@@ -221,7 +221,9 @@ function runStreamThreadId(route: Route) {
 export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   let threads = [...(options?.threads ?? [])];
   const agents = options?.agents ?? [];
-  const skills = options?.skills ?? DEFAULT_SKILLS;
+  const skills = (options?.skills ?? DEFAULT_SKILLS).map((skill) => ({
+    ...skill,
+  }));
   const scheduledTasks = options?.scheduledTasks ?? [];
   let mutableScheduledTasks = [...scheduledTasks];
   const mutableTaskRuns: Record<
