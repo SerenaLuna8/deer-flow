@@ -2,7 +2,7 @@
 
 ## Status
 
-Visual direction approved on 2026-07-10; detailed specification pending review. This document supersedes only the memory-page portion of `2026-07-10-scheduled-tasks-memory-workbench-design.md`.
+Approved for implementation on 2026-07-10. This document supersedes only the memory-page portion of `2026-07-10-scheduled-tasks-memory-workbench-design.md`.
 
 The selected direction is **Memory Inbox**: facts are the primary daily-management surface, while generated summaries remain available in a compact, expandable area. The generated high-fidelity mockup in the design conversation is the visual reference.
 
