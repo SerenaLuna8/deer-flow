@@ -651,6 +651,8 @@ export function MemorySettingsPage() {
               className={cn(
                 "grid gap-4",
                 filter === "all" &&
+                  shouldRenderSummariesBlock &&
+                  shouldRenderFactsBlock &&
                   "lg:grid-cols-[minmax(0,0.36fr)_minmax(0,0.64fr)]",
               )}
             >
@@ -677,9 +679,9 @@ export function MemorySettingsPage() {
                   className="bg-card min-w-0 rounded-xl border p-5 shadow-xs"
                 >
                   <div className="mb-4">
-                    <h3 className="text-base font-medium">
+                    <h2 className="text-base font-medium">
                       {t.settings.memory.markdown.facts}
-                    </h3>
+                    </h2>
                   </div>
 
                   {filteredFacts.length === 0 ? (

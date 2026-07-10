@@ -68,3 +68,22 @@ test("memory workbench switches between summary and facts panels", async ({
   await expect(page.getByTestId("memory-summary-panel")).toBeVisible();
   await expect(page.getByTestId("memory-facts-panel")).toHaveCount(0);
 });
+
+test("fact-only search expands the facts panel to the full workbench width", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  mockMemoryAPI(page);
+  await page.goto("/workspace/memory");
+
+  await expect(page.getByTestId("memory-filter-all")).toHaveAttribute(
+    "data-state",
+    "on",
+  );
+  await page.getByPlaceholder("Search memory").fill("Chinese responses");
+
+  await expect(page.getByTestId("memory-summary-panel")).toHaveCount(0);
+  const factsPanel = page.getByTestId("memory-facts-panel");
+  await expect(factsPanel).toBeVisible();
+  await expect(factsPanel.locator("..")).not.toHaveClass(/lg:grid-cols-/);
+});
