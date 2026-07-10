@@ -57,6 +57,7 @@ export type MockAPIOptions = {
   threads?: MockThread[];
   agents?: MockAgent[];
   skills?: MockSkill[];
+  skillContents?: Record<string, string>;
   scheduledTasks?: Array<{
     id: string;
     thread_id: string | null;
@@ -1032,6 +1033,44 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   });
 
   // Skills list — settings page and slash autocomplete
+  void page.route("**/api/skills/**", (route) => {
+    const segments = new URL(route.request().url()).pathname
+      .split("/")
+      .filter(Boolean);
+    const isContentRequest = segments.at(-2) === "content";
+    const encodedName = segments.at(-1);
+    const name = decodeURIComponent(encodedName ?? "");
+    const skill = skills.find((candidate) => candidate.name === name);
+    if (route.request().method() === "PUT" && skill) {
+      const body = route.request().postDataJSON() as { enabled: boolean };
+      skill.enabled = body.enabled;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ...skill,
+          editable: skill.category === "custom",
+        }),
+      });
+    }
+    if (route.request().method() !== "GET" || !isContentRequest) {
+      return route.fallback();
+    }
+    const content = options?.skillContents?.[name];
+    if (!skill || content === undefined) {
+      return route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Skill content unavailable" }),
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content }),
+    });
+  });
+
   void page.route("**/api/skills", (route) => {
     if (route.request().method() === "GET") {
       return route.fulfill({

@@ -1,8 +1,8 @@
 "use client";
 
-import { SparklesIcon } from "lucide-react";
+import { ChevronRightIcon, SparklesIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -28,8 +28,10 @@ import { SkillRequestError } from "@/core/skills/api";
 import { useEnableSkill, useSkills } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
+import { cn } from "@/lib/utils";
 
 import { SettingsSection } from "./settings-section";
+import { SkillDetailSheet } from "./skill-detail-sheet";
 
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
@@ -68,10 +70,19 @@ function SkillSettingsList({
   const { user } = useAuth();
   const isAdmin = user?.system_role === "admin";
   const [filter, setFilter] = useState<string>("public");
+  const [selectedSkillName, setSelectedSkillName] = useState<string | null>(
+    null,
+  );
+  const [detailOpen, setDetailOpen] = useState(false);
+  const openerRef = useRef<HTMLButtonElement | null>(null);
   const { mutate: enableSkill } = useEnableSkill();
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
+  );
+  const selectedSkill = useMemo(
+    () => skills.find((skill) => skill.name === selectedSkillName) ?? null,
+    [selectedSkillName, skills],
   );
   const handleCreateSkill = () => {
     onClose?.();
@@ -100,17 +111,58 @@ function SkillSettingsList({
       )}
       {filteredSkills.length > 0 &&
         filteredSkills.map((skill) => (
-          <Item className="w-full" variant="outline" key={skill.name}>
+          <Item
+            className={cn(
+              "w-full",
+              selectedSkill?.name === skill.name &&
+                "border-foreground/20 bg-muted/20",
+            )}
+            variant="outline"
+            key={skill.name}
+          >
             <ItemContent>
-              <ItemTitle>
-                <div className="flex items-center gap-2">{skill.name}</div>
-              </ItemTitle>
-              <ItemDescription className="line-clamp-4">
-                {skill.description}
-              </ItemDescription>
+              {isAdmin ? (
+                <button
+                  type="button"
+                  className="focus-visible:ring-ring group w-full rounded-sm text-left focus-visible:ring-2 focus-visible:outline-none"
+                  aria-haspopup="dialog"
+                  aria-expanded={
+                    detailOpen && selectedSkill?.name === skill.name
+                  }
+                  aria-label={t.settings.skills.viewSkill(skill.name)}
+                  onClick={(event) => {
+                    openerRef.current = event.currentTarget;
+                    setSelectedSkillName(skill.name);
+                    setDetailOpen(true);
+                  }}
+                >
+                  <span className="flex items-center justify-between gap-3">
+                    <span className="min-w-0">
+                      <span className="block font-medium">{skill.name}</span>
+                      <span className="text-muted-foreground mt-1 line-clamp-4 block text-sm">
+                        {skill.description}
+                      </span>
+                    </span>
+                    <ChevronRightIcon
+                      aria-hidden="true"
+                      className="text-muted-foreground size-4 shrink-0"
+                    />
+                  </span>
+                </button>
+              ) : (
+                <>
+                  <ItemTitle>
+                    <div className="flex items-center gap-2">{skill.name}</div>
+                  </ItemTitle>
+                  <ItemDescription className="line-clamp-4">
+                    {skill.description}
+                  </ItemDescription>
+                </>
+              )}
             </ItemContent>
             <ItemActions>
               <Switch
+                aria-label={t.settings.skills.toggleSkill(skill.name)}
                 checked={skill.enabled}
                 disabled={
                   env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" || !isAdmin
@@ -122,6 +174,12 @@ function SkillSettingsList({
             </ItemActions>
           </Item>
         ))}
+      <SkillDetailSheet
+        skill={selectedSkill}
+        open={detailOpen}
+        onOpenChange={setDetailOpen}
+        openerRef={openerRef}
+      />
     </div>
   );
 }

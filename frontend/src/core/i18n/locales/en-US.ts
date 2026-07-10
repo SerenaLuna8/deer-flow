@@ -777,6 +777,21 @@ export const enUS: Translations = {
       adminRequired: "Admin privileges are required to manage agent skills.",
       installAdminRequired:
         "Admin privileges are required to install agent skills.",
+      viewSkill: (name) => `View ${name} SKILL.md`,
+      toggleSkill: (name) => `Enable or disable ${name}`,
+      fileLabel: "SKILL.md",
+      renderedDescription: "Rendered contents of SKILL.md",
+      enabled: "Enabled",
+      disabled: "Disabled",
+      categories: { public: "Public", custom: "Custom", legacy: "Legacy" },
+      adminRequiredPreview:
+        "Admin privileges are required to preview skill content.",
+      contentUnavailable: "Skill content is unavailable.",
+      loadError: "Unable to load skill content.",
+      emptyContent: "This SKILL.md is empty.",
+      licenseLabel: "License",
+      loading: "Loading skill content",
+      retry: "Retry",
     },
     notification: {
       title: "Notification",

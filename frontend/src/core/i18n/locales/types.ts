@@ -656,6 +656,20 @@ export interface Translations {
       emptyButton: string;
       adminRequired: string;
       installAdminRequired: string;
+      viewSkill: (name: string) => string;
+      toggleSkill: (name: string) => string;
+      fileLabel: string;
+      renderedDescription: string;
+      enabled: string;
+      disabled: string;
+      categories: { public: string; custom: string; legacy: string };
+      adminRequiredPreview: string;
+      contentUnavailable: string;
+      loadError: string;
+      emptyContent: string;
+      licenseLabel: string;
+      loading: string;
+      retry: string;
     };
     notification: {
       title: string;

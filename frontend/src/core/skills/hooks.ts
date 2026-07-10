@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { enableSkill, SkillRequestError } from "./api";
+import { enableSkill, loadSkillContent, SkillRequestError } from "./api";
 
 import { loadSkills } from ".";
 
@@ -11,6 +11,15 @@ export function useSkills() {
     retry: (count, err) => !(err instanceof SkillRequestError) && count < 3,
   });
   return { skills: data ?? [], isLoading, error };
+}
+
+export function useSkillContent(skillName: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["skills", "content", skillName],
+    queryFn: () => loadSkillContent(skillName!),
+    enabled: enabled && skillName !== null,
+    retry: (count, err) => !(err instanceof SkillRequestError) && count < 3,
+  });
 }
 
 export function useEnableSkill() {
