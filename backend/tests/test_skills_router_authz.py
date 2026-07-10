@@ -1,11 +1,9 @@
 """Authorization regression tests for the skills router.
 
 Custom skill SKILL.md content is injected into every user's agent system
-prompt. The mutating endpoints that write global shared state (install,
-toggle PUBLIC skills, edit/delete custom skill content, and the endpoints
-that expose raw custom-skill content/history) must be admin-only, matching
-the MCP router which guards the equivalent global extensions_config mutations
-with ``require_admin_user``.
+prompt. Endpoints that write skill state or expose raw SKILL.md content and
+history must be admin-only, matching the MCP router which guards the equivalent
+global extensions_config operations with ``require_admin_user``.
 
 Under per-user skill isolation, ``list_custom_skills`` is open to all
 authenticated users (they see only their own custom skills), but all other
@@ -56,6 +54,7 @@ def _make_app(*, system_role: str) -> FastAPI:
 # tenant's injected skill set.
 _GUARDED_ENDPOINTS = [
     ("post", "/api/skills/install", {"thread_id": "t1", "path": "mnt/user-data/outputs/x.skill"}),
+    ("get", "/api/skills/content/demo", None),
     ("get", "/api/skills/custom/demo", None),
     ("put", "/api/skills/custom/demo", {"content": "---\nname: demo\ndescription: hijacked\n---\n"}),
     ("delete", "/api/skills/custom/demo", None),
@@ -65,18 +64,26 @@ _GUARDED_ENDPOINTS = [
 ]
 
 
-def test_non_admin_is_forbidden_on_all_mutating_skills_endpoints():
+def test_non_admin_is_forbidden_on_all_guarded_skills_endpoints(monkeypatch):
     """A normal (non-admin) authenticated user must get 403, never 200/500.
 
     403 proves the admin guard fired before any business logic ran. If the
     guard were missing the request would instead reach the handler and return
     200 or a 4xx/5xx from the storage layer.
     """
+    storage_lookups = []
+
+    def _unexpected_storage_lookup(_config):
+        storage_lookups.append(_config)
+        raise AssertionError("admin guard must run before storage lookup")
+
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", _unexpected_storage_lookup)
     app = _make_app(system_role="user")
     with TestClient(app) as client:
         for method, path, body in _GUARDED_ENDPOINTS:
             resp = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
             assert resp.status_code == 403, f"{method.upper()} {path} expected 403 for non-admin, got {resp.status_code}"
+    assert storage_lookups == []
 
 
 def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch):

@@ -49,6 +49,10 @@ class SkillsListResponse(BaseModel):
     skills: list[SkillResponse]
 
 
+class SkillContentResponse(BaseModel):
+    content: str = Field(..., description="Raw SKILL.md content")
+
+
 class SkillUpdateRequest(BaseModel):
     """Request model for updating a skill."""
 
@@ -96,6 +100,43 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
         enabled=skill.enabled,
         editable=skill.category == SkillCategory.CUSTOM,
     )
+
+
+class _VisibleSkillNotFoundError(Exception):
+    pass
+
+
+class _SkillContentNotFoundError(Exception):
+    pass
+
+
+class _InvalidSkillContentFileError(Exception):
+    pass
+
+
+class _SkillContentPathNotAllowedError(Exception):
+    pass
+
+
+def _read_visible_skill_content(
+    storage: SkillStorage,
+    skill_name: str,
+) -> str:
+    skills = storage.load_skills(enabled_only=False)
+    skill = next((candidate for candidate in skills if candidate.name == skill_name), None)
+    if skill is None:
+        raise _VisibleSkillNotFoundError
+    if skill.skill_file.name != SKILL_MD_FILE:
+        raise _InvalidSkillContentFileError
+    try:
+        skill_file = storage.validate_skill_file_path(skill.skill_file)
+    except ValueError as exc:
+        raise _SkillContentPathNotAllowedError from exc
+    if skill_file.name != SKILL_MD_FILE:
+        raise _InvalidSkillContentFileError
+    if not skill_file.is_file():
+        raise _SkillContentNotFoundError
+    return skill_file.read_text(encoding="utf-8")
 
 
 def _static_scan_http_detail(error: StaticScanBlockedError) -> dict:
@@ -354,6 +395,49 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
     except Exception as e:
         logger.error("Failed to roll back custom skill %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to roll back custom skill: {str(e)}")
+
+
+@router.get(
+    "/skills/content/{skill_name}",
+    response_model=SkillContentResponse,
+    summary="Get Skill Content",
+    description="Retrieve read-only SKILL.md content for a visible skill.",
+)
+async def get_skill_content(
+    skill_name: str,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> SkillContentResponse:
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    normalized_name = skill_name.replace("\r\n", "").replace("\n", "")
+    storage = _get_user_skill_storage(config)
+    try:
+        content = await asyncio.to_thread(
+            _read_visible_skill_content,
+            storage,
+            normalized_name,
+        )
+        return SkillContentResponse(content=content)
+    except _VisibleSkillNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Skill '{normalized_name}' not found",
+        ) from exc
+    except _SkillContentNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Skill '{normalized_name}' content not found",
+        ) from exc
+    except _InvalidSkillContentFileError as exc:
+        raise HTTPException(status_code=400, detail="Invalid skill content file") from exc
+    except _SkillContentPathNotAllowedError as exc:
+        raise HTTPException(status_code=403, detail="Skill content path is not allowed") from exc
+    except (OSError, UnicodeError) as exc:
+        logger.error("Failed to read skill content for %s", normalized_name, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to read skill content") from exc
+    except Exception as exc:
+        logger.error("Failed to get skill content for %s", normalized_name, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get skill content") from exc
 
 
 @router.get(

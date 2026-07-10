@@ -15,6 +15,7 @@ from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from app.gateway.routers import uploads as uploads_router
 from deerflow.skills.security_static_scanner import StaticScannerError
+from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import Skill
 
@@ -77,6 +78,218 @@ def _make_skill_archive_bytes(name: str, content: str | None = None) -> bytes:
 def _user_custom_dir(base_dir: Path, user_id: str = "default") -> Path:
     """Helper to locate the per-user custom skills dir for test assertions."""
     return base_dir / "users" / user_id / "skills" / "custom"
+
+
+def _registered_skill(name: str, skill_file: Path) -> Skill:
+    return Skill(
+        name=name,
+        description="Demo",
+        license=None,
+        skill_dir=skill_file.parent,
+        skill_file=skill_file,
+        relative_path=Path(name),
+        category="public",
+        enabled=True,
+    )
+
+
+def test_get_skill_content_returns_public_markdown_for_admin(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    content = _skill_content("paper-review", "Review papers") + "\n# Workflow\n"
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "public" / "paper-review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        )
+    )
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+
+    app = _make_test_app(config)
+    with TestClient(app) as client:
+        response = client.get("/api/skills/content/paper-review")
+
+    assert response.status_code == 200
+    assert response.json() == {"content": content}
+
+
+def test_get_skill_content_returns_current_user_custom_markdown_for_admin(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    content = _skill_content("my-workflow", "Private workflow") + "\n# Steps\n"
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    skill_dir = _user_custom_dir(tmp_path) / "my-workflow"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        )
+    )
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+
+    app = _make_test_app(config)
+    with TestClient(app) as client:
+        response = client.get("/api/skills/content/my-workflow")
+
+    assert response.status_code == 200
+    assert response.json() == {"content": content}
+
+
+def test_get_skill_content_rejects_non_skill_md_path(monkeypatch, tmp_path: Path) -> None:
+    readme = tmp_path / "public" / "demo" / "README.md"
+    readme.parent.mkdir(parents=True)
+    readme.write_text("DO_NOT_LEAK", encoding="utf-8")
+    skill = Skill(
+        name="demo",
+        description="Demo",
+        license=None,
+        skill_dir=readme.parent,
+        skill_file=readme,
+        relative_path=Path("demo"),
+        category="public",
+        enabled=True,
+    )
+    storage = SimpleNamespace(
+        load_skills=lambda *, enabled_only: [skill],
+        validate_skill_file_path=lambda path: path.resolve(),
+    )
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+
+    app = _make_test_app(SimpleNamespace())
+    with TestClient(app) as client:
+        response = client.get("/api/skills/content/demo")
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid skill content file"}
+    assert "DO_NOT_LEAK" not in response.text
+    assert str(tmp_path) not in response.text
+
+
+def test_get_skill_content_returns_404_for_unknown_registry_name(monkeypatch, tmp_path: Path) -> None:
+    def _unexpected_validation(_path: Path) -> Path:
+        raise AssertionError("registry miss must not validate a path")
+
+    storage = SimpleNamespace(
+        load_skills=lambda *, enabled_only: [],
+        validate_skill_file_path=_unexpected_validation,
+    )
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+
+    app = _make_test_app(SimpleNamespace())
+    with TestClient(app) as client:
+        response = client.get("/api/skills/content/missing")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Skill 'missing' not found"}
+    assert str(tmp_path) not in response.text
+
+
+def test_get_skill_content_returns_404_when_registered_file_was_removed(monkeypatch, tmp_path: Path) -> None:
+    skill_file = tmp_path / "public" / "demo" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text("DO_NOT_LEAK", encoding="utf-8")
+    skill = _registered_skill("demo", skill_file)
+    skill_file.unlink()
+    storage = SimpleNamespace(
+        load_skills=lambda *, enabled_only: [skill],
+        validate_skill_file_path=lambda path: path.resolve(),
+    )
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+
+    app = _make_test_app(SimpleNamespace())
+    with TestClient(app) as client:
+        response = client.get("/api/skills/content/demo")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Skill 'demo' content not found"}
+    assert "DO_NOT_LEAK" not in response.text
+    assert str(tmp_path) not in response.text
+
+
+def test_get_skill_content_rejects_symlink_escape(monkeypatch, tmp_path: Path) -> None:
+    skills_root = tmp_path / "skills"
+    skill_file = skills_root / "public" / "demo" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    escaped_file = tmp_path / "outside-sentinel.md"
+    escaped_file.write_text("DO_NOT_LEAK", encoding="utf-8")
+    skill_file.symlink_to(escaped_file)
+    skill = _registered_skill("demo", skill_file)
+    validator = LocalSkillStorage(host_path=str(skills_root))
+    storage = SimpleNamespace(
+        load_skills=lambda *, enabled_only: [skill],
+        validate_skill_file_path=validator.validate_skill_file_path,
+    )
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+
+    app = _make_test_app(SimpleNamespace())
+    with TestClient(app) as client:
+        response = client.get("/api/skills/content/demo")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Skill content path is not allowed"}
+    assert "DO_NOT_LEAK" not in response.text
+    assert str(tmp_path) not in response.text
+
+
+def test_get_skill_content_maps_decode_failure_to_generic_500(monkeypatch, tmp_path: Path) -> None:
+    skill_file = tmp_path / "public" / "demo" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_bytes(b"\xffDO_NOT_LEAK")
+    skill = _registered_skill("demo", skill_file)
+    storage = SimpleNamespace(
+        load_skills=lambda *, enabled_only: [skill],
+        validate_skill_file_path=lambda path: path.resolve(),
+    )
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+
+    app = _make_test_app(SimpleNamespace())
+    with TestClient(app) as client:
+        response = client.get("/api/skills/content/demo")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to read skill content"}
+    assert "DO_NOT_LEAK" not in response.text
+    assert str(tmp_path) not in response.text
+
+
+def test_get_skill_content_maps_unexpected_failure_to_generic_500(monkeypatch, tmp_path: Path) -> None:
+    def _fail_to_load(*, enabled_only: bool) -> list[Skill]:
+        raise RuntimeError(f"DO_NOT_LEAK {tmp_path}")
+
+    storage = SimpleNamespace(load_skills=_fail_to_load)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+
+    app = _make_test_app(SimpleNamespace())
+    with TestClient(app) as client:
+        response = client.get("/api/skills/content/demo")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to get skill content"}
+    assert "DO_NOT_LEAK" not in response.text
+    assert str(tmp_path) not in response.text
 
 
 def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
@@ -810,6 +1023,12 @@ class TestMultiUserSkillIsolation:
         with TestClient(bob_app) as client:
             bob_get_response = client.get("/api/skills/custom/alice-secret-skill")
             assert bob_get_response.status_code == 404
+            bob_content_response = client.get(
+                "/api/skills/content/alice-secret-skill",
+            )
+            assert bob_content_response.status_code == 404
+            assert "# alice-secret-skill" not in bob_content_response.text
+            assert str(tmp_path) not in bob_content_response.text
 
         # Alice can still read it
         monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: alice_storage)
