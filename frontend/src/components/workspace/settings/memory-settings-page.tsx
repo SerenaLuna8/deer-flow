@@ -42,8 +42,7 @@ import { SafeStreamdown } from "@/core/streamdown/components";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
-
-import { SettingsSection } from "./settings-section";
+import { cn } from "@/lib/utils";
 
 type MemoryViewFilter = "all" | "facts" | "summaries";
 type MemoryFact = UserMemory["facts"][number];
@@ -533,10 +532,57 @@ export function MemorySettingsPage() {
 
   return (
     <>
-      <SettingsSection
-        title={t.settings.memory.title}
-        description={t.settings.memory.description}
-      >
+      <section data-testid="memory-workbench" className="space-y-6">
+        <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="space-y-1">
+            <h1 className="text-2xl font-semibold tracking-tight">
+              {t.settings.memory.title}
+            </h1>
+            <p className="text-muted-foreground max-w-2xl text-sm">
+              {t.settings.memory.description}
+            </p>
+          </div>
+
+          {!isLoading && !error && memory ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                onChange={(event) => void handleImportFileSelection(event)}
+              />
+              <Button
+                variant="outline"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={importMemoryMutation.isPending}
+              >
+                <UploadIcon className="mr-2 h-4 w-4" />
+                {importButton}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => void handleExportMemory()}
+                disabled={isExporting}
+              >
+                <DownloadIcon className="mr-2 h-4 w-4" />
+                {isExporting ? t.common.loading : exportButton}
+              </Button>
+              <Button variant="outline" onClick={openCreateFactDialog}>
+                <PlusIcon className="mr-2 h-4 w-4" />
+                {addFactLabel}
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={() => setClearDialogOpen(true)}
+                disabled={clearMemory.isPending}
+              >
+                {clearMemory.isPending ? t.common.loading : clearAllLabel}
+              </Button>
+            </div>
+          ) : null}
+        </header>
+
         {isLoading ? (
           <div className="text-muted-foreground text-sm">
             {t.common.loading}
@@ -548,84 +594,51 @@ export function MemorySettingsPage() {
             {t.settings.memory.empty}
           </div>
         ) : (
-          <div className="space-y-4">
+          <>
             {isMemorySummaryEmpty(memory) && memory.facts.length === 0 ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {memoryFullyEmpty}
               </div>
             ) : null}
 
-            <div className="flex flex-col gap-3">
-              {/* Row 1: search + filter tabs */}
-              <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
-                <Input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder={searchPlaceholder}
-                  className="min-w-0 flex-1 sm:max-w-md"
-                />
-                <ToggleGroup
-                  type="single"
-                  value={filter}
-                  onValueChange={(value) => {
-                    if (value) setFilter(value as MemoryViewFilter);
-                  }}
-                  variant="outline"
-                  className="shrink-0 self-start sm:ml-auto sm:self-auto"
+            <div className="bg-muted/25 flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center">
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={searchPlaceholder}
+                className="min-w-0 flex-1 sm:max-w-md"
+              />
+              <ToggleGroup
+                type="single"
+                value={filter}
+                onValueChange={(value) => {
+                  if (value) setFilter(value as MemoryViewFilter);
+                }}
+                variant="outline"
+                className="shrink-0 self-start sm:ml-auto sm:self-auto"
+              >
+                <ToggleGroupItem
+                  data-testid="memory-filter-all"
+                  value="all"
+                  className="whitespace-nowrap"
                 >
-                  <ToggleGroupItem value="all" className="whitespace-nowrap">
-                    {filterAll}
-                  </ToggleGroupItem>
-                  <ToggleGroupItem value="facts" className="whitespace-nowrap">
-                    {filterFacts}
-                  </ToggleGroupItem>
-                  <ToggleGroupItem
-                    value="summaries"
-                    className="whitespace-nowrap"
-                  >
-                    {filterSummaries}
-                  </ToggleGroupItem>
-                </ToggleGroup>
-              </div>
-
-              {/* Row 2: actions — constructive group on the left, destructive separated to the right */}
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".json,application/json"
-                  className="hidden"
-                  onChange={(event) => void handleImportFileSelection(event)}
-                />
-                <Button
-                  variant="outline"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={importMemoryMutation.isPending}
+                  {filterAll}
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  data-testid="memory-filter-facts"
+                  value="facts"
+                  className="whitespace-nowrap"
                 >
-                  <UploadIcon className="mr-2 h-4 w-4" />
-                  {importButton}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => void handleExportMemory()}
-                  disabled={isExporting}
+                  {filterFacts}
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  data-testid="memory-filter-summaries"
+                  value="summaries"
+                  className="whitespace-nowrap"
                 >
-                  <DownloadIcon className="mr-2 h-4 w-4" />
-                  {isExporting ? t.common.loading : exportButton}
-                </Button>
-                <Button variant="outline" onClick={openCreateFactDialog}>
-                  <PlusIcon className="mr-2 h-4 w-4" />
-                  {addFactLabel}
-                </Button>
-                <Button
-                  variant="destructive"
-                  className="ml-auto"
-                  onClick={() => setClearDialogOpen(true)}
-                  disabled={clearMemory.isPending}
-                >
-                  {clearMemory.isPending ? t.common.loading : clearAllLabel}
-                </Button>
-              </div>
+                  {filterSummaries}
+                </ToggleGroupItem>
+              </ToggleGroup>
             </div>
 
             {!hasMatchingVisibleContent && normalizedQuery ? (
@@ -634,120 +647,139 @@ export function MemorySettingsPage() {
               </div>
             ) : null}
 
-            {shouldRenderSummariesBlock ? (
-              <div className="min-w-0 rounded-lg border p-4">
-                <div className="text-muted-foreground mb-4 text-sm">
-                  {summaryReadOnly}
-                </div>
-                <SafeStreamdown
-                  className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-                  {...streamdownPlugins}
+            <div
+              className={cn(
+                "grid gap-4",
+                filter === "all" &&
+                  "lg:grid-cols-[minmax(0,0.36fr)_minmax(0,0.64fr)]",
+              )}
+            >
+              {shouldRenderSummariesBlock ? (
+                <section
+                  data-testid="memory-summary-panel"
+                  className="bg-card min-w-0 rounded-xl border p-5 shadow-xs"
                 >
-                  {summariesToMarkdown(memory, filteredSectionGroups, t)}
-                </SafeStreamdown>
-              </div>
-            ) : null}
-
-            {shouldRenderFactsBlock ? (
-              <div className="min-w-0 rounded-lg border p-4">
-                <div className="mb-4">
-                  <h3 className="text-base font-medium">
-                    {t.settings.memory.markdown.facts}
-                  </h3>
-                </div>
-
-                {filteredFacts.length === 0 ? (
-                  <div className="text-muted-foreground text-sm">
-                    {normalizedQuery ? noMatches : noFacts}
+                  <div className="text-muted-foreground mb-4 text-sm">
+                    {summaryReadOnly}
                   </div>
-                ) : (
-                  <div className="space-y-3">
-                    {filteredFacts.map((fact) => {
-                      const { key } = confidenceToLevelKey(fact.confidence);
-                      const confidenceText =
-                        t.settings.memory.markdown.table.confidenceLevel[key];
+                  <SafeStreamdown
+                    className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                    {...streamdownPlugins}
+                  >
+                    {summariesToMarkdown(memory, filteredSectionGroups, t)}
+                  </SafeStreamdown>
+                </section>
+              ) : null}
 
-                      return (
-                        <div
-                          key={fact.id}
-                          className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-start sm:justify-between"
-                        >
-                          <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
-                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.category}:
-                                </span>{" "}
-                                {upperFirst(fact.category)}
-                              </span>
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.confidence}:
-                                </span>{" "}
-                                {confidenceText}
-                              </span>
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.createdAt}:
-                                </span>{" "}
-                                {formatTimeAgo(fact.createdAt)}
-                              </span>
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.source}:
-                                </span>{" "}
-                                {fact.source === "manual" ? (
-                                  t.settings.memory.manualFactSource
-                                ) : (
-                                  <Link
-                                    href={pathOfThread(fact.source)}
-                                    className="text-primary underline-offset-4 hover:underline"
-                                  >
-                                    {t.settings.memory.markdown.table.view}
-                                  </Link>
-                                )}
-                              </span>
+              {shouldRenderFactsBlock ? (
+                <section
+                  data-testid="memory-facts-panel"
+                  className="bg-card min-w-0 rounded-xl border p-5 shadow-xs"
+                >
+                  <div className="mb-4">
+                    <h3 className="text-base font-medium">
+                      {t.settings.memory.markdown.facts}
+                    </h3>
+                  </div>
+
+                  {filteredFacts.length === 0 ? (
+                    <div className="text-muted-foreground text-sm">
+                      {normalizedQuery ? noMatches : noFacts}
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {filteredFacts.map((fact) => {
+                        const { key } = confidenceToLevelKey(fact.confidence);
+                        const confidenceText =
+                          t.settings.memory.markdown.table.confidenceLevel[key];
+
+                        return (
+                          <div
+                            key={fact.id}
+                            className="border-border/70 hover:bg-muted/30 flex flex-col gap-3 rounded-lg border p-4 transition-colors sm:flex-row sm:items-start sm:justify-between"
+                          >
+                            <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
+                              <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                                <span>
+                                  <span className="text-muted-foreground">
+                                    {t.settings.memory.markdown.table.category}:
+                                  </span>{" "}
+                                  {upperFirst(fact.category)}
+                                </span>
+                                <span>
+                                  <span className="text-muted-foreground">
+                                    {
+                                      t.settings.memory.markdown.table
+                                        .confidence
+                                    }
+                                    :
+                                  </span>{" "}
+                                  {confidenceText}
+                                </span>
+                                <span>
+                                  <span className="text-muted-foreground">
+                                    {t.settings.memory.markdown.table.createdAt}
+                                    :
+                                  </span>{" "}
+                                  {formatTimeAgo(fact.createdAt)}
+                                </span>
+                                <span>
+                                  <span className="text-muted-foreground">
+                                    {t.settings.memory.markdown.table.source}:
+                                  </span>{" "}
+                                  {fact.source === "manual" ? (
+                                    t.settings.memory.manualFactSource
+                                  ) : (
+                                    <Link
+                                      href={pathOfThread(fact.source)}
+                                      className="text-primary underline-offset-4 hover:underline"
+                                    >
+                                      {t.settings.memory.markdown.table.view}
+                                    </Link>
+                                  )}
+                                </span>
+                              </div>
+                              <p className="text-sm [overflow-wrap:anywhere]">
+                                {fact.content}
+                              </p>
                             </div>
-                            <p className="text-sm [overflow-wrap:anywhere]">
-                              {fact.content}
-                            </p>
-                          </div>
 
-                          <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="shrink-0"
-                              onClick={() => openEditFactDialog(fact)}
-                              disabled={deleteMemoryFact.isPending}
-                              title={t.common.edit}
-                              aria-label={t.common.edit}
-                            >
-                              <PenLineIcon className="h-4 w-4" />
-                            </Button>
+                            <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="shrink-0"
+                                onClick={() => openEditFactDialog(fact)}
+                                disabled={deleteMemoryFact.isPending}
+                                title={t.common.edit}
+                                aria-label={t.common.edit}
+                              >
+                                <PenLineIcon className="h-4 w-4" />
+                              </Button>
 
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="text-destructive hover:text-destructive shrink-0"
-                              onClick={() => setFactToDelete(fact)}
-                              disabled={deleteMemoryFact.isPending}
-                              title={t.common.delete}
-                              aria-label={t.common.delete}
-                            >
-                              <Trash2Icon className="h-4 w-4" />
-                            </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="text-destructive hover:text-destructive shrink-0"
+                                onClick={() => setFactToDelete(fact)}
+                                disabled={deleteMemoryFact.isPending}
+                                title={t.common.delete}
+                                aria-label={t.common.delete}
+                              >
+                                <Trash2Icon className="h-4 w-4" />
+                              </Button>
+                            </div>
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            ) : null}
-          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              ) : null}
+            </div>
+          </>
         )}
-      </SettingsSection>
+      </section>
 
       <Dialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>
         <DialogContent>

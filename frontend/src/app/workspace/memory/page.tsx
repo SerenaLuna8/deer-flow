@@ -3,7 +3,7 @@ import { WorkspaceCapabilityPage } from "@/components/workspace/workspace-capabi
 
 export default function MemoryPage() {
   return (
-    <WorkspaceCapabilityPage>
+    <WorkspaceCapabilityPage width="wide">
       <MemorySettingsPage />
     </WorkspaceCapabilityPage>
   );
