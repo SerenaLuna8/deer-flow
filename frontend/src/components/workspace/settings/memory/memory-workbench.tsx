@@ -276,7 +276,10 @@ function MemoryFactRow(props: {
   }[visual];
 
   return (
-    <article className="hover:bg-muted/30 flex min-w-0 items-start gap-3 px-4 py-4 [overflow-wrap:anywhere] transition-colors sm:px-5">
+    <article
+      data-testid={`memory-fact-row-${fact.id}`}
+      className="hover:bg-muted/30 flex min-w-0 items-start gap-3 px-4 py-4 [overflow-wrap:anywhere] transition-colors sm:px-5"
+    >
       <div className="bg-muted/50 text-muted-foreground mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border">
         <CategoryIcon aria-hidden="true" className="size-4" />
       </div>
