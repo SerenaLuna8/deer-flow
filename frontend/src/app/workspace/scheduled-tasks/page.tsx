@@ -395,6 +395,7 @@ export default function ScheduledTasksPage() {
                               timezone: "",
                             });
                             setCreateNonce((n) => n + 1);
+                            createOpenerRef.current = createTriggerRef.current;
                             setCreateSheetOpen(false);
                           },
                         },

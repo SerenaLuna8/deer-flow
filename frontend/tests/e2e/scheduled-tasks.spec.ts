@@ -631,6 +631,24 @@ test("create sheet supports keyboard controls and restores focus", async ({
 
 test("user can create a scheduled task from the page", async ({ page }) => {
   mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
+  let postObserved = false;
+  let refreshStarted = false;
+  let releaseRefresh!: () => void;
+  const refreshHeld = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  await page.route("**/api/scheduled-tasks", async (route) => {
+    const method = route.request().method();
+    if (method === "POST") {
+      postObserved = true;
+      return route.fallback();
+    }
+    if (method === "GET" && postObserved) {
+      refreshStarted = true;
+      await refreshHeld;
+    }
+    return route.fallback();
+  });
 
   await page.goto("/workspace/scheduled-tasks");
   await expect(page.getByTestId("scheduled-task-create-form")).toHaveCount(0);
@@ -661,24 +679,31 @@ test("user can create a scheduled task from the page", async ({ page }) => {
       request.method() === "POST" &&
       new URL(request.url()).pathname === "/api/scheduled-tasks",
   );
-  await createForm.getByRole("button", { name: "Create" }).click();
-  const createRequest = await createRequestPromise;
-  expect(createRequest.postDataJSON()).toEqual({
-    context_mode: "reuse_thread",
-    thread_id: "thread-create-target",
-    title: "Created from UI",
-    prompt: "Summarize thread",
-    schedule_type: "once",
-    schedule_spec: { run_at: "2026-07-02T13:00:00+00:00" },
-    timezone: "America/New_York",
-  });
+  try {
+    await createForm.getByRole("button", { name: "Create" }).click();
+    const createRequest = await createRequestPromise;
+    expect(createRequest.postDataJSON()).toEqual({
+      context_mode: "reuse_thread",
+      thread_id: "thread-create-target",
+      title: "Created from UI",
+      prompt: "Summarize thread",
+      schedule_type: "once",
+      schedule_spec: { run_at: "2026-07-02T13:00:00+00:00" },
+      timezone: "America/New_York",
+    });
+    await expect.poll(() => refreshStarted).toBe(true);
+    await expect(createSheet).toHaveCount(0);
+    await expect(createTrigger).toBeFocused();
+  } finally {
+    releaseRefresh();
+  }
+
   await expect(
     page.getByRole("button", { name: /Created from UI/i }),
   ).toBeVisible();
   await expect(
     page.getByTestId("scheduled-task-detail").getByText("Summarize thread"),
   ).toBeVisible();
-  await expect(createSheet).toHaveCount(0);
   await expect(emptyAction).toHaveCount(0);
   await expect(createTrigger).toBeFocused();
 
