@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  DownloadIcon,
-  PenLineIcon,
-  PlusIcon,
-  Trash2Icon,
-  UploadIcon,
-} from "lucide-react";
+import { PenLineIcon, Trash2Icon } from "lucide-react";
 import Link from "next/link";
 import { useDeferredValue, useId, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -22,10 +16,10 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   buildMemorySectionGroups,
   confidenceToLevelKey,
+  countPopulatedSummaries,
   isMemorySummaryEmpty,
   type MemoryFact,
   type MemorySection,
@@ -34,6 +28,11 @@ import {
   truncateFactPreview,
   upperFirst,
 } from "@/components/workspace/settings/memory/memory-view-model";
+import {
+  MemoryHeaderActions,
+  MemoryOverview,
+  MemoryToolbar,
+} from "@/components/workspace/settings/memory/memory-workbench";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
@@ -224,7 +223,6 @@ export function MemorySettingsPage() {
     "This fact will be removed from memory immediately. This action cannot be undone.";
   const factDeleteSuccess =
     t.settings.memory.factDeleteSuccess ?? "Fact deleted";
-  const addFactLabel = t.settings.memory.addFact;
   const addFactTitle = t.settings.memory.addFactTitle;
   const editFactTitle = t.settings.memory.editFactTitle;
   const addFactSuccess = t.settings.memory.addFactSuccess;
@@ -244,19 +242,18 @@ export function MemorySettingsPage() {
     t.settings.memory.memoryFullyEmpty ?? "No memory saved yet.";
   const factPreviewLabel =
     t.settings.memory.factPreviewLabel ?? "Fact to delete";
-  const searchPlaceholder =
-    t.settings.memory.searchPlaceholder ?? "Search memory";
-  const filterAll = t.settings.memory.filterAll ?? "All";
-  const filterFacts = t.settings.memory.filterFacts ?? "Facts";
-  const filterSummaries = t.settings.memory.filterSummaries ?? "Summaries";
   const noMatches = t.settings.memory.noMatches ?? "No matching memory found";
-  const exportButton = t.settings.memory.exportButton ?? t.common.export;
   const exportSuccess =
     t.settings.memory.exportSuccess ?? t.common.exportSuccess;
-  const importButton = t.settings.memory.importButton ?? t.common.import;
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
 
   const sectionGroups = memory ? buildMemorySectionGroups(memory, t) : [];
+  const summaryCount = countPopulatedSummaries(sectionGroups);
+  const trimmedRecentFocus = memory?.user.topOfMind.summary.trim();
+  const recentFocus =
+    trimmedRecentFocus && trimmedRecentFocus.length > 0
+      ? trimmedRecentFocus
+      : t.settings.memory.markdown.empty;
   const filteredSectionGroups = sectionGroups
     .map((group) => ({
       ...group,
@@ -452,7 +449,7 @@ export function MemorySettingsPage() {
           </div>
 
           {!isLoading && !error && memory ? (
-            <div className="flex flex-wrap items-center gap-2">
+            <>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -460,34 +457,17 @@ export function MemorySettingsPage() {
                 className="hidden"
                 onChange={(event) => void handleImportFileSelection(event)}
               />
-              <Button
-                variant="outline"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={importMemoryMutation.isPending}
-              >
-                <UploadIcon className="mr-2 h-4 w-4" />
-                {importButton}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => void handleExportMemory()}
-                disabled={isExporting}
-              >
-                <DownloadIcon className="mr-2 h-4 w-4" />
-                {isExporting ? t.common.loading : exportButton}
-              </Button>
-              <Button onClick={openCreateFactDialog}>
-                <PlusIcon className="mr-2 h-4 w-4" />
-                {addFactLabel}
-              </Button>
-              <Button
-                variant="destructive"
-                onClick={() => setClearDialogOpen(true)}
-                disabled={clearMemory.isPending}
-              >
-                {clearMemory.isPending ? t.common.loading : clearAllLabel}
-              </Button>
-            </div>
+              <MemoryHeaderActions
+                t={t}
+                isImporting={importMemoryMutation.isPending}
+                isExporting={isExporting}
+                isClearing={clearMemory.isPending}
+                onAddFact={openCreateFactDialog}
+                onImport={() => fileInputRef.current?.click()}
+                onExport={() => void handleExportMemory()}
+                onClear={() => setClearDialogOpen(true)}
+              />
+            </>
           ) : null}
         </header>
 
@@ -503,51 +483,27 @@ export function MemorySettingsPage() {
           </div>
         ) : (
           <>
+            <MemoryOverview
+              t={t}
+              factCount={memory.facts.length}
+              summaryCount={summaryCount}
+              lastUpdated={formatTimeAgo(memory.lastUpdated)}
+              recentFocus={recentFocus}
+              onViewSummaries={() => setFilter("summaries")}
+            />
+            <MemoryToolbar
+              t={t}
+              query={query}
+              filter={filter}
+              onQueryChange={setQuery}
+              onFilterChange={setFilter}
+            />
+
             {isMemorySummaryEmpty(memory) && memory.facts.length === 0 ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {memoryFullyEmpty}
               </div>
             ) : null}
-
-            <div className="bg-muted/25 flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center">
-              <Input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder={searchPlaceholder}
-                className="min-w-0 flex-1 sm:max-w-md"
-              />
-              <ToggleGroup
-                type="single"
-                value={filter}
-                onValueChange={(value) => {
-                  if (value) setFilter(value as MemoryViewFilter);
-                }}
-                variant="outline"
-                className="shrink-0 self-start sm:ml-auto sm:self-auto"
-              >
-                <ToggleGroupItem
-                  data-testid="memory-filter-all"
-                  value="all"
-                  className="whitespace-nowrap"
-                >
-                  {filterAll}
-                </ToggleGroupItem>
-                <ToggleGroupItem
-                  data-testid="memory-filter-facts"
-                  value="facts"
-                  className="whitespace-nowrap"
-                >
-                  {filterFacts}
-                </ToggleGroupItem>
-                <ToggleGroupItem
-                  data-testid="memory-filter-summaries"
-                  value="summaries"
-                  className="whitespace-nowrap"
-                >
-                  {filterSummaries}
-                </ToggleGroupItem>
-              </ToggleGroup>
-            </div>
 
             {!hasMatchingVisibleContent && normalizedQuery ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">

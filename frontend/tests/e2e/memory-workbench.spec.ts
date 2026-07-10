@@ -95,7 +95,7 @@ async function expectPageNoHorizontalOverflow(page: Page) {
     .toBeLessThanOrEqual(0);
 }
 
-test("memory action buttons preserve primary, secondary, and destructive hierarchy", async ({
+test("memory inbox exposes primary add and secondary management actions", async ({
   page,
 }) => {
   mockLangGraphAPI(page);
@@ -106,15 +106,35 @@ test("memory action buttons preserve primary, secondary, and destructive hierarc
     "data-variant",
     "default",
   );
+  const manage = page.getByRole("button", { name: "Manage memory" });
+  await expect(manage).toHaveAttribute("data-variant", "outline");
+
+  await manage.click();
   await expect(
-    page.getByRole("button", { name: "Import memory" }),
-  ).toHaveAttribute("data-variant", "outline");
+    page.getByRole("menuitem", { name: "Import memory" }),
+  ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Export memory" }),
-  ).toHaveAttribute("data-variant", "outline");
+    page.getByRole("menuitem", { name: "Export memory" }),
+  ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Clear all memory" }),
+    page.getByRole("menuitem", { name: "Clear all memory" }),
   ).toHaveAttribute("data-variant", "destructive");
+});
+
+test("memory overview derives counts and recent focus from loaded memory", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  mockMemoryAPI(page);
+  await page.goto("/workspace/memory");
+
+  const overview = page.getByTestId("memory-overview");
+  await expect(overview).toContainText("1 fact");
+  await expect(overview).toContainText("4 summaries");
+  await expect(overview).toContainText("Redesigning DeerFlow.");
+  await expect(
+    overview.getByRole("button", { name: "View summaries" }),
+  ).toBeVisible();
 });
 
 test("memory workbench switches between summary and facts panels", async ({
