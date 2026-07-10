@@ -135,7 +135,44 @@ test("empty page guides the user to create the first scheduled task", async ({
 
   await createSheet.getByRole("button", { name: "Close" }).click();
   await expect(createSheet).toHaveCount(0);
-  await expect(page.getByTestId("scheduled-task-create-trigger")).toBeFocused();
+  await expect(page.getByTestId("scheduled-task-empty-action")).toBeFocused();
+});
+
+test("loading and failed requests do not show empty task onboarding", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
+  let releaseScheduledTasks!: () => void;
+  const scheduledTasksHeld = new Promise<void>((resolve) => {
+    releaseScheduledTasks = resolve;
+  });
+  let scheduledTasksStarted!: () => void;
+  const scheduledTasksStartedPromise = new Promise<void>((resolve) => {
+    scheduledTasksStarted = resolve;
+  });
+  await page.route("**/api/scheduled-tasks", async (route) => {
+    if (route.request().method() !== "GET") {
+      return route.fallback();
+    }
+    scheduledTasksStarted();
+    await scheduledTasksHeld;
+    return route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ detail: "Scheduled tasks unavailable" }),
+    });
+  });
+
+  await page.goto("/workspace/scheduled-tasks");
+  await scheduledTasksStartedPromise;
+  await expect(page.getByTestId("scheduled-task-empty")).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-task-load-error")).toHaveCount(0);
+
+  releaseScheduledTasks();
+  await expect(page.getByTestId("scheduled-task-load-error")).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(page.getByTestId("scheduled-task-empty")).toHaveCount(0);
 });
 
 test("filters with no matches explain how to restore scheduled tasks", async ({
@@ -598,7 +635,8 @@ test("user can create a scheduled task from the page", async ({ page }) => {
   await page.goto("/workspace/scheduled-tasks");
   await expect(page.getByTestId("scheduled-task-create-form")).toHaveCount(0);
   const createTrigger = page.getByTestId("scheduled-task-create-trigger");
-  await createTrigger.click();
+  const emptyAction = page.getByTestId("scheduled-task-empty-action");
+  await emptyAction.click();
 
   const createSheet = page.getByRole("dialog", {
     name: "Create scheduled task",
@@ -641,6 +679,7 @@ test("user can create a scheduled task from the page", async ({ page }) => {
     page.getByTestId("scheduled-task-detail").getByText("Summarize thread"),
   ).toBeVisible();
   await expect(createSheet).toHaveCount(0);
+  await expect(emptyAction).toHaveCount(0);
   await expect(createTrigger).toBeFocused();
 
   await page.keyboard.press("Enter");

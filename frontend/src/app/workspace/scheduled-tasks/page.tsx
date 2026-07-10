@@ -2,7 +2,7 @@
 
 import { CalendarClockIcon, PlusIcon } from "lucide-react";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -105,6 +105,8 @@ export default function ScheduledTasksPage() {
   const data = threadId ? threadTasksQuery.data : allTasksQuery.data;
   const queryError = threadId ? threadTasksQuery.error : allTasksQuery.error;
   const [createSheetOpen, setCreateSheetOpen] = useState(false);
+  const createTriggerRef = useRef<HTMLButtonElement>(null);
+  const createOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [contextMode, setContextMode] = useState<
@@ -244,12 +246,29 @@ export default function ScheduledTasksPage() {
             </div>
             <Sheet open={createSheetOpen} onOpenChange={setCreateSheetOpen}>
               <SheetTrigger asChild>
-                <Button data-testid="scheduled-task-create-trigger">
+                <Button
+                  ref={createTriggerRef}
+                  data-testid="scheduled-task-create-trigger"
+                  onClick={(event) => {
+                    createOpenerRef.current = event.currentTarget;
+                  }}
+                >
                   <PlusIcon className="size-4" />
                   {st.create.title}
                 </Button>
               </SheetTrigger>
-              <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+              <SheetContent
+                className="w-full overflow-y-auto sm:max-w-xl"
+                onCloseAutoFocus={(event) => {
+                  event.preventDefault();
+                  const opener = createOpenerRef.current;
+                  const focusTarget = opener?.isConnected
+                    ? opener
+                    : createTriggerRef.current;
+                  focusTarget?.focus();
+                  createOpenerRef.current = null;
+                }}
+              >
                 <SheetHeader className="border-b px-6 py-5">
                   <SheetTitle>{st.create.title}</SheetTitle>
                   <SheetDescription>
@@ -421,7 +440,12 @@ export default function ScheduledTasksPage() {
               <EmptyContent>
                 <Button
                   data-testid="scheduled-task-empty-action"
-                  onClick={() => setCreateSheetOpen(true)}
+                  aria-haspopup="dialog"
+                  aria-expanded={createSheetOpen}
+                  onClick={(event) => {
+                    createOpenerRef.current = event.currentTarget;
+                    setCreateSheetOpen(true);
+                  }}
                 >
                   <PlusIcon className="size-4" />
                   {st.empty.action}
