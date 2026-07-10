@@ -4,6 +4,7 @@ import { PlusIcon } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -71,6 +72,19 @@ function formatTimestamp(value: string | null, locale: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function statusBadgeVariant(status: ScheduledTask["status"]) {
+  if (status === "failed" || status === "cancelled") {
+    return "destructive" as const;
+  }
+  if (status === "paused" || status === "completed") {
+    return "secondary" as const;
+  }
+  if (status === "enabled" || status === "running") {
+    return "default" as const;
+  }
+  return "outline" as const;
 }
 
 export default function ScheduledTasksPage() {
@@ -143,10 +157,13 @@ export default function ScheduledTasksPage() {
     (st.runTrigger as Record<string, string>)[v] ?? v;
   const runStatusLabel = (v: string) =>
     (st.runStatus as Record<string, string>)[v] ?? v;
-  const taskSummary = (task: ScheduledTask) =>
-    `${scheduleTypeLabel(task.schedule_type)} · ${statusLabel(task.status)}`;
   const runSummary = (run: ScheduledTaskRun) =>
     `${runTriggerLabel(run.trigger)} · ${runStatusLabel(run.status)}`;
+  const runsCountLabel = (count: number) =>
+    (count === 1 ? st.detail.runsCountOne : st.detail.runsCount).replace(
+      "{count}",
+      String(count),
+    );
   const applyRecipe = (recipe: Recipe) => {
     const labels = st.recipes[recipe.titleKey];
     setTitle(labels.title);
@@ -201,14 +218,14 @@ export default function ScheduledTasksPage() {
     <WorkspaceContainer>
       <WorkspaceHeader />
       <WorkspaceBody className="overflow-y-auto">
-        <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-5 p-4 sm:p-6 md:p-8">
+        <div className="mx-auto flex w-full max-w-[1440px] min-w-0 flex-col gap-5 p-4 sm:p-6 md:p-8">
           <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-1">
               <h1 className="text-2xl font-semibold tracking-tight">
                 {t.sidebar.scheduledTasks}
               </h1>
               {threadId ? (
-                <p className="text-muted-foreground text-sm">
+                <p className="text-muted-foreground text-sm [overflow-wrap:anywhere]">
                   {st.detail.filteredByThread.replace("{id}", threadId)}
                 </p>
               ) : null}
@@ -250,7 +267,11 @@ export default function ScheduledTasksPage() {
                       </Button>
                     ))}
                   </div>
-                  <div className="flex gap-2">
+                  <div
+                    className="flex gap-2"
+                    role="group"
+                    aria-label={st.detail.contextMode}
+                  >
                     <Button
                       variant={
                         contextMode === "fresh_thread_per_run"
@@ -258,6 +279,7 @@ export default function ScheduledTasksPage() {
                           : "outline"
                       }
                       size="sm"
+                      aria-pressed={contextMode === "fresh_thread_per_run"}
                       onClick={() => setContextMode("fresh_thread_per_run")}
                     >
                       {st.context.fresh}
@@ -267,6 +289,7 @@ export default function ScheduledTasksPage() {
                         contextMode === "reuse_thread" ? "default" : "outline"
                       }
                       size="sm"
+                      aria-pressed={contextMode === "reuse_thread"}
                       onClick={() => setContextMode("reuse_thread")}
                     >
                       {st.context.reuse}
@@ -371,14 +394,19 @@ export default function ScheduledTasksPage() {
             </div>
           ) : null}
 
-          <section className="bg-muted/25 flex flex-wrap gap-3 rounded-xl border p-3">
-            <div className="flex flex-wrap items-center gap-2">
+          <section className="bg-muted/25 flex min-w-0 flex-wrap gap-3 rounded-xl border p-3">
+            <div
+              className="flex flex-wrap items-center gap-2"
+              role="group"
+              aria-label={st.filters.allStatuses}
+            >
               <span className="text-muted-foreground px-1 text-xs font-medium">
                 {st.filters.allStatuses}
               </span>
               <Button
                 variant={statusFilter === "all" ? "default" : "outline"}
                 size="sm"
+                aria-pressed={statusFilter === "all"}
                 onClick={() => setStatusFilter("all")}
               >
                 {st.filters.allStatuses}
@@ -386,6 +414,7 @@ export default function ScheduledTasksPage() {
               <Button
                 variant={statusFilter === "enabled" ? "default" : "outline"}
                 size="sm"
+                aria-pressed={statusFilter === "enabled"}
                 onClick={() => setStatusFilter("enabled")}
               >
                 {st.filters.enabled}
@@ -393,6 +422,7 @@ export default function ScheduledTasksPage() {
               <Button
                 variant={statusFilter === "paused" ? "default" : "outline"}
                 size="sm"
+                aria-pressed={statusFilter === "paused"}
                 onClick={() => setStatusFilter("paused")}
               >
                 {st.filters.paused}
@@ -400,6 +430,7 @@ export default function ScheduledTasksPage() {
               <Button
                 variant={statusFilter === "completed" ? "default" : "outline"}
                 size="sm"
+                aria-pressed={statusFilter === "completed"}
                 onClick={() => setStatusFilter("completed")}
               >
                 {st.filters.completed}
@@ -407,18 +438,24 @@ export default function ScheduledTasksPage() {
               <Button
                 variant={statusFilter === "failed" ? "default" : "outline"}
                 size="sm"
+                aria-pressed={statusFilter === "failed"}
                 onClick={() => setStatusFilter("failed")}
               >
                 {st.filters.failed}
               </Button>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
+            <div
+              className="flex flex-wrap items-center gap-2"
+              role="group"
+              aria-label={st.filters.allTypes}
+            >
               <span className="text-muted-foreground px-1 text-xs font-medium">
                 {st.filters.allTypes}
               </span>
               <Button
                 variant={typeFilter === "all" ? "default" : "outline"}
                 size="sm"
+                aria-pressed={typeFilter === "all"}
                 onClick={() => setTypeFilter("all")}
               >
                 {st.filters.allTypes}
@@ -426,6 +463,7 @@ export default function ScheduledTasksPage() {
               <Button
                 variant={typeFilter === "cron" ? "default" : "outline"}
                 size="sm"
+                aria-pressed={typeFilter === "cron"}
                 onClick={() => setTypeFilter("cron")}
               >
                 {st.filters.cron}
@@ -433,6 +471,7 @@ export default function ScheduledTasksPage() {
               <Button
                 variant={typeFilter === "once" ? "default" : "outline"}
                 size="sm"
+                aria-pressed={typeFilter === "once"}
                 onClick={() => setTypeFilter("once")}
               >
                 {st.filters.once}
@@ -440,11 +479,18 @@ export default function ScheduledTasksPage() {
             </div>
           </section>
 
-          <div className="grid items-start gap-4 lg:grid-cols-[minmax(280px,0.36fr)_minmax(0,0.64fr)]">
+          <div
+            className="grid min-w-0 items-start gap-4 lg:grid-cols-[minmax(280px,0.36fr)_minmax(0,0.64fr)]"
+            data-testid="scheduled-task-workbench"
+          >
             <section
-              className="bg-card flex flex-col gap-3 rounded-xl border p-3 shadow-xs"
+              className="bg-card flex min-w-0 flex-col gap-3 rounded-xl border p-3 shadow-xs"
               data-testid="scheduled-task-list"
+              aria-labelledby="scheduled-task-list-heading"
             >
+              <h2 id="scheduled-task-list-heading" className="sr-only">
+                {t.sidebar.scheduledTasks}
+              </h2>
               {filteredData.map((task) => {
                 const isSelected = selectedTask?.id === task.id;
                 return (
@@ -453,16 +499,25 @@ export default function ScheduledTasksPage() {
                     key={task.id}
                     onClick={() => setSelectedTaskId(task.id)}
                     data-testid={`scheduled-task-item-${task.id}`}
+                    aria-current={isSelected ? "true" : undefined}
+                    aria-controls="scheduled-task-detail-panel"
                     className={cn(
-                      "hover:bg-muted/40 rounded-lg border p-4 text-left transition-colors",
+                      "hover:bg-muted/40 min-w-0 rounded-lg border p-4 text-left [overflow-wrap:anywhere] transition-colors",
                       isSelected
                         ? "border-foreground bg-muted/50"
                         : "border-border",
                     )}
                   >
-                    <div className="min-w-0 font-medium">{task.title}</div>
-                    <div className="text-muted-foreground mt-1 text-sm">
-                      {taskSummary(task)}
+                    <div className="min-w-0 font-medium [overflow-wrap:anywhere]">
+                      {task.title}
+                    </div>
+                    <div className="mt-2 flex min-w-0 flex-wrap gap-1.5">
+                      <Badge variant="outline">
+                        {scheduleTypeLabel(task.schedule_type)}
+                      </Badge>
+                      <Badge variant={statusBadgeVariant(task.status)}>
+                        {statusLabel(task.status)}
+                      </Badge>
                     </div>
                     <div className="text-muted-foreground mt-3 text-xs">
                       {st.detail.nextRun}:{" "}
@@ -474,26 +529,37 @@ export default function ScheduledTasksPage() {
             </section>
 
             <section
-              className="bg-card rounded-xl border p-5 shadow-xs"
+              id="scheduled-task-detail-panel"
+              className="bg-card min-w-0 rounded-xl border p-5 shadow-xs"
               data-testid="scheduled-task-detail"
+              aria-labelledby="scheduled-task-detail-heading"
             >
               {selectedTask ? (
-                <div className="flex flex-col gap-5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="text-lg font-semibold">
-                      {selectedTask.title}
+                <div className="flex min-w-0 flex-col gap-5">
+                  <div className="flex min-w-0 items-start justify-between gap-3">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <h2
+                        id="scheduled-task-detail-heading"
+                        className="min-w-0 text-lg font-semibold [overflow-wrap:anywhere]"
+                      >
+                        {selectedTask.title}
+                      </h2>
+                      <Badge variant={statusBadgeVariant(selectedTask.status)}>
+                        {statusLabel(selectedTask.status)}
+                      </Badge>
                     </div>
                     <Button
                       variant="outline"
                       size="sm"
+                      className="shrink-0"
                       onClick={() => setEditing((value) => !value)}
                     >
                       {editing ? st.actions.cancelEdit : st.actions.edit}
                     </Button>
                   </div>
 
-                  <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
-                    <div className="space-y-1">
+                  <div className="grid min-w-0 gap-x-6 gap-y-4 sm:grid-cols-2 [&>*]:min-w-0">
+                    <div className="min-w-0 space-y-1">
                       <div className="text-muted-foreground text-xs">
                         {st.detail.contextMode}
                       </div>
@@ -501,19 +567,19 @@ export default function ScheduledTasksPage() {
                         {contextModeLabel(selectedTask.context_mode)}
                       </div>
                     </div>
-                    <div className="space-y-1">
+                    <div className="min-w-0 space-y-1">
                       <div className="text-muted-foreground text-xs">
                         {selectedTask.context_mode === "reuse_thread"
                           ? st.detail.thread
                           : st.detail.lastThread}
                       </div>
-                      <div className="text-sm">
+                      <div className="text-sm [overflow-wrap:anywhere]">
                         {selectedTask.context_mode === "reuse_thread"
                           ? (selectedTask.thread_id ?? NONE)
                           : (selectedTask.last_thread_id ?? NONE)}
                       </div>
                     </div>
-                    <div className="space-y-1">
+                    <div className="min-w-0 space-y-1">
                       <div className="text-muted-foreground text-xs">
                         {st.detail.schedule}
                       </div>
@@ -521,7 +587,7 @@ export default function ScheduledTasksPage() {
                         {scheduleTypeLabel(selectedTask.schedule_type)}
                       </div>
                     </div>
-                    <div className="space-y-1">
+                    <div className="min-w-0 space-y-1">
                       <div className="text-muted-foreground text-xs">
                         {st.detail.nextRun}
                       </div>
@@ -529,7 +595,7 @@ export default function ScheduledTasksPage() {
                         {formatTimestamp(selectedTask.next_run_at, locale)}
                       </div>
                     </div>
-                    <div className="space-y-1">
+                    <div className="min-w-0 space-y-1">
                       <div className="text-muted-foreground text-xs">
                         {st.detail.lastRun}
                       </div>
@@ -537,19 +603,30 @@ export default function ScheduledTasksPage() {
                         {formatTimestamp(selectedTask.last_run_at, locale)}
                       </div>
                     </div>
-                    <div className="space-y-1">
+                    <div className="min-w-0 space-y-1">
+                      <div className="text-muted-foreground text-xs">
+                        {st.detail.runCount}
+                      </div>
+                      <div
+                        className="text-sm"
+                        data-testid="scheduled-task-run-count"
+                      >
+                        {selectedTask.run_count}
+                      </div>
+                    </div>
+                    <div className="min-w-0 space-y-1">
                       <div className="text-muted-foreground text-xs">
                         {st.detail.lastRunId}
                       </div>
-                      <div className="text-sm break-all">
+                      <div className="text-sm [overflow-wrap:anywhere]">
                         {selectedTask.last_run_id ?? NONE}
                       </div>
                     </div>
-                    <div className="space-y-1 sm:col-span-2">
+                    <div className="min-w-0 space-y-1 sm:col-span-2">
                       <div className="text-muted-foreground text-xs">
                         {st.detail.lastError}
                       </div>
-                      <div className="text-sm">
+                      <div className="text-sm [overflow-wrap:anywhere]">
                         {selectedTask.last_error ?? NONE}
                       </div>
                     </div>
@@ -590,7 +667,7 @@ export default function ScheduledTasksPage() {
                       </Button>
                     </div>
                   ) : (
-                    <div className="bg-muted/30 rounded-lg p-4 text-sm">
+                    <div className="bg-muted/30 min-w-0 rounded-lg p-4 text-sm [overflow-wrap:anywhere]">
                       {selectedTask.prompt}
                     </div>
                   )}
@@ -625,40 +702,36 @@ export default function ScheduledTasksPage() {
                     </Button>
                   </div>
 
-                  <div className="space-y-3 border-t pt-5">
-                    <div
+                  <section
+                    className="min-w-0 space-y-3 border-t pt-5"
+                    data-testid="scheduled-task-runs"
+                    aria-labelledby="scheduled-task-runs-heading"
+                  >
+                    <h3
+                      id="scheduled-task-runs-heading"
                       className="font-medium"
-                      data-testid="scheduled-task-runs"
                     >
-                      {(taskRunsQuery.data ?? []).length === 1
-                        ? st.detail.runsCountOne.replace(
-                            "{count}",
-                            String((taskRunsQuery.data ?? []).length),
-                          )
-                        : st.detail.runsCount.replace(
-                            "{count}",
-                            String((taskRunsQuery.data ?? []).length),
-                          )}
-                    </div>
+                      {runsCountLabel(selectedTask.run_count)}
+                    </h3>
                     <div
-                      className="flex flex-col gap-2"
+                      className="flex min-w-0 flex-col gap-2"
                       data-testid="scheduled-task-run-list"
                     >
                       {(taskRunsQuery.data ?? []).length > 0 ? (
                         (taskRunsQuery.data ?? []).map((run) => (
                           <div
                             key={run.id}
-                            className="rounded-md border p-3 text-sm"
+                            className="min-w-0 rounded-md border p-3 text-sm [overflow-wrap:anywhere]"
                           >
                             <div className="font-medium">{runSummary(run)}</div>
-                            <div className="text-muted-foreground text-xs">
+                            <div className="text-muted-foreground text-xs [overflow-wrap:anywhere]">
                               {run.run_id ?? NONE}
                             </div>
                             <div className="text-muted-foreground text-xs">
                               {formatTimestamp(run.scheduled_for, locale)}
                             </div>
                             {run.error && (
-                              <div className="text-destructive text-xs">
+                              <div className="text-destructive text-xs [overflow-wrap:anywhere]">
                                 {run.error}
                               </div>
                             )}
@@ -670,12 +743,15 @@ export default function ScheduledTasksPage() {
                         </div>
                       )}
                     </div>
-                  </div>
+                  </section>
                 </div>
               ) : (
-                <div className="text-muted-foreground text-sm">
+                <h2
+                  id="scheduled-task-detail-heading"
+                  className="text-muted-foreground text-sm"
+                >
                   {st.detail.noSelection}
-                </div>
+                </h2>
               )}
             </section>
           </div>

@@ -237,6 +237,7 @@ export interface Translations {
       lastRun: string;
       lastRunId: string;
       lastError: string;
+      runCount: string;
       runsCount: string;
       runsCountOne: string;
       noRuns: string;

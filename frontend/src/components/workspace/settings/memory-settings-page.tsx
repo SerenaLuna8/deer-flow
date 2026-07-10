@@ -568,7 +568,7 @@ export function MemorySettingsPage() {
                 <DownloadIcon className="mr-2 h-4 w-4" />
                 {isExporting ? t.common.loading : exportButton}
               </Button>
-              <Button variant="outline" onClick={openCreateFactDialog}>
+              <Button onClick={openCreateFactDialog}>
                 <PlusIcon className="mr-2 h-4 w-4" />
                 {addFactLabel}
               </Button>

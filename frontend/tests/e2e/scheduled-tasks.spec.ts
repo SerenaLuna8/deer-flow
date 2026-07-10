@@ -1,8 +1,53 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { MOCK_THREAD_ID, mockLangGraphAPI } from "./utils/mock-api";
 
 test.describe.configure({ mode: "serial" });
+
+const LONG_TOKEN = `long-token-${"x".repeat(320)}`;
+
+async function expectNoHorizontalOverflow(page: Page) {
+  const dimensions = await page.evaluate(() => {
+    const workbench = document.querySelector(
+      '[data-testid="scheduled-task-workbench"]',
+    );
+    if (!(workbench instanceof HTMLElement)) {
+      throw new Error("Scheduled task workbench not found");
+    }
+    return {
+      document: {
+        clientWidth: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+      },
+      body: {
+        clientWidth: document.body.clientWidth,
+        scrollWidth: document.body.scrollWidth,
+      },
+      scrollContainer: {
+        clientWidth: document.querySelector("main")?.clientWidth ?? 0,
+        scrollWidth: document.querySelector("main")?.scrollWidth ?? 0,
+      },
+      workbench: {
+        clientWidth: workbench.clientWidth,
+        scrollWidth: workbench.scrollWidth,
+      },
+    };
+  });
+
+  expect(dimensions.document.scrollWidth).toBeLessThanOrEqual(
+    dimensions.document.clientWidth,
+  );
+  expect(dimensions.body.scrollWidth).toBeLessThanOrEqual(
+    dimensions.body.clientWidth,
+  );
+  expect(dimensions.scrollContainer.clientWidth).toBeGreaterThan(0);
+  expect(dimensions.scrollContainer.scrollWidth).toBeLessThanOrEqual(
+    dimensions.scrollContainer.clientWidth,
+  );
+  expect(dimensions.workbench.scrollWidth).toBeLessThanOrEqual(
+    dimensions.workbench.clientWidth,
+  );
+}
 
 test("scheduled tasks page is reachable from sidebar", async ({ page }) => {
   mockLangGraphAPI(page, {
@@ -38,6 +83,318 @@ test("scheduled tasks page is reachable from sidebar", async ({ page }) => {
   await expect(page.getByTestId("scheduled-task-list")).toBeVisible();
   await expect(page.getByTestId("scheduled-task-detail")).toBeVisible();
   await expect(page.getByTestId("scheduled-task-runs")).toContainText("0 runs");
+});
+
+test("workbench exposes semantic state and the task's total run count", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [
+      {
+        id: "task-total",
+        thread_id: "thread-total",
+        context_mode: "reuse_thread",
+        title: "Daily total",
+        prompt: "Summarize all activity",
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 9 * * *" },
+        timezone: "UTC",
+        status: "enabled",
+        next_run_at: "2026-07-02T01:00:00+00:00",
+        last_run_at: "2026-07-01T01:00:00+00:00",
+        last_run_id: "run-latest",
+        last_error: null,
+        run_count: 57,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      },
+      {
+        id: "task-once",
+        thread_id: null,
+        context_mode: "fresh_thread_per_run",
+        title: "One-time cleanup",
+        prompt: "Clean up once",
+        schedule_type: "once",
+        schedule_spec: { run_at: "2026-07-03T01:00:00+00:00" },
+        timezone: "UTC",
+        status: "paused",
+        next_run_at: "2026-07-03T01:00:00+00:00",
+        last_run_at: null,
+        last_run_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      },
+    ],
+  });
+  await page.route("**/api/scheduled-tasks/*/runs", (route) => {
+    const taskId = decodeURIComponent(
+      new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+    );
+    const runs =
+      taskId === "task-total"
+        ? [
+            {
+              id: "history-1",
+              task_id: taskId,
+              thread_id: "thread-total",
+              run_id: "run-1",
+              scheduled_for: "2026-07-01T01:00:00+00:00",
+              trigger: "scheduled",
+              status: "success",
+              error: null,
+              started_at: "2026-07-01T01:00:00+00:00",
+              finished_at: "2026-07-01T01:01:00+00:00",
+              created_at: "2026-07-01T01:00:00+00:00",
+            },
+            {
+              id: "history-2",
+              task_id: taskId,
+              thread_id: "thread-total",
+              run_id: "run-2",
+              scheduled_for: "2026-06-30T01:00:00+00:00",
+              trigger: "manual",
+              status: "failed",
+              error: "Previous failure",
+              started_at: "2026-06-30T01:00:00+00:00",
+              finished_at: "2026-06-30T01:01:00+00:00",
+              created_at: "2026-06-30T01:00:00+00:00",
+            },
+          ]
+        : [];
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(runs),
+    });
+  });
+
+  await page.goto("/workspace/scheduled-tasks");
+
+  const list = page.getByTestId("scheduled-task-list");
+  await expect(list).toHaveAttribute(
+    "aria-labelledby",
+    "scheduled-task-list-heading",
+  );
+  await expect(
+    list.getByRole("heading", { level: 2, name: "Scheduled tasks" }),
+  ).toBeAttached();
+
+  const selectedTask = page.getByTestId("scheduled-task-item-task-total");
+  await expect(selectedTask).toHaveAttribute("aria-current", "true");
+  await expect(selectedTask).toHaveAttribute(
+    "aria-controls",
+    "scheduled-task-detail-panel",
+  );
+  await expect(
+    selectedTask.locator('[data-slot="badge"]').filter({
+      hasText: "Recurring",
+    }),
+  ).toBeVisible();
+  await expect(
+    selectedTask.locator('[data-slot="badge"]').filter({ hasText: "Enabled" }),
+  ).toBeVisible();
+
+  const detail = page.getByTestId("scheduled-task-detail");
+  await expect(detail).toHaveAttribute("id", "scheduled-task-detail-panel");
+  await expect(detail).toHaveAttribute(
+    "aria-labelledby",
+    "scheduled-task-detail-heading",
+  );
+  await expect(
+    detail.getByRole("heading", { level: 2, name: "Daily total" }),
+  ).toBeVisible();
+  await expect(
+    detail.locator('[data-slot="badge"]').filter({ hasText: "Enabled" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("scheduled-task-run-count")).toHaveText("57");
+
+  const runs = page.getByTestId("scheduled-task-runs");
+  await expect(runs).toHaveAttribute(
+    "aria-labelledby",
+    "scheduled-task-runs-heading",
+  );
+  await expect(
+    runs.getByRole("heading", { level: 3, name: "57 runs" }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("scheduled-task-run-list").locator(":scope > div"),
+  ).toHaveCount(2);
+
+  const statusGroup = page.getByRole("group", { name: "All statuses" });
+  await expect(
+    statusGroup.getByRole("button", { name: "All statuses" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    statusGroup.getByRole("button", { name: "Enabled", exact: true }),
+  ).toHaveAttribute("aria-pressed", "false");
+  await statusGroup
+    .getByRole("button", { name: "Enabled", exact: true })
+    .click();
+  await expect(
+    statusGroup.getByRole("button", { name: "Enabled", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await statusGroup.getByRole("button", { name: "All statuses" }).click();
+
+  const typeGroup = page.getByRole("group", { name: "All types" });
+  await expect(
+    typeGroup.getByRole("button", { name: "All types" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await typeGroup.getByRole("button", { name: "Once" }).click();
+  await expect(typeGroup.getByRole("button", { name: "Once" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(
+    page.getByTestId("scheduled-task-item-task-once"),
+  ).toHaveAttribute("aria-current", "true");
+  await expect(selectedTask).toHaveCount(0);
+
+  await page.getByTestId("scheduled-task-create-trigger").click();
+  const contextGroup = page.getByRole("group", { name: "Context mode" });
+  await expect(
+    contextGroup.getByRole("button", { name: "Fresh thread" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await contextGroup.getByRole("button", { name: "Reuse thread" }).click();
+  await expect(
+    contextGroup.getByRole("button", { name: "Reuse thread" }),
+  ).toHaveAttribute("aria-pressed", "true");
+});
+
+test("desktop workbench keeps the list and detail near a 36/64 split", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [
+      {
+        id: "task-layout",
+        thread_id: "thread-layout",
+        title: "Layout task",
+        prompt: "Check desktop layout",
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 9 * * *" },
+        timezone: "UTC",
+        status: "enabled",
+        next_run_at: "2026-07-02T01:00:00+00:00",
+        last_run_at: null,
+        last_run_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      },
+    ],
+  });
+
+  await page.goto("/workspace/scheduled-tasks");
+  const listBox = await page.getByTestId("scheduled-task-list").boundingBox();
+  const detailBox = await page
+    .getByTestId("scheduled-task-detail")
+    .boundingBox();
+  expect(listBox).not.toBeNull();
+  expect(detailBox).not.toBeNull();
+  if (!listBox || !detailBox) {
+    throw new Error("Scheduled task panels were not measurable");
+  }
+
+  const combinedWidth = listBox.width + detailBox.width;
+  expect(Math.abs(listBox.width / combinedWidth - 0.36)).toBeLessThan(0.03);
+  expect(Math.abs(detailBox.width / combinedWidth - 0.64)).toBeLessThan(0.03);
+  expect(Math.abs(listBox.y - detailBox.y)).toBeLessThan(2);
+});
+
+test("mobile workbench contains long tokens in light and dark themes", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const longThreadId = `thread-${LONG_TOKEN}`;
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [
+      {
+        id: "task-overflow",
+        thread_id: longThreadId,
+        context_mode: "reuse_thread",
+        title: `title-${LONG_TOKEN}`,
+        prompt: `prompt-${LONG_TOKEN}`,
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 9 * * *" },
+        timezone: "UTC",
+        status: "failed",
+        next_run_at: "2026-07-02T01:00:00+00:00",
+        last_run_at: "2026-07-01T01:00:00+00:00",
+        last_run_id: `last-run-${LONG_TOKEN}`,
+        last_error: `last-error-${LONG_TOKEN}`,
+        run_count: 1,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      },
+    ],
+  });
+  await page.route("**/api/scheduled-tasks/*/runs", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          id: "history-overflow",
+          task_id: "task-overflow",
+          thread_id: `thread-${LONG_TOKEN}`,
+          run_id: `run-${LONG_TOKEN}`,
+          scheduled_for: "2026-07-01T01:00:00+00:00",
+          trigger: "scheduled",
+          status: "failed",
+          error: `run-error-${LONG_TOKEN}`,
+          started_at: "2026-07-01T01:00:00+00:00",
+          finished_at: "2026-07-01T01:01:00+00:00",
+          created_at: "2026-07-01T01:00:00+00:00",
+        },
+      ]),
+    }),
+  );
+
+  await page.goto(
+    `/workspace/scheduled-tasks?thread_id=${encodeURIComponent(longThreadId)}`,
+  );
+  const list = page.getByTestId("scheduled-task-list");
+  const detail = page.getByTestId("scheduled-task-detail");
+  await expect(list).toBeVisible();
+  await expect(detail).toBeVisible();
+
+  const listBox = await list.boundingBox();
+  const detailBox = await detail.boundingBox();
+  expect(listBox).not.toBeNull();
+  expect(detailBox).not.toBeNull();
+  if (!listBox || !detailBox) {
+    throw new Error("Scheduled task panels were not measurable");
+  }
+  expect(detailBox.y).toBeGreaterThan(listBox.y + listBox.height);
+  await expectNoHorizontalOverflow(page);
+
+  await page.evaluate(() => document.documentElement.classList.add("dark"));
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await expect(list).toBeVisible();
+  await expect(detail).toBeVisible();
+  const failedBadge = detail
+    .locator('[data-slot="badge"]')
+    .filter({ hasText: "Failed" });
+  await expect(failedBadge).toBeVisible();
+  const badgeColors = await failedBadge.evaluate((badge) => {
+    const styles = getComputedStyle(badge);
+    return {
+      background: styles.backgroundColor,
+      foreground: styles.color,
+    };
+  });
+  expect(badgeColors.background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(badgeColors.foreground).not.toBe("rgba(0, 0, 0, 0)");
+  expect(badgeColors.foreground).not.toBe("transparent");
+  expect(badgeColors.foreground).not.toBe(badgeColors.background);
+  await expectNoHorizontalOverflow(page);
 });
 
 test("thread page links to filtered scheduled tasks", async ({ page }) => {
@@ -95,6 +452,38 @@ test("create sheet supports keyboard controls and restores focus", async ({
   await expect(createSheet).toBeVisible();
   await expect(createTrigger).toHaveAttribute("aria-haspopup", "dialog");
   await expect(createTrigger).toHaveAttribute("aria-expanded", "true");
+
+  const focusIsInsideSheet = () =>
+    createSheet.evaluate((dialog) => dialog.contains(document.activeElement));
+  await expect.poll(focusIsInsideSheet).toBe(true);
+
+  const focusableControls = createSheet.locator(
+    'button:not([disabled]):visible, input:not([disabled]):visible, textarea:not([disabled]):visible, [tabindex]:not([tabindex="-1"]):visible',
+  );
+  const firstFocusableControl = focusableControls.first();
+  const lastFocusableControl = focusableControls.last();
+  await lastFocusableControl.focus();
+  await page.keyboard.press("Tab");
+  await expect(firstFocusableControl).toBeFocused();
+  await firstFocusableControl.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(lastFocusableControl).toBeFocused();
+
+  const createForm = createSheet.getByTestId("scheduled-task-create-form");
+  await createForm.getByPlaceholder("Task title").fill("Preserved draft");
+  await createForm.getByPlaceholder("Prompt").fill("Preserved prompt");
+  await createSheet.getByRole("button", { name: "Close" }).click();
+  await expect(createSheet).toHaveCount(0);
+  await expect(createTrigger).toBeFocused();
+
+  await createTrigger.click();
+  await expect(createSheet).toBeVisible();
+  await expect(createForm.getByPlaceholder("Task title")).toHaveValue(
+    "Preserved draft",
+  );
+  await expect(createForm.getByPlaceholder("Prompt")).toHaveValue(
+    "Preserved prompt",
+  );
 
   await page.keyboard.press("Escape");
   await expect(createSheet).toHaveCount(0);
@@ -216,6 +605,11 @@ test("failed creation keeps the sheet open and preserves input", async ({
     "thread-kept",
   );
   await expect(createForm.getByLabel("Run at")).toHaveValue("2026-07-02T09:00");
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "Failed to create scheduled task: Create failed" }),
+  ).toBeVisible();
 });
 
 test("user can pause a scheduled task from the detail pane", async ({
@@ -279,7 +673,6 @@ test("trigger shows a run entry in the detail pane", async ({ page }) => {
 
   await page.goto("/workspace/scheduled-tasks");
   await page.getByRole("button", { name: "Trigger now" }).click();
-  await expect(page.getByTestId("scheduled-task-runs")).toContainText("1 run");
   await expect(
     page.getByTestId("scheduled-task-run-list").getByText(/Manual · Success/i),
   ).toBeVisible();

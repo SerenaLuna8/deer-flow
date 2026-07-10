@@ -302,6 +302,7 @@ export const enUS: Translations = {
       lastRun: "Last run",
       lastRunId: "Last run id",
       lastError: "Last error",
+      runCount: "Total runs",
       runsCount: "{count} runs",
       runsCountOne: "{count} run",
       noRuns: "No runs yet",

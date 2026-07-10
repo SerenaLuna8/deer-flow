@@ -293,6 +293,7 @@ export const zhCN: Translations = {
       lastRun: "上次运行",
       lastRunId: "上次运行 ID",
       lastError: "上次错误",
+      runCount: "运行总数",
       runsCount: "{count} 次运行",
       runsCountOne: "{count} 次运行",
       noRuns: "暂无运行",
