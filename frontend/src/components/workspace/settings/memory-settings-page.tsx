@@ -23,6 +23,17 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  buildMemorySectionGroups,
+  confidenceToLevelKey,
+  isMemorySummaryEmpty,
+  type MemoryFact,
+  type MemorySection,
+  type MemorySectionGroup,
+  type MemoryViewFilter,
+  truncateFactPreview,
+  upperFirst,
+} from "@/components/workspace/settings/memory/memory-view-model";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
@@ -43,20 +54,6 @@ import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 import { cn } from "@/lib/utils";
-
-type MemoryViewFilter = "all" | "facts" | "summaries";
-type MemoryFact = UserMemory["facts"][number];
-
-type MemorySection = {
-  title: string;
-  summary: string;
-  updatedAt?: string;
-};
-
-type MemorySectionGroup = {
-  title: string;
-  sections: MemorySection[];
-};
 
 type PendingImport = {
   fileName: string;
@@ -129,20 +126,6 @@ const DEFAULT_FACT_FORM_STATE: FactFormState = {
   confidence: "0.8",
 };
 
-function confidenceToLevelKey(confidence: unknown): {
-  key: "veryHigh" | "high" | "normal" | "unknown";
-  value?: number;
-} {
-  if (typeof confidence !== "number" || !Number.isFinite(confidence)) {
-    return { key: "unknown" };
-  }
-
-  const value = Math.min(1, Math.max(0, confidence));
-  if (value >= 0.85) return { key: "veryHigh", value };
-  if (value >= 0.65) return { key: "high", value };
-  return { key: "normal", value };
-}
-
 function formatMemorySection(
   section: MemorySection,
   t: ReturnType<typeof useI18n>["t"],
@@ -159,54 +142,6 @@ function formatMemorySection(
   ]
     .filter(Boolean)
     .join("\n");
-}
-
-function buildMemorySectionGroups(
-  memory: UserMemory,
-  t: ReturnType<typeof useI18n>["t"],
-): MemorySectionGroup[] {
-  return [
-    {
-      title: t.settings.memory.markdown.userContext,
-      sections: [
-        {
-          title: t.settings.memory.markdown.work,
-          summary: memory.user.workContext.summary,
-          updatedAt: memory.user.workContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.personal,
-          summary: memory.user.personalContext.summary,
-          updatedAt: memory.user.personalContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.topOfMind,
-          summary: memory.user.topOfMind.summary,
-          updatedAt: memory.user.topOfMind.updatedAt,
-        },
-      ],
-    },
-    {
-      title: t.settings.memory.markdown.historyBackground,
-      sections: [
-        {
-          title: t.settings.memory.markdown.recentMonths,
-          summary: memory.history.recentMonths.summary,
-          updatedAt: memory.history.recentMonths.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.earlierContext,
-          summary: memory.history.earlierContext.summary,
-          updatedAt: memory.history.earlierContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.longTermBackground,
-          summary: memory.history.longTermBackground.summary,
-          updatedAt: memory.history.longTermBackground.updatedAt,
-        },
-      ],
-    },
-  ];
 }
 
 function summariesToMarkdown(
@@ -243,33 +178,6 @@ function summariesToMarkdown(
   }
 
   return out.join("\n");
-}
-
-function isMemorySummaryEmpty(memory: UserMemory) {
-  return (
-    memory.user.workContext.summary.trim() === "" &&
-    memory.user.personalContext.summary.trim() === "" &&
-    memory.user.topOfMind.summary.trim() === "" &&
-    memory.history.recentMonths.summary.trim() === "" &&
-    memory.history.earlierContext.summary.trim() === "" &&
-    memory.history.longTermBackground.summary.trim() === ""
-  );
-}
-
-function truncateFactPreview(content: string, maxLength = 140) {
-  const normalized = content.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-  const ellipsis = "...";
-  if (maxLength <= ellipsis.length) {
-    return normalized.slice(0, maxLength);
-  }
-  return `${normalized.slice(0, maxLength - ellipsis.length)}${ellipsis}`;
-}
-
-function upperFirst(str: string) {
-  return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
 export function MemorySettingsPage() {

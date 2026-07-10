@@ -662,8 +662,19 @@ export const enUS: Translations = {
     },
     memory: {
       title: "Memory",
-      description:
-        "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
+      description: "Review and manage what DeerFlow remembers about you.",
+      manageMemory: "Manage memory",
+      factCount: (count) => `${count} ${count === 1 ? "fact" : "facts"}`,
+      summaryCount: (count) =>
+        `${count} ${count === 1 ? "summary" : "summaries"}`,
+      recentFocus: "Recent focus",
+      viewSummaries: "View summaries",
+      hideSummaries: "Hide summaries",
+      smartSummaries: "Smart summaries",
+      emptyTitle: "No memory yet",
+      emptyDescription:
+        "Add a fact or keep chatting so DeerFlow can learn useful context.",
+      loadErrorTitle: "Memory could not be loaded",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
       exportButton: "Export memory",

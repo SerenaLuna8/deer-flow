@@ -554,6 +554,16 @@ export interface Translations {
     memory: {
       title: string;
       description: string;
+      manageMemory: string;
+      factCount: (count: number) => string;
+      summaryCount: (count: number) => string;
+      recentFocus: string;
+      viewSummaries: string;
+      hideSummaries: string;
+      smartSummaries: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      loadErrorTitle: string;
       empty: string;
       rawJson: string;
       exportButton: string;

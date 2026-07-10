@@ -639,8 +639,18 @@ export const zhCN: Translations = {
     },
     memory: {
       title: "记忆",
-      description:
-        "DeerFlow 会在后台不断从你的对话中自动学习。这些记忆能帮助 DeerFlow 更好地理解你，并提供更个性化的体验。",
+      description: "查看和管理 DeerFlow 对你的长期理解。",
+      manageMemory: "管理记忆",
+      factCount: (count) => `${count} 条事实`,
+      summaryCount: (count) => `${count} 个摘要`,
+      recentFocus: "近期关注",
+      viewSummaries: "查看摘要",
+      hideSummaries: "收起摘要",
+      smartSummaries: "智能摘要",
+      emptyTitle: "还没有记忆",
+      emptyDescription:
+        "添加一条事实，或继续对话，让 DeerFlow 学习有用的上下文。",
+      loadErrorTitle: "无法加载记忆",
       empty: "暂无可展示的记忆数据。",
       rawJson: "原始 JSON",
       exportButton: "导出记忆",
