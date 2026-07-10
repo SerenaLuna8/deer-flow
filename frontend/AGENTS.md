@@ -90,6 +90,8 @@ Human input requests are a structured message protocol layered on normal chat hi
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
 - `src/app/workspace/scheduled-tasks/page.tsx` owns scheduled-task filters, selection, mutations, and the controlled create-task Sheet; the Sheet is presentation only and must reuse the page's existing payload and reset flow.
 - `src/components/workspace/settings/memory-settings-page.tsx` owns memory filters and mutations; its wide workbench panels are presentation-only views over the existing filtered summaries and facts.
+- `SkillSettingsList` owns skill selection, the opener reference, and the read-only preview Sheet state; `useSkillContent` owns the lazy per-skill query enabled while that Sheet is open.
+- `SkillDetailSheet` strips only a parser-compatible leading frontmatter fence and renders the remainder with the existing raw-HTML-disabled Markdown renderer.
 
 ## Code Style
 

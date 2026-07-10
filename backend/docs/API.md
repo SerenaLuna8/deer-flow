@@ -366,15 +366,30 @@ GET /api/skills/{skill_name}
 ```json
 {
   "name": "pdf-processing",
-  "display_name": "PDF Processing",
   "description": "Handle PDF documents efficiently",
-  "enabled": true,
   "license": "MIT",
-  "path": "public/pdf-processing",
-  "allowed_tools": ["read_file", "write_file", "bash"],
-  "content": "# PDF Processing\n\nInstructions for the agent..."
+  "category": "public",
+  "enabled": true,
+  "editable": false
 }
 ```
+
+#### Get Skill Content (Admin Only)
+
+Return the raw Markdown for a read-only Web UI preview of a skill visible in the current user's storage scope.
+
+```http
+GET /api/skills/content/{skill_name}
+```
+
+**Response:**
+```json
+{
+  "content": "---\nname: pdf-processing\ndescription: Handle PDF documents efficiently\n---\n\n# PDF Processing\n\nInstructions for the agent..."
+}
+```
+
+The route requires an administrator session. It resolves a visible `Skill` before reading, validates that `Skill.skill_file` is an allowed regular `SKILL.md`, and offloads discovery, path validation, and filesystem reading from the event loop. The existing list, metadata detail, custom-skill, and embedded-client contracts remain unchanged.
 
 #### Enable Skill
 
