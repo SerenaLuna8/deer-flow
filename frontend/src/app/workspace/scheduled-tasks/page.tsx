@@ -20,6 +20,7 @@ import {
   SheetDescription,
   SheetHeader,
   SheetTitle,
+  SheetTrigger,
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -212,13 +213,153 @@ export default function ScheduledTasksPage() {
                 </p>
               ) : null}
             </div>
-            <Button
-              data-testid="scheduled-task-create-trigger"
-              onClick={() => setCreateSheetOpen(true)}
-            >
-              <PlusIcon className="size-4" />
-              {st.create.title}
-            </Button>
+            <Sheet open={createSheetOpen} onOpenChange={setCreateSheetOpen}>
+              <SheetTrigger asChild>
+                <Button data-testid="scheduled-task-create-trigger">
+                  <PlusIcon className="size-4" />
+                  {st.create.title}
+                </Button>
+              </SheetTrigger>
+              <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+                <SheetHeader className="border-b px-6 py-5">
+                  <SheetTitle>{st.create.title}</SheetTitle>
+                  <SheetDescription>
+                    {t.sidebar.scheduledTasks}
+                  </SheetDescription>
+                </SheetHeader>
+                <div
+                  className="space-y-5 px-6 pb-8"
+                  data-testid="scheduled-task-create-form"
+                >
+                  <div
+                    className="flex flex-wrap items-center gap-1"
+                    data-testid="schedule-recipes"
+                  >
+                    <span className="text-muted-foreground text-sm">
+                      {st.recipes.label}:
+                    </span>
+                    {RECIPES.map((recipe) => (
+                      <Button
+                        key={recipe.id}
+                        variant="outline"
+                        size="sm"
+                        onClick={() => applyRecipe(recipe)}
+                      >
+                        <span aria-hidden>{recipe.icon}</span>
+                        {st.recipes[recipe.titleKey].title}
+                      </Button>
+                    ))}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant={
+                        contextMode === "fresh_thread_per_run"
+                          ? "default"
+                          : "outline"
+                      }
+                      size="sm"
+                      onClick={() => setContextMode("fresh_thread_per_run")}
+                    >
+                      {st.context.fresh}
+                    </Button>
+                    <Button
+                      variant={
+                        contextMode === "reuse_thread" ? "default" : "outline"
+                      }
+                      size="sm"
+                      onClick={() => setContextMode("reuse_thread")}
+                    >
+                      {st.context.reuse}
+                    </Button>
+                  </div>
+                  {contextMode === "reuse_thread" && (
+                    <Input
+                      value={targetThreadId}
+                      onChange={(event) =>
+                        setTargetThreadId(event.target.value)
+                      }
+                      placeholder={st.context.threadIdPlaceholder}
+                    />
+                  )}
+                  <Input
+                    value={title}
+                    onChange={(event) => setTitle(event.target.value)}
+                    placeholder={st.create.taskTitle}
+                  />
+                  <Textarea
+                    rows={4}
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    placeholder={st.create.prompt}
+                  />
+                  <ScheduledTaskScheduleInput
+                    key={createNonce}
+                    initial={createSchedule}
+                    onChange={setCreateSchedule}
+                  />
+                  {formError && (
+                    <div className="text-destructive text-sm">{formError}</div>
+                  )}
+                  <Button
+                    onClick={() => {
+                      const hasSchedule =
+                        Boolean(createSchedule.schedule_spec.cron) ||
+                        Boolean(createSchedule.schedule_spec.run_at);
+                      if (
+                        !title ||
+                        !prompt ||
+                        !hasSchedule ||
+                        (contextMode === "reuse_thread" && !targetThreadId)
+                      ) {
+                        setFormError(st.create.fillRequired);
+                        return;
+                      }
+                      setFormError(null);
+                      createTask.mutate(
+                        {
+                          context_mode: contextMode,
+                          thread_id:
+                            contextMode === "reuse_thread"
+                              ? targetThreadId
+                              : null,
+                          title,
+                          prompt,
+                          schedule_type: createSchedule.schedule_type,
+                          schedule_spec: createSchedule.schedule_spec,
+                          timezone: createSchedule.timezone || "UTC",
+                        },
+                        {
+                          onSuccess: () => {
+                            // Clear the form so a follow-up task starts fresh.
+                            setTitle("");
+                            setPrompt("");
+                            setTargetThreadId("");
+                            setContextMode("fresh_thread_per_run");
+                            setCreateSchedule({
+                              schedule_type: "cron",
+                              schedule_spec: { cron: "0 9 * * *" },
+                              timezone: "",
+                            });
+                            setCreateNonce((n) => n + 1);
+                            setCreateSheetOpen(false);
+                          },
+                        },
+                      );
+                    }}
+                    disabled={
+                      !title ||
+                      !prompt ||
+                      (!createSchedule.schedule_spec.cron &&
+                        !createSchedule.schedule_spec.run_at) ||
+                      (contextMode === "reuse_thread" && !targetThreadId) ||
+                      createTask.isPending
+                    }
+                  >
+                    {st.create.submit}
+                  </Button>
+                </div>
+              </SheetContent>
+            </Sheet>
           </header>
 
           {queryError ? (
@@ -540,138 +681,6 @@ export default function ScheduledTasksPage() {
           </div>
         </div>
       </WorkspaceBody>
-
-      <Sheet open={createSheetOpen} onOpenChange={setCreateSheetOpen}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
-          <SheetHeader className="border-b px-6 py-5">
-            <SheetTitle>{st.create.title}</SheetTitle>
-            <SheetDescription>{t.sidebar.scheduledTasks}</SheetDescription>
-          </SheetHeader>
-          <div
-            className="space-y-5 px-6 pb-8"
-            data-testid="scheduled-task-create-form"
-          >
-            <div
-              className="flex flex-wrap items-center gap-1"
-              data-testid="schedule-recipes"
-            >
-              <span className="text-muted-foreground text-sm">
-                {st.recipes.label}:
-              </span>
-              {RECIPES.map((recipe) => (
-                <Button
-                  key={recipe.id}
-                  variant="outline"
-                  size="sm"
-                  onClick={() => applyRecipe(recipe)}
-                >
-                  <span aria-hidden>{recipe.icon}</span>
-                  {st.recipes[recipe.titleKey].title}
-                </Button>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <Button
-                variant={
-                  contextMode === "fresh_thread_per_run" ? "default" : "outline"
-                }
-                size="sm"
-                onClick={() => setContextMode("fresh_thread_per_run")}
-              >
-                {st.context.fresh}
-              </Button>
-              <Button
-                variant={contextMode === "reuse_thread" ? "default" : "outline"}
-                size="sm"
-                onClick={() => setContextMode("reuse_thread")}
-              >
-                {st.context.reuse}
-              </Button>
-            </div>
-            {contextMode === "reuse_thread" && (
-              <Input
-                value={targetThreadId}
-                onChange={(event) => setTargetThreadId(event.target.value)}
-                placeholder={st.context.threadIdPlaceholder}
-              />
-            )}
-            <Input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder={st.create.taskTitle}
-            />
-            <Textarea
-              rows={4}
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder={st.create.prompt}
-            />
-            <ScheduledTaskScheduleInput
-              key={createNonce}
-              initial={createSchedule}
-              onChange={setCreateSchedule}
-            />
-            {formError && (
-              <div className="text-destructive text-sm">{formError}</div>
-            )}
-            <Button
-              onClick={() => {
-                const hasSchedule =
-                  Boolean(createSchedule.schedule_spec.cron) ||
-                  Boolean(createSchedule.schedule_spec.run_at);
-                if (
-                  !title ||
-                  !prompt ||
-                  !hasSchedule ||
-                  (contextMode === "reuse_thread" && !targetThreadId)
-                ) {
-                  setFormError(st.create.fillRequired);
-                  return;
-                }
-                setFormError(null);
-                createTask.mutate(
-                  {
-                    context_mode: contextMode,
-                    thread_id:
-                      contextMode === "reuse_thread" ? targetThreadId : null,
-                    title,
-                    prompt,
-                    schedule_type: createSchedule.schedule_type,
-                    schedule_spec: createSchedule.schedule_spec,
-                    timezone: createSchedule.timezone || "UTC",
-                  },
-                  {
-                    onSuccess: () => {
-                      // Clear the form so a follow-up task starts fresh.
-                      setTitle("");
-                      setPrompt("");
-                      setTargetThreadId("");
-                      setContextMode("fresh_thread_per_run");
-                      setCreateSchedule({
-                        schedule_type: "cron",
-                        schedule_spec: { cron: "0 9 * * *" },
-                        timezone: "",
-                      });
-                      setCreateNonce((n) => n + 1);
-                      setCreateSheetOpen(false);
-                    },
-                  },
-                );
-              }}
-              disabled={
-                !title ||
-                !prompt ||
-                (!createSchedule.schedule_spec.cron &&
-                  !createSchedule.schedule_spec.run_at) ||
-                (contextMode === "reuse_thread" && !targetThreadId) ||
-                createTask.isPending
-              }
-            >
-              {st.create.submit}
-            </Button>
-          </div>
-        </SheetContent>
-      </Sheet>
 
       {/* Delete confirm — follows the agent-card confirm pattern. */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
