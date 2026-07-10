@@ -1,20 +1,36 @@
 "use client";
 
 import {
+  AlertCircleIcon,
+  BrainIcon,
+  BriefcaseBusinessIcon,
+  ChevronDownIcon,
   Clock3Icon,
   DownloadIcon,
   FileTextIcon,
+  FolderGit2Icon,
+  HeartIcon,
   Layers3Icon,
+  NotebookTextIcon,
+  PenLineIcon,
   PlusIcon,
   SearchIcon,
   Settings2Icon,
+  SparklesIcon,
   StarIcon,
   Trash2Icon,
   UploadIcon,
 } from "lucide-react";
+import Link from "next/link";
 import type * as React from "react";
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -23,9 +39,22 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import type { MemoryViewFilter } from "@/components/workspace/settings/memory/memory-view-model";
+import {
+  confidenceToLevelKey,
+  getMemoryCategoryVisual,
+  type MemoryFact,
+  type MemorySectionGroup,
+  type MemoryViewFilter,
+  upperFirst,
+} from "@/components/workspace/settings/memory/memory-view-model";
 import type { Translations } from "@/core/i18n/locales/types";
+import { SafeStreamdown } from "@/core/streamdown/components";
+import { streamdownPlugins } from "@/core/streamdown/plugins";
+import { pathOfThread } from "@/core/threads/utils";
+import { formatTimeAgo } from "@/core/utils/datetime";
+import { cn } from "@/lib/utils";
 
 export function MemoryHeaderActions(props: {
   t: Translations;
@@ -224,5 +253,288 @@ export function MemoryToolbar(props: {
         </ToggleGroupItem>
       </ToggleGroup>
     </div>
+  );
+}
+
+function MemoryFactRow(props: {
+  fact: MemoryFact;
+  t: Translations;
+  onEdit: () => void;
+  onDelete: () => void;
+  disabled: boolean;
+}): React.ReactNode {
+  const { fact, t, onEdit, onDelete, disabled } = props;
+  const { key } = confidenceToLevelKey(fact.confidence);
+  const confidenceText = t.settings.memory.markdown.table.confidenceLevel[key];
+  const visual = getMemoryCategoryVisual(fact.category);
+  const CategoryIcon = {
+    preference: HeartIcon,
+    work: BriefcaseBusinessIcon,
+    project: FolderGit2Icon,
+    context: NotebookTextIcon,
+    default: BrainIcon,
+  }[visual];
+
+  return (
+    <article className="hover:bg-muted/30 flex min-w-0 items-start gap-3 px-4 py-4 [overflow-wrap:anywhere] transition-colors sm:px-5">
+      <div className="bg-muted/50 text-muted-foreground mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border">
+        <CategoryIcon aria-hidden="true" className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1 space-y-2">
+        <p className="text-sm font-medium [overflow-wrap:anywhere]">
+          {fact.content}
+        </p>
+        <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 text-xs">
+          <span>{upperFirst(fact.category)}</span>
+          <span>{confidenceText}</span>
+          <span>{formatTimeAgo(fact.createdAt)}</span>
+          <span>
+            {fact.source === "manual" ? (
+              t.settings.memory.manualFactSource
+            ) : (
+              <Link
+                href={pathOfThread(fact.source)}
+                className="text-primary font-medium underline-offset-4 hover:underline"
+              >
+                {t.settings.memory.markdown.table.view}
+              </Link>
+            )}
+          </span>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="shrink-0"
+          onClick={onEdit}
+          disabled={disabled}
+          title={t.common.edit}
+          aria-label={t.common.edit}
+        >
+          <PenLineIcon aria-hidden="true" className="size-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="text-destructive hover:text-destructive shrink-0"
+          onClick={onDelete}
+          disabled={disabled}
+          title={t.common.delete}
+          aria-label={t.common.delete}
+        >
+          <Trash2Icon aria-hidden="true" className="size-4" />
+        </Button>
+      </div>
+    </article>
+  );
+}
+
+export function MemoryFactList(props: {
+  facts: MemoryFact[];
+  t: Translations;
+  isDeleting: boolean;
+  onEdit: (fact: MemoryFact) => void;
+  onDelete: (fact: MemoryFact) => void;
+}): React.ReactNode {
+  const { facts, t, isDeleting, onEdit, onDelete } = props;
+
+  return (
+    <section
+      data-testid="memory-facts-panel"
+      aria-labelledby="memory-facts-heading"
+      className="bg-card min-w-0 overflow-hidden rounded-xl border"
+    >
+      <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
+        <h2 id="memory-facts-heading" className="text-sm font-medium">
+          {t.settings.memory.markdown.facts}
+        </h2>
+        <span className="text-muted-foreground text-xs">
+          {t.settings.memory.factCount(facts.length)}
+        </span>
+      </div>
+      <div className="divide-y">
+        {facts.length > 0 ? (
+          facts.map((fact) => (
+            <MemoryFactRow
+              key={fact.id}
+              fact={fact}
+              t={t}
+              onEdit={() => onEdit(fact)}
+              onDelete={() => onDelete(fact)}
+              disabled={isDeleting}
+            />
+          ))
+        ) : (
+          <p className="text-muted-foreground px-4 py-5 text-sm sm:px-5">
+            {t.settings.memory.noFacts}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+export function MemorySummaryDisclosure(props: {
+  t: Translations;
+  groups: MemorySectionGroup[];
+  summaryCount: number;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  triggerRef: React.Ref<HTMLButtonElement>;
+}): React.ReactNode {
+  const { t, groups, summaryCount, open, onOpenChange, triggerRef } = props;
+
+  return (
+    <Collapsible
+      open={open}
+      onOpenChange={onOpenChange}
+      data-testid="memory-summary-disclosure"
+      className="bg-card min-w-0 overflow-hidden rounded-xl border"
+    >
+      <CollapsibleTrigger asChild>
+        <Button
+          ref={triggerRef}
+          variant="ghost"
+          className="h-auto w-full justify-between rounded-none px-4 py-4 sm:px-5"
+          aria-controls="memory-summary-content"
+        >
+          <span className="flex min-w-0 items-center gap-3 text-left">
+            <SparklesIcon
+              aria-hidden="true"
+              className="text-muted-foreground size-4"
+            />
+            <span>
+              <span className="block text-sm font-medium">
+                {t.settings.memory.smartSummaries}
+              </span>
+              <span className="text-muted-foreground block text-xs">
+                {t.settings.memory.summaryCount(summaryCount)} ·{" "}
+                {t.settings.memory.summaryReadOnly}
+              </span>
+            </span>
+          </span>
+          <ChevronDownIcon
+            aria-hidden="true"
+            className={cn("size-4 transition-transform", open && "rotate-180")}
+          />
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent id="memory-summary-content">
+        <div data-testid="memory-summary-panel" className="border-t p-4 sm:p-5">
+          <div className="grid gap-6 lg:grid-cols-2">
+            {groups.map((group) => (
+              <section key={group.title} className="min-w-0 space-y-4">
+                <h3 className="text-sm font-medium">{group.title}</h3>
+                {group.sections.map((section) => (
+                  <div
+                    key={section.title}
+                    className="min-w-0 border-t pt-3 first:border-t-0 first:pt-0"
+                  >
+                    <h4 className="text-sm font-medium">{section.title}</h4>
+                    <SafeStreamdown
+                      className="mt-2 min-w-0 text-sm [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                      {...streamdownPlugins}
+                    >
+                      {section.summary.trim() ||
+                        t.settings.memory.markdown.empty}
+                    </SafeStreamdown>
+                    {section.updatedAt ? (
+                      <p className="text-muted-foreground mt-2 text-xs">
+                        {t.settings.memory.markdown.updatedAt}:{" "}
+                        {formatTimeAgo(section.updatedAt)}
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+              </section>
+            ))}
+          </div>
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+export function MemoryEmptyState(props: {
+  t: Translations;
+  onAddFact: () => void;
+}): React.ReactNode {
+  const { t, onAddFact } = props;
+
+  return (
+    <section
+      data-testid="memory-empty-state"
+      className="flex flex-col items-center rounded-xl border border-dashed px-6 py-10 text-center"
+    >
+      <div className="bg-muted text-muted-foreground flex size-10 items-center justify-center rounded-full">
+        <BrainIcon aria-hidden="true" className="size-5" />
+      </div>
+      <h2 className="mt-4 text-sm font-medium">
+        {t.settings.memory.emptyTitle}
+      </h2>
+      <p className="text-muted-foreground mt-1 max-w-md text-sm">
+        {t.settings.memory.emptyDescription}
+      </p>
+      <Button type="button" className="mt-4" onClick={onAddFact}>
+        <PlusIcon aria-hidden="true" />
+        {t.settings.memory.addFact}
+      </Button>
+    </section>
+  );
+}
+
+export function MemoryLoadingState(): React.ReactNode {
+  return (
+    <div data-testid="memory-loading-state" className="space-y-6">
+      <div className="bg-card grid grid-cols-2 gap-4 rounded-xl border p-4 lg:grid-cols-4">
+        {Array.from({ length: 4 }, (_, index) => (
+          <div key={index} className="space-y-2">
+            <Skeleton className="h-3 w-20" />
+            <Skeleton className="h-4 w-28 max-w-full" />
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:justify-between">
+        <Skeleton className="h-9 w-full sm:max-w-md" />
+        <Skeleton className="h-9 w-56 max-w-full" />
+      </div>
+      <div className="bg-card overflow-hidden rounded-xl border">
+        <div className="px-4 py-3 sm:px-5">
+          <Skeleton className="h-4 w-28" />
+        </div>
+        <div className="divide-y">
+          {Array.from({ length: 3 }, (_, index) => (
+            <div
+              key={index}
+              className="flex items-start gap-3 px-4 py-4 sm:px-5"
+            >
+              <Skeleton className="size-9 shrink-0" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-4 w-3/4" />
+                <Skeleton className="h-3 w-1/2" />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function MemoryLoadError(props: {
+  t: Translations;
+  error: { message: string };
+}): React.ReactNode {
+  const { t, error } = props;
+
+  return (
+    <Alert variant="destructive" data-testid="memory-load-error">
+      <AlertCircleIcon aria-hidden="true" />
+      <AlertTitle>{t.settings.memory.loadErrorTitle}</AlertTitle>
+      <AlertDescription>{error.message}</AlertDescription>
+    </Alert>
   );
 }

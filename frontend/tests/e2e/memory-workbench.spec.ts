@@ -39,6 +39,24 @@ const memoryFixture = {
   ],
 };
 
+const emptyMemoryFixture = {
+  ...memoryFixture,
+  user: {
+    workContext: { ...memoryFixture.user.workContext, summary: "" },
+    personalContext: { ...memoryFixture.user.personalContext, summary: "" },
+    topOfMind: { ...memoryFixture.user.topOfMind, summary: "" },
+  },
+  history: {
+    recentMonths: { ...memoryFixture.history.recentMonths, summary: "" },
+    earlierContext: { ...memoryFixture.history.earlierContext, summary: "" },
+    longTermBackground: {
+      ...memoryFixture.history.longTermBackground,
+      summary: "",
+    },
+  },
+  facts: [],
+};
+
 const longSummary = `Summary${"S".repeat(512)}`;
 const longFactContent = `Fact${"F".repeat(512)}`;
 const longFactCategory = `Category${"C".repeat(256)}`;
@@ -137,27 +155,21 @@ test("memory overview derives counts and recent focus from loaded memory", async
   ).toBeVisible();
 });
 
-test("memory workbench switches between summary and facts panels", async ({
-  page,
-}) => {
+test("filters preserve facts and summaries visibility", async ({ page }) => {
   mockLangGraphAPI(page);
   mockMemoryAPI(page);
   await page.goto("/workspace/memory");
 
-  await expect(page.getByTestId("memory-workbench")).toBeVisible();
-  await expect(page.getByTestId("memory-summary-panel")).toBeVisible();
-  await expect(page.getByTestId("memory-facts-panel")).toBeVisible();
-
   await page.getByTestId("memory-filter-facts").click();
-  await expect(page.getByTestId("memory-summary-panel")).toHaveCount(0);
   await expect(page.getByTestId("memory-facts-panel")).toBeVisible();
+  await expect(page.getByTestId("memory-summary-disclosure")).toHaveCount(0);
 
   await page.getByTestId("memory-filter-summaries").click();
-  await expect(page.getByTestId("memory-summary-panel")).toBeVisible();
   await expect(page.getByTestId("memory-facts-panel")).toHaveCount(0);
+  await expect(page.getByTestId("memory-summary-panel")).toBeVisible();
 });
 
-test("wide workbench uses a 36/64 split and single filters stay full width", async ({
+test("facts stay full width while summaries use a disclosure", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -165,50 +177,53 @@ test("wide workbench uses a 36/64 split and single filters stay full width", asy
   mockMemoryAPI(page);
   await page.goto("/workspace/memory");
 
-  const summaryPanel = page.getByTestId("memory-summary-panel");
-  const factsPanel = page.getByTestId("memory-facts-panel");
-  await expect(summaryPanel).toBeVisible();
-  await expect(factsPanel).toBeVisible();
-  const summaryBox = await summaryPanel.boundingBox();
-  const factsBox = await factsPanel.boundingBox();
-  const allGridBox = await summaryPanel.evaluate((panel) => {
-    const grid = panel.parentElement;
-    if (!grid) return null;
-    const { width, x } = grid.getBoundingClientRect();
-    return { width, x };
-  });
-  expect(summaryBox).not.toBeNull();
+  const workbench = page.getByTestId("memory-workbench");
+  const facts = page.getByTestId("memory-facts-panel");
+  const disclosure = page.getByTestId("memory-summary-disclosure");
+  await expect(facts).toBeVisible();
+  await expect(disclosure).toBeVisible();
+  await expect(page.getByTestId("memory-summary-panel")).toHaveCount(0);
+
+  const workbenchBox = await workbench.boundingBox();
+  const factsBox = await facts.boundingBox();
+  expect(workbenchBox).not.toBeNull();
   expect(factsBox).not.toBeNull();
-  expect(allGridBox).not.toBeNull();
+  expect(factsBox!.width / workbenchBox!.width).toBeGreaterThan(0.95);
 
-  const combinedPanelWidth = summaryBox!.width + factsBox!.width;
-  expect(summaryBox!.width / combinedPanelWidth).toBeGreaterThanOrEqual(0.34);
-  expect(summaryBox!.width / combinedPanelWidth).toBeLessThanOrEqual(0.38);
-  expect(factsBox!.width / combinedPanelWidth).toBeGreaterThanOrEqual(0.62);
-  expect(factsBox!.width / combinedPanelWidth).toBeLessThanOrEqual(0.66);
-  expect(Math.abs(summaryBox!.y - factsBox!.y)).toBeLessThanOrEqual(2);
+  await disclosure.getByRole("button", { name: /Smart summaries/ }).click();
+  await expect(page.getByTestId("memory-summary-panel")).toBeVisible();
+});
 
-  await page.getByTestId("memory-filter-facts").click();
-  await expect(summaryPanel).toHaveCount(0);
-  await expect(factsPanel).toBeVisible();
-  const factsOnlyPanelBox = await factsPanel.boundingBox();
-  expect(factsOnlyPanelBox).not.toBeNull();
-  expect(
-    Math.abs(factsOnlyPanelBox!.width - allGridBox!.width),
-  ).toBeLessThanOrEqual(1);
-  expect(Math.abs(factsOnlyPanelBox!.x - allGridBox!.x)).toBeLessThanOrEqual(1);
+test("a summary-only search match opens the matching summary", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  mockMemoryAPI(page);
+  await page.goto("/workspace/memory");
 
-  await page.getByTestId("memory-filter-summaries").click();
-  await expect(summaryPanel).toBeVisible();
-  await expect(factsPanel).toHaveCount(0);
-  const summariesOnlyPanelBox = await summaryPanel.boundingBox();
-  expect(summariesOnlyPanelBox).not.toBeNull();
-  expect(
-    Math.abs(summariesOnlyPanelBox!.width - allGridBox!.width),
-  ).toBeLessThanOrEqual(1);
-  expect(
-    Math.abs(summariesOnlyPanelBox!.x - allGridBox!.x),
-  ).toBeLessThanOrEqual(1);
+  await page.getByPlaceholder("Search memory").fill("Forked DeerFlow");
+  await expect(page.getByTestId("memory-summary-panel")).toBeVisible();
+  await expect(
+    page.getByText("Forked DeerFlow.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("memory-facts-panel")).toHaveCount(0);
+});
+
+test("fully empty memory renders one recovery state without empty panels", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  mockMemoryAPI(page, emptyMemoryFixture);
+  await page.goto("/workspace/memory");
+
+  await expect(page.getByTestId("memory-empty-state")).toBeVisible();
+  await expect(page.getByTestId("memory-facts-panel")).toHaveCount(0);
+  await expect(page.getByTestId("memory-summary-panel")).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("memory-empty-state")
+      .getByRole("button", { name: "Add fact" }),
+  ).toBeVisible();
 });
 
 test("narrow workbench stacks long memory content without horizontal overflow", async ({
@@ -225,11 +240,15 @@ test("narrow workbench stacks long memory content without horizontal overflow", 
   const factContent = page.getByText(longFactContent, { exact: true });
 
   await expect(factContent).toBeVisible();
+  await page
+    .getByTestId("memory-summary-disclosure")
+    .getByRole("button", { name: /Smart summaries/ })
+    .click();
   const summaryBox = await summaryPanel.boundingBox();
   const factsBox = await factsPanel.boundingBox();
   expect(summaryBox).not.toBeNull();
   expect(factsBox).not.toBeNull();
-  expect(summaryBox!.y + summaryBox!.height).toBeLessThanOrEqual(factsBox!.y);
+  expect(factsBox!.y + factsBox!.height).toBeLessThanOrEqual(summaryBox!.y);
   await expectNoHorizontalOverflow(workbench);
   await expectNoHorizontalOverflow(summaryPanel);
   await expectNoHorizontalOverflow(factsPanel);
@@ -256,6 +275,10 @@ test("persisted dark theme keeps the narrow workbench legible without horizontal
 
   await expect(html).toHaveClass(/\bdark\b/);
   await expect(html).not.toHaveClass(/\blight\b/);
+  await page
+    .getByTestId("memory-summary-disclosure")
+    .getByRole("button", { name: /Smart summaries/ })
+    .click();
   await expect(summaryPanel).toBeVisible();
   await expect(factsPanel).toBeVisible();
   await expect(factContent).toBeVisible();

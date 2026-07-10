@@ -1,7 +1,5 @@
 "use client";
 
-import { PenLineIcon, Trash2Icon } from "lucide-react";
-import Link from "next/link";
 import { useDeferredValue, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -18,19 +16,20 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   buildMemorySectionGroups,
-  confidenceToLevelKey,
   countPopulatedSummaries,
   isMemorySummaryEmpty,
   type MemoryFact,
-  type MemorySection,
-  type MemorySectionGroup,
   type MemoryViewFilter,
   truncateFactPreview,
-  upperFirst,
 } from "@/components/workspace/settings/memory/memory-view-model";
 import {
+  MemoryEmptyState,
+  MemoryFactList,
   MemoryHeaderActions,
+  MemoryLoadError,
+  MemoryLoadingState,
   MemoryOverview,
+  MemorySummaryDisclosure,
   MemoryToolbar,
 } from "@/components/workspace/settings/memory/memory-workbench";
 import { useI18n } from "@/core/i18n/hooks";
@@ -48,11 +47,7 @@ import type {
   MemoryFactPatchInput,
   UserMemory,
 } from "@/core/memory/types";
-import { SafeStreamdown } from "@/core/streamdown/components";
-import { streamdownPlugins } from "@/core/streamdown/plugins";
-import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
-import { cn } from "@/lib/utils";
 
 type PendingImport = {
   fileName: string;
@@ -125,60 +120,6 @@ const DEFAULT_FACT_FORM_STATE: FactFormState = {
   confidence: "0.8",
 };
 
-function formatMemorySection(
-  section: MemorySection,
-  t: ReturnType<typeof useI18n>["t"],
-): string {
-  const content =
-    section.summary.trim() ||
-    `<span class="text-muted-foreground">${t.settings.memory.markdown.empty}</span>`;
-  return [
-    `### ${section.title}`,
-    content,
-    "",
-    section.updatedAt &&
-      `> ${t.settings.memory.markdown.updatedAt}: \`${formatTimeAgo(section.updatedAt)}\``,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function summariesToMarkdown(
-  memory: UserMemory,
-  sectionGroups: MemorySectionGroup[],
-  t: ReturnType<typeof useI18n>["t"],
-) {
-  const parts: string[] = [];
-
-  parts.push(`## ${t.settings.memory.markdown.overview}`);
-  parts.push(
-    `- **${t.common.lastUpdated}**: \`${formatTimeAgo(memory.lastUpdated)}\``,
-  );
-
-  for (const group of sectionGroups) {
-    parts.push(`\n## ${group.title}`);
-    for (const section of group.sections) {
-      parts.push(formatMemorySection(section, t));
-    }
-  }
-
-  const markdown = parts.join("\n\n");
-  const lines = markdown.split("\n");
-  const out: string[] = [];
-  let i = 0;
-  for (const line of lines) {
-    i++;
-    if (i !== 1 && line.startsWith("## ")) {
-      if (out.length === 0 || out[out.length - 1] !== "---") {
-        out.push("---");
-      }
-    }
-    out.push(line);
-  }
-
-  return out.join("\n");
-}
-
 export function MemorySettingsPage() {
   const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
@@ -197,6 +138,8 @@ export function MemorySettingsPage() {
   );
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MemoryViewFilter>("all");
+  const [summariesExpanded, setSummariesExpanded] = useState(false);
+  const summaryTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(
     null,
   );
@@ -236,10 +179,6 @@ export function MemorySettingsPage() {
   const factSave = t.settings.memory.factSave;
   const factValidationContent = t.settings.memory.factValidationContent;
   const factValidationConfidence = t.settings.memory.factValidationConfidence;
-  const noFacts = t.settings.memory.noFacts ?? "No saved facts yet.";
-  const summaryReadOnly = t.settings.memory.summaryReadOnly;
-  const memoryFullyEmpty =
-    t.settings.memory.memoryFullyEmpty ?? "No memory saved yet.";
   const factPreviewLabel =
     t.settings.memory.factPreviewLabel ?? "Fact to delete";
   const noMatches = t.settings.memory.noMatches ?? "No matching memory found";
@@ -277,17 +216,38 @@ export function MemorySettingsPage() {
       )
     : [];
 
-  const showSummaries = filter !== "facts";
+  const hasSummarySearchMatch =
+    normalizedQuery.length > 0 && filteredSectionGroups.length > 0;
+  const summariesForcedOpen = filter === "summaries" || hasSummarySearchMatch;
+  const summariesOpen = summariesForcedOpen || summariesExpanded;
   const showFacts = filter !== "summaries";
-  const shouldRenderSummariesBlock =
-    showSummaries && (filteredSectionGroups.length > 0 || !normalizedQuery);
-  const shouldRenderFactsBlock =
-    showFacts &&
-    (filteredFacts.length > 0 || !normalizedQuery || filter === "facts");
+  const showSummaries = filter !== "facts";
+  const memoryFullyEmpty = Boolean(
+    memory && isMemorySummaryEmpty(memory) && memory.facts.length === 0,
+  );
   const hasMatchingVisibleContent =
-    !memory ||
     (showSummaries && filteredSectionGroups.length > 0) ||
     (showFacts && filteredFacts.length > 0);
+  const hasNoMatches = normalizedQuery.length > 0 && !hasMatchingVisibleContent;
+  const shouldRenderFactsBlock =
+    showFacts &&
+    !hasNoMatches &&
+    (normalizedQuery.length === 0 || filteredFacts.length > 0);
+  const shouldRenderSummariesBlock =
+    showSummaries &&
+    !hasNoMatches &&
+    (normalizedQuery.length === 0 || filteredSectionGroups.length > 0);
+
+  function handleViewSummaries() {
+    setSummariesExpanded(true);
+    requestAnimationFrame(() => {
+      summaryTriggerRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+      summaryTriggerRef.current?.focus({ preventScroll: true });
+    });
+  }
 
   async function handleExportMemory() {
     try {
@@ -472,11 +432,9 @@ export function MemorySettingsPage() {
         </header>
 
         {isLoading ? (
-          <div className="text-muted-foreground text-sm">
-            {t.common.loading}
-          </div>
+          <MemoryLoadingState />
         ) : error ? (
-          <div>Error: {error.message}</div>
+          <MemoryLoadError t={t} error={error} />
         ) : !memory ? (
           <div className="text-muted-foreground text-sm">
             {t.settings.memory.empty}
@@ -489,7 +447,7 @@ export function MemorySettingsPage() {
               summaryCount={summaryCount}
               lastUpdated={formatTimeAgo(memory.lastUpdated)}
               recentFocus={recentFocus}
-              onViewSummaries={() => setFilter("summaries")}
+              onViewSummaries={handleViewSummaries}
             />
             <MemoryToolbar
               t={t}
@@ -499,150 +457,42 @@ export function MemorySettingsPage() {
               onFilterChange={setFilter}
             />
 
-            {isMemorySummaryEmpty(memory) && memory.facts.length === 0 ? (
-              <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-                {memoryFullyEmpty}
-              </div>
-            ) : null}
-
-            {!hasMatchingVisibleContent && normalizedQuery ? (
+            {memoryFullyEmpty ? (
+              <MemoryEmptyState t={t} onAddFact={openCreateFactDialog} />
+            ) : hasNoMatches ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {noMatches}
               </div>
-            ) : null}
+            ) : (
+              <div className="space-y-4">
+                {shouldRenderFactsBlock ? (
+                  <MemoryFactList
+                    t={t}
+                    facts={filteredFacts}
+                    isDeleting={deleteMemoryFact.isPending}
+                    onEdit={openEditFactDialog}
+                    onDelete={setFactToDelete}
+                  />
+                ) : null}
 
-            <div
-              className={cn(
-                "grid gap-4",
-                filter === "all" &&
-                  shouldRenderSummariesBlock &&
-                  shouldRenderFactsBlock &&
-                  "lg:grid-cols-[minmax(0,0.36fr)_minmax(0,0.64fr)]",
-              )}
-            >
-              {shouldRenderSummariesBlock ? (
-                <section
-                  data-testid="memory-summary-panel"
-                  className="bg-card min-w-0 rounded-xl border p-5 shadow-xs"
-                >
-                  <div className="text-muted-foreground mb-4 text-sm">
-                    {summaryReadOnly}
-                  </div>
-                  <SafeStreamdown
-                    className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-                    {...streamdownPlugins}
-                  >
-                    {summariesToMarkdown(memory, filteredSectionGroups, t)}
-                  </SafeStreamdown>
-                </section>
-              ) : null}
-
-              {shouldRenderFactsBlock ? (
-                <section
-                  data-testid="memory-facts-panel"
-                  className="bg-card min-w-0 rounded-xl border p-5 shadow-xs"
-                >
-                  <div className="mb-4">
-                    <h2 className="text-base font-medium">
-                      {t.settings.memory.markdown.facts}
-                    </h2>
-                  </div>
-
-                  {filteredFacts.length === 0 ? (
-                    <div className="text-muted-foreground text-sm">
-                      {normalizedQuery ? noMatches : noFacts}
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {filteredFacts.map((fact) => {
-                        const { key } = confidenceToLevelKey(fact.confidence);
-                        const confidenceText =
-                          t.settings.memory.markdown.table.confidenceLevel[key];
-
-                        return (
-                          <div
-                            key={fact.id}
-                            className="border-border/70 hover:bg-muted/30 flex flex-col gap-3 rounded-lg border p-4 transition-colors sm:flex-row sm:items-start sm:justify-between"
-                          >
-                            <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
-                              <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-                                <span>
-                                  <span className="text-muted-foreground">
-                                    {t.settings.memory.markdown.table.category}:
-                                  </span>{" "}
-                                  {upperFirst(fact.category)}
-                                </span>
-                                <span>
-                                  <span className="text-muted-foreground">
-                                    {
-                                      t.settings.memory.markdown.table
-                                        .confidence
-                                    }
-                                    :
-                                  </span>{" "}
-                                  {confidenceText}
-                                </span>
-                                <span>
-                                  <span className="text-muted-foreground">
-                                    {t.settings.memory.markdown.table.createdAt}
-                                    :
-                                  </span>{" "}
-                                  {formatTimeAgo(fact.createdAt)}
-                                </span>
-                                <span>
-                                  <span className="text-muted-foreground">
-                                    {t.settings.memory.markdown.table.source}:
-                                  </span>{" "}
-                                  {fact.source === "manual" ? (
-                                    t.settings.memory.manualFactSource
-                                  ) : (
-                                    <Link
-                                      href={pathOfThread(fact.source)}
-                                      className="text-primary underline-offset-4 hover:underline"
-                                    >
-                                      {t.settings.memory.markdown.table.view}
-                                    </Link>
-                                  )}
-                                </span>
-                              </div>
-                              <p className="text-sm [overflow-wrap:anywhere]">
-                                {fact.content}
-                              </p>
-                            </div>
-
-                            <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="shrink-0"
-                                onClick={() => openEditFactDialog(fact)}
-                                disabled={deleteMemoryFact.isPending}
-                                title={t.common.edit}
-                                aria-label={t.common.edit}
-                              >
-                                <PenLineIcon className="h-4 w-4" />
-                              </Button>
-
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="text-destructive hover:text-destructive shrink-0"
-                                onClick={() => setFactToDelete(fact)}
-                                disabled={deleteMemoryFact.isPending}
-                                title={t.common.delete}
-                                aria-label={t.common.delete}
-                              >
-                                <Trash2Icon className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
-              ) : null}
-            </div>
+                {shouldRenderSummariesBlock ? (
+                  <MemorySummaryDisclosure
+                    t={t}
+                    groups={filteredSectionGroups}
+                    summaryCount={countPopulatedSummaries(
+                      filteredSectionGroups,
+                    )}
+                    open={summariesOpen}
+                    onOpenChange={(open) => {
+                      if (!summariesForcedOpen) {
+                        setSummariesExpanded(open);
+                      }
+                    }}
+                    triggerRef={summaryTriggerRef}
+                  />
+                ) : null}
+              </div>
+            )}
           </>
         )}
       </section>
