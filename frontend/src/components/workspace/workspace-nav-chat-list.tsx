@@ -1,6 +1,13 @@
 "use client";
 
-import { BotIcon, CalendarClock, MessagesSquare } from "lucide-react";
+import {
+  BotIcon,
+  BrainIcon,
+  CalendarClock,
+  MessagesSquare,
+  SparklesIcon,
+  WrenchIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -15,8 +22,18 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  WORKSPACE_CAPABILITY_LINKS,
+  isWorkspaceCapabilityPath,
+} from "@/components/workspace/workspace-capability-links";
 import { useAgentsApiEnabled } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+
+const capabilityIcons = {
+  memory: BrainIcon,
+  tools: WrenchIcon,
+  skills: SparklesIcon,
+} as const;
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
@@ -89,6 +106,22 @@ export function WorkspaceNavChatList() {
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
+        {WORKSPACE_CAPABILITY_LINKS.map(({ id, href }) => {
+          const Icon = capabilityIcons[id];
+          return (
+            <SidebarMenuItem key={id}>
+              <SidebarMenuButton
+                isActive={isWorkspaceCapabilityPath(pathname, href)}
+                asChild
+              >
+                <Link className="text-muted-foreground" href={href}>
+                  <Icon />
+                  <span>{t.settings.sections[id]}</span>
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          );
+        })}
       </SidebarMenu>
     </SidebarGroup>
   );
