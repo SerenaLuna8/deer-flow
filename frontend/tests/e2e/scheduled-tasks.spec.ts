@@ -104,13 +104,6 @@ test("create sheet supports keyboard controls and restores focus", async ({
 
 test("user can create a scheduled task from the page", async ({ page }) => {
   mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
-  let createPayload: Record<string, unknown> | undefined;
-  await page.route("**/api/scheduled-tasks", async (route) => {
-    if (route.request().method() === "POST") {
-      createPayload = route.request().postDataJSON() as Record<string, unknown>;
-    }
-    await route.fallback();
-  });
 
   await page.goto("/workspace/scheduled-tasks");
   await expect(page.getByTestId("scheduled-task-create-form")).toHaveCount(0);
@@ -135,8 +128,14 @@ test("user can create a scheduled task from the page", async ({ page }) => {
   await createForm.getByLabel("Run at").fill("2026-07-02T09:00");
   await createForm.getByPlaceholder("Task title").fill("Created from UI");
   await createForm.getByPlaceholder("Prompt").fill("Summarize thread");
+  const createRequestPromise = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/scheduled-tasks",
+  );
   await createForm.getByRole("button", { name: "Create" }).click();
-  expect(createPayload).toEqual({
+  const createRequest = await createRequestPromise;
+  expect(createRequest.postDataJSON()).toEqual({
     context_mode: "reuse_thread",
     thread_id: "thread-create-target",
     title: "Created from UI",
