@@ -4,13 +4,10 @@ import {
   BellIcon,
   CableIcon,
   InfoIcon,
-  BrainIcon,
   PaletteIcon,
-  SparklesIcon,
   UserIcon,
-  WrenchIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   Dialog,
@@ -23,32 +20,31 @@ import { AboutSettingsPage } from "@/components/workspace/settings/about-setting
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
 import { ChannelsSettingsPage } from "@/components/workspace/settings/channels-settings-page";
-import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
-import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
-import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
+import {
+  SETTINGS_SECTION_IDS,
+  type SettingsSectionId,
+} from "@/components/workspace/settings/settings-sections";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
-type SettingsSection =
-  | "account"
-  | "appearance"
-  | "channels"
-  | "memory"
-  | "tools"
-  | "skills"
-  | "notification"
-  | "about";
+const settingsSectionIcons = {
+  account: UserIcon,
+  appearance: PaletteIcon,
+  notification: BellIcon,
+  channels: CableIcon,
+  about: InfoIcon,
+} as const;
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
-  defaultSection?: SettingsSection;
+  defaultSection?: SettingsSectionId;
 };
 
 export function SettingsDialog(props: SettingsDialogProps) {
   const { defaultSection = "appearance", ...dialogProps } = props;
   const { t } = useI18n();
   const [activeSection, setActiveSection] =
-    useState<SettingsSection>(defaultSection);
+    useState<SettingsSectionId>(defaultSection);
 
   useEffect(() => {
     // When opening the dialog, ensure the active section follows the caller's intent.
@@ -58,48 +54,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
     }
   }, [defaultSection, dialogProps.open]);
 
-  const sections = useMemo(
-    () => [
-      {
-        id: "account",
-        label: t.settings.sections.account,
-        icon: UserIcon,
-      },
-      {
-        id: "appearance",
-        label: t.settings.sections.appearance,
-        icon: PaletteIcon,
-      },
-      {
-        id: "notification",
-        label: t.settings.sections.notification,
-        icon: BellIcon,
-      },
-      {
-        id: "channels",
-        label: t.settings.sections.channels,
-        icon: CableIcon,
-      },
-      {
-        id: "memory",
-        label: t.settings.sections.memory,
-        icon: BrainIcon,
-      },
-      { id: "tools", label: t.settings.sections.tools, icon: WrenchIcon },
-      { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
-      { id: "about", label: t.settings.sections.about, icon: InfoIcon },
-    ],
-    [
-      t.settings.sections.account,
-      t.settings.sections.appearance,
-      t.settings.sections.channels,
-      t.settings.sections.memory,
-      t.settings.sections.tools,
-      t.settings.sections.skills,
-      t.settings.sections.notification,
-      t.settings.sections.about,
-    ],
-  );
+  const sections = SETTINGS_SECTION_IDS.map((id) => ({
+    id,
+    label: t.settings.sections[id],
+    icon: settingsSectionIcons[id],
+  }));
   return (
     <Dialog
       {...dialogProps}
@@ -124,7 +83,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   <li key={id}>
                     <button
                       type="button"
-                      onClick={() => setActiveSection(id as SettingsSection)}
+                      onClick={() => setActiveSection(id)}
                       className={cn(
                         "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                         active
@@ -144,13 +103,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
             <div className="space-y-8 p-6">
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
-              {activeSection === "memory" && <MemorySettingsPage />}
-              {activeSection === "tools" && <ToolSettingsPage />}
-              {activeSection === "skills" && (
-                <SkillSettingsPage
-                  onClose={() => props.onOpenChange?.(false)}
-                />
-              )}
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "channels" && <ChannelsSettingsPage />}
               {activeSection === "about" && <AboutSettingsPage />}
