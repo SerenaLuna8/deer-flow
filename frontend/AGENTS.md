@@ -88,6 +88,8 @@ Human input requests are a structured message protocol layered on normal chat hi
 - `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
 - `src/components/workspace/messages/message-list.tsx` owns human-input card answered/latest/pending gating; entry pages only translate a submitted card response into `sendMessage` calls.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
+- `src/app/workspace/scheduled-tasks/page.tsx` owns scheduled-task filters, selection, mutations, and the controlled create-task Sheet; the Sheet is presentation only and must reuse the page's existing payload and reset flow.
+- `src/components/workspace/settings/memory-settings-page.tsx` owns memory filters and mutations; its wide workbench panels are presentation-only views over the existing filtered summaries and facts.
 
 ## Code Style
 
