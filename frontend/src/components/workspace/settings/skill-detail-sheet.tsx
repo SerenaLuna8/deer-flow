@@ -105,7 +105,11 @@ export function SkillDetailSheet({
                 </Button>
               </div>
             ) : body.trim() ? (
-              <MarkdownContent content={body} isLoading={false} />
+              <MarkdownContent
+                className="text-sm [&_h1]:mt-0 [&_h1]:text-xl [&_h1]:leading-7 [&_h2]:mt-5 [&_h2]:text-lg [&_h2]:leading-7 [&_h3]:mt-4 [&_h3]:text-base [&_h3]:leading-6 [&_h4]:mt-4 [&_h4]:text-sm [&_h4]:leading-6 [&_li]:py-0.5 [&_li]:text-sm [&_li]:leading-6 [&_p]:mb-3 [&_p]:text-sm [&_p]:leading-6"
+                content={body}
+                isLoading={false}
+              />
             ) : (
               <p className="text-muted-foreground text-sm">
                 {t.settings.skills.emptyContent}
