@@ -226,6 +226,47 @@ test("fully empty memory renders one recovery state without empty panels", async
   ).toBeVisible();
 });
 
+test("memory loading state announces localized progress", async ({ page }) => {
+  mockLangGraphAPI(page);
+  let releaseMemory!: () => void;
+  const memoryHeld = new Promise<void>((resolve) => {
+    releaseMemory = resolve;
+  });
+  let memoryStarted!: () => void;
+  const memoryStartedPromise = new Promise<void>((resolve) => {
+    memoryStarted = resolve;
+  });
+  await page.route("**/api/memory", async (route) => {
+    if (route.request().method() !== "GET") {
+      return route.fallback();
+    }
+    memoryStarted();
+    await memoryHeld;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(memoryFixture),
+    });
+  });
+
+  await page.goto("/workspace/memory");
+  await memoryStartedPromise;
+
+  const loadingState = page.getByRole("status", { name: "Loading..." });
+  try {
+    await expect(loadingState).toHaveAttribute(
+      "data-testid",
+      "memory-loading-state",
+    );
+    await expect(loadingState).toHaveAttribute("aria-live", "polite");
+    await expect(loadingState).toHaveAttribute("aria-busy", "true");
+  } finally {
+    releaseMemory();
+  }
+
+  await expect(loadingState).toHaveCount(0);
+});
+
 test("narrow workbench stacks long memory content without horizontal overflow", async ({
   page,
 }) => {
@@ -238,12 +279,43 @@ test("narrow workbench stacks long memory content without horizontal overflow", 
   const summaryPanel = page.getByTestId("memory-summary-panel");
   const factsPanel = page.getByTestId("memory-facts-panel");
   const factContent = page.getByText(longFactContent, { exact: true });
+  const summaryTrigger = page
+    .getByTestId("memory-summary-disclosure")
+    .getByRole("button", { name: /Smart summaries/ });
+  const summaryDescription = summaryTrigger
+    .locator("span")
+    .filter({ hasText: /Summary sections are read-only for now/ })
+    .last();
 
   await expect(factContent).toBeVisible();
-  await page
-    .getByTestId("memory-summary-disclosure")
-    .getByRole("button", { name: /Smart summaries/ })
-    .click();
+  await expect(summaryDescription).toBeVisible();
+  const descriptionLayout = await summaryDescription.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const textRects = Array.from(range.getClientRects()).filter(
+      (rect) => rect.width > 0 && rect.height > 0,
+    );
+    const button = element.closest("button");
+    const icons = button?.querySelectorAll("svg");
+    const chevron = icons?.length ? icons[icons.length - 1] : null;
+
+    return {
+      lineCount: new Set(textRects.map((rect) => Math.round(rect.top))).size,
+      textRight: Math.max(...textRects.map((rect) => rect.right)),
+      chevronLeft: chevron?.getBoundingClientRect().left ?? null,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    };
+  });
+  expect(descriptionLayout.lineCount).toBeGreaterThan(1);
+  expect(descriptionLayout.scrollWidth).toBeLessThanOrEqual(
+    descriptionLayout.clientWidth,
+  );
+  expect(descriptionLayout.chevronLeft).not.toBeNull();
+  expect(descriptionLayout.textRight).toBeLessThanOrEqual(
+    descriptionLayout.chevronLeft!,
+  );
+  await summaryTrigger.click();
   const summaryBox = await summaryPanel.boundingBox();
   const factsBox = await factsPanel.boundingBox();
   expect(summaryBox).not.toBeNull();

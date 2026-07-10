@@ -398,19 +398,19 @@ export function MemorySummaryDisclosure(props: {
         <Button
           ref={triggerRef}
           variant="ghost"
-          className="h-auto w-full justify-between rounded-none px-4 py-4 sm:px-5"
+          className="h-auto w-full min-w-0 justify-between rounded-none px-4 py-4 whitespace-normal sm:px-5"
           aria-controls="memory-summary-content"
         >
-          <span className="flex min-w-0 items-center gap-3 text-left">
+          <span className="flex min-w-0 flex-1 items-center gap-3 text-left">
             <SparklesIcon
               aria-hidden="true"
-              className="text-muted-foreground size-4"
+              className="text-muted-foreground size-4 shrink-0"
             />
-            <span>
+            <span className="min-w-0">
               <span className="block text-sm font-medium">
                 {t.settings.memory.smartSummaries}
               </span>
-              <span className="text-muted-foreground block text-xs">
+              <span className="text-muted-foreground block min-w-0 text-xs [overflow-wrap:anywhere] whitespace-normal">
                 {t.settings.memory.summaryCount(summaryCount)} ·{" "}
                 {t.settings.memory.summaryReadOnly}
               </span>
@@ -486,9 +486,18 @@ export function MemoryEmptyState(props: {
   );
 }
 
-export function MemoryLoadingState(): React.ReactNode {
+export function MemoryLoadingState(props: { label: string }): React.ReactNode {
+  const { label } = props;
+
   return (
-    <div data-testid="memory-loading-state" className="space-y-6">
+    <div
+      data-testid="memory-loading-state"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label={label}
+      className="space-y-6"
+    >
       <div className="bg-card grid grid-cols-2 gap-4 rounded-xl border p-4 lg:grid-cols-4">
         {Array.from({ length: 4 }, (_, index) => (
           <div key={index} className="space-y-2">

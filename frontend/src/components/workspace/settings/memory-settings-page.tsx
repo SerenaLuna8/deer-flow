@@ -432,7 +432,7 @@ export function MemorySettingsPage() {
         </header>
 
         {isLoading ? (
-          <MemoryLoadingState />
+          <MemoryLoadingState label={t.common.loading} />
         ) : error ? (
           <MemoryLoadError t={t} error={error} />
         ) : !memory ? (
