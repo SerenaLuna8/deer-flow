@@ -57,6 +57,28 @@ const emptyMemoryFixture = {
   facts: [],
 };
 
+const importedMemoryFixture = {
+  ...memoryFixture,
+  lastUpdated: "2026-07-10T02:00:00Z",
+  user: {
+    ...memoryFixture.user,
+    topOfMind: {
+      summary: "Verifying the imported memory contract.",
+      updatedAt: "2026-07-10T02:00:00Z",
+    },
+  },
+  facts: [
+    {
+      id: "fact-imported",
+      content: "Imported memory contract marker",
+      category: "context",
+      confidence: 0.88,
+      createdAt: "2026-07-10T02:00:00Z",
+      source: "manual",
+    },
+  ],
+};
+
 const longSummary = `Summary${"S".repeat(512)}`;
 const longFactContent = `Fact${"F".repeat(512)}`;
 const longFactCategory = `Category${"C".repeat(256)}`;
@@ -275,13 +297,16 @@ test("fact create, edit, and delete keep their existing request contracts", asyn
   await expect(
     page.getByText("Updated durable context", { exact: true }),
   ).toBeVisible();
-  expect(
-    api.requests.some(
-      (request) =>
-        request.method === "PATCH" &&
-        request.path.endsWith("/api/memory/facts/fact-created"),
-    ),
-  ).toBe(true);
+  const patched = api.requests.find(
+    (request) =>
+      request.method === "PATCH" &&
+      request.path.endsWith("/api/memory/facts/fact-created"),
+  );
+  expect(patched?.body).toEqual({
+    content: "Updated durable context",
+    category: "context",
+    confidence: 0.75,
+  });
 
   const updatedRow = page.getByTestId("memory-fact-row-fact-created");
   await updatedRow.getByRole("button", { name: "Delete" }).click();
@@ -324,26 +349,35 @@ test("management menu preserves export, import, and clear flows", async ({
   await chooser.setFiles({
     name: "memory.json",
     mimeType: "application/json",
-    buffer: Buffer.from(JSON.stringify(memoryFixture)),
+    buffer: Buffer.from(JSON.stringify(importedMemoryFixture)),
   });
-  const importRequestPromise = page.waitForRequest((request) => {
-    const url = new URL(request.url());
-    return (
-      request.method() === "POST" && url.pathname.endsWith("/api/memory/import")
-    );
+  const importResponsePromise = page.waitForResponse((response) => {
+    const request = response.request();
+    const url = new URL(response.url());
+    return request.method() === "POST" && url.pathname === "/api/memory/import";
   });
   await page.getByRole("button", { name: "Import", exact: true }).click();
-  const importRequest = await importRequestPromise;
+  const importResponse = await importResponsePromise;
+  expect(importResponse.ok()).toBe(true);
+  const importRequest = importResponse.request();
   expect(importRequest.method()).toBe("POST");
   expect(new URL(importRequest.url()).pathname).toBe("/api/memory/import");
-  expect(importRequest.postDataJSON()).toEqual(memoryFixture);
-  expect(
-    api.requests.some(
-      (request) =>
-        request.method === "POST" &&
-        request.path.endsWith("/api/memory/import"),
-    ),
-  ).toBe(true);
+  expect(importRequest.postDataJSON()).toEqual(importedMemoryFixture);
+  await expect(
+    page.getByText("Imported memory contract marker", { exact: true }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      api.requests.find(
+        (request) =>
+          request.method === "POST" && request.path === "/api/memory/import",
+      ),
+    )
+    .toEqual({
+      method: "POST",
+      path: "/api/memory/import",
+      body: importedMemoryFixture,
+    });
 
   await page.getByRole("button", { name: "Manage memory" }).click();
   await page.getByRole("menuitem", { name: "Clear all memory" }).click();
@@ -371,6 +405,35 @@ test("memory overview derives counts and recent focus from loaded memory", async
   await expect(
     overview.getByRole("button", { name: "View summaries" }),
   ).toBeVisible();
+});
+
+test("view summaries clears obscuring state and focuses the disclosure", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockMemoryAPI(page);
+  await page.goto("/workspace/memory");
+
+  await page.getByPlaceholder("Search memory").fill("Chinese responses");
+  await page.getByTestId("memory-filter-facts").click();
+  await expect(page.getByTestId("memory-summary-disclosure")).toHaveCount(0);
+
+  await page
+    .getByTestId("memory-overview")
+    .getByRole("button", { name: "View summaries" })
+    .click();
+
+  await expect(page.getByPlaceholder("Search memory")).toHaveValue("");
+  await expect(page.getByTestId("memory-filter-summaries")).toHaveAttribute(
+    "data-state",
+    "on",
+  );
+  await expect(page.getByTestId("memory-summary-panel")).toBeVisible();
+  await expect(
+    page
+      .getByTestId("memory-summary-disclosure")
+      .getByRole("button", { name: /Smart summaries/ }),
+  ).toBeFocused();
 });
 
 test("filters preserve facts and summaries visibility", async ({ page }) => {

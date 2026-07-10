@@ -1,6 +1,6 @@
 "use client";
 
-import { useDeferredValue, useId, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -140,6 +140,7 @@ export function MemorySettingsPage() {
   const [filter, setFilter] = useState<MemoryViewFilter>("all");
   const [summariesExpanded, setSummariesExpanded] = useState(false);
   const summaryTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const shouldFocusSummaryTriggerRef = useRef(false);
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(
     null,
   );
@@ -238,15 +239,27 @@ export function MemorySettingsPage() {
     !hasNoMatches &&
     (normalizedQuery.length === 0 || filteredSectionGroups.length > 0);
 
+  useEffect(() => {
+    const trigger = summaryTriggerRef.current;
+    if (
+      !shouldFocusSummaryTriggerRef.current ||
+      !shouldRenderSummariesBlock ||
+      !summariesOpen ||
+      !trigger
+    ) {
+      return;
+    }
+
+    shouldFocusSummaryTriggerRef.current = false;
+    trigger.scrollIntoView({ behavior: "smooth", block: "center" });
+    trigger.focus({ preventScroll: true });
+  }, [shouldRenderSummariesBlock, summariesOpen]);
+
   function handleViewSummaries() {
+    shouldFocusSummaryTriggerRef.current = true;
+    setQuery("");
+    setFilter("summaries");
     setSummariesExpanded(true);
-    requestAnimationFrame(() => {
-      summaryTriggerRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
-      summaryTriggerRef.current?.focus({ preventScroll: true });
-    });
   }
 
   async function handleExportMemory() {
