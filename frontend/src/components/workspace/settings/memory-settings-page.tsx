@@ -1,14 +1,6 @@
 "use client";
 
-import {
-  DownloadIcon,
-  PenLineIcon,
-  PlusIcon,
-  Trash2Icon,
-  UploadIcon,
-} from "lucide-react";
-import Link from "next/link";
-import { useDeferredValue, useId, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -22,7 +14,24 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  buildMemorySectionGroups,
+  countPopulatedSummaries,
+  isMemorySummaryEmpty,
+  type MemoryFact,
+  type MemoryViewFilter,
+  truncateFactPreview,
+} from "@/components/workspace/settings/memory/memory-view-model";
+import {
+  MemoryEmptyState,
+  MemoryFactList,
+  MemoryHeaderActions,
+  MemoryLoadError,
+  MemoryLoadingState,
+  MemoryOverview,
+  MemorySummaryDisclosure,
+  MemoryToolbar,
+} from "@/components/workspace/settings/memory/memory-workbench";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
@@ -38,25 +47,7 @@ import type {
   MemoryFactPatchInput,
   UserMemory,
 } from "@/core/memory/types";
-import { SafeStreamdown } from "@/core/streamdown/components";
-import { streamdownPlugins } from "@/core/streamdown/plugins";
-import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
-import { cn } from "@/lib/utils";
-
-type MemoryViewFilter = "all" | "facts" | "summaries";
-type MemoryFact = UserMemory["facts"][number];
-
-type MemorySection = {
-  title: string;
-  summary: string;
-  updatedAt?: string;
-};
-
-type MemorySectionGroup = {
-  title: string;
-  sections: MemorySection[];
-};
 
 type PendingImport = {
   fileName: string;
@@ -129,149 +120,6 @@ const DEFAULT_FACT_FORM_STATE: FactFormState = {
   confidence: "0.8",
 };
 
-function confidenceToLevelKey(confidence: unknown): {
-  key: "veryHigh" | "high" | "normal" | "unknown";
-  value?: number;
-} {
-  if (typeof confidence !== "number" || !Number.isFinite(confidence)) {
-    return { key: "unknown" };
-  }
-
-  const value = Math.min(1, Math.max(0, confidence));
-  if (value >= 0.85) return { key: "veryHigh", value };
-  if (value >= 0.65) return { key: "high", value };
-  return { key: "normal", value };
-}
-
-function formatMemorySection(
-  section: MemorySection,
-  t: ReturnType<typeof useI18n>["t"],
-): string {
-  const content =
-    section.summary.trim() ||
-    `<span class="text-muted-foreground">${t.settings.memory.markdown.empty}</span>`;
-  return [
-    `### ${section.title}`,
-    content,
-    "",
-    section.updatedAt &&
-      `> ${t.settings.memory.markdown.updatedAt}: \`${formatTimeAgo(section.updatedAt)}\``,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function buildMemorySectionGroups(
-  memory: UserMemory,
-  t: ReturnType<typeof useI18n>["t"],
-): MemorySectionGroup[] {
-  return [
-    {
-      title: t.settings.memory.markdown.userContext,
-      sections: [
-        {
-          title: t.settings.memory.markdown.work,
-          summary: memory.user.workContext.summary,
-          updatedAt: memory.user.workContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.personal,
-          summary: memory.user.personalContext.summary,
-          updatedAt: memory.user.personalContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.topOfMind,
-          summary: memory.user.topOfMind.summary,
-          updatedAt: memory.user.topOfMind.updatedAt,
-        },
-      ],
-    },
-    {
-      title: t.settings.memory.markdown.historyBackground,
-      sections: [
-        {
-          title: t.settings.memory.markdown.recentMonths,
-          summary: memory.history.recentMonths.summary,
-          updatedAt: memory.history.recentMonths.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.earlierContext,
-          summary: memory.history.earlierContext.summary,
-          updatedAt: memory.history.earlierContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.longTermBackground,
-          summary: memory.history.longTermBackground.summary,
-          updatedAt: memory.history.longTermBackground.updatedAt,
-        },
-      ],
-    },
-  ];
-}
-
-function summariesToMarkdown(
-  memory: UserMemory,
-  sectionGroups: MemorySectionGroup[],
-  t: ReturnType<typeof useI18n>["t"],
-) {
-  const parts: string[] = [];
-
-  parts.push(`## ${t.settings.memory.markdown.overview}`);
-  parts.push(
-    `- **${t.common.lastUpdated}**: \`${formatTimeAgo(memory.lastUpdated)}\``,
-  );
-
-  for (const group of sectionGroups) {
-    parts.push(`\n## ${group.title}`);
-    for (const section of group.sections) {
-      parts.push(formatMemorySection(section, t));
-    }
-  }
-
-  const markdown = parts.join("\n\n");
-  const lines = markdown.split("\n");
-  const out: string[] = [];
-  let i = 0;
-  for (const line of lines) {
-    i++;
-    if (i !== 1 && line.startsWith("## ")) {
-      if (out.length === 0 || out[out.length - 1] !== "---") {
-        out.push("---");
-      }
-    }
-    out.push(line);
-  }
-
-  return out.join("\n");
-}
-
-function isMemorySummaryEmpty(memory: UserMemory) {
-  return (
-    memory.user.workContext.summary.trim() === "" &&
-    memory.user.personalContext.summary.trim() === "" &&
-    memory.user.topOfMind.summary.trim() === "" &&
-    memory.history.recentMonths.summary.trim() === "" &&
-    memory.history.earlierContext.summary.trim() === "" &&
-    memory.history.longTermBackground.summary.trim() === ""
-  );
-}
-
-function truncateFactPreview(content: string, maxLength = 140) {
-  const normalized = content.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-  const ellipsis = "...";
-  if (maxLength <= ellipsis.length) {
-    return normalized.slice(0, maxLength);
-  }
-  return `${normalized.slice(0, maxLength - ellipsis.length)}${ellipsis}`;
-}
-
-function upperFirst(str: string) {
-  return str.charAt(0).toUpperCase() + str.slice(1);
-}
-
 export function MemorySettingsPage() {
   const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
@@ -290,6 +138,9 @@ export function MemorySettingsPage() {
   );
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MemoryViewFilter>("all");
+  const [summariesExpanded, setSummariesExpanded] = useState(false);
+  const summaryTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const shouldFocusSummaryTriggerRef = useRef(false);
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(
     null,
   );
@@ -316,7 +167,6 @@ export function MemorySettingsPage() {
     "This fact will be removed from memory immediately. This action cannot be undone.";
   const factDeleteSuccess =
     t.settings.memory.factDeleteSuccess ?? "Fact deleted";
-  const addFactLabel = t.settings.memory.addFact;
   const addFactTitle = t.settings.memory.addFactTitle;
   const editFactTitle = t.settings.memory.editFactTitle;
   const addFactSuccess = t.settings.memory.addFactSuccess;
@@ -330,25 +180,20 @@ export function MemorySettingsPage() {
   const factSave = t.settings.memory.factSave;
   const factValidationContent = t.settings.memory.factValidationContent;
   const factValidationConfidence = t.settings.memory.factValidationConfidence;
-  const noFacts = t.settings.memory.noFacts ?? "No saved facts yet.";
-  const summaryReadOnly = t.settings.memory.summaryReadOnly;
-  const memoryFullyEmpty =
-    t.settings.memory.memoryFullyEmpty ?? "No memory saved yet.";
   const factPreviewLabel =
     t.settings.memory.factPreviewLabel ?? "Fact to delete";
-  const searchPlaceholder =
-    t.settings.memory.searchPlaceholder ?? "Search memory";
-  const filterAll = t.settings.memory.filterAll ?? "All";
-  const filterFacts = t.settings.memory.filterFacts ?? "Facts";
-  const filterSummaries = t.settings.memory.filterSummaries ?? "Summaries";
   const noMatches = t.settings.memory.noMatches ?? "No matching memory found";
-  const exportButton = t.settings.memory.exportButton ?? t.common.export;
   const exportSuccess =
     t.settings.memory.exportSuccess ?? t.common.exportSuccess;
-  const importButton = t.settings.memory.importButton ?? t.common.import;
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
 
   const sectionGroups = memory ? buildMemorySectionGroups(memory, t) : [];
+  const summaryCount = countPopulatedSummaries(sectionGroups);
+  const trimmedRecentFocus = memory?.user.topOfMind.summary.trim();
+  const recentFocus =
+    trimmedRecentFocus && trimmedRecentFocus.length > 0
+      ? trimmedRecentFocus
+      : t.settings.memory.markdown.empty;
   const filteredSectionGroups = sectionGroups
     .map((group) => ({
       ...group,
@@ -372,17 +217,50 @@ export function MemorySettingsPage() {
       )
     : [];
 
-  const showSummaries = filter !== "facts";
+  const hasSummarySearchMatch =
+    normalizedQuery.length > 0 && filteredSectionGroups.length > 0;
+  const summariesForcedOpen = filter === "summaries" || hasSummarySearchMatch;
+  const summariesOpen = summariesForcedOpen || summariesExpanded;
   const showFacts = filter !== "summaries";
-  const shouldRenderSummariesBlock =
-    showSummaries && (filteredSectionGroups.length > 0 || !normalizedQuery);
-  const shouldRenderFactsBlock =
-    showFacts &&
-    (filteredFacts.length > 0 || !normalizedQuery || filter === "facts");
+  const showSummaries = filter !== "facts";
+  const memoryFullyEmpty = Boolean(
+    memory && isMemorySummaryEmpty(memory) && memory.facts.length === 0,
+  );
   const hasMatchingVisibleContent =
-    !memory ||
     (showSummaries && filteredSectionGroups.length > 0) ||
     (showFacts && filteredFacts.length > 0);
+  const hasNoMatches = normalizedQuery.length > 0 && !hasMatchingVisibleContent;
+  const shouldRenderFactsBlock =
+    showFacts &&
+    !hasNoMatches &&
+    (normalizedQuery.length === 0 || filteredFacts.length > 0);
+  const shouldRenderSummariesBlock =
+    showSummaries &&
+    !hasNoMatches &&
+    (normalizedQuery.length === 0 || filteredSectionGroups.length > 0);
+
+  useEffect(() => {
+    const trigger = summaryTriggerRef.current;
+    if (
+      !shouldFocusSummaryTriggerRef.current ||
+      !shouldRenderSummariesBlock ||
+      !summariesOpen ||
+      !trigger
+    ) {
+      return;
+    }
+
+    shouldFocusSummaryTriggerRef.current = false;
+    trigger.scrollIntoView({ behavior: "smooth", block: "center" });
+    trigger.focus({ preventScroll: true });
+  }, [shouldRenderSummariesBlock, summariesOpen]);
+
+  function handleViewSummaries() {
+    shouldFocusSummaryTriggerRef.current = true;
+    setQuery("");
+    setFilter("summaries");
+    setSummariesExpanded(true);
+  }
 
   async function handleExportMemory() {
     try {
@@ -544,7 +422,7 @@ export function MemorySettingsPage() {
           </div>
 
           {!isLoading && !error && memory ? (
-            <div className="flex flex-wrap items-center gap-2">
+            <>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -552,233 +430,82 @@ export function MemorySettingsPage() {
                 className="hidden"
                 onChange={(event) => void handleImportFileSelection(event)}
               />
-              <Button
-                variant="outline"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={importMemoryMutation.isPending}
-              >
-                <UploadIcon className="mr-2 h-4 w-4" />
-                {importButton}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => void handleExportMemory()}
-                disabled={isExporting}
-              >
-                <DownloadIcon className="mr-2 h-4 w-4" />
-                {isExporting ? t.common.loading : exportButton}
-              </Button>
-              <Button onClick={openCreateFactDialog}>
-                <PlusIcon className="mr-2 h-4 w-4" />
-                {addFactLabel}
-              </Button>
-              <Button
-                variant="destructive"
-                onClick={() => setClearDialogOpen(true)}
-                disabled={clearMemory.isPending}
-              >
-                {clearMemory.isPending ? t.common.loading : clearAllLabel}
-              </Button>
-            </div>
+              <MemoryHeaderActions
+                t={t}
+                isImporting={importMemoryMutation.isPending}
+                isExporting={isExporting}
+                isClearing={clearMemory.isPending}
+                onAddFact={openCreateFactDialog}
+                onImport={() => fileInputRef.current?.click()}
+                onExport={() => void handleExportMemory()}
+                onClear={() => setClearDialogOpen(true)}
+              />
+            </>
           ) : null}
         </header>
 
         {isLoading ? (
-          <div className="text-muted-foreground text-sm">
-            {t.common.loading}
-          </div>
+          <MemoryLoadingState label={t.common.loading} />
         ) : error ? (
-          <div>Error: {error.message}</div>
+          <MemoryLoadError t={t} error={error} />
         ) : !memory ? (
           <div className="text-muted-foreground text-sm">
             {t.settings.memory.empty}
           </div>
         ) : (
           <>
-            {isMemorySummaryEmpty(memory) && memory.facts.length === 0 ? (
-              <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-                {memoryFullyEmpty}
-              </div>
-            ) : null}
+            <MemoryOverview
+              t={t}
+              factCount={memory.facts.length}
+              summaryCount={summaryCount}
+              lastUpdated={formatTimeAgo(memory.lastUpdated)}
+              recentFocus={recentFocus}
+              onViewSummaries={handleViewSummaries}
+            />
+            <MemoryToolbar
+              t={t}
+              query={query}
+              filter={filter}
+              onQueryChange={setQuery}
+              onFilterChange={setFilter}
+            />
 
-            <div className="bg-muted/25 flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center">
-              <Input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder={searchPlaceholder}
-                className="min-w-0 flex-1 sm:max-w-md"
-              />
-              <ToggleGroup
-                type="single"
-                value={filter}
-                onValueChange={(value) => {
-                  if (value) setFilter(value as MemoryViewFilter);
-                }}
-                variant="outline"
-                className="shrink-0 self-start sm:ml-auto sm:self-auto"
-              >
-                <ToggleGroupItem
-                  data-testid="memory-filter-all"
-                  value="all"
-                  className="whitespace-nowrap"
-                >
-                  {filterAll}
-                </ToggleGroupItem>
-                <ToggleGroupItem
-                  data-testid="memory-filter-facts"
-                  value="facts"
-                  className="whitespace-nowrap"
-                >
-                  {filterFacts}
-                </ToggleGroupItem>
-                <ToggleGroupItem
-                  data-testid="memory-filter-summaries"
-                  value="summaries"
-                  className="whitespace-nowrap"
-                >
-                  {filterSummaries}
-                </ToggleGroupItem>
-              </ToggleGroup>
-            </div>
-
-            {!hasMatchingVisibleContent && normalizedQuery ? (
+            {memoryFullyEmpty ? (
+              <MemoryEmptyState t={t} onAddFact={openCreateFactDialog} />
+            ) : hasNoMatches ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {noMatches}
               </div>
-            ) : null}
+            ) : (
+              <div className="space-y-4">
+                {shouldRenderFactsBlock ? (
+                  <MemoryFactList
+                    t={t}
+                    facts={filteredFacts}
+                    isDeleting={deleteMemoryFact.isPending}
+                    onEdit={openEditFactDialog}
+                    onDelete={setFactToDelete}
+                  />
+                ) : null}
 
-            <div
-              className={cn(
-                "grid gap-4",
-                filter === "all" &&
-                  shouldRenderSummariesBlock &&
-                  shouldRenderFactsBlock &&
-                  "lg:grid-cols-[minmax(0,0.36fr)_minmax(0,0.64fr)]",
-              )}
-            >
-              {shouldRenderSummariesBlock ? (
-                <section
-                  data-testid="memory-summary-panel"
-                  className="bg-card min-w-0 rounded-xl border p-5 shadow-xs"
-                >
-                  <div className="text-muted-foreground mb-4 text-sm">
-                    {summaryReadOnly}
-                  </div>
-                  <SafeStreamdown
-                    className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-                    {...streamdownPlugins}
-                  >
-                    {summariesToMarkdown(memory, filteredSectionGroups, t)}
-                  </SafeStreamdown>
-                </section>
-              ) : null}
-
-              {shouldRenderFactsBlock ? (
-                <section
-                  data-testid="memory-facts-panel"
-                  className="bg-card min-w-0 rounded-xl border p-5 shadow-xs"
-                >
-                  <div className="mb-4">
-                    <h2 className="text-base font-medium">
-                      {t.settings.memory.markdown.facts}
-                    </h2>
-                  </div>
-
-                  {filteredFacts.length === 0 ? (
-                    <div className="text-muted-foreground text-sm">
-                      {normalizedQuery ? noMatches : noFacts}
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {filteredFacts.map((fact) => {
-                        const { key } = confidenceToLevelKey(fact.confidence);
-                        const confidenceText =
-                          t.settings.memory.markdown.table.confidenceLevel[key];
-
-                        return (
-                          <div
-                            key={fact.id}
-                            className="border-border/70 hover:bg-muted/30 flex flex-col gap-3 rounded-lg border p-4 transition-colors sm:flex-row sm:items-start sm:justify-between"
-                          >
-                            <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
-                              <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-                                <span>
-                                  <span className="text-muted-foreground">
-                                    {t.settings.memory.markdown.table.category}:
-                                  </span>{" "}
-                                  {upperFirst(fact.category)}
-                                </span>
-                                <span>
-                                  <span className="text-muted-foreground">
-                                    {
-                                      t.settings.memory.markdown.table
-                                        .confidence
-                                    }
-                                    :
-                                  </span>{" "}
-                                  {confidenceText}
-                                </span>
-                                <span>
-                                  <span className="text-muted-foreground">
-                                    {t.settings.memory.markdown.table.createdAt}
-                                    :
-                                  </span>{" "}
-                                  {formatTimeAgo(fact.createdAt)}
-                                </span>
-                                <span>
-                                  <span className="text-muted-foreground">
-                                    {t.settings.memory.markdown.table.source}:
-                                  </span>{" "}
-                                  {fact.source === "manual" ? (
-                                    t.settings.memory.manualFactSource
-                                  ) : (
-                                    <Link
-                                      href={pathOfThread(fact.source)}
-                                      className="text-primary underline-offset-4 hover:underline"
-                                    >
-                                      {t.settings.memory.markdown.table.view}
-                                    </Link>
-                                  )}
-                                </span>
-                              </div>
-                              <p className="text-sm [overflow-wrap:anywhere]">
-                                {fact.content}
-                              </p>
-                            </div>
-
-                            <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="shrink-0"
-                                onClick={() => openEditFactDialog(fact)}
-                                disabled={deleteMemoryFact.isPending}
-                                title={t.common.edit}
-                                aria-label={t.common.edit}
-                              >
-                                <PenLineIcon className="h-4 w-4" />
-                              </Button>
-
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="text-destructive hover:text-destructive shrink-0"
-                                onClick={() => setFactToDelete(fact)}
-                                disabled={deleteMemoryFact.isPending}
-                                title={t.common.delete}
-                                aria-label={t.common.delete}
-                              >
-                                <Trash2Icon className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
-              ) : null}
-            </div>
+                {shouldRenderSummariesBlock ? (
+                  <MemorySummaryDisclosure
+                    t={t}
+                    groups={filteredSectionGroups}
+                    summaryCount={countPopulatedSummaries(
+                      filteredSectionGroups,
+                    )}
+                    open={summariesOpen}
+                    onOpenChange={(open) => {
+                      if (!summariesForcedOpen) {
+                        setSummariesExpanded(open);
+                      }
+                    }}
+                    triggerRef={summaryTriggerRef}
+                  />
+                ) : null}
+              </div>
+            )}
           </>
         )}
       </section>
