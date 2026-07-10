@@ -229,6 +229,7 @@ export const zhCN: Translations = {
 
   // 定时任务
   scheduledTasks: {
+    description: "按计划自动运行任务，并查看每次执行结果。",
     scheduleType: {
       cron: "重复",
       once: "单次",
@@ -275,6 +276,9 @@ export const zhCN: Translations = {
       threadIdPlaceholder: "线程 ID",
     },
     filters: {
+      status: "状态",
+      type: "类型",
+      all: "全部",
       allStatuses: "全部状态",
       enabled: "已启用",
       paused: "已暂停",
@@ -283,6 +287,14 @@ export const zhCN: Translations = {
       allTypes: "全部类型",
       cron: "定时",
       once: "单次",
+    },
+    empty: {
+      title: "还没有定时任务",
+      description: "创建一个任务，让 DeerFlow 按计划自动完成工作。",
+      action: "创建第一条任务",
+      filteredTitle: "没有符合条件的任务",
+      filteredDescription: "调整筛选条件，或清除筛选查看全部任务。",
+      clearFilters: "清除筛选",
     },
     detail: {
       contextMode: "上下文模式",

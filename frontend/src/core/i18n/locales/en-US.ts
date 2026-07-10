@@ -238,6 +238,7 @@ export const enUS: Translations = {
 
   // Scheduled tasks
   scheduledTasks: {
+    description: "Run tasks on a schedule and review every result.",
     scheduleType: {
       cron: "Recurring",
       once: "One-time",
@@ -284,6 +285,9 @@ export const enUS: Translations = {
       threadIdPlaceholder: "Thread ID",
     },
     filters: {
+      status: "Status",
+      type: "Type",
+      all: "All",
       allStatuses: "All statuses",
       enabled: "Enabled",
       paused: "Paused",
@@ -292,6 +296,16 @@ export const enUS: Translations = {
       allTypes: "All types",
       cron: "Cron",
       once: "Once",
+    },
+    empty: {
+      title: "No scheduled tasks yet",
+      description:
+        "Create a task and let DeerFlow automatically complete work on schedule.",
+      action: "Create your first task",
+      filteredTitle: "No tasks match your filters",
+      filteredDescription:
+        "Adjust your filters or clear them to see all tasks.",
+      clearFilters: "Clear filters",
     },
     detail: {
       contextMode: "Context mode",

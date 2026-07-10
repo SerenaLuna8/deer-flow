@@ -85,6 +85,89 @@ test("scheduled tasks page is reachable from sidebar", async ({ page }) => {
   await expect(page.getByTestId("scheduled-task-runs")).toContainText("0 runs");
 });
 
+test("empty page guides the user to create the first scheduled task", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
+  await page.goto("/workspace/scheduled-tasks");
+
+  const empty = page.getByTestId("scheduled-task-empty");
+  await expect(empty).toBeVisible();
+  await expect(page.getByTestId("scheduled-task-filters")).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-task-workbench")).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-task-list")).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-task-detail")).toHaveCount(0);
+
+  const dimensions = await page.evaluate(() => {
+    const emptyState = document.querySelector(
+      '[data-testid="scheduled-task-empty"]',
+    );
+    if (!(emptyState instanceof HTMLElement)) {
+      throw new Error("Scheduled task empty state not found");
+    }
+    return {
+      document: {
+        clientWidth: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+      },
+      empty: {
+        clientWidth: emptyState.clientWidth,
+        scrollWidth: emptyState.scrollWidth,
+      },
+    };
+  });
+  expect(dimensions.document.scrollWidth).toBeLessThanOrEqual(
+    dimensions.document.clientWidth,
+  );
+  expect(dimensions.empty.scrollWidth).toBeLessThanOrEqual(
+    dimensions.empty.clientWidth,
+  );
+
+  await page.getByTestId("scheduled-task-empty-action").click();
+  await expect(
+    page.getByRole("dialog", { name: "Create scheduled task" }),
+  ).toBeVisible();
+});
+
+test("filters with no matches explain how to restore scheduled tasks", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [
+      {
+        id: "task-filter-miss",
+        thread_id: "thread-filter-miss",
+        title: "Enabled recurring task",
+        prompt: "Run on schedule",
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 9 * * *" },
+        timezone: "UTC",
+        status: "enabled",
+        next_run_at: "2026-07-02T01:00:00+00:00",
+        last_run_at: null,
+        last_run_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      },
+    ],
+  });
+
+  await page.goto("/workspace/scheduled-tasks");
+  const statusGroup = page.getByRole("group", { name: "Status" });
+  await statusGroup.getByRole("button", { name: "Failed" }).click();
+  await expect(page.getByTestId("scheduled-task-filter-empty")).toBeVisible();
+  await expect(page.getByTestId("scheduled-task-workbench")).toHaveCount(0);
+
+  await page.getByTestId("scheduled-task-clear-filters").click();
+  await expect(page.getByTestId("scheduled-task-filter-empty")).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-task-list")).toBeVisible();
+  await expect(page.getByTestId("scheduled-task-detail")).toBeVisible();
+});
+
 test("workbench exposes semantic state and the task's total run count", async ({
   page,
 }) => {
@@ -223,9 +306,9 @@ test("workbench exposes semantic state and the task's total run count", async ({
     page.getByTestId("scheduled-task-run-list").locator(":scope > div"),
   ).toHaveCount(2);
 
-  const statusGroup = page.getByRole("group", { name: "All statuses" });
+  const statusGroup = page.getByRole("group", { name: "Status" });
   await expect(
-    statusGroup.getByRole("button", { name: "All statuses" }),
+    statusGroup.getByRole("button", { name: "All" }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(
     statusGroup.getByRole("button", { name: "Enabled", exact: true }),
@@ -236,12 +319,13 @@ test("workbench exposes semantic state and the task's total run count", async ({
   await expect(
     statusGroup.getByRole("button", { name: "Enabled", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
-  await statusGroup.getByRole("button", { name: "All statuses" }).click();
+  await statusGroup.getByRole("button", { name: "All" }).click();
 
-  const typeGroup = page.getByRole("group", { name: "All types" });
-  await expect(
-    typeGroup.getByRole("button", { name: "All types" }),
-  ).toHaveAttribute("aria-pressed", "true");
+  const typeGroup = page.getByRole("group", { name: "Type" });
+  await expect(typeGroup.getByRole("button", { name: "All" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await typeGroup.getByRole("button", { name: "Once" }).click();
   await expect(typeGroup.getByRole("button", { name: "Once" })).toHaveAttribute(
     "aria-pressed",

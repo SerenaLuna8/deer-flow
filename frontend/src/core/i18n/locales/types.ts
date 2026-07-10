@@ -176,6 +176,7 @@ export interface Translations {
 
   // Scheduled tasks
   scheduledTasks: {
+    description: string;
     scheduleType: { cron: string; once: string };
     preset: {
       label: string;
@@ -219,6 +220,9 @@ export interface Translations {
       threadIdPlaceholder: string;
     };
     filters: {
+      status: string;
+      type: string;
+      all: string;
       allStatuses: string;
       enabled: string;
       paused: string;
@@ -227,6 +231,14 @@ export interface Translations {
       allTypes: string;
       cron: string;
       once: string;
+    };
+    empty: {
+      title: string;
+      description: string;
+      action: string;
+      filteredTitle: string;
+      filteredDescription: string;
+      clearFilters: string;
     };
     detail: {
       contextMode: string;
