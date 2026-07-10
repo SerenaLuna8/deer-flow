@@ -4,14 +4,15 @@
 
 The visual direction was approved on 2026-07-10. The selected design is a wide,
 read-only right-side sheet opened from the existing `/workspace/skills` list.
-The generated high-fidelity mockup in the design conversation is the visual
+The generated high-fidelity mockup is checked in at
+`docs/pr-evidence/skills-markdown-preview/source-mockup.png` and is the visual
 reference.
 
 ## Goal
 
-Let an authenticated DeerFlow user click any visible public, custom, or legacy
-skill and read that skill's `SKILL.md` as rendered Markdown without leaving the
-skills list.
+Let a DeerFlow administrator click any public or current-user custom skill shown
+on the existing tabs and read that skill's `SKILL.md` as rendered Markdown
+without leaving the skills list.
 
 Success means:
 
@@ -21,8 +22,8 @@ Success means:
   enable switch never opens the sheet.
 - The sheet renders the visible skill's `SKILL.md` with the existing safe
   Markdown stack and never executes raw HTML.
-- Public, current-user custom, and visible legacy skills use one read-only
-  detail contract that preserves user isolation.
+- Public and current-user custom skills use one admin-only read contract that
+  preserves the existing raw-content authorization boundary and user isolation.
 - Loading, missing, forbidden, failed, long-content, keyboard, and narrow-screen
   states remain usable.
 
@@ -46,9 +47,11 @@ tabs, copying, download, or additional skill management actions.
 ### Skill rows
 
 The existing card layout remains the list primitive. The name and description
-area becomes a semantic button that occupies the row's available content width.
-It receives a subtle hover state, visible keyboard focus, and a small disclosure
-chevron. The enable switch remains a separate sibling interaction target.
+area becomes a semantic button for administrators that occupies the row's
+available content width. It receives a subtle hover state, visible keyboard
+focus, and a small disclosure chevron. For non-admin users it remains passive,
+matching the existing disabled management controls. The enable switch remains a
+separate sibling interaction target.
 
 Opening a skill gives its row a restrained selected treatment. Closing the Sheet
 restores focus to the row trigger and keeps the active public/custom tab and list
@@ -79,10 +82,12 @@ supports the capabilities already provided by DeerFlow's safe Streamdown stack,
 including headings, paragraphs, lists, tables, code blocks, links, and math.
 
 `SKILL.md` YAML frontmatter is not rendered as a raw code block. A small pure
-helper removes only a valid leading frontmatter block; the header displays the
-already parsed name, description, category, license, and enable state from the
-detail response. If the content has no valid leading frontmatter block, the
-complete content is rendered.
+helper removes only a leading frontmatter fence whose delimiters match the
+backend parser's whitespace-tolerant `---` rules. It does not parse YAML because
+only skills already parsed by the backend can appear in the list. The header
+displays name, description, category, license, and enable state from the latest
+list data. If the content has no matching leading frontmatter fence, the complete
+content is rendered.
 
 Raw HTML is disabled because custom skill content is user-authored and must be
 treated as untrusted. Supporting files, relative images, and browsing files
@@ -91,17 +96,18 @@ may not resolve in the preview.
 
 ## API and Security Contract
 
-`GET /api/skills` remains a metadata-only list response. The existing
-`GET /api/skills/{skill_name}` route returns a new `SkillDetailResponse` that
-extends `SkillResponse` with `content: str`.
+`GET /api/skills` remains a metadata-only list response and the existing
+`GET /api/skills/{skill_name}` metadata contract remains unchanged. A new
+admin-only `GET /api/skills/content/{skill_name}` route returns
+`SkillContentResponse { content: str }`.
 
-The detail route is available to authenticated users and resolves only skills
+The content route calls `require_admin_user` before resolving only skills
 returned by the current user's `UserScopedSkillStorage`:
 
 - Public skills come from the configured global public root.
 - Custom skills come only from the current user's custom root.
-- Legacy global custom skills are readable only when they are visible through
-  the existing legacy fallback rules.
+- Legacy global custom skills remain outside the current two-tab UI. The route
+  still cannot resolve one unless it is visible through existing storage rules.
 - Guessing another user's skill name returns the same 404 as any unknown name.
 
 The server never builds a filesystem path from `skill_name`. It finds the
@@ -124,8 +130,9 @@ HTTP behavior is intentionally generic and does not leak host paths or content:
 - Path validation or symlink escape: 403.
 - Permission, decoding, or unexpected read failure: 500.
 
-Existing custom-skill editing/history endpoints and all admin requirements stay
-unchanged.
+Existing metadata, custom-skill editing/history, embedded-client, and admin
+requirements stay unchanged. The new content endpoint is added to the guarded
+skills endpoint contract.
 
 ## Component Boundaries
 
@@ -138,20 +145,21 @@ unchanged.
 
 ### Frontend data layer
 
-- `core/skills/type.ts` adds `SkillDetail` without changing the list `Skill`
-  shape.
-- `core/skills/api.ts` adds `loadSkillDetail(name)` and reuses
+- `core/skills/type.ts` adds `SkillContentResponse` without changing the list
+  response shape.
+- `core/skills/api.ts` adds `loadSkillContent(name)` and reuses
   `SkillRequestError`.
-- `core/skills/hooks.ts` adds a detail query keyed by
-  `['skills', 'detail', skillName]` and enables it only while a selected skill
+- `core/skills/hooks.ts` adds a content query keyed by
+  `['skills', 'content', skillName]` and enables it only while a selected skill
   is open.
-- A pure helper under `core/skills/` strips valid leading frontmatter without
-  parsing or duplicating YAML metadata.
+- A pure helper under `core/skills/` strips a parser-compatible leading
+  frontmatter fence without parsing or duplicating YAML metadata.
 
 ### Frontend presentation
 
 - `SkillSettingsList` remains the owner of filtering, create navigation,
-  enable mutations, selected skill, and Sheet open state.
+  enable mutations, selected skill name, trigger ref, and Sheet open state. It
+  derives the selected `Skill` from the latest list response.
 - A focused `SkillDetailSheet` component owns header presentation, loading,
   errors, retry, responsive Sheet sizing, and safe Markdown rendering.
 - Generated `components/ui/*` files are reused and are not edited.
@@ -159,15 +167,16 @@ unchanged.
 ## Data and Interaction Flow
 
 1. The existing list query loads skill metadata.
-2. The user activates a row's name/description button.
-3. Selection opens the Sheet immediately and enables the detail query.
+2. An administrator activates a row's name/description button.
+3. Selection opens the Sheet immediately and enables the content query.
 4. The Sheet shows a layout-matched skeleton while the detail request runs.
-5. A successful response supplies both header metadata and raw `SKILL.md`.
-6. The frontend removes a valid leading frontmatter block and renders the
+5. The latest list item supplies header metadata and a successful content
+   response supplies raw `SKILL.md`.
+6. The frontend removes a parser-compatible leading frontmatter fence and renders the
    remaining content through the existing raw-HTML-disabled Markdown pipeline.
-7. Closing the Sheet disables the detail query for rendering purposes, retains
+7. Closing the Sheet disables the content query for rendering purposes, retains
    cached data under its per-skill query key, and restores focus through Radix
-   Sheet behavior.
+   `onCloseAutoFocus` plus the saved row-trigger ref.
 
 Switch mutations continue to invalidate the existing `['skills']` query family
 and do not depend on the Sheet.
@@ -176,9 +185,10 @@ and do not depend on the Sheet.
 
 - Loading keeps the Sheet header context visible and shows skeleton lines that
   match a Markdown document rather than a lone loading label.
-- A request failure keeps the Sheet open, shows a localized compact error, and
-  offers a retry button.
-- A 404 reports that the skill content is unavailable without exposing a path.
+- A request failure keeps the Sheet open and offers a retry button.
+- A 403 reports that administrator access is required, a 404 reports that the
+  skill content is unavailable, and other failures use a generic localized
+  message. None exposes a host path.
 - Empty Markdown shows a localized empty-content message.
 - Closing the Sheet during a request prevents stale data from replacing the
   next selected skill because each skill has its own query key.
@@ -197,8 +207,8 @@ and do not depend on the Sheet.
 
 ## Accessibility
 
-- Each skill preview trigger is a native button with a localized accessible
-  name.
+- Each administrator skill preview trigger is a native button with a localized
+  accessible name; non-admin rows do not claim dialog affordance.
 - The enable switch is not nested inside the preview button.
 - Radix Sheet owns dialog semantics, focus trapping, Escape behavior, close
   control labeling, and focus restoration.
@@ -213,8 +223,10 @@ The implementation updates:
 
 - `README.md` and `README_zh.md` to mention read-only `SKILL.md` preview in the
   Web UI skills workspace.
-- `backend/AGENTS.md` with the detail response and safe user-scoped read path.
-- `frontend/AGENTS.md` with the Sheet ownership, detail query, and safe Markdown
+- `backend/AGENTS.md` with the guarded content response and safe user-scoped
+  read path.
+- `backend/docs/API.md` with the new guarded content endpoint.
+- `frontend/AGENTS.md` with the Sheet ownership, content query, and safe Markdown
   rendering boundary.
 
 ## Testing and Acceptance
@@ -223,9 +235,10 @@ Implementation follows test-driven development.
 
 Backend coverage includes:
 
-- Public, current-user custom, and visible legacy Markdown responses.
-- A normal authenticated user can read their visible skill details.
-- One user cannot read another user's custom skill by guessing its name.
+- Admin public and current-user custom Markdown responses.
+- A normal authenticated user receives 403 before any raw content lookup.
+- An admin in one user scope cannot read another user's custom skill by guessing
+  its name.
 - Unknown and disappeared files return 404.
 - Non-`SKILL.md` registered files return 400.
 - Symlink/root escape returns 403 without leaking paths or file content.
@@ -233,8 +246,7 @@ Backend coverage includes:
 
 Frontend unit coverage includes:
 
-- Detail request URL, success response, and error mapping.
-- Detail query key and enablement contract where practical.
+- Content request URL, success response, and error mapping.
 - Frontmatter removal and non-frontmatter fallback.
 
 Frontend end-to-end coverage includes:
@@ -257,9 +269,11 @@ mockup at the same desktop viewport and verifies the mobile Sheet separately.
 - No change to skill enable/disable authorization or mutation behavior.
 - No skill search, sorting, pagination, or list redesign.
 - No dedicated skill detail route or shareable deep link.
+- No change to the current public/custom tab taxonomy or display of legacy
+  skills.
 - No browsing of supporting skill files or resolution of relative assets.
 - No new Markdown or YAML dependency.
 - No changes to agent skill loading, activation, prompt injection, SkillScan,
   or sandbox mounting.
-- No change to the embedded `DeerFlowClient.get_skill()` return contract in
-  this Web UI-focused increment.
+- No change to `GET /api/skills/{name}` or the embedded
+  `DeerFlowClient.get_skill()` metadata contract.
