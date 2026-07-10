@@ -125,9 +125,17 @@ test("empty page guides the user to create the first scheduled task", async ({
   );
 
   await page.getByTestId("scheduled-task-empty-action").click();
-  await expect(
-    page.getByRole("dialog", { name: "Create scheduled task" }),
-  ).toBeVisible();
+  const createSheet = page.getByRole("dialog", {
+    name: "Create scheduled task",
+  });
+  await expect(createSheet).toBeVisible();
+  const focusIsInsideSheet = () =>
+    createSheet.evaluate((dialog) => dialog.contains(document.activeElement));
+  await expect.poll(focusIsInsideSheet).toBe(true);
+
+  await createSheet.getByRole("button", { name: "Close" }).click();
+  await expect(createSheet).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-task-create-trigger")).toBeFocused();
 });
 
 test("filters with no matches explain how to restore scheduled tasks", async ({
@@ -158,12 +166,21 @@ test("filters with no matches explain how to restore scheduled tasks", async ({
 
   await page.goto("/workspace/scheduled-tasks");
   const statusGroup = page.getByRole("group", { name: "Status" });
+  const typeGroup = page.getByRole("group", { name: "Type" });
   await statusGroup.getByRole("button", { name: "Failed" }).click();
+  await typeGroup.getByRole("button", { name: "Once" }).click();
   await expect(page.getByTestId("scheduled-task-filter-empty")).toBeVisible();
   await expect(page.getByTestId("scheduled-task-workbench")).toHaveCount(0);
 
   await page.getByTestId("scheduled-task-clear-filters").click();
   await expect(page.getByTestId("scheduled-task-filter-empty")).toHaveCount(0);
+  await expect(
+    statusGroup.getByRole("button", { name: "All" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(typeGroup.getByRole("button", { name: "All" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await expect(page.getByTestId("scheduled-task-list")).toBeVisible();
   await expect(page.getByTestId("scheduled-task-detail")).toBeVisible();
 });
