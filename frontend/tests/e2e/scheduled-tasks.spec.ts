@@ -35,6 +35,8 @@ test("scheduled tasks page is reachable from sidebar", async ({ page }) => {
   await expect(
     page.getByRole("button", { name: /Daily summary/i }),
   ).toBeVisible();
+  await expect(page.getByTestId("scheduled-task-list")).toBeVisible();
+  await expect(page.getByTestId("scheduled-task-detail")).toBeVisible();
   await expect(page.getByTestId("scheduled-task-runs")).toContainText("0 runs");
 });
 
@@ -80,7 +82,14 @@ test("user can create a scheduled task from the page", async ({ page }) => {
   mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
 
   await page.goto("/workspace/scheduled-tasks");
-  const createForm = page.getByTestId("scheduled-task-create-form");
+  await expect(page.getByTestId("scheduled-task-create-form")).toHaveCount(0);
+  await page.getByTestId("scheduled-task-create-trigger").click();
+
+  const createSheet = page.getByRole("dialog", {
+    name: "Create scheduled task",
+  });
+  await expect(createSheet).toBeVisible();
+  const createForm = createSheet.getByTestId("scheduled-task-create-form");
   await createForm.getByRole("button", { name: "One-time" }).click();
   await createForm.getByLabel("Run at").fill("2026-07-02T09:00");
   await createForm.getByPlaceholder("Task title").fill("Created from UI");
@@ -92,6 +101,7 @@ test("user can create a scheduled task from the page", async ({ page }) => {
   await expect(
     page.getByTestId("scheduled-task-detail").getByText("Summarize thread"),
   ).toBeVisible();
+  await expect(createSheet).toHaveCount(0);
 });
 
 test("user can pause a scheduled task from the detail pane", async ({

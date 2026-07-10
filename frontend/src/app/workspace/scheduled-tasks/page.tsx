@@ -1,5 +1,6 @@
 "use client";
 
+import { PlusIcon } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -13,6 +14,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import {
   ScheduledTaskScheduleInput,
@@ -73,6 +81,7 @@ export default function ScheduledTasksPage() {
   const threadTasksQuery = useThreadScheduledTasks(threadId);
   const data = threadId ? threadTasksQuery.data : allTasksQuery.data;
   const queryError = threadId ? threadTasksQuery.error : allTasksQuery.error;
+  const [createSheetOpen, setCreateSheetOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [contextMode, setContextMode] = useState<
@@ -190,14 +199,358 @@ export default function ScheduledTasksPage() {
   return (
     <WorkspaceContainer>
       <WorkspaceHeader />
-      <WorkspaceBody>
-        <div className="mx-auto flex w-full max-w-(--container-width-md) flex-col gap-4 p-6">
-          <h1 className="text-2xl font-semibold">{t.sidebar.scheduledTasks}</h1>
+      <WorkspaceBody className="overflow-y-auto">
+        <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-5 p-4 sm:p-6 md:p-8">
+          <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-1">
+              <h1 className="text-2xl font-semibold tracking-tight">
+                {t.sidebar.scheduledTasks}
+              </h1>
+              {threadId ? (
+                <p className="text-muted-foreground text-sm">
+                  {st.detail.filteredByThread.replace("{id}", threadId)}
+                </p>
+              ) : null}
+            </div>
+            <Button
+              data-testid="scheduled-task-create-trigger"
+              onClick={() => setCreateSheetOpen(true)}
+            >
+              <PlusIcon className="size-4" />
+              {st.create.title}
+            </Button>
+          </header>
+
+          {queryError ? (
+            <div
+              className="text-destructive text-sm"
+              data-testid="scheduled-task-load-error"
+            >
+              {st.detail.loadFailed}: {queryError.message}
+            </div>
+          ) : null}
+
+          <section className="bg-muted/25 flex flex-wrap gap-3 rounded-xl border p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-muted-foreground px-1 text-xs font-medium">
+                {st.filters.allStatuses}
+              </span>
+              <Button
+                variant={statusFilter === "all" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setStatusFilter("all")}
+              >
+                {st.filters.allStatuses}
+              </Button>
+              <Button
+                variant={statusFilter === "enabled" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setStatusFilter("enabled")}
+              >
+                {st.filters.enabled}
+              </Button>
+              <Button
+                variant={statusFilter === "paused" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setStatusFilter("paused")}
+              >
+                {st.filters.paused}
+              </Button>
+              <Button
+                variant={statusFilter === "completed" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setStatusFilter("completed")}
+              >
+                {st.filters.completed}
+              </Button>
+              <Button
+                variant={statusFilter === "failed" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setStatusFilter("failed")}
+              >
+                {st.filters.failed}
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-muted-foreground px-1 text-xs font-medium">
+                {st.filters.allTypes}
+              </span>
+              <Button
+                variant={typeFilter === "all" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setTypeFilter("all")}
+              >
+                {st.filters.allTypes}
+              </Button>
+              <Button
+                variant={typeFilter === "cron" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setTypeFilter("cron")}
+              >
+                {st.filters.cron}
+              </Button>
+              <Button
+                variant={typeFilter === "once" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setTypeFilter("once")}
+              >
+                {st.filters.once}
+              </Button>
+            </div>
+          </section>
+
+          <div className="grid items-start gap-4 lg:grid-cols-[minmax(280px,0.36fr)_minmax(0,0.64fr)]">
+            <section
+              className="bg-card flex flex-col gap-3 rounded-xl border p-3 shadow-xs"
+              data-testid="scheduled-task-list"
+            >
+              {filteredData.map((task) => {
+                const isSelected = selectedTask?.id === task.id;
+                return (
+                  <button
+                    type="button"
+                    key={task.id}
+                    onClick={() => setSelectedTaskId(task.id)}
+                    data-testid={`scheduled-task-item-${task.id}`}
+                    className={cn(
+                      "hover:bg-muted/40 rounded-lg border p-4 text-left transition-colors",
+                      isSelected
+                        ? "border-foreground bg-muted/50"
+                        : "border-border",
+                    )}
+                  >
+                    <div className="min-w-0 font-medium">{task.title}</div>
+                    <div className="text-muted-foreground mt-1 text-sm">
+                      {taskSummary(task)}
+                    </div>
+                    <div className="text-muted-foreground mt-3 text-xs">
+                      {st.detail.nextRun}:{" "}
+                      {formatTimestamp(task.next_run_at, locale)}
+                    </div>
+                  </button>
+                );
+              })}
+            </section>
+
+            <section
+              className="bg-card rounded-xl border p-5 shadow-xs"
+              data-testid="scheduled-task-detail"
+            >
+              {selectedTask ? (
+                <div className="flex flex-col gap-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="text-lg font-semibold">
+                      {selectedTask.title}
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setEditing((value) => !value)}
+                    >
+                      {editing ? st.actions.cancelEdit : st.actions.edit}
+                    </Button>
+                  </div>
+
+                  <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+                    <div className="space-y-1">
+                      <div className="text-muted-foreground text-xs">
+                        {st.detail.contextMode}
+                      </div>
+                      <div className="text-sm">
+                        {contextModeLabel(selectedTask.context_mode)}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-muted-foreground text-xs">
+                        {selectedTask.context_mode === "reuse_thread"
+                          ? st.detail.thread
+                          : st.detail.lastThread}
+                      </div>
+                      <div className="text-sm">
+                        {selectedTask.context_mode === "reuse_thread"
+                          ? (selectedTask.thread_id ?? NONE)
+                          : (selectedTask.last_thread_id ?? NONE)}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-muted-foreground text-xs">
+                        {st.detail.schedule}
+                      </div>
+                      <div className="text-sm">
+                        {scheduleTypeLabel(selectedTask.schedule_type)}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-muted-foreground text-xs">
+                        {st.detail.nextRun}
+                      </div>
+                      <div className="text-sm">
+                        {formatTimestamp(selectedTask.next_run_at, locale)}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-muted-foreground text-xs">
+                        {st.detail.lastRun}
+                      </div>
+                      <div className="text-sm">
+                        {formatTimestamp(selectedTask.last_run_at, locale)}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-muted-foreground text-xs">
+                        {st.detail.lastRunId}
+                      </div>
+                      <div className="text-sm break-all">
+                        {selectedTask.last_run_id ?? NONE}
+                      </div>
+                    </div>
+                    <div className="space-y-1 sm:col-span-2">
+                      <div className="text-muted-foreground text-xs">
+                        {st.detail.lastError}
+                      </div>
+                      <div className="text-sm">
+                        {selectedTask.last_error ?? NONE}
+                      </div>
+                    </div>
+                  </div>
+
+                  {editing ? (
+                    <div className="flex flex-col gap-2 rounded-lg border p-3">
+                      <Input
+                        value={editTitle}
+                        onChange={(event) => setEditTitle(event.target.value)}
+                        placeholder={st.edit.titlePlaceholder}
+                      />
+                      <Textarea
+                        rows={4}
+                        value={editPrompt}
+                        onChange={(event) => setEditPrompt(event.target.value)}
+                        placeholder={st.edit.promptPlaceholder}
+                      />
+                      <ScheduledTaskScheduleInput
+                        key={selectedTask.id}
+                        initial={editSchedule}
+                        onChange={setEditSchedule}
+                        scheduleTypeLocked
+                      />
+                      <Button
+                        size="sm"
+                        onClick={() =>
+                          updateTask.mutate({
+                            title: editTitle,
+                            prompt: editPrompt,
+                            schedule_spec: editSchedule.schedule_spec,
+                            timezone: editSchedule.timezone || "UTC",
+                          })
+                        }
+                        disabled={updateTask.isPending}
+                      >
+                        {st.edit.submit}
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="bg-muted/30 rounded-lg p-4 text-sm">
+                      {selectedTask.prompt}
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        selectedTask.status === "paused"
+                          ? resumeTask.mutate(selectedTask.id)
+                          : pauseTask.mutate(selectedTask.id)
+                      }
+                    >
+                      {selectedTask.status === "paused"
+                        ? st.actions.resume
+                        : st.actions.pause}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => triggerTask.mutate(selectedTask.id)}
+                    >
+                      {st.actions.trigger}
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => setDeleteOpen(true)}
+                    >
+                      {st.actions.delete}
+                    </Button>
+                  </div>
+
+                  <div className="space-y-3 border-t pt-5">
+                    <div
+                      className="font-medium"
+                      data-testid="scheduled-task-runs"
+                    >
+                      {(taskRunsQuery.data ?? []).length === 1
+                        ? st.detail.runsCountOne.replace(
+                            "{count}",
+                            String((taskRunsQuery.data ?? []).length),
+                          )
+                        : st.detail.runsCount.replace(
+                            "{count}",
+                            String((taskRunsQuery.data ?? []).length),
+                          )}
+                    </div>
+                    <div
+                      className="flex flex-col gap-2"
+                      data-testid="scheduled-task-run-list"
+                    >
+                      {(taskRunsQuery.data ?? []).length > 0 ? (
+                        (taskRunsQuery.data ?? []).map((run) => (
+                          <div
+                            key={run.id}
+                            className="rounded-md border p-3 text-sm"
+                          >
+                            <div className="font-medium">{runSummary(run)}</div>
+                            <div className="text-muted-foreground text-xs">
+                              {run.run_id ?? NONE}
+                            </div>
+                            <div className="text-muted-foreground text-xs">
+                              {formatTimestamp(run.scheduled_for, locale)}
+                            </div>
+                            {run.error && (
+                              <div className="text-destructive text-xs">
+                                {run.error}
+                              </div>
+                            )}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-muted-foreground text-sm">
+                          {st.detail.noRuns}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-muted-foreground text-sm">
+                  {st.detail.noSelection}
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
+      </WorkspaceBody>
+
+      <Sheet open={createSheetOpen} onOpenChange={setCreateSheetOpen}>
+        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+          <SheetHeader className="border-b px-6 py-5">
+            <SheetTitle>{st.create.title}</SheetTitle>
+            <SheetDescription>{t.sidebar.scheduledTasks}</SheetDescription>
+          </SheetHeader>
           <div
-            className="grid gap-2 rounded-lg border p-4"
+            className="space-y-5 px-6 pb-8"
             data-testid="scheduled-task-create-form"
           >
-            <div className="font-medium">{st.create.title}</div>
             <div
               className="flex flex-wrap items-center gap-1"
               data-testid="schedule-recipes"
@@ -300,6 +653,7 @@ export default function ScheduledTasksPage() {
                         timezone: "",
                       });
                       setCreateNonce((n) => n + 1);
+                      setCreateSheetOpen(false);
                     },
                   },
                 );
@@ -316,265 +670,8 @@ export default function ScheduledTasksPage() {
               {st.create.submit}
             </Button>
           </div>
-          {threadId && (
-            <div className="text-muted-foreground text-sm">
-              {st.detail.filteredByThread.replace("{id}", threadId)}
-            </div>
-          )}
-          {queryError ? (
-            <div
-              className="text-destructive text-sm"
-              data-testid="scheduled-task-load-error"
-            >
-              {st.detail.loadFailed}: {queryError.message}
-            </div>
-          ) : null}
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant={statusFilter === "all" ? "default" : "outline"}
-              size="sm"
-              onClick={() => setStatusFilter("all")}
-            >
-              {st.filters.allStatuses}
-            </Button>
-            <Button
-              variant={statusFilter === "enabled" ? "default" : "outline"}
-              size="sm"
-              onClick={() => setStatusFilter("enabled")}
-            >
-              {st.filters.enabled}
-            </Button>
-            <Button
-              variant={statusFilter === "paused" ? "default" : "outline"}
-              size="sm"
-              onClick={() => setStatusFilter("paused")}
-            >
-              {st.filters.paused}
-            </Button>
-            <Button
-              variant={statusFilter === "completed" ? "default" : "outline"}
-              size="sm"
-              onClick={() => setStatusFilter("completed")}
-            >
-              {st.filters.completed}
-            </Button>
-            <Button
-              variant={statusFilter === "failed" ? "default" : "outline"}
-              size="sm"
-              onClick={() => setStatusFilter("failed")}
-            >
-              {st.filters.failed}
-            </Button>
-            <Button
-              variant={typeFilter === "all" ? "default" : "outline"}
-              size="sm"
-              onClick={() => setTypeFilter("all")}
-            >
-              {st.filters.allTypes}
-            </Button>
-            <Button
-              variant={typeFilter === "cron" ? "default" : "outline"}
-              size="sm"
-              onClick={() => setTypeFilter("cron")}
-            >
-              {st.filters.cron}
-            </Button>
-            <Button
-              variant={typeFilter === "once" ? "default" : "outline"}
-              size="sm"
-              onClick={() => setTypeFilter("once")}
-            >
-              {st.filters.once}
-            </Button>
-          </div>
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-            <div
-              data-testid="scheduled-task-list"
-              className="flex flex-col gap-3"
-            >
-              {filteredData.map((task) => {
-                const isSelected = selectedTask?.id === task.id;
-                return (
-                  <button
-                    type="button"
-                    key={task.id}
-                    onClick={() => setSelectedTaskId(task.id)}
-                    data-testid={`scheduled-task-item-${task.id}`}
-                    className={cn(
-                      "rounded-lg border p-4 text-left",
-                      isSelected ? "border-foreground" : "border-border",
-                    )}
-                  >
-                    <div className="font-medium">{task.title}</div>
-                    <div className="text-muted-foreground text-sm">
-                      {taskSummary(task)}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-            <div
-              className="rounded-lg border p-4"
-              data-testid="scheduled-task-detail"
-            >
-              {selectedTask ? (
-                <div className="flex flex-col gap-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="text-lg font-semibold">
-                      {selectedTask.title}
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setEditing((value) => !value)}
-                    >
-                      {editing ? st.actions.cancelEdit : st.actions.edit}
-                    </Button>
-                  </div>
-                  <div className="text-muted-foreground text-sm">
-                    {st.detail.contextMode}:{" "}
-                    {contextModeLabel(selectedTask.context_mode)}
-                  </div>
-                  <div className="text-muted-foreground text-sm">
-                    {selectedTask.context_mode === "reuse_thread"
-                      ? `${st.detail.thread}: ${selectedTask.thread_id ?? NONE}`
-                      : `${st.detail.lastThread}: ${selectedTask.last_thread_id ?? NONE}`}
-                  </div>
-                  <div className="text-muted-foreground text-sm">
-                    {st.detail.schedule}:{" "}
-                    {scheduleTypeLabel(selectedTask.schedule_type)}
-                  </div>
-                  <div className="text-muted-foreground text-sm">
-                    {st.detail.nextRun}:{" "}
-                    {formatTimestamp(selectedTask.next_run_at, locale)}
-                  </div>
-                  <div className="text-muted-foreground text-sm">
-                    {st.detail.lastRun}:{" "}
-                    {formatTimestamp(selectedTask.last_run_at, locale)}
-                  </div>
-                  <div className="text-muted-foreground text-sm">
-                    {st.detail.lastRunId}: {selectedTask.last_run_id ?? NONE}
-                  </div>
-                  <div className="text-muted-foreground text-sm">
-                    {st.detail.lastError}: {selectedTask.last_error ?? NONE}
-                  </div>
-                  {editing ? (
-                    <div className="flex flex-col gap-2 rounded-lg border p-3">
-                      <Input
-                        value={editTitle}
-                        onChange={(event) => setEditTitle(event.target.value)}
-                        placeholder={st.edit.titlePlaceholder}
-                      />
-                      <Textarea
-                        rows={4}
-                        value={editPrompt}
-                        onChange={(event) => setEditPrompt(event.target.value)}
-                        placeholder={st.edit.promptPlaceholder}
-                      />
-                      <ScheduledTaskScheduleInput
-                        key={selectedTask.id}
-                        initial={editSchedule}
-                        onChange={setEditSchedule}
-                        scheduleTypeLocked
-                      />
-                      <Button
-                        size="sm"
-                        onClick={() =>
-                          updateTask.mutate({
-                            title: editTitle,
-                            prompt: editPrompt,
-                            schedule_spec: editSchedule.schedule_spec,
-                            timezone: editSchedule.timezone || "UTC",
-                          })
-                        }
-                        disabled={updateTask.isPending}
-                      >
-                        {st.edit.submit}
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="text-sm">{selectedTask.prompt}</div>
-                  )}
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() =>
-                        selectedTask.status === "paused"
-                          ? resumeTask.mutate(selectedTask.id)
-                          : pauseTask.mutate(selectedTask.id)
-                      }
-                    >
-                      {selectedTask.status === "paused"
-                        ? st.actions.resume
-                        : st.actions.pause}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => triggerTask.mutate(selectedTask.id)}
-                    >
-                      {st.actions.trigger}
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => setDeleteOpen(true)}
-                    >
-                      {st.actions.delete}
-                    </Button>
-                  </div>
-                  <div data-testid="scheduled-task-runs">
-                    {(taskRunsQuery.data ?? []).length === 1
-                      ? st.detail.runsCountOne.replace(
-                          "{count}",
-                          String((taskRunsQuery.data ?? []).length),
-                        )
-                      : st.detail.runsCount.replace(
-                          "{count}",
-                          String((taskRunsQuery.data ?? []).length),
-                        )}
-                  </div>
-                  <div
-                    className="flex flex-col gap-2"
-                    data-testid="scheduled-task-run-list"
-                  >
-                    {(taskRunsQuery.data ?? []).length > 0 ? (
-                      (taskRunsQuery.data ?? []).map((run) => (
-                        <div
-                          key={run.id}
-                          className="rounded-md border p-3 text-sm"
-                        >
-                          <div className="font-medium">{runSummary(run)}</div>
-                          <div className="text-muted-foreground text-xs">
-                            {run.run_id ?? NONE}
-                          </div>
-                          <div className="text-muted-foreground text-xs">
-                            {formatTimestamp(run.scheduled_for, locale)}
-                          </div>
-                          {run.error && (
-                            <div className="text-destructive text-xs">
-                              {run.error}
-                            </div>
-                          )}
-                        </div>
-                      ))
-                    ) : (
-                      <div className="text-muted-foreground text-sm">
-                        {st.detail.noRuns}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <div className="text-muted-foreground text-sm">
-                  {st.detail.noSelection}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </WorkspaceBody>
+        </SheetContent>
+      </Sheet>
 
       {/* Delete confirm — follows the agent-card confirm pattern. */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
