@@ -9,8 +9,8 @@
 #      mirroring scripts/detect_uv_extras.py for parity with local `make dev`).
 #   2. Validate each extra against [A-Za-z][A-Za-z0-9_-]* so a stray shell
 #      metacharacter in `.env` cannot reach `uv sync`.
-#   3. `uv sync --all-packages` so workspace member extras (deerflow-harness's
-#      postgres extra in particular) are installed — see PR #2584.
+#   3. `uv sync --all-packages` so selected workspace-member extras are
+#      installed consistently.
 #   4. Self-heal: if the first sync fails, recreate .venv and retry once.
 #   5. Hand off to uvicorn with reload, replacing this shell so uvicorn becomes
 #      PID 1 inside the container.
@@ -42,6 +42,10 @@ if [ -n "${UV_EXTRAS:-}" ]; then
     # Normalize comma → space, then split on whitespace via the unquoted `for`.
     for raw in $(printf '%s' "$UV_EXTRAS" | tr ',' ' '); do
         [ -z "$raw" ] && continue
+        if [ "$raw" = "postgres" ]; then
+            echo "[startup] postgres extra no longer exists; PostgreSQL dependencies are installed by default" >&2
+            exit 1
+        fi
         # Reject anything that does not look like an identifier.
         # Two patterns: leading non-letter, or any non-[A-Za-z0-9_-] character.
         case "$raw" in

@@ -103,7 +103,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 20
+  config_version: 22
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -114,11 +114,7 @@ config: |
     use: deerflow.community.aio_sandbox:AioSandboxProvider
     provisioner_url: http://provisioner:8002
   database:
-    backend: postgres
-    postgres_url: $DATABASE_URL
-  checkpointer:
-    type: postgres
-    connection_string: $DATABASE_URL
+    url: $DATABASE_URL
   stream_bridge:
     type: redis   # cross-pod SSE; URL from DEER_FLOW_STREAM_BRIDGE_REDIS_URL
   # Tools MUST be listed explicitly - the agent gets none otherwise
@@ -151,14 +147,14 @@ config: |
     # also: ls, read_file, glob, grep, write_file, str_replace (see values.yaml)
 ```
 
-`$DATABASE_URL` is injected from the postgres Secret (see below). The
-`checkpointer:` section is required for multi-replica operation — the LangGraph
-Store (cross-thread memory + thread list) reads it and does not fall back to
-`database:`. `stream_bridge.type: redis` is the default and routes live SSE
-events through the bundled redis StatefulSet (or `redis.external`).
+`$DATABASE_URL` is injected from the postgres Secret (see below). The unified
+`database.url` setting supplies DeerFlow application data, the LangGraph Store,
+and the checkpointer. PostgreSQL dependencies are installed by default.
+`stream_bridge.type: redis` is the default and routes live SSE events through
+the bundled redis StatefulSet (or `redis.external`).
 Because `config:` is a single override blob, a partial `config:` replaces the
 chart default entirely - keep the `tools:`/`tool_groups:` block (or the agent
-will have no tools) and the `sandbox:`/`database:`/`checkpointer:`/`stream_bridge:`
+will have no tools) and the `sandbox:`/`database:`/`stream_bridge:`
 sections shown above.
 
 ## 3. Install (from a local chart checkout)
@@ -189,11 +185,11 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
 
 ## Architecture notes
 
-- **PostgreSQL is the default database.** A bundled single-instance postgres
+- **PostgreSQL is required.** A bundled single-instance postgres
   StatefulSet (`postgresql.enabled: true`) runs in the namespace and the gateway
   connects via the in-cluster Service. The DSN is auto-generated into a Secret
   (key `database-url`) and injected as `DATABASE_URL`; `config.yaml` references
-  it as `$DATABASE_URL` in `database.postgres_url`. Schema is bootstrapped
+  it as `$DATABASE_URL` in `database.url`. Schema is bootstrapped
   automatically on gateway startup (alembic `create_all` + `stamp head`).
   For real HA, disable the bundled instance and point at a managed DB:
   ```yaml
@@ -227,7 +223,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   set `redis.auth.password` to enable AUTH. For a managed Redis, disable the
   bundled instance and point at it via `redis.external`.
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
-  (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
+  (learned memory, custom agents, per-thread user-data). PostgreSQL data is
+  backed up separately using normal PostgreSQL tooling. The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC
   user-data mode. Default `ReadWriteOnce`; use `ReadWriteMany` (NFS) on
   multi-node clusters so sandbox Pods on other nodes can mount it.

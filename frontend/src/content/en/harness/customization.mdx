@@ -144,15 +144,7 @@ The model class must implement the LangChain `BaseChatModel` interface.
 
 ## Custom checkpointer
 
-Thread state persistence can use any LangGraph-compatible checkpointer:
-
-```yaml
-checkpointer:
-  type: sqlite
-  connection_string: ./my-checkpoints.db
-```
-
-For custom backends, implement the LangGraph `BaseCheckpointSaver` interface and configure it programmatically when initializing the `DeerFlowClient`.
+Application configuration always derives thread persistence from the required PostgreSQL `database.url`. Embedded integrations can still pass a LangGraph `BaseCheckpointSaver` implementation programmatically when initializing `DeerFlowClient`; there is no standalone checkpointer YAML section.
 
 ## Guardrails
 

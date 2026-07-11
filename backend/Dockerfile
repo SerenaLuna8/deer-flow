@@ -13,8 +13,8 @@ FROM python:3.12-slim-bookworm AS builder
 ARG NODE_MAJOR=22
 ARG APT_MIRROR
 ARG UV_INDEX_URL
-# Optional extras to install (e.g. "postgres" for PostgreSQL support)
-# Usage: docker build --build-arg UV_EXTRAS=postgres,discord ...
+# Optional extras to install (for example, "ollama,discord")
+# Usage: docker build --build-arg UV_EXTRAS=ollama,discord ...
 ARG UV_EXTRAS
 
 # Optionally override apt mirror for restricted networks (e.g. APT_MIRROR=mirrors.aliyun.com)
@@ -56,6 +56,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     extras_flags=""; \
     for extra in $(printf "%s" "$UV_EXTRAS" | tr "," " "); do \
         case "$extra" in \
+            postgres) \
+                echo "postgres extra no longer exists; PostgreSQL dependencies are installed by default" >&2; \
+                exit 1; \
+                ;; \
             [!A-Za-z]* | *[!A-Za-z0-9_-]*) \
                 echo "UV_EXTRAS entry $extra is invalid (must match [A-Za-z][A-Za-z0-9_-]*)" >&2; \
                 exit 1; \

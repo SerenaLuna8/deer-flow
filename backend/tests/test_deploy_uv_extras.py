@@ -92,6 +92,38 @@ def test_backend_dockerfile_rejects_glob_uv_extra(tmp_path):
     assert not capture.exists()
 
 
+def test_backend_dockerfile_rejects_removed_postgres_extra(tmp_path):
+    workdir = tmp_path / "work"
+    (workdir / "backend").mkdir(parents=True)
+    capture = tmp_path / "uv_args.txt"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv = bin_dir / "uv"
+    uv.write_text(
+        '#!/usr/bin/env sh\nfor arg in "$@"; do printf "%s\\n" "$arg"; done > "$CAPTURE_UV_ARGS"\n',
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CAPTURE_UV_ARGS"] = str(capture)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["UV_EXTRAS"] = "postgres"
+
+    result = subprocess.run(
+        ["sh", "-c", _backend_dockerfile_uv_sync_script()],
+        cwd=workdir,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "postgres extra no longer exists" in result.stderr
+    assert not capture.exists()
+
+
 def test_deploy_build_auto_detects_discord_extra(tmp_path):
     """Production image builds preserve every detected extra as Docker build tokens."""
     worktree = tmp_path / "repo"

@@ -98,10 +98,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: DEER_FLOW_INTERNAL_AUTH_TOKEN
-            {{- /* PostgreSQL DSN — only mounted when postgres is configured
-                  (bundled StatefulSet, external databaseUrl, or an existing
-                  Secret). In sqlite/memory mode the env is omitted and
-                  config.yaml's database.postgres_url is never read. */ -}}
+            {{- /* PostgreSQL DSN from the bundled StatefulSet, an external
+                  databaseUrl, or an existing Secret. Public application
+                  configuration requires DATABASE_URL via database.url. */ -}}
             {{- $pgConfigured := or .Values.postgresql.enabled .Values.postgresql.external.databaseUrl .Values.postgresql.external.existingSecret .Values.postgresql.existingSecret -}}
             {{- if $pgConfigured }}
             - name: DATABASE_URL

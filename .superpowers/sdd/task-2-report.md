@@ -191,3 +191,58 @@ Follow-up commit subject: `test(config): stop treating postgres as an extra` (fi
 ### Concerns
 
 - Stale provider error prose still mentions the removed postgres extra and remains intentionally deferred to task 3; tests now validate only generic actionable missing-`asyncpg` guidance.
+
+## Third review follow-up
+
+### STATUS
+
+PASS — removed the remaining public postgres-extra and selectable-backend guidance from build entrypoints, Helm defaults, and English/Chinese application documentation while preserving real optional extras.
+
+### RED
+
+The three new entrypoint regressions failed before the production changes:
+
+```text
+3 failed in 4.41s
+```
+
+They proved that the detector still accepted `postgres`, the development entrypoint still emitted `--extra postgres`, and the backend Dockerfile still passed the removed extra to `uv sync`.
+
+### Changes
+
+- `backend/Dockerfile` and `docker/dev-entrypoint.sh` now reject the removed `postgres` extra with actionable guidance; generic `UV_EXTRAS` support remains for actual extras.
+- `scripts/detect_uv_extras.py` ignores an explicitly supplied removed postgres extra and explains that PostgreSQL dependencies are installed by default; `scripts/serve.sh` documents only real optional extras.
+- English and Chinese application/configuration, deployment, operations, agent/thread, and harness documentation now presents only `database.url` and PostgreSQL backup/recovery.
+- Helm defaults and documentation now use config version 22 with `database.url`, without a selectable database backend or standalone checkpointer section.
+
+### GREEN
+
+Focused new regressions:
+
+```text
+3 passed in 0.18s
+```
+
+Affected entrypoint and persistence suites:
+
+```text
+88 passed in 5.29s
+```
+
+### Verification
+
+- Related ruff command: `All checks passed!`
+- `uv lock --check`: `Resolved 233 packages in 3ms`
+- `helm lint deploy/helm/deer-flow`: `1 chart(s) linted, 0 chart(s) failed`
+- Shell syntax checks passed for `docker/dev-entrypoint.sh`, `scripts/serve.sh`, and `scripts/deploy.sh`.
+- Prettier checks passed for all 14 changed English/Chinese MDX files.
+- `git diff --check`: passed.
+- The directed public-file audit for `--extra postgres`, `UV_EXTRAS=postgres`, selectable `database.backend`, `postgres_url`, and YAML `checkpointer:` found only `backend/docs/rfc-create-deerflow-agent.md`'s Python API annotation `checkpointer: BaseCheckpointSaver | None`; that internal programmatic parameter is not public application configuration.
+
+### Commit
+
+Follow-up commit subject: `fix(config): remove postgres extra entrypoints` (final hash reported after commit).
+
+### Concerns
+
+- Legacy provider implementation branches remain intentionally deferred to task 3; public configuration and operational guidance no longer expose them.

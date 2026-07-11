@@ -120,7 +120,7 @@ The following table maps each top-level `config.yaml` section to its documentati
 | `memory`          | Cross-session memory storage                     | [Memory](/docs/harness/memory)                           |
 | `summarization`   | Conversation summarization                       | [Middlewares](/docs/harness/middlewares)                 |
 | `title`           | Automatic thread title generation                | [Middlewares](/docs/harness/middlewares)                 |
-| `checkpointer`    | Thread state persistence                         | [Agents & Threads](/docs/application/agents-and-threads) |
+| `database`        | Required PostgreSQL connection                   | [Agents & Threads](/docs/application/agents-and-threads) |
 | `guardrails`      | Tool call authorization                          | —                                                        |
 | `stream_bridge`   | Streaming configuration                          | —                                                        |
 | `uploads`         | File upload settings (PDF converter)             | —                                                        |
@@ -128,10 +128,13 @@ The following table maps each top-level `config.yaml` section to its documentati
 
 ## Minimal config to get started
 
-The minimum valid `config.yaml` requires at least one model and a sandbox:
+The minimum valid `config.yaml` requires a PostgreSQL connection, at least one model, and a sandbox:
 
 ```yaml
-config_version: 6
+config_version: 22
+
+database:
+  url: $DATABASE_URL
 
 models:
   - name: gpt-4o

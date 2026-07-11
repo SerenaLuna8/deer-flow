@@ -119,17 +119,20 @@ make config-upgrade
 | `memory`          | 跨会话记忆存储                               | [记忆系统](/docs/harness/memory)                     |
 | `summarization`   | 对话摘要压缩                                 | [中间件](/docs/harness/middlewares)                  |
 | `title`           | 自动生成线程标题                             | [中间件](/docs/harness/middlewares)                  |
-| `checkpointer`    | 线程状态持久化                               | [Agent 与线程](/docs/application/agents-and-threads) |
+| `database`        | 必需的 PostgreSQL 连接                       | [Agent 与线程](/docs/application/agents-and-threads) |
 | `guardrails`      | 工具调用授权                                 | —                                                    |
 | `uploads`         | 文件上传设置（PDF 转换器）                   | —                                                    |
 | `channels`        | IM 频道集成（飞书、Slack 等）                | —                                                    |
 
 ## 最小配置示例
 
-最小有效的 `config.yaml` 至少需要一个模型和一个沙箱：
+最小有效的 `config.yaml` 需要 PostgreSQL 连接、至少一个模型和一个沙箱：
 
 ```yaml
-config_version: 6
+config_version: 22
+
+database:
+  url: $DATABASE_URL
 
 models:
   - name: gpt-4o

@@ -105,22 +105,19 @@ If file tools (`read_file`, `ls`, `bash`) fail with permission or path errors:
 
 ---
 
-### SQLite reports `database is locked`
+### PostgreSQL connection failures
 
-This usually means SQLite is handling concurrent writes from multiple users or long-running agent runs. SQLite supports concurrent reads, but only one writer can hold the database lock at a time. In DeerFlow, checkpoint writes and application writes share the same SQLite database file.
-
-For production or multi-user deployments, switch to Postgres:
+DeerFlow requires PostgreSQL. If startup reports a connection, authentication, or timeout error, verify that `DATABASE_URL` is available to the Gateway process and reachable from its network namespace:
 
 ```yaml
 database:
-  backend: postgres
-  postgres_url: $DATABASE_URL
+  url: $DATABASE_URL
 
 run_events:
   backend: db
 ```
 
-SQLite should be kept for local development, single-user deployments, or short-lived evaluation environments.
+Test the same URL with your PostgreSQL client, confirm DNS/port/TLS settings, and verify that the database user can create and migrate DeerFlow tables. PostgreSQL drivers are installed by default.
 
 ---
 
@@ -155,13 +152,11 @@ If MCP tools appear in `extensions_config.json` but are not available in the age
 
 ## Data backup
 
-Back up the storage backends you use:
+Back up DeerFlow files and PostgreSQL:
 
 - `backend/.deer-flow/threads/` for thread working directories, uploads, and artifacts.
 - `backend/.deer-flow/memory.json` and `backend/.deer-flow/agents/` for learned memory.
-- `${database.sqlite_dir}/deerflow.db` when using `database.backend: sqlite` (default: `.deer-flow/data/deerflow.db`).
-- Regular database dumps when using `database.backend: postgres`.
-- The legacy `checkpointer.connection_string` file if your deployment still configures a standalone `checkpointer`.
+- Regular PostgreSQL dumps with `pg_dump`, including a restore test with `pg_restore` or `psql` appropriate to the dump format.
 
 In Docker deployments, back up the bind-mounted host paths rather than the container filesystem.
 

@@ -94,7 +94,7 @@ provisioner:
 # -- PostgreSQL database. Bundled mode (default) deploys a single-instance
 #    postgres StatefulSet; set `enabled: false` to use an external managed DB.
 #    The gateway reads DATABASE_URL from the resolved Secret and config.yaml
-#    references it as $DATABASE_URL in database.postgres_url.
+#    references it as $DATABASE_URL in database.url.
 postgresql:
   # -- Deploy a bundled postgres StatefulSet. Disable to use an external DB.
   enabled: true
@@ -221,7 +221,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 21
+  config_version: 22
   log_level: info
 
   models: []
@@ -241,19 +241,10 @@ config: |
     replicas: 3
 
   database:
-    # PostgreSQL is the default backend (bundled StatefulSet, or external).
+    # PostgreSQL is required (bundled StatefulSet, or external).
     # DATABASE_URL is injected from the postgres Secret; $DATABASE_URL is
     # resolved by the harness before the config is instantiated.
-    backend: postgres
-    postgres_url: $DATABASE_URL
-
-  # The LangGraph Store (cross-thread memory + thread list) reads this legacy
-  # `checkpointer:` section — it does NOT fall back to `database:` the way the
-  # checkpointer does. Point it at the same postgres so the Store is shared
-  # across gateway pods (required for multi-replica operation).
-  checkpointer:
-    type: postgres
-    connection_string: $DATABASE_URL
+    url: $DATABASE_URL
 
   # Stream bridge: `redis` (default) stores per-run SSE events in Redis Streams
   # so live run events reach a client on any gateway pod (cross-pod SSE delivery

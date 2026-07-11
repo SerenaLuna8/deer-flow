@@ -66,6 +66,13 @@ def test_single_extra():
     assert proc.stdout.strip() == "--extra ollama"
 
 
+def test_removed_postgres_extra_is_rejected():
+    proc = _run("postgres")
+    assert proc.returncode != 0
+    assert "postgres extra no longer exists" in proc.stderr
+    assert proc.stdout.strip() == ""
+
+
 def test_multi_extra_comma_separated():
     proc = _run("ollama,redis")
     assert proc.returncode == 0

@@ -141,15 +141,7 @@ models:
 
 ## 自定义检查点
 
-线程状态持久化可以使用任何与 LangGraph 兼容的检查点器：
-
-```yaml
-checkpointer:
-  type: sqlite
-  connection_string: ./my-checkpoints.db
-```
-
-对于自定义后端，实现 LangGraph 的 `BaseCheckpointSaver` 接口，并在初始化 `DeerFlowClient` 时以编程方式配置它。
+应用配置始终从必需的 PostgreSQL `database.url` 派生线程持久化设置。嵌入式集成仍可在初始化 `DeerFlowClient` 时以编程方式传入 LangGraph `BaseCheckpointSaver` 实现；不再提供独立的 checkpointer YAML 配置段。
 
 <Cards num={2}>
   <Cards.Card title="集成指南" href="/docs/harness/integration-guide" />

@@ -147,40 +147,23 @@ skills:
 
 技能可用性在 `extensions_config.json` 中管理（参见下方）。
 
-### 数据库后端
+### 数据库
 
-DeerFlow 使用 `database` 配置同时管理 LangGraph 检查点数据和应用数据，例如运行记录、反馈和线程元数据。
-
-默认使用 SQLite，适合本地开发和单节点单用户持久化：
+DeerFlow 必须使用 PostgreSQL 存储 LangGraph 检查点和运行记录、反馈、线程元数据等应用数据。将连接地址放入 `DATABASE_URL`，并通过统一的 `database` 配置引用：
 
 ```yaml
 database:
-  backend: sqlite
-  sqlite_dir: .deer-flow/data
-```
-
-SQLite 模式会把数据写入同一个 `deerflow.db` 文件。它适合开发或单用户部署，但生产并发流量可能触发 SQLite 的单写者限制，出现 `sqlite3.OperationalError: database is locked`。
-
-生产环境或多用户部署请使用 Postgres：
-
-```yaml
-database:
-  backend: postgres
-  postgres_url: $DATABASE_URL
+  url: $DATABASE_URL
+  pool_size: 5
+  max_overflow: 10
+  pool_timeout_seconds: 30
+  statement_timeout_seconds: 30
 
 run_events:
   backend: db
 ```
 
-在环境变量中设置 `DATABASE_URL`，例如 `postgresql://user:password@localhost:5432/deerflow`。
-
-本地运行时安装 PostgreSQL 支持：
-
-```bash
-cd backend && uv sync --all-packages --extra postgres
-```
-
-Docker 或脚本启动场景，在安装或构建前设置 `UV_EXTRAS=postgres`。旧的独立 `checkpointer` 配置仍然兼容，但新的部署应优先使用 `database`。
+`DATABASE_URL` 接受 `postgresql://...` 和 `postgresql+asyncpg://...` 地址。PostgreSQL 驱动已是默认依赖，不需要数据库 extra；独立的 `checkpointer` 配置不再接受。
 
 ## 前端环境变量
 

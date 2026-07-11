@@ -40,7 +40,12 @@ _EXTRA_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 def _validate_extras(names: list[str]) -> list[str]:
     valid: list[str] = []
     for name in names:
-        if _EXTRA_NAME_RE.match(name):
+        if name.casefold() == "postgres":
+            print(
+                "detect_uv_extras: ignoring UV_EXTRAS entry 'postgres' (the postgres extra no longer exists; PostgreSQL dependencies are installed by default)",
+                file=sys.stderr,
+            )
+        elif _EXTRA_NAME_RE.match(name):
             valid.append(name)
         else:
             print(

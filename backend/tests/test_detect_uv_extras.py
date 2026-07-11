@@ -39,6 +39,11 @@ def test_parse_env_extras_supports_comma_and_whitespace():
     assert detect.parse_env_extras("") == []
 
 
+def test_parse_env_extras_rejects_removed_postgres_extra(capsys):
+    assert detect.parse_env_extras("postgres") == []
+    assert "postgres extra no longer exists" in capsys.readouterr().err
+
+
 def test_parse_env_extras_drops_shell_metacharacters(capsys):
     """A `.env` value containing shell injection bait must not pass through.
 

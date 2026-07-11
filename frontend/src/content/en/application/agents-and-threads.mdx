@@ -92,28 +92,17 @@ Opening a thread from the sidebar loads its full history from persisted state. T
 
 ### Thread persistence configuration
 
-The `database` section controls the default persistence backend for thread state and application data:
+PostgreSQL is required for thread state and application data. Configure the shared connection through `database.url`:
 
 ```yaml
-# SQLite (local development and single-user deployments)
 database:
-  backend: sqlite
-  sqlite_dir: .deer-flow/data
+  url: $DATABASE_URL
 
-# Postgres (production and multi-user deployments)
-# database:
-#   backend: postgres
-#   postgres_url: $DATABASE_URL
-#
-# run_events:
-#   backend: db
+run_events:
+  backend: db
 ```
 
-<Callout type="info">
-  The legacy <code>checkpointer</code> section is still accepted for LangGraph
-  state compatibility and takes precedence when configured. Prefer{" "}
-  <code>database</code> for new deployments.
-</Callout>
+PostgreSQL drivers are default dependencies. A standalone `checkpointer` configuration is not accepted.
 
 ### Thread data storage
 
