@@ -4,9 +4,14 @@ Uses a helper to create the store for each backend type.
 Memory tests run directly; DB and JSONL tests create stores inside each test.
 """
 
+import asyncio
+
 import pytest
 import pytest_asyncio
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
+from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 
 _DATABASE_URL: str | None = None
@@ -19,6 +24,9 @@ async def _postgres_database(migrated_postgres_database_url):
     try:
         yield
     finally:
+        from deerflow.persistence.engine import close_engine
+
+        await close_engine()
         _DATABASE_URL = None
 
 
@@ -33,6 +41,36 @@ async def _init_db() -> None:
 @pytest.fixture
 def store():
     return MemoryRunEventStore()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_concurrent_db_writes_assign_unique_contiguous_sequence(
+    migrated_postgres_database_url: str,
+) -> None:
+    first_engine = create_async_engine(migrated_postgres_database_url, poolclass=NullPool)
+    second_engine = create_async_engine(migrated_postgres_database_url, poolclass=NullPool)
+    first = DbRunEventStore(async_sessionmaker(first_engine, expire_on_commit=False))
+    second = DbRunEventStore(async_sessionmaker(second_engine, expire_on_commit=False))
+    try:
+        writes = [
+            (first if index % 2 == 0 else second).put(
+                thread_id="concurrent-thread",
+                run_id="run-1",
+                event_type="human_message",
+                category="message",
+                content=str(index),
+            )
+            for index in range(20)
+        ]
+        records = await asyncio.gather(*writes)
+        assert sorted(record["seq"] for record in records) == list(range(1, 21))
+
+        persisted = await first.list_events("concurrent-thread", "run-1", limit=50, user_id=None)
+        assert [record["seq"] for record in persisted] == list(range(1, 21))
+    finally:
+        await first_engine.dispose()
+        await second_engine.dispose()
 
 
 # -- Basic write and query --
@@ -551,7 +589,6 @@ class TestMakeRunEventStore:
         assert type(store).__name__ == "DbRunEventStore"
         await close_engine()
 
-    @pytest.mark.anyio
     @pytest.mark.anyio
     async def test_jsonl_backend(self):
         from unittest.mock import MagicMock

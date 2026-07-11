@@ -16,7 +16,7 @@ from app.channels.message_bus import MessageBus, OutboundMessage
 _DATABASE_URL: str | None = None
 
 
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture()
 async def _postgres_database(migrated_postgres_database_url):
     global _DATABASE_URL
     _DATABASE_URL = migrated_postgres_database_url
@@ -39,7 +39,7 @@ async def _make_repo(_tmp_path):
     return repo
 
 
-def test_slack_connect_command_binds_socket_mode_identity(tmp_path):
+def test_slack_connect_command_binds_socket_mode_identity(tmp_path, _postgres_database):
     import anyio
 
     from app.channels.slack import SlackChannel

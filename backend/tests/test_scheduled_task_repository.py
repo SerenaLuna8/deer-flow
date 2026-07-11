@@ -10,14 +10,17 @@ from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
 _DATABASE_URL: str | None = None
 
+pytestmark = [pytest.mark.postgres, pytest.mark.usefixtures("_postgres_database")]
 
-@pytest_asyncio.fixture(autouse=True)
+
+@pytest_asyncio.fixture()
 async def _postgres_database(migrated_postgres_database_url):
     global _DATABASE_URL
     _DATABASE_URL = migrated_postgres_database_url
     try:
         yield
     finally:
+        await close_engine()
         _DATABASE_URL = None
 
 

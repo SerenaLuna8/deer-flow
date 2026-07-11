@@ -47,9 +47,9 @@ sys.modules["deerflow.subagents.executor"] = _executor_mock
 @pytest.fixture(scope="session")
 def postgres_admin_url() -> str:
     """Return a maintenance URL without ever logging credentials."""
-    url = os.getenv("POSTGRES_TEST_URL") or os.getenv("DATABASE_URL")
+    url = os.getenv("POSTGRES_TEST_URL")
     if not url:
-        pytest.skip("POSTGRES_TEST_URL or DATABASE_URL is required for PostgreSQL tests")
+        pytest.skip("POSTGRES_TEST_URL is required for PostgreSQL tests")
     return RedactedURL(replace_database(url, "postgres"))
 
 

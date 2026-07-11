@@ -58,6 +58,48 @@ async def test_advisory_lock_wait_ignores_normal_statement_timeout(postgres_data
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_advisory_lock_wait_disables_idle_transaction_timeout_before_lock(
+    postgres_database_url: str,
+) -> None:
+    holder_engine = create_async_engine(postgres_database_url)
+    waiter_engine = create_async_engine(
+        postgres_database_url,
+        connect_args={"server_settings": {"idle_in_transaction_session_timeout": "100"}},
+    )
+    probe_engine = create_async_engine(postgres_database_url)
+    acquired = asyncio.Event()
+
+    async def wait_then_fail() -> None:
+        async with _postgres_lock(waiter_engine):
+            acquired.set()
+            raise RuntimeError("lock body failed")
+
+    waiter: asyncio.Task[None] | None = None
+    try:
+        async with holder_engine.connect() as holder:
+            await holder.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _PG_LOCK_KEY})
+            waiter = asyncio.create_task(wait_then_fail())
+            await asyncio.sleep(0.3)
+            assert not acquired.is_set()
+            await holder.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _PG_LOCK_KEY})
+
+        with pytest.raises(RuntimeError, match="lock body failed"):
+            await asyncio.wait_for(waiter, timeout=2)
+        assert acquired.is_set()
+
+        async with probe_engine.connect() as probe:
+            assert await probe.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": _PG_LOCK_KEY}) is True
+            await probe.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _PG_LOCK_KEY})
+    finally:
+        if waiter is not None and not waiter.done():
+            waiter.cancel()
+        await holder_engine.dispose()
+        await waiter_engine.dispose()
+        await probe_engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_cancelled_lock_holder_releases_session_lock(postgres_database_url: str) -> None:
     engine = create_async_engine(postgres_database_url)
     entered = asyncio.Event()

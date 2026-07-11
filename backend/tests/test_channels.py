@@ -7,6 +7,7 @@ import json
 import logging
 import tempfile
 from concurrent.futures import Future
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -595,7 +596,8 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
     return mock_client
 
 
-async def _make_channel_connection_repo(database_url: str):
+@asynccontextmanager
+async def _channel_connection_repo(database_url: str):
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from sqlalchemy.pool import NullPool
 
@@ -606,8 +608,23 @@ async def _make_channel_connection_repo(database_url: str):
         async_sessionmaker(engine, expire_on_commit=False),
         cipher=ChannelCredentialCipher.from_key("test-channel-key"),
     )
-    repo.close = engine.dispose  # type: ignore[method-assign]
-    return repo
+    try:
+        yield repo
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_channel_connection_repo_disposes_owned_engine_on_failure(monkeypatch):
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr("sqlalchemy.ext.asyncio.create_async_engine", MagicMock(return_value=engine))
+
+    with pytest.raises(RuntimeError, match="body failed"):
+        async with _channel_connection_repo("postgresql://unused"):
+            raise RuntimeError("body failed")
+
+    engine.dispose.assert_awaited_once()
 
 
 def _make_stream_part(event: str, data):
@@ -3833,12 +3850,14 @@ class TestChannelManagerConnectionRouting:
     def test_connection_scoped_conversations_do_not_share_threads(self, tmp_path, monkeypatch, migrated_postgres_database_url):
         from app.channels.manager import ChannelManager
         from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
-        from deerflow.persistence.engine import close_engine
 
         monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        repo_context = None
 
         async def go():
-            repo = await _make_channel_connection_repo(migrated_postgres_database_url)
+            nonlocal repo_context
+            repo_context = _channel_connection_repo(migrated_postgres_database_url)
+            repo = await repo_context.__aenter__()
             alice = await repo.upsert_connection(
                 owner_user_id="alice",
                 provider="slack",
@@ -3913,7 +3932,8 @@ class TestChannelManagerConnectionRouting:
         try:
             _run(go())
         finally:
-            _run(close_engine())
+            if repo_context is not None:
+                _run(repo_context.__aexit__(None, None, None))
 
 
 # ---------------------------------------------------------------------------

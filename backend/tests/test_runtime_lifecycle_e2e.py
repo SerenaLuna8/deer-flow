@@ -808,6 +808,12 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
             json={
                 "values": {
                     "title": "Before rollback",
+                    "messages": [
+                        HumanMessage(
+                            content="Human message before rollback",
+                            id="pre-run-human-message",
+                        ).model_dump(),
+                    ],
                 },
                 "as_node": "test_seed",
             },
@@ -815,6 +821,10 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         )
         assert before.status_code == 200, before.text
         assert before.json()["values"]["title"] == "Before rollback"
+        seeded = client.get(f"/api/threads/{thread_id}/state")
+        assert seeded.status_code == 200, seeded.text
+        assert seeded.json()["values"]["messages"] == before.json()["values"]["messages"]
+        assert seeded.json()["values"]["messages"][0]["content"] == "Human message before rollback"
 
         created = client.post(
             f"/api/threads/{thread_id}/runs",
@@ -842,3 +852,4 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         after = client.get(f"/api/threads/{thread_id}/state")
         assert after.status_code == 200, after.text
         assert after.json()["values"]["title"] == "Before rollback"
+        assert after.json()["values"]["messages"] == seeded.json()["values"]["messages"]

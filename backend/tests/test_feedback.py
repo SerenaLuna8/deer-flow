@@ -11,13 +11,14 @@ from deerflow.persistence.feedback import FeedbackRepository
 _DATABASE_URL: str | None = None
 
 
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture()
 async def _postgres_database(migrated_postgres_database_url):
     global _DATABASE_URL
     _DATABASE_URL = migrated_postgres_database_url
     try:
         yield
     finally:
+        await _cleanup()
         _DATABASE_URL = None
 
 
@@ -39,6 +40,8 @@ async def _cleanup():
 # -- FeedbackRepository --
 
 
+@pytest.mark.postgres
+@pytest.mark.usefixtures("_postgres_database")
 class TestFeedbackRepository:
     @pytest.mark.anyio
     async def test_create_positive(self, tmp_path):

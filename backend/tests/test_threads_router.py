@@ -878,3 +878,37 @@ def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:
     assert all(cid is not None for cid in resp_ids), f"response missing checkpoint_id: {resp_ids}"
     assert set(resp_ids) <= set(ids), f"aput discarded endpoint-assigned id: returned {resp_ids}, stored {ids}"
     assert resp_ids[1] > resp_ids[0], f"endpoint-assigned uuid6 not preserved/ordered through aput: {resp_ids}"
+
+
+def test_update_thread_state_persists_new_nonprimitive_channel() -> None:
+    """POST /state must version a newly introduced blob-backed channel."""
+    app, _store, _checkpointer = _build_thread_app()
+    message = HumanMessage(content="persist me", id="state-update-human").model_dump()
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"metadata": {}})
+        assert created.status_code == 200, created.text
+        thread_id = created.json()["thread_id"]
+
+        updated = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"values": {"messages": [message]}, "as_node": "test_seed"},
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["values"]["messages"][0]["content"] == "persist me"
+
+        persisted = client.get(f"/api/threads/{thread_id}/state")
+        assert persisted.status_code == 200, persisted.text
+        assert persisted.json()["values"]["messages"][0]["content"] == "persist me"
+
+
+def test_update_thread_state_without_values_keeps_existing_checkpoint() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"metadata": {}})
+        assert created.status_code == 200, created.text
+        thread_id = created.json()["thread_id"]
+
+        updated = client.post(f"/api/threads/{thread_id}/state", json={})
+        assert updated.status_code == 200, updated.text

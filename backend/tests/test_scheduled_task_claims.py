@@ -1,7 +1,10 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
@@ -9,14 +12,17 @@ from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
 _DATABASE_URL: str | None = None
 
+pytestmark = [pytest.mark.postgres, pytest.mark.usefixtures("_postgres_database")]
 
-@pytest_asyncio.fixture(autouse=True)
+
+@pytest_asyncio.fixture()
 async def _postgres_database(migrated_postgres_database_url):
     global _DATABASE_URL
     _DATABASE_URL = migrated_postgres_database_url
     try:
         yield
     finally:
+        await close_engine()
         _DATABASE_URL = None
 
 
@@ -168,3 +174,41 @@ async def test_claim_skips_task_with_active_lease(tmp_path):
     assert reclaimed == []
 
     await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_two_repositories_claim_due_set_without_overlap() -> None:
+    assert _DATABASE_URL is not None
+    first_engine = create_async_engine(_DATABASE_URL, poolclass=NullPool)
+    second_engine = create_async_engine(_DATABASE_URL, poolclass=NullPool)
+    first = ScheduledTaskRepository(async_sessionmaker(first_engine, expire_on_commit=False))
+    second = ScheduledTaskRepository(async_sessionmaker(second_engine, expire_on_commit=False))
+    now = datetime.now(UTC)
+    expected = {f"due-{index}" for index in range(8)}
+    try:
+        for task_id in sorted(expected):
+            await first.create(
+                task_id=task_id,
+                user_id="user-1",
+                thread_id="thread-1",
+                context_mode="reuse_thread",
+                assistant_id="lead_agent",
+                title=task_id,
+                prompt="Prompt",
+                schedule_type="cron",
+                schedule_spec={"cron": "0 9 * * *"},
+                timezone="UTC",
+                next_run_at=now - timedelta(minutes=1),
+            )
+
+        first_claim, second_claim = await asyncio.gather(
+            first.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=120, limit=4),
+            second.claim_due_tasks(now=now, lease_owner="worker-2", lease_seconds=120, limit=4),
+        )
+        first_ids = {task["id"] for task in first_claim}
+        second_ids = {task["id"] for task in second_claim}
+        assert first_ids.isdisjoint(second_ids)
+        assert first_ids | second_ids == expected
+    finally:
+        await first_engine.dispose()
+        await second_engine.dispose()

@@ -25,7 +25,7 @@ async def _noop_lifespan(_app):
     yield
 
 
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture()
 async def _setup_auth(migrated_postgres_database_url):
     """Reset auth state and provide one migrated PostgreSQL database."""
     from app.gateway import deps

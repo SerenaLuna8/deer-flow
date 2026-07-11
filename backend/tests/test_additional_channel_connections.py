@@ -43,7 +43,7 @@ def test_pending_connect_code_is_none_when_connections_disabled():
 _DATABASE_URL: str | None = None
 
 
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture()
 async def _postgres_database(migrated_postgres_database_url):
     global _DATABASE_URL
     _DATABASE_URL = migrated_postgres_database_url
@@ -72,7 +72,7 @@ async def _seed_state(repo, provider: str, state: str, owner_user_id: str = "dee
     )
 
 
-def test_feishu_connect_command_binds_identity(tmp_path):
+def test_feishu_connect_command_binds_identity(tmp_path, _postgres_database):
     import anyio
 
     from app.channels.feishu import FeishuChannel
@@ -106,7 +106,7 @@ def test_feishu_connect_command_binds_identity(tmp_path):
     anyio.run(go)
 
 
-def test_dingtalk_connect_command_binds_identity(tmp_path):
+def test_dingtalk_connect_command_binds_identity(tmp_path, _postgres_database):
     import anyio
 
     from app.channels.dingtalk import _CONVERSATION_TYPE_GROUP, DingTalkChannel
@@ -142,7 +142,7 @@ def test_dingtalk_connect_command_binds_identity(tmp_path):
     anyio.run(go)
 
 
-def test_wechat_connect_command_binds_identity(tmp_path):
+def test_wechat_connect_command_binds_identity(tmp_path, _postgres_database):
     import anyio
 
     from app.channels.wechat import WechatChannel
@@ -175,7 +175,7 @@ def test_wechat_connect_command_binds_identity(tmp_path):
     anyio.run(go)
 
 
-def test_wecom_connect_command_binds_identity(tmp_path):
+def test_wecom_connect_command_binds_identity(tmp_path, _postgres_database):
     import anyio
 
     from app.channels.wecom import WeComChannel
@@ -210,7 +210,7 @@ def test_wecom_connect_command_binds_identity(tmp_path):
     anyio.run(go)
 
 
-def test_additional_channels_attach_owner_identity(tmp_path):
+def test_additional_channels_attach_owner_identity(tmp_path, _postgres_database):
     import anyio
 
     from app.channels.dingtalk import _CONVERSATION_TYPE_GROUP, DingTalkChannel

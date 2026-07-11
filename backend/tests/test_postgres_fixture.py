@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import traceback
+from importlib import import_module
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncpg
@@ -31,12 +32,12 @@ def test_test_database_name_validation_rejects_reserved_or_non_generated_names(d
         _validate_test_database_name(database)
 
 
-def test_postgres_marker_fixture_skips_cleanly_without_url(monkeypatch) -> None:
+def test_postgres_marker_fixture_requires_explicit_test_url(monkeypatch) -> None:
     import conftest
 
     monkeypatch.delenv("POSTGRES_TEST_URL", raising=False)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    with pytest.raises(pytest.skip.Exception, match="POSTGRES_TEST_URL or DATABASE_URL"):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://application-role@localhost/deerflow")
+    with pytest.raises(pytest.skip.Exception, match="POSTGRES_TEST_URL is required"):
         conftest.postgres_admin_url.__wrapped__()
 
 
@@ -127,3 +128,46 @@ async def test_temporary_database_drops_after_exception_and_terminates_connectio
     async with admin_engine.connect() as connection:
         assert await connection.scalar(text("SELECT 1 FROM pg_database WHERE datname = :database"), {"database": database}) is None
     await admin_engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "test_feedback",
+        "test_run_event_store",
+        "test_run_repository",
+        "test_scheduled_task_claims",
+        "test_scheduled_task_repository",
+    ],
+)
+async def test_repository_fixture_failure_closes_global_engine_before_database_drop(
+    postgres_admin_url: str,
+    module_name: str,
+) -> None:
+    from deerflow.config.database_config import DatabaseConfig
+    from deerflow.persistence.bootstrap import bootstrap_schema
+    from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine
+
+    module = import_module(module_name)
+    try:
+        async with temporary_postgres_database(postgres_admin_url) as database_url:
+            schema_engine = create_async_engine(database_url)
+            try:
+                await bootstrap_schema(schema_engine)
+            finally:
+                await schema_engine.dispose()
+
+            fixture = module._postgres_database.__wrapped__(RedactedURL(database_url))
+            await fixture.__anext__()
+            await init_engine(DatabaseConfig(url=database_url))
+
+            with pytest.raises(RuntimeError, match="fixture body failed"):
+                await fixture.athrow(RuntimeError("fixture body failed"))
+
+        assert get_engine() is None
+        with pytest.raises(RuntimeError, match="not initialized"):
+            get_session_factory()
+    finally:
+        await close_engine()

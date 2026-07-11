@@ -40,7 +40,7 @@ async def _noop_lifespan(_app):
     yield
 
 
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture()
 async def _persistence_engine(migrated_postgres_database_url):
     """Initialise a per-test PostgreSQL engine + reset cached providers.
 
@@ -534,7 +534,7 @@ def _get_auth_client():
     return _AUTH_CLIENT
 
 
-def test_api_auth_me_no_cookie_returns_structured_401():
+def test_api_auth_me_no_cookie_returns_structured_401(_persistence_engine):
     """/api/v1/auth/me without cookie → 401 with {code: 'not_authenticated'}."""
     _setup_config()
     client = _get_auth_client()
@@ -545,7 +545,7 @@ def test_api_auth_me_no_cookie_returns_structured_401():
     assert "message" in body["detail"]
 
 
-def test_api_auth_me_auth_disabled_returns_synthetic_user(monkeypatch):
+def test_api_auth_me_auth_disabled_returns_synthetic_user(monkeypatch, _persistence_engine):
     _setup_config()
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
     client = _get_auth_client()
@@ -560,7 +560,7 @@ def test_api_auth_me_auth_disabled_returns_synthetic_user(monkeypatch):
     assert body["oauth_provider"] is None
 
 
-def test_api_auth_me_expired_token_returns_structured_401():
+def test_api_auth_me_expired_token_returns_structured_401(_persistence_engine):
     """/api/v1/auth/me with expired token → 401 with {code: 'token_expired'}."""
     _setup_config()
     expired = {"sub": "u1", "exp": datetime.now(UTC) - timedelta(hours=1), "iat": datetime.now(UTC)}
@@ -574,7 +574,7 @@ def test_api_auth_me_expired_token_returns_structured_401():
     assert body["detail"]["code"] == "token_expired"
 
 
-def test_api_auth_me_invalid_sig_returns_structured_401():
+def test_api_auth_me_invalid_sig_returns_structured_401(_persistence_engine):
     """/api/v1/auth/me with bad signature → 401 with {code: 'token_invalid'}."""
     _setup_config()
     payload = {"sub": "u1", "exp": datetime.now(UTC) + timedelta(hours=1), "iat": datetime.now(UTC)}
@@ -588,7 +588,7 @@ def test_api_auth_me_invalid_sig_returns_structured_401():
     assert body["detail"]["code"] == "token_invalid"
 
 
-def test_api_login_bad_credentials_returns_structured_401():
+def test_api_login_bad_credentials_returns_structured_401(_persistence_engine):
     """Login with wrong password → 401 with {code: 'invalid_credentials'}."""
     _setup_config()
     client = _get_auth_client()
@@ -601,7 +601,7 @@ def test_api_login_bad_credentials_returns_structured_401():
     assert body["detail"]["code"] == "invalid_credentials"
 
 
-def test_api_login_success_no_token_in_body():
+def test_api_login_success_no_token_in_body(_persistence_engine):
     """Successful login → response body has expires_in but NOT access_token."""
     _setup_config()
     client = _get_auth_client()
@@ -623,7 +623,7 @@ def test_api_login_success_no_token_in_body():
     assert "access_token" in resp.cookies
 
 
-def test_api_register_duplicate_returns_structured_400():
+def test_api_register_duplicate_returns_structured_400(_persistence_engine):
     """Register with duplicate email → 400 with {code: 'email_already_exists'}."""
     _setup_config()
     client = _get_auth_client()
@@ -649,7 +649,7 @@ def _get_set_cookie_headers(resp) -> list[str]:
     return [v for k, v in resp.headers.multi_items() if k.lower() == "set-cookie"]
 
 
-def test_register_http_cookie_httponly_true_secure_false():
+def test_register_http_cookie_httponly_true_secure_false(_persistence_engine):
     """HTTP register → access_token cookie is httponly=True, secure=False, no max_age."""
     _setup_config()
     client = _get_auth_client()
@@ -664,7 +664,7 @@ def test_register_http_cookie_httponly_true_secure_false():
     assert "secure" not in cookie_header.lower().replace("samesite", "")
 
 
-def test_register_https_cookie_httponly_true_secure_true():
+def test_register_https_cookie_httponly_true_secure_true(_persistence_engine):
     """HTTPS register (x-forwarded-proto) → access_token cookie is httponly=True, secure=True, has max_age."""
     _setup_config()
     client = _get_auth_client()
@@ -681,7 +681,7 @@ def test_register_https_cookie_httponly_true_secure_true():
     assert "max-age" in cookie_header.lower()
 
 
-def test_login_https_sets_secure_cookie():
+def test_login_https_sets_secure_cookie(_persistence_engine):
     """HTTPS login → access_token cookie has secure flag."""
     _setup_config()
     client = _get_auth_client()
@@ -699,7 +699,7 @@ def test_login_https_sets_secure_cookie():
     assert "secure" in cookie_header.lower()
 
 
-def test_csrf_cookie_secure_on_https():
+def test_csrf_cookie_secure_on_https(_persistence_engine):
     """HTTPS register → csrf_token cookie has secure flag but NOT httponly."""
     _setup_config()
     client = _get_auth_client()
@@ -716,7 +716,7 @@ def test_csrf_cookie_secure_on_https():
     assert "httponly" not in csrf_header.lower()
 
 
-def test_csrf_cookie_not_secure_on_http():
+def test_csrf_cookie_not_secure_on_http(_persistence_engine):
     """HTTP register → csrf_token cookie does NOT have secure flag."""
     _setup_config()
     client = _get_auth_client()
@@ -731,7 +731,7 @@ def test_csrf_cookie_not_secure_on_http():
     assert "secure" not in csrf_header.lower().replace("samesite", "")
 
 
-def test_csrf_cookie_persistent_on_https():
+def test_csrf_cookie_persistent_on_https(_persistence_engine):
     """HTTPS register → csrf_token cookie is persistent (has max_age), like access_token.
 
     Regression for iOS Safari home-screen PWAs. When iOS terminates a
@@ -759,7 +759,7 @@ def test_csrf_cookie_persistent_on_https():
     assert access_cookies and "max-age" in access_cookies[0].lower()
 
 
-def test_csrf_cookie_session_only_on_http():
+def test_csrf_cookie_session_only_on_http(_persistence_engine):
     """HTTP register → csrf_token cookie has NO max_age (session cookie).
 
     Mirrors the access_token's ``... if is_https else None`` guard so the
@@ -779,7 +779,7 @@ def test_csrf_cookie_session_only_on_http():
     assert "max-age" not in csrf_cookies[0].lower()
 
 
-def test_oidc_callback_csrf_cookie_persistent_on_https():
+def test_oidc_callback_csrf_cookie_persistent_on_https(_persistence_engine):
     """The OIDC-callback CSRF cookie helper is persistent over HTTPS too.
 
     ``routers.auth._set_csrf_cookie`` is the second place a csrf_token cookie

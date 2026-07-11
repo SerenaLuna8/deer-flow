@@ -14,13 +14,14 @@ from deerflow.runtime.runs.store.base import RunStore
 _DATABASE_URL: str | None = None
 
 
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture()
 async def _postgres_database(migrated_postgres_database_url):
     global _DATABASE_URL
     _DATABASE_URL = migrated_postgres_database_url
     try:
         yield
     finally:
+        await _cleanup()
         _DATABASE_URL = None
 
 
@@ -78,6 +79,68 @@ async def test_update_run_progress_defaults_to_noop_for_custom_store():
     await store.update_run_progress("r1", total_tokens=1)
 
 
+@pytest.mark.anyio
+async def test_aggregate_tokens_by_thread_returns_zeros_when_no_rows():
+    captured = []
+
+    class FakeResult:
+        def all(self):
+            return []
+
+    class FakeSession:
+        async def execute(self, stmt):
+            captured.append(stmt)
+            return FakeResult()
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    repo = RunRepository(lambda: FakeSessionContext())
+    agg = await repo.aggregate_tokens_by_thread("t1")
+    assert agg == {
+        "total_tokens": 0,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_runs": 0,
+        "by_model": {},
+        "by_caller": {"lead_agent": 0, "subagent": 0, "middleware": 0},
+    }
+    assert len(captured) == 1
+
+
+@pytest.mark.anyio
+async def test_aggregate_tokens_by_thread_compiles_on_postgres_dialect():
+    captured = []
+
+    class FakeResult:
+        def all(self):
+            return []
+
+    class FakeSession:
+        async def execute(self, stmt):
+            captured.append(stmt)
+            return FakeResult()
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    repo = RunRepository(lambda: FakeSessionContext())
+    await repo.aggregate_tokens_by_thread("t1")
+    compiled = str(captured[0].compile(dialect=postgresql.dialect()))
+    assert "token_usage_by_model" in compiled
+    assert "GROUP BY" not in compiled.upper()
+
+
+@pytest.mark.postgres
+@pytest.mark.usefixtures("_postgres_database")
 class TestRunRepository:
     @pytest.mark.anyio
     async def test_put_and_get(self, tmp_path):
@@ -457,82 +520,6 @@ class TestRunRepository:
         assert row4["model_name"] is None
 
         await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_aggregate_tokens_by_thread_returns_zeros_when_no_rows(self):
-        """Empty thread aggregates to all-zero totals, no model buckets, and a
-        single query — replaces the older test that pinned the now-removed
-        ``GROUP BY coalesce(model_name)`` shape (issue #3645 reduces by_model
-        in Python from each row's per-model JSON column instead)."""
-        captured = []
-
-        class FakeResult:
-            def all(self):
-                return []
-
-        class FakeSession:
-            async def execute(self, stmt):
-                captured.append(stmt)
-                return FakeResult()
-
-        class FakeSessionContext:
-            async def __aenter__(self):
-                return FakeSession()
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return None
-
-        repo = RunRepository(lambda: FakeSessionContext())
-
-        agg = await repo.aggregate_tokens_by_thread("t1")
-        assert agg == {
-            "total_tokens": 0,
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_runs": 0,
-            "by_model": {},
-            "by_caller": {"lead_agent": 0, "subagent": 0, "middleware": 0},
-        }
-        assert len(captured) == 1
-
-    @pytest.mark.anyio
-    async def test_aggregate_tokens_by_thread_compiles_on_postgres_dialect(self):
-        """Compile-smoke the new SELECT on the postgres dialect.
-
-        The project ships both SQLite and Postgres backends. The new aggregation
-        projects ``RunRow.token_usage_by_model`` (a JSON column) directly into
-        the row set instead of grouping on a scalar, so the SQL needs to compile
-        cleanly under PG's JSON/JSONB binding too. Pins:
-          * the JSON column is selected by name (PG would otherwise need a
-            ``::jsonb`` cast or coalesce around it)
-          * there is no GROUP BY / aggregate function left (the per-model
-            reduction now happens in Python — see issue #3645)
-        """
-
-        captured = []
-
-        class FakeResult:
-            def all(self):
-                return []
-
-        class FakeSession:
-            async def execute(self, stmt):
-                captured.append(stmt)
-                return FakeResult()
-
-        class FakeSessionContext:
-            async def __aenter__(self):
-                return FakeSession()
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return None
-
-        repo = RunRepository(lambda: FakeSessionContext())
-        await repo.aggregate_tokens_by_thread("t1")
-
-        compiled = str(captured[0].compile(dialect=postgresql.dialect()))
-        assert "token_usage_by_model" in compiled
-        assert "GROUP BY" not in compiled.upper()
 
     @pytest.mark.anyio
     async def test_run_manager_hydrates_store_only_run_from_sql(self, tmp_path):

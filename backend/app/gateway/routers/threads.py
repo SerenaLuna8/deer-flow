@@ -983,6 +983,13 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         channel_values.update(body.values)
 
     checkpoint["channel_values"] = channel_values
+    channel_versions: dict[str, Any] = dict(checkpoint.get("channel_versions", {}) or {})
+    new_versions: dict[str, Any] = {}
+    for channel in body.values or {}:
+        version = checkpointer.get_next_version(channel_versions.get(channel), None)
+        channel_versions[channel] = version
+        new_versions[channel] = version
+    checkpoint["channel_versions"] = channel_versions
     metadata["updated_at"] = now_iso()
 
     if body.as_node:
@@ -1012,7 +1019,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         }
     }
     try:
-        new_config = await checkpointer.aput(write_config, checkpoint, metadata, {})
+        new_config = await checkpointer.aput(write_config, checkpoint, metadata, new_versions)
     except Exception:
         logger.exception("Failed to update state for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread state")
