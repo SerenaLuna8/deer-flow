@@ -97,6 +97,9 @@ make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_
 make lint               # Lint with ruff
 make format             # Format code with ruff
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see Schema Migrations section)
+make setup-db           # 显式创建目标 PostgreSQL 数据库并 bootstrap 到 head
+make migrate-db         # 仅升级已存在数据库，不执行管理员建库操作
+make check-db           # 只读检查连接、revision 和必需表
 ```
 
 The `detect-blocking-io` target parses `app/`, `packages/harness/deerflow/`,
@@ -631,11 +634,19 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the author
 
 **Concurrency safety**: PostgreSQL uses `pg_advisory_lock` to serialise concurrent Gateway instances. Column revisions in `versions/` additionally use idempotent helpers (`_helpers.py::safe_add_column`, `safe_drop_column`) so repeated post-baseline changes and retries are no-ops when the change is already present.
 
+**本地初始化与检查**：`make setup-db` 仅从显式 `POSTGRES_ADMIN_URL` 取得连接
+`postgres` maintenance database 的管理员连接，并从显式 `DATABASE_URL` 取得目标连接。
+它验证 database/role identifier、确认目标 role 已存在、并发安全地创建目标数据库，随后
+复用 `bootstrap_schema` 升级到 Alembic head；它不创建 role，也不提升权限。`make
+migrate-db` 只 bootstrap 已存在目标数据库，不读取管理员连接；`make check-db` 只执行
+参数化只读查询，报告 PostgreSQL 版本、current/head revision 和必需表。三个命令均不输出
+username、password 或完整 URL。Gateway runtime 仍只验证目标库，绝不自动创建数据库。
+
 **Authoring a new revision**:
 ```bash
 cd backend && make migrate-rev MSG="add foo column to runs"
 ```
-This invokes `alembic revision --autogenerate` against the live ORM models. Review the generated file under `migrations/versions/` and switch raw `op.add_column` / `op.drop_column` calls to the idempotent helpers from `_helpers.py` before committing. There is no `make migrate` / `make migrate-stamp` target on purpose — the only execution path is Gateway startup, which keeps operational mistakes off the table.
+This invokes `alembic revision --autogenerate` against the live ORM models. Review the generated file under `migrations/versions/` and switch raw `op.add_column` / `op.drop_column` calls to the idempotent helpers from `_helpers.py` before committing. Production migration execution goes through the same bootstrap API used by Gateway startup: `make migrate-db` exposes that path explicitly for an existing database, while `make setup-db` is the only command allowed to create the target database.
 
 **Where things live**:
 - `migrations/env.py` — PostgreSQL-only alembic environment; delegates filtering to `_env_filters.py`

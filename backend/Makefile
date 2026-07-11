@@ -22,6 +22,15 @@ lint:
 format:
 	uvx ruff check . --fix && uvx ruff format .
 
+setup-db:
+	PYTHONPATH=. uv run python scripts/setup_postgres.py
+
+migrate-db:
+	PYTHONPATH=. uv run python scripts/setup_postgres.py --migrate-only
+
+check-db:
+	PYTHONPATH=. uv run python scripts/check_postgres.py
+
 detect-blocking-io:
 	@PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python ../scripts/detect_blocking_io_static.py --output ../.deer-flow/blocking-io-findings.json
 

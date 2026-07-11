@@ -109,6 +109,21 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    这会启动一个交互式向导，引导你选择 LLM provider、可选的 web 搜索工具，以及 sandbox 模式、bash 权限、文件写入等执行/安全偏好。它会生成一份最小化的 `config.yaml`，并把 API key 写入 `.env`，大约 2 分钟完成。
 
    随时可以运行 `make doctor` 检查配置和系统环境，并获得可执行的修复建议。
+
+   DeerFlow 运行期只使用 PostgreSQL。首次初始化数据库时，需要分别显式设置
+   `POSTGRES_ADMIN_URL`（连接 `postgres` maintenance database，仅用于建库）和
+   `DATABASE_URL`（目标数据库连接），然后执行：
+
+   ```bash
+   make setup-db
+   make check-db
+   ```
+
+   `setup-db` 不会创建或修改 role；目标 role 必须已存在。后续只升级已存在数据库时
+   使用 `make migrate-db`，它不读取管理员连接，也不会创建数据库。`make check-db`
+   只读检查 PostgreSQL 版本、Alembic revision 和必需表。命令输出不会显示 username、
+   password 或完整 URL。Gateway 启动只验证和升级已配置的目标数据库，不会自动建库。
+
    如果你要提交本地安装、配置或运行问题，可以执行 `make support-bundle`。
    命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成
    `*-issue-summary.md`、面向 AI 辅助提 issue 的 `*-issue-draft.md`，以及可选证据

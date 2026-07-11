@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.PHONY: help config config-upgrade check install setup setup-db migrate-db check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -24,6 +24,9 @@ help:
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
+	@echo "  make setup-db        - 创建并初始化 PostgreSQL 数据库"
+	@echo "  make migrate-db      - 仅升级已存在 PostgreSQL 数据库"
+	@echo "  make check-db        - 只读检查 PostgreSQL 数据库状态"
 	@echo "  make detect-thread-boundaries - Inventory async/thread boundary points"
 	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
@@ -55,6 +58,15 @@ setup:
 
 doctor:
 	@$(BACKEND_UV_RUN) python ../scripts/doctor.py
+
+setup-db:
+	@$(MAKE) -C backend setup-db
+
+migrate-db:
+	@$(MAKE) -C backend migrate-db
+
+check-db:
+	@$(MAKE) -C backend check-db
 
 support-bundle:
 	@$(BACKEND_UV_RUN) python ../scripts/support_bundle.py --include-doctor
