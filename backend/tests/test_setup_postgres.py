@@ -14,7 +14,15 @@ from scripts import check_postgres, setup_postgres
 
 def _connection(*, database_exists: bool = False, owner_exists: bool = True):
     connection = AsyncMock()
-    connection.fetchval.side_effect = [database_exists, owner_exists]
+
+    async def fetchval(statement, *_args):
+        if "pg_roles" in statement:
+            return owner_exists
+        if "pg_database" in statement:
+            return database_exists
+        raise AssertionError(f"unexpected query: {statement}")
+
+    connection.fetchval.side_effect = fetchval
     return connection
 
 
@@ -89,7 +97,28 @@ async def test_ensure_database_is_idempotent(monkeypatch) -> None:
     monkeypatch.setattr(setup_postgres.asyncpg, "connect", AsyncMock(return_value=connection))
 
     assert await setup_postgres.ensure_database("postgresql://admin:secret@localhost/postgres", "deerflow_test_1_abc") is False
+    connection.fetchval.assert_awaited_once_with("SELECT 1 FROM pg_database WHERE datname = $1", "deerflow_test_1_abc")
     assert not any(call.args[0].startswith("CREATE DATABASE") for call in connection.execute.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_existing_database_still_requires_explicit_owner_to_exist(monkeypatch) -> None:
+    connection = _connection(database_exists=True, owner_exists=False)
+    monkeypatch.setattr(setup_postgres.asyncpg, "connect", AsyncMock(return_value=connection))
+    admin_url = "postgresql://admin:secret@localhost/postgres"
+
+    with pytest.raises(setup_postgres.PostgresSetupError, match="role") as exc_info:
+        await setup_postgres.ensure_database(
+            admin_url,
+            "deerflow_test_1_abc",
+            owner_name="missing_owner",
+        )
+
+    connection.fetchval.assert_awaited_once_with("SELECT 1 FROM pg_roles WHERE rolname = $1", "missing_owner")
+    assert not any(call.args[0].startswith("CREATE DATABASE") for call in connection.execute.await_args_list)
+    rendered = "".join(__import__("traceback").format_exception(exc_info.value))
+    assert "secret" not in rendered
+    assert "postgresql://" not in rendered
 
 
 @pytest.mark.asyncio

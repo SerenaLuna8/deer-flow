@@ -104,10 +104,10 @@ async def ensure_database(
         connection = await asyncpg.connect(_asyncpg_url(admin_url))
         await connection.execute("SELECT pg_advisory_lock($1)", _SETUP_LOCK_KEY)
         lock_acquired = True
-        if await connection.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", database_name):
-            return False
         if owner_name is not None and not await connection.fetchval("SELECT 1 FROM pg_roles WHERE rolname = $1", owner_name):
             raise PostgresSetupError("目标 PostgreSQL role 不存在；请先由管理员创建该 role，再重试 setup-db")
+        if await connection.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", database_name):
+            return False
 
         owner_clause = f' OWNER "{owner_name}"' if owner_name is not None else ""
         try:
