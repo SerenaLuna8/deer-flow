@@ -24,7 +24,7 @@ from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
 from deerflow.persistence.user.model import UserRow
 
 
-class SQLiteUserRepository(UserRepository):
+class SQLUserRepository(UserRepository):
     """Async user repository backed by the shared SQLAlchemy engine."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:

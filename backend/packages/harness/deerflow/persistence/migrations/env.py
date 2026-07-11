@@ -53,7 +53,6 @@ def run_migrations_offline() -> None:
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
-        render_as_batch=True,
         include_object=include_object,
     )
     with context.begin_transaction():
@@ -64,7 +63,6 @@ def do_run_migrations(connection):
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
-        render_as_batch=True,  # Required for SQLite ALTER TABLE support
         include_object=include_object,
     )
     with context.begin_transaction():
@@ -73,24 +71,6 @@ def do_run_migrations(connection):
 
 async def run_migrations_online() -> None:
     connectable = create_async_engine(config.get_main_option("sqlalchemy.url"))
-
-    # Cross-process bootstrap safety for SQLite: every connection alembic
-    # opens needs a wide ``busy_timeout`` so that when another process holds
-    # the file write lock (e.g. mid-bootstrap), our writes wait instead of
-    # raising ``database is locked``. The production engine in
-    # ``deerflow.persistence.engine`` sets this on its own connections, but
-    # alembic spawns its OWN engine here -- those connections wouldn't inherit
-    # anything unless we wire the same hook on this one.
-    if connectable.url.drivername.startswith("sqlite"):
-        from sqlalchemy import event
-
-        @event.listens_for(connectable.sync_engine, "connect")
-        def _alembic_sqlite_busy_timeout(dbapi_conn, _record):  # noqa: ARG001
-            cursor = dbapi_conn.cursor()
-            try:
-                cursor.execute("PRAGMA busy_timeout=30000;")
-            finally:
-                cursor.close()
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

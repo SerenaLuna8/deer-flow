@@ -64,9 +64,9 @@ Gateway API. Config schema and resolution order are documented in
 
 Persistence configuration is PostgreSQL-only: `database.url` resolves from
 `DATABASE_URL`, PostgreSQL drivers are default dependencies, and a standalone
-`checkpointer` section is rejected. The runtime providers still contain legacy
-SQLite branches pending their dedicated cleanup; those branches are not part of
-the supported configuration contract.
+`checkpointer` section is rejected. ORM sessions, schema bootstrap, LangGraph
+checkpointers, and LangGraph stores are all PostgreSQL implementations; runtime
+startup validates but never creates the target database.
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.

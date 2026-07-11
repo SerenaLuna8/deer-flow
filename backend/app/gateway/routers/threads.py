@@ -1004,7 +1004,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
     # read (which always includes checkpoint_ns=""). The fresh checkpoint ID is
     # assigned above via checkpoint["id"]; keep checkpoint_id out of the config so
     # the write is keyed by the new checkpoint payload rather than the prior read.
-    # All supported savers (InMemorySaver, AsyncSqliteSaver, AsyncPostgresSaver)
+    # The supported AsyncPostgresSaver
     # persist and echo back checkpoint["id"] verbatim — none mint their own — so
     # the new_config below carries the uuid6 we assigned here. (Regression-locked
     # by test_update_thread_state_inserts_new_checkpoint_each_call.)

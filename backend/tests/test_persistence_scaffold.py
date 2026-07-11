@@ -8,16 +8,87 @@ Tests:
 5. Postgres missing-dep error message
 """
 
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+
+def test_database_config_has_no_runtime_compatibility_aliases() -> None:
+    config = DatabaseConfig(url="postgresql://localhost/test")
+    for name in ("backend", "postgres_url", "app_sqlalchemy_url", "echo_sql"):
+        assert not hasattr(config, name)
+
+
+@pytest.mark.asyncio
+async def test_init_engine_only_accepts_database_config() -> None:
+    from deerflow.persistence.engine import init_engine
+
+    with pytest.raises(TypeError):
+        await init_engine("sqlite")  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        await init_engine("memory", backend="memory")  # type: ignore[call-arg]
+
+
+def test_session_factory_requires_initialization(monkeypatch) -> None:
+    import deerflow.persistence.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_session_factory", None)
+    with pytest.raises(RuntimeError, match="not initialized"):
+        engine_module.get_session_factory()
+
+
+@pytest.mark.asyncio
+async def test_init_engine_uses_postgres_pool_and_statement_timeout() -> None:
+    from deerflow.persistence.engine import close_engine, init_engine
+
+    connection = SimpleNamespace(execute=AsyncMock())
+    connect_cm = AsyncMock()
+    connect_cm.__aenter__.return_value = connection
+    engine = MagicMock()
+    engine.connect.return_value = connect_cm
+    engine.dispose = AsyncMock()
+    config = DatabaseConfig(
+        url="postgresql://user:secret@localhost/test",
+        pool_size=7,
+        max_overflow=4,
+        pool_timeout_seconds=12,
+        statement_timeout_seconds=9,
+    )
+    with patch("deerflow.persistence.engine.create_async_engine", return_value=engine) as create, patch("deerflow.persistence.bootstrap.bootstrap_schema", new=AsyncMock()):
+        await init_engine(config)
+    kwargs = create.call_args.kwargs
+    assert kwargs["pool_size"] == 7
+    assert kwargs["max_overflow"] == 4
+    assert kwargs["pool_timeout"] == 12
+    assert kwargs["pool_pre_ping"] is True
+    assert kwargs["connect_args"]["server_settings"]["statement_timeout"] == "9000"
+    connection.execute.assert_awaited_once()
+    await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_init_engine_does_not_create_missing_database() -> None:
+    from deerflow.persistence.engine import init_engine
+
+    connect_cm = AsyncMock()
+    connect_cm.__aenter__.side_effect = RuntimeError("database does not exist")
+    engine = MagicMock()
+    engine.connect.return_value = connect_cm
+    engine.dispose = AsyncMock()
+    config = DatabaseConfig(url="postgresql://user:secret@localhost/missing")
+    with patch("deerflow.persistence.engine.create_async_engine", return_value=engine) as create:
+        with pytest.raises(RuntimeError, match="create the target database") as exc_info:
+            await init_engine(config)
+    assert "secret" not in str(exc_info.value)
+    assert create.call_count == 1
+
 
 # -- DatabaseConfig --
 
@@ -302,41 +373,3 @@ class TestBaseToDictMixin:
             assert "_Tmp" in repr(obj)
 
         await engine.dispose()
-
-
-# -- Engine lifecycle --
-
-
-class TestEngineLifecycle:
-    @pytest.mark.anyio
-    async def test_memory_is_noop(self):
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
-
-        await init_engine("memory")
-        assert get_session_factory() is None
-        await close_engine()
-
-    @pytest.mark.anyio
-    async def test_sqlite_creates_engine(self, tmp_path):
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
-
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
-        sf = get_session_factory()
-        assert sf is not None
-        async with sf() as session:
-            assert session is not None
-        await close_engine()
-        assert get_session_factory() is None
-
-    @pytest.mark.anyio
-    async def test_postgres_without_asyncpg_gives_actionable_error(self):
-        """If asyncpg is not installed, error message tells user what to do."""
-        from deerflow.persistence.engine import init_engine
-
-        with patch.dict(sys.modules, {"asyncpg": None}), pytest.raises(ImportError) as exc_info:
-            await init_engine("postgres", url="postgresql+asyncpg://x:x@localhost/x")
-
-        message = str(exc_info.value)
-        assert "asyncpg" in message
-        assert "install" in message.lower()

@@ -14,7 +14,6 @@ import deerflow.config.app_config as app_config_module
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.agents_api_config import get_agents_api_config, load_agents_api_config_from_dict
 from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config
-from deerflow.config.checkpointer_config import load_checkpointer_config_from_dict
 from deerflow.config.guardrails_config import get_guardrails_config, load_guardrails_config_from_dict
 from deerflow.config.memory_config import get_memory_config, load_memory_config_from_dict
 from deerflow.config.stream_bridge_config import get_stream_bridge_config, load_stream_bridge_config_from_dict
@@ -48,7 +47,6 @@ def _reset_config_singletons() -> None:
     load_subagents_config_from_dict({})
     load_tool_search_config_from_dict({})
     load_guardrails_config_from_dict({})
-    load_checkpointer_config_from_dict(None)
     load_stream_bridge_config_from_dict(None)
     load_acp_config_from_dict({})
     reset_checkpointer()

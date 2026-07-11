@@ -1051,7 +1051,7 @@ def _new_checkpoint_marker() -> dict[str, str]:
 def _bump_channel_version(checkpointer: Any, current_version: Any) -> Any:
     """Return a strictly-different next version for a checkpoint channel.
 
-    DB-backed LangGraph savers (PostgresSaver / v4 SqliteSaver blob layout)
+    DB-backed LangGraph PostgresSaver blob layout
     persist channel blobs keyed by ``channel_versions[<channel>]``, so the
     new value MUST differ from the prior value. We delegate to the
     checkpointer's ``get_next_version`` when available — that is the canonical
@@ -1176,7 +1176,7 @@ async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_co
         checkpoint.update({"id": marker["id"], "ts": marker["ts"], "channel_values": channel_values})
 
         # Bump ``channel_versions["title"]`` and declare the bump in ``new_versions``
-        # so DB-backed savers (SqliteSaver v4 / PostgresSaver) actually persist the
+        # so the DB-backed PostgresSaver actually persists the
         # new blob — those savers strip inline ``channel_values`` from ``put`` and
         # only write blobs for channels listed in ``new_versions``. The legacy
         # single-table sqlite saver ignores ``new_versions`` and inlines the

@@ -7,16 +7,20 @@ issues when unit-testing lightweight config/registry code in isolation.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import pytest_asyncio
 
 # Make 'app' and 'deerflow' importable from any working directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+
+from postgres_utils import RedactedURL, replace_database, temporary_postgres_database  # noqa: E402
 
 # Break the circular import chain that exists in production code:
 #   deerflow.subagents.__init__
@@ -38,6 +42,35 @@ _executor_mock.MAX_CONCURRENT_SUBAGENTS = 3
 _executor_mock.get_background_task_result = MagicMock()
 
 sys.modules["deerflow.subagents.executor"] = _executor_mock
+
+
+@pytest.fixture(scope="session")
+def postgres_admin_url() -> str:
+    """Return a maintenance URL without ever logging credentials."""
+    url = os.getenv("POSTGRES_TEST_URL") or os.getenv("DATABASE_URL")
+    if not url:
+        pytest.skip("POSTGRES_TEST_URL or DATABASE_URL is required for PostgreSQL tests")
+    return RedactedURL(replace_database(url, "postgres"))
+
+
+@pytest_asyncio.fixture()
+async def postgres_database_url(postgres_admin_url: str):
+    async with temporary_postgres_database(postgres_admin_url) as url:
+        yield RedactedURL(url)
+
+
+@pytest_asyncio.fixture()
+async def migrated_postgres_database_url(postgres_database_url: str):
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from deerflow.persistence.bootstrap import bootstrap_schema
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_schema(engine)
+        yield postgres_database_url
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture()

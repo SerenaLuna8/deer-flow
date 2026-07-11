@@ -1,7 +1,6 @@
 import hashlib
 import logging
 import os
-import warnings
 from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
@@ -206,22 +205,6 @@ class AppConfig(BaseModel):
             field_doc="Stream bridge connecting agent workers to SSE endpoints.",
         ),
     )
-
-    @property
-    def checkpointer(self):
-        """Deprecated runtime-only view derived from ``database``.
-
-        This is deliberately not a Pydantic field: config input containing a
-        top-level ``checkpointer`` section is rejected by validation.
-        """
-        from deerflow.config.checkpointer_config import CheckpointerConfig
-
-        warnings.warn(
-            "AppConfig.checkpointer is deprecated; use AppConfig.database",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return CheckpointerConfig(database=self.database)
 
     # Name -> config lookup tables, (re)built after validation by
     # ``_build_name_indexes``. They make ``get_model_config`` / ``get_tool_config``

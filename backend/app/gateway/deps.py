@@ -47,24 +47,13 @@ _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
-    """Refuse to start when GATEWAY_WORKERS > 1 and the DB backend is not Postgres.
-
-    SQLite write-locks cannot support concurrent multi-process access.
-    This gate runs once at startup before any persistence engine is
-    initialised so the error message is clear and the process exits
-    immediately.
-    """
+    """Retained startup hook; database configuration is PostgreSQL-only."""
     try:
         workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
     except (TypeError, ValueError):
         workers = 1
 
-    if workers <= 1:
-        return
-
-    backend = getattr(config.database, "backend", None)
-    if backend != "postgres":
-        raise SystemExit(f"GATEWAY_WORKERS={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set GATEWAY_WORKERS=1 or switch to Postgres.")
+    _ = (workers, config)
 
 
 async def _drain_inflight_runs(run_manager: RunManager) -> None:
@@ -133,7 +122,7 @@ def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) 
 
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
-    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.auth.repositories.sql import SQLUserRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
     from deerflow.runtime import RunRecord
 
@@ -403,7 +392,7 @@ def get_run_context(request: Request) -> RunContext:
 
 # Cached singletons to avoid repeated instantiation per request
 _cached_local_provider: LocalAuthProvider | None = None
-_cached_repo: SQLiteUserRepository | None = None
+_cached_repo: SQLUserRepository | None = None
 
 
 def get_local_provider() -> LocalAuthProvider:
@@ -414,13 +403,11 @@ def get_local_provider() -> LocalAuthProvider:
     """
     global _cached_local_provider, _cached_repo
     if _cached_repo is None:
-        from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+        from app.gateway.auth.repositories.sql import SQLUserRepository
         from deerflow.persistence.engine import get_session_factory
 
         sf = get_session_factory()
-        if sf is None:
-            raise RuntimeError("get_local_provider() called before init_engine_from_config(); cannot access users table")
-        _cached_repo = SQLiteUserRepository(sf)
+        _cached_repo = SQLUserRepository(sf)
     if _cached_local_provider is None:
         from app.gateway.auth.local_provider import LocalAuthProvider
 

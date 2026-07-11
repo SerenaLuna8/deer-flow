@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -48,22 +48,3 @@ class DatabaseConfig(BaseModel):
         if self.url.startswith("postgresql+asyncpg://"):
             return self.url.replace("postgresql+asyncpg://", "postgresql://", 1)
         return self.url
-
-    # Temporary read-only runtime aliases. They preserve the PostgreSQL path
-    # until task 3 removes backend branching; they do not expose a selectable
-    # backend or accept legacy constructor fields.
-    @property
-    def backend(self) -> Literal["postgres"]:
-        return "postgres"
-
-    @property
-    def postgres_url(self) -> str:
-        return self.checkpointer_url
-
-    @property
-    def app_sqlalchemy_url(self) -> str:
-        return self.sqlalchemy_url
-
-    @property
-    def echo_sql(self) -> bool:
-        return False

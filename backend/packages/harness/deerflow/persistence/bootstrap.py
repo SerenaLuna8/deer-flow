@@ -79,7 +79,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -138,31 +137,6 @@ _BASELINE_TABLE_NAMES: frozenset[str] = frozenset(
         "users",
     }
 )
-
-
-# Per-engine SQLite bootstrap locks. Per-engine (not module-global) so each
-# engine instance pairs with a lock bound to the event loop that uses that
-# engine -- necessary because ``asyncio.Lock`` binds to the first loop it sees,
-# and pytest gives each async test its own loop. Production uses one engine
-# per process so this dict collapses to a single entry in practice.
-#
-# Keyed by the engine object itself via ``WeakKeyDictionary`` rather than
-# ``id(engine)``: CPython recycles addresses after GC, so a stale ``id`` →
-# ``Lock`` entry from a dead engine could be returned to a new engine that
-# happened to land on the same address. The returned lock would still be bound
-# to the dead engine's event loop and ``async with`` would raise
-# ``RuntimeError: ... bound to a different event loop``. Hashing the engine
-# itself also drops entries automatically when the engine is collected, so this
-# dict never grows past the live engine count.
-_SQLITE_LOCKS: weakref.WeakKeyDictionary[AsyncEngine, asyncio.Lock] = weakref.WeakKeyDictionary()
-
-
-def _get_sqlite_local_lock(engine: AsyncEngine) -> asyncio.Lock:
-    lock = _SQLITE_LOCKS.get(engine)
-    if lock is None:
-        lock = asyncio.Lock()
-        _SQLITE_LOCKS[engine] = lock
-    return lock
 
 
 def _escape_url_for_alembic(url: str) -> str:
@@ -357,51 +331,15 @@ async def _postgres_lock(engine: AsyncEngine):
                 logger.warning("bootstrap: pg_advisory_unlock raised; session close will release", exc_info=True)
 
 
-@asynccontextmanager
-async def _sqlite_lock(engine: AsyncEngine):
-    """Serialise SQLite bootstrap inside one process; cross-process is
-    best-effort via SQLite's own file lock + ``PRAGMA busy_timeout``.
-
-    Why not ``BEGIN IMMEDIATE`` on a sentinel connection? SQLite is
-    single-writer per file. If we held a write lock on one connection,
-    alembic's own connection (opened inside ``stamp`` / ``upgrade``) would
-    deadlock against us.
-
-    Why not a cross-process OS file lock? It would work, but it adds a hard
-    dependency on platform-specific ``fcntl`` / ``msvcrt`` calls for a
-    deployment shape (multi-process SQLite) that's already discouraged for
-    DeerFlow. The 30s ``busy_timeout`` plus idempotent revisions cover the
-    realistic case; truly multi-instance deployments should use Postgres.
-
-    Note: the 30s ``busy_timeout`` is set by the engine event hooks in
-    ``persistence/engine.py`` (production) and ``migrations/env.py``
-    (alembic-spawned). This function relies on those PRAGMAs being in place
-    rather than setting one on a probe connection that wouldn't propagate.
-    """
-    async with _get_sqlite_local_lock(engine):
-        logger.info("bootstrap: acquired sqlite in-process lock")
-        yield
-
-
-def _bootstrap_lock(engine: AsyncEngine, *, backend: str):
-    if backend == "postgres":
-        return _postgres_lock(engine)
-    if backend == "sqlite":
-        return _sqlite_lock(engine)
-    raise ValueError(f"bootstrap: unsupported backend {backend!r}")
-
-
 # ---------------------------------------------------------------------------
 # Top-level entry point
 # ---------------------------------------------------------------------------
 
 
-async def bootstrap_schema(engine: AsyncEngine, *, backend: str) -> None:
+async def bootstrap_schema(engine: AsyncEngine) -> None:
     """Bring the DB schema to head.
 
-    Postgres calls are serialised across processes with an advisory lock.
-    SQLite calls are serialised inside one process and are best-effort across
-    processes via SQLite's file lock and ``busy_timeout``.
+    PostgreSQL calls are serialised across processes with an advisory lock.
 
     Branch dispatch is documented at module top. ``alembic.command.stamp`` and
     ``alembic.command.upgrade`` are synchronous and would block the event
@@ -410,7 +348,7 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str) -> None:
     head = _get_head_revision()
     cfg = _get_alembic_config(engine)
 
-    async with _bootstrap_lock(engine, backend=backend):
+    async with _postgres_lock(engine):
         async with engine.connect() as conn:
             state = await conn.run_sync(_reflect_state)
         decision = _decide_state(state)
@@ -449,4 +387,4 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str) -> None:
         else:  # pragma: no cover -- defensive
             raise RuntimeError(f"bootstrap: unhandled decision {decision!r}")
 
-    logger.info("bootstrap: complete (backend=%s)", backend)
+    logger.info("bootstrap: complete (backend=postgres)")
