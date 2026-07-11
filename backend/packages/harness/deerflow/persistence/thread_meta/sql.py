@@ -29,8 +29,7 @@ class ThreadMetaRepository(ThreadMetaStore):
         for key in ("created_at", "updated_at"):
             val = d.get(key)
             if isinstance(val, datetime):
-                # SQLite drops tzinfo despite ``DateTime(timezone=True)``;
-                # ``coerce_iso`` normalizes naive values as UTC so the wire format always carries tz.
+                # Normalize legacy naive values as UTC so the wire format always carries tz.
                 d[key] = coerce_iso(val)
         return d
 

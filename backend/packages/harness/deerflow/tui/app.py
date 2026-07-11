@@ -567,8 +567,8 @@ class DeerFlowTUI(App):
         writer = getattr(self.session, "writer", None)
         if writer is not None:
             # Make this terminal session visible in the Web UI sidebar by writing a
-            # threads_meta row under the local default user (best-effort, no-op on
-            # memory backends). Done on this worker thread to keep the UI responsive.
+            # threads_meta row under the local default user (best-effort when
+            # PostgreSQL is unavailable). Done on this worker thread to keep the UI responsive.
             writer.ensure_created(thread_id, assistant_id="lead-agent", metadata={"source": "tui"})
 
         latest_title: str | None = None

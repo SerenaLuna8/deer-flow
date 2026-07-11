@@ -1,4 +1,4 @@
-"""In-memory RunStore. Used when database.backend=memory (default) and in tests.
+"""In-memory RunStore test double.
 
 Equivalent to the original RunManager._runs dict behavior.
 """

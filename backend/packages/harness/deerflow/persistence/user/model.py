@@ -4,7 +4,7 @@ Lives in the harness persistence package so it is picked up by
 ``Base.metadata.create_all()`` alongside ``threads_meta``, ``runs``,
 ``run_events``, and ``feedback``. Using the shared engine means:
 
-- One SQLite/Postgres database, one connection pool
+- One PostgreSQL database and connection pool
 - One schema initialisation codepath
 - Consistent async sessions across auth and persistence reads
 """

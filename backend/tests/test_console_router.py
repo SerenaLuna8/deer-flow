@@ -303,14 +303,11 @@ class TestUserScoping:
         assert "qwen" not in usage["by_model"]
 
 
-class TestNoSqlBackend:
-    def test_503_when_memory_backend(self, session_factory, monkeypatch):
-        monkeypatch.setattr(console, "get_session_factory", lambda: None)
-        monkeypatch.setattr(console, "get_current_user", AsyncMock(return_value=None))
-        app = make_authed_test_app()
-        app.include_router(console.router)
-        c = TestClient(app)
-        for path in ("/api/console/stats", "/api/console/runs", "/api/console/usage"):
-            resp = c.get(path)
-            assert resp.status_code == 503
-            assert "SQL database backend" in resp.json()["detail"]
+class TestPostgresRequired:
+    def test_uninitialized_session_factory_fails_explicitly(self, monkeypatch):
+        def fail_uninitialized():
+            raise RuntimeError("Persistence engine is not initialized")
+
+        monkeypatch.setattr(console, "get_session_factory", fail_uninitialized)
+        with pytest.raises(RuntimeError, match="not initialized"):
+            console._session_factory()

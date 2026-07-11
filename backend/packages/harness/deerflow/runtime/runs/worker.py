@@ -1176,11 +1176,9 @@ async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_co
         checkpoint.update({"id": marker["id"], "ts": marker["ts"], "channel_values": channel_values})
 
         # Bump ``channel_versions["title"]`` and declare the bump in ``new_versions``
-        # so the DB-backed PostgresSaver actually persists the
-        # new blob — those savers strip inline ``channel_values`` from ``put`` and
-        # only write blobs for channels listed in ``new_versions``. The legacy
-        # single-table sqlite saver ignores ``new_versions`` and inlines the
-        # snapshot, so this path is correct for both layouts. Mirrors
+        # so the DB-backed PostgresSaver actually persists the new blob — it
+        # strips inline ``channel_values`` from ``put`` and only writes blobs
+        # for channels listed in ``new_versions``. Mirrors
         # ``_rollback_to_pre_run_checkpoint`` in the same file.
         channel_versions = dict(checkpoint.get("channel_versions", {}) or {})
         next_title_version = _bump_channel_version(checkpointer, channel_versions.get("title"))

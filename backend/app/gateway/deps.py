@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -44,16 +43,6 @@ logger = logging.getLogger(__name__)
 # them together if their sum must stay within the server's graceful-shutdown
 # timeout.
 _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
-
-
-def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
-    """Retained startup hook; database configuration is PostgreSQL-only."""
-    try:
-        workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
-    except (TypeError, ValueError):
-        workers = 1
-
-    _ = (workers, config)
 
 
 async def _drain_inflight_runs(run_manager: RunManager) -> None:
@@ -220,19 +209,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     from deerflow.runtime.checkpointer.async_provider import make_checkpointer
     from deerflow.runtime.events.store import make_run_event_store
 
-    # ------------------------------------------------------------------
-    # Multi-worker safety gate: reject SQLite when GATEWAY_WORKERS > 1.
-    # SQLite write-locks cannot support concurrent multi-process access.
-    # ------------------------------------------------------------------
-    _enforce_postgres_for_multi_worker(startup_config)
-
     async with AsyncExitStack() as stack:
         config = startup_config
 
         app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
 
-        # Initialize persistence engine BEFORE checkpointer so that
-        # auto-create-database logic runs first (postgres backend).
+        # Initialize and probe PostgreSQL before opening checkpointer/store pools.
         await init_engine_from_config(config.database)
 
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
@@ -240,32 +222,20 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
-        if sf is not None:
-            from deerflow.persistence.feedback import FeedbackRepository
-            from deerflow.persistence.run import RunRepository
+        from deerflow.persistence.feedback import FeedbackRepository
+        from deerflow.persistence.run import RunRepository
 
-            app.state.run_store = RunRepository(sf)
-            app.state.feedback_repo = FeedbackRepository(sf)
-        else:
-            from deerflow.runtime.runs.store.memory import MemoryRunStore
-
-            app.state.run_store = MemoryRunStore()
-            app.state.feedback_repo = None
+        app.state.run_store = RunRepository(sf)
+        app.state.feedback_repo = FeedbackRepository(sf)
 
         from deerflow.persistence.thread_meta import make_thread_store
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
-        if sf is not None:
-            from deerflow.persistence.scheduled_task_runs import (
-                ScheduledTaskRunRepository,
-            )
-            from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+        from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+        from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
-            app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
-            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
-        else:
-            app.state.scheduled_task_repo = None
-            app.state.scheduled_task_run_repo = None
+        app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
+        app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
 
         # Run event store. The store and the matching ``run_events_config`` are
         # both frozen at startup so ``get_run_context`` does not combine a
@@ -277,19 +247,18 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # RunManager with store backing for persistence
         app.state.run_manager = RunManager(store=app.state.run_store)
-        if getattr(config.database, "backend", None) == "sqlite":
-            from deerflow.utils.time import now_iso
+        from deerflow.utils.time import now_iso
 
-            # Startup-only recovery: clean shutdowns return no active rows and
-            # the thread-status update below becomes a no-op.
-            recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
-                error="Gateway restarted before this run reached a durable final state.",
-                before=now_iso(),
-            )
-            sb_config = getattr(config, "stream_bridge", None)
-            cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
-            await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
-            await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+        # Startup-only recovery: clean shutdowns return no active rows and
+        # the thread-status update below becomes a no-op.
+        recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
+            error="Gateway restarted before this run reached a durable final state.",
+            before=now_iso(),
+        )
+        sb_config = getattr(config, "stream_bridge", None)
+        cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
+        await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
+        await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
 
         try:
             yield

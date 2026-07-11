@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncpg
 import pytest
-from postgres_utils import replace_database, temporary_postgres_database
+from postgres_utils import RedactedURL, _validate_test_database_name, replace_database, temporary_postgres_database
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -15,6 +16,69 @@ def test_replace_database_preserves_credentials_without_exposing_them() -> None:
     parsed = make_url(replaced)
     assert parsed.database == "postgres"
     assert parsed.password == "p@ss"
+
+
+def test_redacted_url_repr_never_contains_credentials() -> None:
+    url = RedactedURL("postgresql+asyncpg://user:secret@localhost/postgres")
+    assert repr(url) == "<redacted-postgres-url>"
+    assert "secret" not in repr(url)
+
+
+@pytest.mark.parametrize("database", ["postgres", "deerflow", "other", "deerflow_test_user_supplied"])
+def test_test_database_name_validation_rejects_reserved_or_non_generated_names(database: str) -> None:
+    with pytest.raises(RuntimeError, match="unsafe"):
+        _validate_test_database_name(database)
+
+
+def test_postgres_marker_fixture_skips_cleanly_without_url(monkeypatch) -> None:
+    import conftest
+
+    monkeypatch.delenv("POSTGRES_TEST_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="POSTGRES_TEST_URL or DATABASE_URL"):
+        conftest.postgres_admin_url.__wrapped__()
+
+
+@pytest.mark.asyncio
+async def test_create_failure_does_not_attempt_drop_and_disposes_admin_engine() -> None:
+    connection = MagicMock()
+    connection.execute = AsyncMock(side_effect=RuntimeError("create failed"))
+    context = AsyncMock()
+    context.__aenter__.return_value = connection
+    engine = MagicMock()
+    engine.connect.return_value = context
+    engine.dispose = AsyncMock()
+
+    with patch("postgres_utils.create_async_engine", return_value=engine):
+        with pytest.raises(RuntimeError, match="unable to create"):
+            async with temporary_postgres_database("postgresql://user:secret@localhost/postgres"):
+                pass
+
+    assert engine.connect.call_count == 1
+    engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_is_sanitized_and_disposes_admin_engine() -> None:
+    create_connection = MagicMock()
+    create_connection.execute = AsyncMock()
+    create_context = AsyncMock()
+    create_context.__aenter__.return_value = create_connection
+    cleanup_connection = MagicMock()
+    cleanup_connection.execute = AsyncMock(side_effect=RuntimeError("secret cleanup detail"))
+    cleanup_context = AsyncMock()
+    cleanup_context.__aenter__.return_value = cleanup_connection
+    engine = MagicMock()
+    engine.connect.side_effect = [create_context, cleanup_context]
+    engine.dispose = AsyncMock()
+
+    with patch("postgres_utils.create_async_engine", return_value=engine):
+        with pytest.raises(RuntimeError, match="unable to clean up") as exc_info:
+            async with temporary_postgres_database("postgresql://user:secret@localhost/postgres"):
+                pass
+
+    assert "secret" not in str(exc_info.value)
+    engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.postgres

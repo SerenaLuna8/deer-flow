@@ -1,8 +1,7 @@
 """Abstract interface for thread metadata storage.
 
-Implementations:
-- ThreadMetaRepository: SQL-backed (sqlite / postgres via SQLAlchemy)
-- MemoryThreadMetaStore: wraps LangGraph BaseStore (memory mode)
+Production uses the PostgreSQL-backed ``ThreadMetaRepository``. The
+``MemoryThreadMetaStore`` remains available as a lightweight test double.
 
 All mutating and querying methods accept a ``user_id`` parameter with
 three-state semantics (see :mod:`deerflow.runtime.user_context`):

@@ -7,8 +7,8 @@ closes that gap: it writes a ``threads_meta`` row (owned by the local default
 user) into the **same** database the Gateway reads — without requiring the
 Gateway process to be running.
 
-Everything here is best-effort: when the database is memory-backed or
-unavailable, the writer degrades to a no-op and the TUI keeps working.
+Everything here is best-effort: when PostgreSQL is unavailable, the writer
+degrades to a no-op and the TUI keeps working.
 
 The SQLAlchemy async engine is bound to the event loop that created it, so all
 DB work runs on one long-lived background loop (``_LoopThread``) rather than a
@@ -91,8 +91,8 @@ class ThreadMetaWriter:
 def build_persistence() -> tuple[_LoopThread, ThreadMetaWriter]:
     """Initialise the shared engine on a background loop and return a writer.
 
-    Returns a ``ThreadMetaWriter`` that is a no-op when the configured database
-    backend is ``memory`` (no SQL session factory) or initialisation fails.
+    Returns a ``ThreadMetaWriter`` that is a no-op when PostgreSQL
+    initialization fails.
     """
     loop = _LoopThread()
     store = None
@@ -104,8 +104,7 @@ def build_persistence() -> tuple[_LoopThread, ThreadMetaWriter]:
         config = get_app_config()
         loop.run(init_engine_from_config(config.database))
         session_factory = get_session_factory()
-        if session_factory is not None:
-            store = make_thread_store(session_factory)
+        store = make_thread_store(session_factory)
     except Exception:  # noqa: BLE001 - degrade to no-op writer
         store = None
     return loop, ThreadMetaWriter(loop, store)

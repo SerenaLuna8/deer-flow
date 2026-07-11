@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -19,6 +20,14 @@ class RedactedURL(str):
         return "<redacted-postgres-url>"
 
 
+_TEST_DATABASE_PATTERN = re.compile(r"deerflow_test_[0-9]+_[0-9a-f]{32}\Z")
+
+
+def _validate_test_database_name(database: str) -> None:
+    if database in {"postgres", "deerflow"} or _TEST_DATABASE_PATTERN.fullmatch(database) is None:
+        raise RuntimeError("refusing unsafe PostgreSQL test database name")
+
+
 def replace_database(url: str, database: str) -> str:
     """Replace only the database component of a PostgreSQL URL."""
     parsed = make_url(url)
@@ -31,8 +40,7 @@ def replace_database(url: str, database: str) -> str:
 async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
     """Create a generated test database and always terminate/drop it."""
     database = f"deerflow_test_{os.getpid()}_{uuid.uuid4().hex}"
-    if not database.startswith("deerflow_test_") or database in {"deerflow", "postgres"}:
-        raise RuntimeError("refusing unsafe PostgreSQL test database name")
+    _validate_test_database_name(database)
 
     admin_engine = create_async_engine(replace_database(admin_url, "postgres"), isolation_level="AUTOCOMMIT")
     try:
@@ -45,11 +53,14 @@ async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
         try:
             yield replace_database(admin_url, database)
         finally:
-            async with admin_engine.connect() as connection:
-                await connection.execute(
-                    text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :database AND pid <> pg_backend_pid()"),
-                    {"database": database},
-                )
-                await connection.execute(text(f'DROP DATABASE IF EXISTS "{database}"'))
+            try:
+                async with admin_engine.connect() as connection:
+                    await connection.execute(
+                        text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :database AND pid <> pg_backend_pid()"),
+                        {"database": database},
+                    )
+                    await connection.execute(text(f'DROP DATABASE IF EXISTS "{database}"'))
+            except Exception as exc:
+                raise RuntimeError("unable to clean up isolated PostgreSQL test database") from exc
     finally:
         await admin_engine.dispose()

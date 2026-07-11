@@ -25,12 +25,10 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_gate_catches_unoffloaded_blocking_io_in_deerflow_module(tmp_path: Path) -> None:
-    from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir
-
-    db_file = tmp_path / "subdir" / "store.db"
+    from deerflow.skills.validation import _validate_skill_frontmatter
 
     with pytest.raises(BlockingError):
-        ensure_sqlite_parent_dir(str(db_file))
+        _validate_skill_frontmatter(tmp_path / "missing-skill")
 
 
 async def test_gate_restores_blockbuster_patches_after_exceptions() -> None:
@@ -46,10 +44,8 @@ async def test_gate_restores_blockbuster_patches_after_exceptions() -> None:
 @pytest.mark.allow_blocking_io
 async def test_allow_blocking_io_marker_opts_out_of_gate(tmp_path: Path) -> None:
     """Verify the @pytest.mark.allow_blocking_io opt-out actually disables the gate."""
-    from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir
+    from deerflow.skills.validation import _validate_skill_frontmatter
 
-    db_file = tmp_path / "subdir" / "store.db"
-
-    ensure_sqlite_parent_dir(str(db_file))
-
-    assert db_file.parent.exists()
+    valid, message, name = _validate_skill_frontmatter(tmp_path / "missing-skill")
+    assert (valid, name) == (False, None)
+    assert "not found" in message

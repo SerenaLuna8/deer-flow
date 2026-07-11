@@ -461,7 +461,7 @@ class RunJournal(BaseCallbackHandler):
         if not self._buffer:
             return
         # Skip if a flush is already in flight — avoids concurrent writes
-        # to the same SQLite file from multiple fire-and-forget tasks.
+        # from multiple fire-and-forget tasks.
         if self._pending_flush_tasks:
             return
         try:

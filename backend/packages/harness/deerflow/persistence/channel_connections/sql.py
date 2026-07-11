@@ -331,8 +331,7 @@ class ChannelConnectionRepository:
         delete-expired + count + insert run in a single transaction serialized
         per (owner, provider), so concurrent connect requests cannot each
         observe ``count < max_pending`` and all insert (which would leak past
-        the cap). PostgreSQL takes a transaction-scoped advisory lock; SQLite
-        serializes writers through the write lock the leading DELETE acquires.
+        the cap). PostgreSQL takes a transaction-scoped advisory lock.
 
         Returns ``True`` when the row was inserted, ``False`` when the cap is
         already reached.
@@ -342,9 +341,7 @@ class ChannelConnectionRepository:
             await self._serialize_oauth_owner_scope(session, owner_user_id, provider)
             # Prune only this owner/provider's expired codes (the ones that affect
             # this cap), not every user's — avoids a global DELETE on each connect
-            # POST. Issuing this write first also takes the SQLite database write
-            # lock so the count below cannot race a concurrent inserter between
-            # count and commit. Stale codes for other owners are pruned globally
+            # POST. Stale codes for other owners are pruned globally
             # by consume_oauth_state / delete_expired_oauth_states.
             await session.execute(
                 delete(ChannelOAuthStateRow).where(
@@ -385,17 +382,10 @@ class ChannelConnectionRepository:
     async def _serialize_oauth_owner_scope(self, session: AsyncSession, owner_user_id: str, provider: str) -> None:
         """Serialize concurrent pending-cap transactions for one (owner, provider).
 
-        On PostgreSQL this takes a transaction-scoped advisory lock so concurrent
-        issuers run their count+insert one at a time. On SQLite the leading
-        DELETE in the caller's transaction already acquires the database write
-        lock, which serializes writers, so no extra lock is required.
+        Takes a PostgreSQL transaction-scoped advisory lock so concurrent
+        issuers run their count+insert one at a time.
         """
-        try:
-            dialect = session.bind.dialect.name if session.bind is not None else ""
-        except Exception:
-            dialect = ""
-        if dialect == "postgresql":
-            await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": self._oauth_scope_lock_key(owner_user_id, provider)})
+        await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": self._oauth_scope_lock_key(owner_user_id, provider)})
 
     @staticmethod
     def _oauth_scope_lock_key(owner_user_id: str, provider: str) -> int:

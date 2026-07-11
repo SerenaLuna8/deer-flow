@@ -39,8 +39,8 @@ class SQLUserRepository(UserRepository):
             email=row.email,
             password_hash=row.password_hash,
             system_role=row.system_role,  # type: ignore[arg-type]
-            # SQLite loses tzinfo on read; reattach UTC so downstream
-            # code can compare timestamps reliably.
+            # Normalize any legacy naive timestamp so downstream comparisons
+            # remain reliable.
             created_at=row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
             oauth_provider=row.oauth_provider,
             oauth_id=row.oauth_id,

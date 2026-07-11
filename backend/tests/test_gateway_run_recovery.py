@@ -89,11 +89,11 @@ async def test_recovered_run_stream_end_skips_expired_stream():
 
 
 @pytest.mark.anyio
-async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
-    """SQLite startup should recover stale active runs before serving requests."""
+async def test_postgres_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
+    """PostgreSQL startup should recover stale active runs before serving requests."""
     app = FastAPI()
     config = SimpleNamespace(
-        database=SimpleNamespace(backend="sqlite"),
+        database=SimpleNamespace(),
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
     )
@@ -110,7 +110,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
         return None
 
     monkeypatch.setattr(engine_module, "init_engine_from_config", fake_init_engine_from_config)
-    monkeypatch.setattr(engine_module, "get_session_factory", lambda: None)
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: object())
     monkeypatch.setattr(engine_module, "close_engine", fake_close_engine)
     monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(stream_bridge))
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
@@ -133,11 +133,11 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_success(monkeypatch):
+async def test_postgres_runtime_does_not_mark_thread_error_when_newer_run_is_success(monkeypatch):
     """Startup recovery should not let an old orphaned run overwrite a newer terminal thread state."""
     app = FastAPI()
     config = SimpleNamespace(
-        database=SimpleNamespace(backend="sqlite"),
+        database=SimpleNamespace(),
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
     )
@@ -154,7 +154,7 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
         return None
 
     monkeypatch.setattr(engine_module, "init_engine_from_config", fake_init_engine_from_config)
-    monkeypatch.setattr(engine_module, "get_session_factory", lambda: None)
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: object())
     monkeypatch.setattr(engine_module, "close_engine", fake_close_engine)
     monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(stream_bridge))
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))

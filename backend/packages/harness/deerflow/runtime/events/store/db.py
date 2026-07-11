@@ -33,8 +33,7 @@ class DbRunEventStore(RunEventStore):
         d["metadata"] = d.pop("event_metadata", {})
         val = d.get("created_at")
         if isinstance(val, datetime):
-            # SQLite drops tzinfo on read despite ``DateTime(timezone=True)``;
-            # ``coerce_iso`` normalizes naive datetimes as UTC.
+            # ``coerce_iso`` normalizes legacy naive datetimes as UTC.
             d["created_at"] = coerce_iso(val)
         d.pop("id", None)
         # Restore structured content that was JSON-serialized on write.
@@ -82,9 +81,7 @@ class DbRunEventStore(RunEventStore):
 
         Coerces ``user.id`` to ``str`` at the boundary: ``User.id`` is
         typed as ``UUID`` by the auth layer, but ``run_events.user_id``
-        is ``VARCHAR(64)`` and aiosqlite cannot bind a raw UUID object
-        to a VARCHAR column ("type 'UUID' is not supported") — the
-        INSERT would silently roll back and the worker would hang.
+        is ``VARCHAR(64)`` and expects a normalized string value.
         """
         user = get_current_user()
         return str(user.id) if user is not None else None
@@ -231,7 +228,7 @@ class DbRunEventStore(RunEventStore):
             # pagination over a single subagent task stays correct (#3779). The
             # query is already scoped to (thread_id, run_id), so the JSON probe
             # only runs over this run's small candidate set; ``.as_string()``
-            # renders to json_extract (SQLite) / ->> (Postgres).
+            # renders to PostgreSQL JSON text extraction.
             stmt = stmt.where(RunEventRow.event_metadata["task_id"].as_string() == task_id)
         if after_seq is not None:
             stmt = stmt.where(RunEventRow.seq > after_seq)

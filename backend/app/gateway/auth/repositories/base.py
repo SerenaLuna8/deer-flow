@@ -18,8 +18,7 @@ class UserNotFoundError(LookupError):
 class UserRepository(ABC):
     """Abstract interface for user data storage.
 
-    Implement this interface to support different storage backends
-    (SQLite)
+    Implement this interface for user persistence.
     """
 
     @abstractmethod

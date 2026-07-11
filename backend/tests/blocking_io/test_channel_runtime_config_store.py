@@ -86,8 +86,9 @@ async def test_configure_runtime_channel_does_not_block_event_loop(tmp_path) -> 
     }
 
 
-async def test_disconnect_runtime_channel_does_not_block_event_loop(tmp_path) -> None:
+async def test_disconnect_runtime_channel_does_not_block_event_loop(tmp_path, monkeypatch) -> None:
     request = await asyncio.to_thread(_make_request, tmp_path)
+    monkeypatch.setattr("app.gateway.routers.channel_connections._get_repository", lambda _request, _config: None)
     store = request.app.state.channel_runtime_config_store
     await asyncio.to_thread(
         store.set_provider_config,

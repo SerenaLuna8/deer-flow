@@ -25,7 +25,7 @@ class FeedbackRepository:
         d = row.to_dict()
         val = d.get("created_at")
         if isinstance(val, datetime):
-            # SQLite drops tzinfo on read; normalize via ``coerce_iso`` so output is always tz-aware.
+            # Normalize legacy naive values via ``coerce_iso`` so output is always tz-aware.
             d["created_at"] = coerce_iso(val)
         return d
 

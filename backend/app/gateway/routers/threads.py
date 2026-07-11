@@ -267,8 +267,8 @@ class ThreadSearchRequest(BaseModel):
     def _validate_metadata_filters(cls, v: dict[str, Any]) -> dict[str, Any]:
         """Reject filter entries the SQL backend cannot compile.
 
-        Enforces consistent behaviour across SQL and memory backends.
-        See ``deerflow.persistence.json_compat`` for the shared validators.
+        Enforces values supported by PostgreSQL JSON queries. See
+        ``deerflow.persistence.json_compat`` for the shared validators.
         """
         if not v:
             return v
@@ -474,8 +474,7 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     """Delete local persisted filesystem data for a thread.
 
     Cleans DeerFlow-managed thread directories, removes checkpoint data,
-    and removes the thread_meta row from the configured ThreadMetaStore
-    (sqlite or memory).
+    and removes the PostgreSQL ``thread_meta`` row.
     """
     from app.gateway.deps import get_thread_store
 
@@ -491,8 +490,8 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         except Exception:
             logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
 
-    # Remove thread_meta row (best-effort) — required for sqlite backend
-    # so the deleted thread no longer appears in /threads/search.
+    # Remove thread_meta row (best-effort) so the deleted thread no longer
+    # appears in /threads/search.
     try:
         thread_store = get_thread_store(request)
         await thread_store.delete(thread_id)
@@ -672,8 +671,7 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
 async def search_threads(body: ThreadSearchRequest, request: Request) -> list[ThreadResponse]:
     """Search and list threads.
 
-    Delegates to the configured ThreadMetaStore implementation
-    (SQL-backed for sqlite/postgres, Store-backed for memory mode).
+    Delegates to the PostgreSQL-backed ThreadMetaStore implementation.
     """
     from app.gateway.deps import get_thread_store
     from deerflow.persistence.thread_meta import InvalidMetadataFilterError
@@ -948,8 +946,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
 
     Writes a new checkpoint that merges *body.values* into the latest
     channel values, then syncs any updated ``title`` field through the
-    ThreadMetaStore abstraction so that ``/threads/search`` reflects the
-    change immediately in both sqlite and memory backends.
+    ThreadMetaStore so that ``/threads/search`` reflects the change immediately.
     """
     from app.gateway.deps import get_thread_store
 
@@ -1025,7 +1022,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
 
     # Sync title changes through the ThreadMetaStore abstraction so /threads/search
-    # reflects them immediately in both sqlite and memory backends.
+    # reflects them immediately in PostgreSQL.
     if thread_store and body.values and "title" in body.values:
         new_title = body.values["title"]
         if new_title:  # Skip empty strings and None

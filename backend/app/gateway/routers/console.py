@@ -6,9 +6,8 @@ operations dashboard or any external monitoring consumer.
 
 This is a reporting layer, not a runtime path: it issues short-lived read-only
 queries against the harness-owned ``runs`` / ``threads_meta`` tables instead of
-widening the runtime ``RunStore`` surface. Requires a SQL database backend
-(``database.backend: sqlite | postgres``); returns 503 on the memory backend,
-which persists no run history to report on.
+widening the runtime ``RunStore`` surface. All queries use the required
+PostgreSQL session factory.
 """
 
 import asyncio
@@ -16,7 +15,7 @@ import logging
 from datetime import UTC, datetime, time, timedelta
 from typing import NamedTuple
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
@@ -118,18 +117,12 @@ class ConsoleUsageResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _session_factory_or_503():
-    sf = get_session_factory()
-    if sf is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Console requires a SQL database backend; set database.backend to sqlite or postgres in config.yaml.",
-        )
-    return sf
+def _session_factory():
+    return get_session_factory()
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
-    """Normalize DB timestamps: SQLite round-trips them naive, Postgres aware."""
+    """Normalize legacy naive timestamps to UTC."""
     if dt is None:
         return None
     return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
@@ -270,7 +263,7 @@ def _run_cost(
 @require_permission("runs", "read")
 async def console_stats(request: Request) -> ConsoleStatsResponse:
     """Return the dashboard's headline counters."""
-    sf = _session_factory_or_503()
+    sf = _session_factory()
     user_id = await get_current_user(request)
     run_where = (RunRow.user_id == user_id,) if user_id else ()
     thread_where = (ThreadMetaRow.user_id == user_id,) if user_id else ()
@@ -344,7 +337,7 @@ async def console_runs(
     status: str | None = Query(default=None, description="Filter by run status (e.g. running, success, error)"),
 ) -> ConsoleRunsResponse:
     """Return a page of the user's runs across all threads."""
-    sf = _session_factory_or_503()
+    sf = _session_factory()
     user_id = await get_current_user(request)
 
     stmt = select(RunRow, ThreadMetaRow.display_name).join(ThreadMetaRow, ThreadMetaRow.thread_id == RunRow.thread_id, isouter=True).order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(limit + 1).offset(offset)
@@ -407,7 +400,7 @@ async def console_usage(
     tz_offset_minutes: int = Query(default=0, ge=-840, le=840, description="Local-time offset from UTC for day bucketing"),
 ) -> ConsoleUsageResponse:
     """Aggregate token usage by local day and by model."""
-    sf = _session_factory_or_503()
+    sf = _session_factory()
     user_id = await get_current_user(request)
 
     tz_delta = timedelta(minutes=tz_offset_minutes)

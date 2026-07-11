@@ -3,10 +3,9 @@
 Replaces the unconditional ``Base.metadata.create_all`` at Gateway startup.
 Combines two ideas:
 
-1. ``create_all`` stays the empty-DB fast path -- it renders ``Base.metadata``
-   faithfully across SQLite and Postgres dialects (JSON vs JSONB, server
-   defaults, index/FK names, type affinity) without anyone having to hand-keep
-   a mirror baseline in sync with the models.
+1. ``create_all`` stays the empty-DB fast path -- it renders PostgreSQL
+   ``Base.metadata`` faithfully without anyone having to hand-keep a mirror
+   baseline in sync with the models.
 2. **Alembic owns every change from baseline onward.** Any new ORM column /
    table / index must ship as a revision under ``migrations/versions/``.
 
@@ -44,32 +43,12 @@ must be updated to match (the guard test fires otherwise).
 Concurrency safety
 ------------------
 
-Layered, with different guarantees per backend. Postgres has true
-cross-process serialisation. SQLite is single-process safe and cross-process
-best-effort; multi-instance deployments should use Postgres.
-
-* **Postgres -- true cross-process serialisation.** ``pg_advisory_lock`` runs
+PostgreSQL ``pg_advisory_lock`` runs
   the whole reflect-and-act sequence under an exclusive lock that survives
   cross-process. Concurrent Gateway instances queue cleanly and the second
   one observes head as a no-op.
-
-* **SQLite -- single-process serialisation, best-effort cross-process.**
-  SQLite is single-node by deployment, so the realistic concurrency case is
-  multiple async tasks inside one Gateway process (tests, lifespan re-entry).
-  A per-engine ``asyncio.Lock`` serialises those. For the rare cross-process
-  case (e.g. two ``make dev`` workers on the same DB file), we rely on
-  SQLite's own file-level write lock plus a 30s ``PRAGMA busy_timeout`` --
-  the latter is set on **both** the production engine
-  (``persistence/engine.py``) and the alembic-spawned engine
-  (``migrations/env.py``) so any writer waits up to 30s for the file lock
-  instead of failing fast. This is best-effort, not a true mutex: under
-  pathological overlap a process can still see ``database is locked`` after
-  30s. The fallback line of defence -- idempotent revisions -- guarantees
-  correctness anyway.
-
-* **Idempotent revisions -- retry fallback.** Column revisions use the helpers
-  in ``migrations/_helpers.py`` so repeated post-baseline changes, manual
-  ALTERs, or retries after SQLite lock contention do not duplicate work.
+Column revisions additionally use idempotent helpers so repeated
+post-baseline changes, manual ALTERs, or retries do not duplicate work.
 
 ``alembic upgrade head`` on a DB already at head is a no-op by alembic's own
 semantics, so the second-N-th actor simply observes head and exits.
@@ -311,24 +290,29 @@ async def _postgres_lock(engine: AsyncEngine):
     A second Gateway then acquires it and runs DDL concurrently with the
     first -- defeating the whole purpose of the lock.
 
-    Defence: ``SET LOCAL idle_in_transaction_session_timeout = 0`` disables
-    the kill **for this transaction only** (no global / role-level effect).
+    Defence: ``SET LOCAL idle_in_transaction_session_timeout = 0`` and
+    ``SET LOCAL statement_timeout = 0`` disable both timeout classes **for
+    this transaction only** (no global / role-level effect).
     Self-hosted Postgres usually ships with the timeout off, so this is a
     no-op there; on managed PG it is what keeps the lock alive while DDL
     runs. Must execute *before* ``pg_advisory_lock`` so a slow lock acquire
     on a heavily-contended cluster is itself protected.
     """
     async with engine.connect() as conn:
-        await conn.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
-        await conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _PG_LOCK_KEY})
-        try:
-            logger.info("bootstrap: acquired postgres advisory lock key=0x%x", _PG_LOCK_KEY)
-            yield
-        finally:
+        async with conn.begin():
+            await conn.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
+            await conn.execute(text("SET LOCAL statement_timeout = 0"))
+            await conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _PG_LOCK_KEY})
             try:
-                await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY})
-            except Exception:  # noqa: BLE001
-                logger.warning("bootstrap: pg_advisory_unlock raised; session close will release", exc_info=True)
+                logger.info("bootstrap: acquired postgres advisory lock key=0x%x", _PG_LOCK_KEY)
+                yield
+            finally:
+                try:
+                    unlocked = await conn.scalar(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY})
+                    if unlocked is not True:
+                        logger.warning("bootstrap: postgres advisory lock was not held during unlock")
+                except Exception:  # noqa: BLE001
+                    logger.warning("bootstrap: pg_advisory_unlock raised; session close will release", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

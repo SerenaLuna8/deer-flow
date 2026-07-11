@@ -1,6 +1,6 @@
 """In-memory ThreadMetaStore backed by LangGraph BaseStore.
 
-Used when database.backend=memory. Delegates to the LangGraph Store's
+Used as a lightweight test double. Delegates to the LangGraph Store's
 ``("threads",)`` namespace — the same namespace used by the Gateway
 router for thread records.
 """

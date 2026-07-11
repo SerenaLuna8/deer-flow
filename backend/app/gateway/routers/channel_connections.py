@@ -192,9 +192,6 @@ def _get_repository(request: Request, config: ChannelConnectionsConfig) -> Chann
         return repo
 
     sf = get_session_factory()
-    if sf is None:
-        raise HTTPException(status_code=503, detail="Channel connection persistence is not available")
-
     repo = ChannelConnectionRepository(sf)
     request.app.state.channel_connection_repo = repo
     return repo

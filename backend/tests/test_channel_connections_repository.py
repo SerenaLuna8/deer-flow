@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRepository,
@@ -18,18 +19,16 @@ from deerflow.persistence.channel_connections import (
 
 
 @pytest.fixture
-async def repo(tmp_path):
-    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
-
-    url = f"sqlite+aiosqlite:///{tmp_path / 'channels.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+async def repo(migrated_postgres_database_url):
+    engine = create_async_engine(migrated_postgres_database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield ChannelConnectionRepository(
-            get_session_factory(),
+            session_factory,
             cipher=ChannelCredentialCipher.from_key("test-encryption-key"),
         )
     finally:
-        await close_engine()
+        await engine.dispose()
 
 
 class TestChannelConnectionRepository:

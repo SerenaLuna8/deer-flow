@@ -137,9 +137,7 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   the asyncio event loop raises `BlockingError` and fails the test.
 - Regression anchors live there: `test_skills_load.py` (locks the
   `asyncio.to_thread` offload around `LocalSkillStorage.load_skills`, fix
-  for #1917); `test_sqlite_lifespan.py` (locks the offload around
-  SQLite path resolution plus `ensure_sqlite_parent_dir`, fix for #1912);
-  `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
+  for #1917); `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
   API offloading its file IO via `asyncio.to_thread`);
   `test_uploads_middleware.py` (locks `UploadsMiddleware.abefore_agent`
   offloading the uploads-directory scan off the event loop); and
@@ -652,7 +650,7 @@ A terminal-native UI over the embedded harness, exposed as the `deerflow` consol
 - `app.py` — Textual `App`. Runs `DeerFlowClient.stream()` (sync) on a worker thread and marshals actions to the UI thread via `call_from_thread`. Slash palette with `/goal` management + model/thread modal pickers; priority key bindings gated by `check_action` so they never steal keys from overlays or the composer.
 - `session.py` / `persistence.py` — builds the client + checkpointer and the `ThreadMetaWriter`.
 
-**Web UI visibility**: the Web UI lists threads from the `threads_meta` SQL table (user-scoped), not the checkpointer. `persistence.py` writes a `threads_meta` row under the default user (`"default"`) into the same DB the Gateway reads — via the harness-only `deerflow.persistence.engine.init_engine_from_config()` — so TUI sessions appear in the Web UI sidebar **without** running the Gateway. Best-effort: a no-op on the `memory` backend. All DB work runs on one long-lived background event loop (a SQLAlchemy async engine is bound to its creating loop).
+**Web UI visibility**: the Web UI lists threads from the `threads_meta` SQL table (user-scoped), not the checkpointer. `persistence.py` writes a `threads_meta` row under the default user (`"default"`) into the same PostgreSQL database the Gateway reads — via the harness-only `deerflow.persistence.engine.init_engine_from_config()` — so TUI sessions appear in the Web UI sidebar **without** running the Gateway. If PostgreSQL is unavailable the best-effort writer becomes a no-op. All DB work runs on one long-lived background event loop (a SQLAlchemy async engine is bound to its creating loop).
 
 **Tests**: `tests/test_tui_*.py` — pure layers via plain pytest, the app/palette/overlays via Textual's pilot harness with a fake in-process session, and `test_tui_persistence.py` for the `threads_meta` round-trip.
 

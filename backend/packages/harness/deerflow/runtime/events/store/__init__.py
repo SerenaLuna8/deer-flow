@@ -10,9 +10,6 @@ def make_run_event_store(config=None) -> RunEventStore:
         from deerflow.persistence.engine import get_session_factory
 
         sf = get_session_factory()
-        if sf is None:
-            # database.backend=memory but run_events.backend=db -> fallback
-            return MemoryRunEventStore()
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         return DbRunEventStore(sf, max_trace_content=config.max_trace_content)

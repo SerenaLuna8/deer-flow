@@ -1,13 +1,4 @@
-"""Tests for the multi-worker Postgres startup gate.
-
-Pins the contract documented in ``docs/multi_worker.md`` work item 1
-(issue #3948): when ``GATEWAY_WORKERS > 1`` and the configured
-database backend is not Postgres, the Gateway must refuse to start.
-The gate runs inside :func:`langgraph_runtime` *before* any
-persistence engine is initialised so operators see a clear error
-instead of intermittent SQLite ``database is locked`` failures in
-production.
-"""
+"""PostgreSQL-only runtime has no backend-dependent worker gate."""
 
 from __future__ import annotations
 
@@ -18,125 +9,63 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
-from app.gateway.deps import _enforce_postgres_for_multi_worker, langgraph_runtime
+from app.gateway.deps import langgraph_runtime
 from deerflow.config.database_config import DatabaseConfig
 
 
-def _config_with_backend(backend: str) -> SimpleNamespace:
-    return SimpleNamespace(database=DatabaseConfig(backend=backend))
-
-
-# ---------------------------------------------------------------------------
-# Unit tests of the gate function itself
-# ---------------------------------------------------------------------------
-
-
-def test_gate_noop_when_gateway_workers_unset(monkeypatch):
-    """With GATEWAY_WORKERS unset, every backend must be accepted."""
-    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
-    for backend in ("sqlite", "memory", "postgres"):
-        _enforce_postgres_for_multi_worker(_config_with_backend(backend))
-
-
-def test_gate_noop_for_single_worker(monkeypatch):
-    """GATEWAY_WORKERS=1 preserves the historical single-worker behavior."""
-    monkeypatch.setenv("GATEWAY_WORKERS", "1")
-    for backend in ("sqlite", "memory", "postgres"):
-        _enforce_postgres_for_multi_worker(_config_with_backend(backend))
-
-
-def test_gate_allows_multi_worker_with_postgres(monkeypatch):
-    monkeypatch.setenv("GATEWAY_WORKERS", "2")
-    _enforce_postgres_for_multi_worker(_config_with_backend("postgres"))
-
-
-def test_gate_rejects_multi_worker_with_sqlite(monkeypatch):
-    monkeypatch.setenv("GATEWAY_WORKERS", "2")
-    with pytest.raises(SystemExit) as exc_info:
-        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
-    msg = str(exc_info.value)
-    assert "GATEWAY_WORKERS=2" in msg
-    assert "postgres" in msg.lower()
-    assert "sqlite" in msg.lower()
-
-
-def test_gate_rejects_multi_worker_with_memory(monkeypatch):
-    """The gate is not sqlite-specific: memory is also unsafe across processes."""
-    monkeypatch.setenv("GATEWAY_WORKERS", "2")
-    with pytest.raises(SystemExit):
-        _enforce_postgres_for_multi_worker(_config_with_backend("memory"))
-
-
-def test_gate_rejects_high_worker_counts(monkeypatch):
-    """The threshold is >1, not ==2; prod-scale counts must also be gated."""
-    monkeypatch.setenv("GATEWAY_WORKERS", "4")
-    with pytest.raises(SystemExit) as exc_info:
-        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
-    assert "GATEWAY_WORKERS=4" in str(exc_info.value)
-
-
-def test_gate_treats_invalid_env_as_single_worker(monkeypatch):
-    """Non-integer GATEWAY_WORKERS values must not crash startup.
-
-    Uvicorn itself rejects these later; the gate should not preempt
-    that with its own crash. Falling back to 1 keeps the gate inert.
-    """
-    for invalid in ("", "auto", "1.5", "abc", "0x4"):
-        monkeypatch.setenv("GATEWAY_WORKERS", invalid)
-        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
-
-
-def test_gate_treats_zero_and_negatives_as_single_worker(monkeypatch):
-    """GATEWAY_WORKERS <= 1 (including 0 and negatives) skips the gate."""
-    for value in ("0", "-1", "-999"):
-        monkeypatch.setenv("GATEWAY_WORKERS", value)
-        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
-
-
-def test_gate_error_message_lists_both_remediations(monkeypatch):
-    """Operators must see both fix options without reading docs."""
-    monkeypatch.setenv("GATEWAY_WORKERS", "2")
-    with pytest.raises(SystemExit) as exc_info:
-        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
-    msg = str(exc_info.value)
-    assert "GATEWAY_WORKERS=1" in msg, "must mention the rollback knob"
-    assert "Postgres" in msg, "must mention the alternative backend"
-
-
-# ---------------------------------------------------------------------------
-# Integration: the gate is wired into langgraph_runtime before init_engine
-# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def _context(value):
+    yield value
 
 
 @pytest.mark.asyncio
-async def test_langgraph_runtime_invokes_gate_before_persistence_setup(monkeypatch):
-    """When the gate trips, no persistence / stream-bridge setup may run.
-
-    Guards against regressions that reorder the gate behind
-    ``init_engine_from_config`` (or any other expensive startup step).
-    """
-    monkeypatch.setenv("GATEWAY_WORKERS", "2")
-
-    init_engine_from_config = AsyncMock(name="init_engine_from_config")
-
-    @asynccontextmanager
-    async def _noop_stream_bridge(_config):
-        yield MagicMock()
+async def test_multi_worker_postgres_runtime_starts_without_backend_gate(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "8")
+    config = SimpleNamespace(
+        database=SimpleNamespace(),
+        run_events=None,
+        stream_bridge=None,
+    )
+    sf = MagicMock()
+    run_manager = MagicMock()
+    run_manager.reconcile_orphaned_inflight_runs = AsyncMock(return_value=[])
+    run_manager.shutdown = AsyncMock()
 
     with (
-        patch(
-            "deerflow.persistence.engine.init_engine_from_config",
-            init_engine_from_config,
-        ),
-        patch("deerflow.runtime.make_stream_bridge", side_effect=_noop_stream_bridge) as make_stream_bridge,
-        patch("deerflow.runtime.make_store", side_effect=_noop_stream_bridge) as make_store,
+        patch("deerflow.persistence.engine.init_engine_from_config", new=AsyncMock()) as init_engine,
+        patch("deerflow.persistence.engine.get_session_factory", return_value=sf),
+        patch("deerflow.persistence.engine.close_engine", new=AsyncMock()),
+        patch("deerflow.runtime.make_stream_bridge", return_value=_context(MagicMock())),
+        patch("deerflow.runtime.checkpointer.async_provider.make_checkpointer", return_value=_context(MagicMock())),
+        patch("deerflow.runtime.make_store", return_value=_context(MagicMock())),
+        patch("deerflow.persistence.thread_meta.make_thread_store", return_value=MagicMock()),
+        patch("deerflow.runtime.events.store.make_run_event_store", return_value=MagicMock()),
+        patch("app.gateway.deps.RunManager", return_value=run_manager),
     ):
-        app = FastAPI()
-        startup_config = _config_with_backend("sqlite")
-        with pytest.raises(SystemExit):
-            async with langgraph_runtime(app, startup_config):
-                pass
+        async with langgraph_runtime(FastAPI(), config):
+            pass
 
-    init_engine_from_config.assert_not_called()
-    make_stream_bridge.assert_not_called()
-    make_store.assert_not_called()
+    init_engine.assert_awaited_once_with(config.database)
+    run_manager.reconcile_orphaned_inflight_runs.assert_awaited_once()
+
+
+def test_postgres_only_runtime_exposes_no_worker_backend_gate() -> None:
+    from app.gateway import deps
+
+    assert not hasattr(deps, "_enforce_postgres_for_multi_worker")
+
+
+def test_database_config_rejects_backend_selector() -> None:
+    with pytest.raises(ValueError, match="backend"):
+        DatabaseConfig(url="postgresql://localhost/test", backend="memory")
+
+
+def test_db_event_store_does_not_fallback_when_engine_is_uninitialized(monkeypatch) -> None:
+    from deerflow.runtime.events import store as event_store_module
+
+    def fail_uninitialized():
+        raise RuntimeError("Persistence engine is not initialized")
+
+    monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", fail_uninitialized)
+    with pytest.raises(RuntimeError, match="not initialized"):
+        event_store_module.make_run_event_store(SimpleNamespace(backend="db", max_trace_content=100))

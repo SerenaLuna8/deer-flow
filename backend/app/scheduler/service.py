@@ -334,7 +334,7 @@ class ScheduledTaskService:
             try:
                 await self.run_once(now=datetime.now(UTC))
             except Exception:
-                # A transient DB error (e.g. SQLite "database is locked") must
+                # A transient database error must
                 # not kill the poller task for the rest of the process life.
                 logger.exception("Scheduled task poll failed; retrying next interval")
             try:

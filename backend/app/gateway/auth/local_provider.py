@@ -17,7 +17,7 @@ class LocalAuthProvider(AuthProvider):
         """Initialize with a UserRepository.
 
         Args:
-            repository: UserRepository implementation (SQLite)
+            repository: PostgreSQL-backed UserRepository implementation
         """
         self._repo = repository
 

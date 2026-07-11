@@ -3,7 +3,7 @@
 This module provides:
 - JWT-based authentication
 - Provider Factory pattern for extensible auth methods
-- UserRepository interface for storage backends (SQLite)
+- UserRepository interface backed by PostgreSQL persistence
 """
 
 from app.gateway.auth.config import AuthConfig, get_auth_config, set_auth_config

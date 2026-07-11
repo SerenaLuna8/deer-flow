@@ -32,10 +32,10 @@ _RETRYABLE_SQLITE_ERROR_CODES = {
 
 
 def _is_retryable_persistence_error(exc: BaseException) -> bool:
-    """Return True for transient SQLite persistence failures.
+    """Return True for recognized transient persistence failures.
 
-    SQLite lock contention normally surfaces through either sqlite3 exceptions
-    or SQLAlchemy wrappers.  The short bounded retry here protects run status
+    Historical lock contention can surface through DBAPI exceptions or
+    SQLAlchemy wrappers. The short bounded retry here protects run status
     finalization from transient writer pressure without hiding permanent
     failures forever.
     """
@@ -184,7 +184,7 @@ class RunManager:
         run_id: str,
         operation: Callable[[], Awaitable[Any]],
     ) -> Any:
-        """Run a short store operation with bounded retries for SQLite pressure."""
+        """Run a short store operation with bounded transient-error retries."""
         policy = self._persistence_retry_policy
         attempt = 1
         delay = policy.initial_delay
@@ -702,7 +702,7 @@ class RunManager:
         """Mark persisted active runs as failed when no local task owns them.
 
         Gateway runs are process-local: the asyncio task and abort event live in
-        memory, while the run row is durable.  After a SQLite-backed gateway
+        memory, while the PostgreSQL run row is durable. After a gateway
         restart, any persisted ``pending`` or ``running`` row created before
         startup cannot still have a local worker.  This recovery step turns that
         ambiguous state into an explicit error instead of letting the UI show an

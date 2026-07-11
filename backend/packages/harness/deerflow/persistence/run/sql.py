@@ -69,9 +69,8 @@ class RunRepository(RunStore):
         # Remap JSON columns to match RunStore interface
         d["metadata"] = d.pop("metadata_json", {})
         d["kwargs"] = d.pop("kwargs_json", {})
-        # Convert datetime to ISO string for consistency with MemoryRunStore.
-        # SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` —
-        # ``coerce_iso`` normalizes naive datetimes as UTC.
+        # Convert datetime to the RunStore API's ISO representation;
+        # ``coerce_iso`` also normalizes legacy naive timestamps as UTC.
         for key in ("created_at", "updated_at"):
             val = d.get(key)
             if isinstance(val, datetime):
@@ -96,8 +95,8 @@ class RunRepository(RunStore):
     ):
         """Insert or update a run row.
 
-        ``RunManager`` retries ``put`` after transient SQLite failures.  Making
-        this operation idempotent prevents a successful-but-unacknowledged first
+        ``RunManager`` may retry ``put`` after transient persistence failures.
+        Making this operation idempotent prevents a successful-but-unacknowledged first
         commit from turning the retry into a primary-key failure.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.put")
