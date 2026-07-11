@@ -171,3 +171,32 @@ async def test_repository_fixture_failure_closes_global_engine_before_database_d
             get_session_factory()
     finally:
         await close_engine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("module_name", "helper_args"),
+    [
+        ("test_additional_channel_connections", (None, "test")),
+        ("test_channel_connections_router", (None,)),
+        ("test_slack_channel_connections", (None,)),
+    ],
+)
+async def test_channel_fixture_failure_disposes_owned_engine(
+    monkeypatch,
+    module_name: str,
+    helper_args: tuple,
+) -> None:
+    module = import_module(module_name)
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr(module, "create_async_engine", MagicMock(return_value=engine))
+
+    fixture = module._postgres_database.__wrapped__(RedactedURL("postgresql://unused@localhost/test"))
+    await fixture.__anext__()
+    await module._make_repo(*helper_args)
+
+    with pytest.raises(RuntimeError, match="fixture body failed"):
+        await fixture.athrow(RuntimeError("fixture body failed"))
+
+    engine.dispose.assert_awaited_once()

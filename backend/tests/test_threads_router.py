@@ -68,6 +68,10 @@ def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
     return app, store, checkpointer
 
 
+async def _collect_checkpoints(checkpointer, config):
+    return [checkpoint async for checkpoint in checkpointer.alist(config)]
+
+
 async def _write_checkpoint(
     checkpointer: InMemorySaver,
     thread_id: str,
@@ -912,3 +916,109 @@ def test_update_thread_state_without_values_keeps_existing_checkpoint() -> None:
 
         updated = client.post(f"/api/threads/{thread_id}/state", json={})
         assert updated.status_code == 200, updated.text
+
+
+def test_update_thread_state_uses_actual_latest_checkpoint_as_parent(monkeypatch) -> None:
+    app, _store, checkpointer = _build_thread_app()
+    captured_write_config = None
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"metadata": {}})
+        assert created.status_code == 200, created.text
+        thread_id = created.json()["thread_id"]
+        first = client.post(f"/api/threads/{thread_id}/state", json={"values": {"title": "First"}})
+        assert first.status_code == 200, first.text
+        first_id = first.json()["checkpoint_id"]
+
+        original_get = checkpointer.aget_tuple
+        original_put = checkpointer.aput
+
+        async def get_with_owner(config):
+            checkpoint_tuple = await original_get(config)
+            assert checkpoint_tuple is not None
+            checkpoint_tuple.config["configurable"]["owner_user_id"] = "owner-1"
+            return checkpoint_tuple
+
+        async def capture_put(config, checkpoint, metadata, new_versions):
+            nonlocal captured_write_config
+            captured_write_config = {
+                **config,
+                "configurable": dict(config["configurable"]),
+            }
+            return await original_put(config, checkpoint, metadata, new_versions)
+
+        monkeypatch.setattr(checkpointer, "aget_tuple", get_with_owner)
+        monkeypatch.setattr(checkpointer, "aput", capture_put)
+        second = client.post(f"/api/threads/{thread_id}/state", json={"values": {"title": "Second"}})
+        assert second.status_code == 200, second.text
+        second_id = second.json()["checkpoint_id"]
+
+    assert captured_write_config is not None
+    assert captured_write_config["configurable"] == {
+        "thread_id": thread_id,
+        "checkpoint_ns": "",
+        "checkpoint_id": first_id,
+        "owner_user_id": "owner-1",
+    }
+    child = asyncio.run(original_get({"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": second_id}}))
+    assert child is not None
+    assert child.parent_config is not None
+    assert child.parent_config["configurable"]["checkpoint_id"] == first_id
+
+
+def test_update_thread_state_explicit_checkpoint_creates_traversable_branch() -> None:
+    app, _store, checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"metadata": {}})
+        assert created.status_code == 200, created.text
+        thread_id = created.json()["thread_id"]
+        first = client.post(f"/api/threads/{thread_id}/state", json={"values": {"title": "First"}})
+        second = client.post(f"/api/threads/{thread_id}/state", json={"values": {"title": "Second"}})
+        assert first.status_code == second.status_code == 200
+        first_id = first.json()["checkpoint_id"]
+        second_id = second.json()["checkpoint_id"]
+
+        branched = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"checkpoint_id": first_id, "values": {"title": "Branched"}},
+        )
+        assert branched.status_code == 200, branched.text
+        branch_id = branched.json()["checkpoint_id"]
+
+    assert branch_id not in {first_id, second_id}
+    branch = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": branch_id}}))
+    assert branch is not None
+    assert branch.parent_config is not None
+    assert branch.parent_config["configurable"] == {
+        "thread_id": thread_id,
+        "checkpoint_ns": "",
+        "checkpoint_id": first_id,
+    }
+    parent = asyncio.run(checkpointer.aget_tuple(branch.parent_config))
+    assert parent is not None
+    assert parent.config["configurable"]["checkpoint_id"] == first_id
+    history = asyncio.run(_collect_checkpoints(checkpointer, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert {first_id, second_id, branch_id} <= {item.config["configurable"]["checkpoint_id"] for item in history}
+
+
+def test_update_thread_state_incompatible_channel_version_returns_structured_500(monkeypatch) -> None:
+    app, _store, checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"metadata": {}})
+        assert created.status_code == 200, created.text
+        thread_id = created.json()["thread_id"]
+        monkeypatch.setattr(
+            checkpointer,
+            "get_next_version",
+            lambda *_args: (_ for _ in ()).throw(NotImplementedError("incompatible version")),
+        )
+
+        response = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"values": {"messages": [HumanMessage(content="x").model_dump()]}},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Failed to update thread state"

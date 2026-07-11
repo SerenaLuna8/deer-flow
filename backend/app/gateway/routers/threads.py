@@ -983,13 +983,6 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         channel_values.update(body.values)
 
     checkpoint["channel_values"] = channel_values
-    channel_versions: dict[str, Any] = dict(checkpoint.get("channel_versions", {}) or {})
-    new_versions: dict[str, Any] = {}
-    for channel in body.values or {}:
-        version = checkpointer.get_next_version(channel_versions.get(channel), None)
-        channel_versions[channel] = version
-        new_versions[channel] = version
-    checkpoint["channel_versions"] = channel_versions
     metadata["updated_at"] = now_iso()
 
     if body.as_node:
@@ -1004,25 +997,37 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
     # checkpoint by max(checkpoint_ids) string order, matching the uuid6 epoch.
     checkpoint["id"] = str(uuid6())
 
-    # aput requires checkpoint_ns in the config — use the same config used for the
-    # read (which always includes checkpoint_ns=""). The fresh checkpoint ID is
-    # assigned above via checkpoint["id"]; keep checkpoint_id out of the config so
-    # the write is keyed by the new checkpoint payload rather than the prior read.
-    # The supported AsyncPostgresSaver
-    # persist and echo back checkpoint["id"] verbatim — none mint their own — so
-    # the new_config below carries the uuid6 we assigned here. (Regression-locked
-    # by test_update_thread_state_inserts_new_checkpoint_each_call.)
-    write_config: dict[str, Any] = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": "",
-        }
-    }
+    # LangGraph treats config.configurable.checkpoint_id as the parent of the
+    # checkpoint payload's fresh UUID6 id. Copy the config returned by the
+    # actual read so explicit historical updates branch from that checkpoint
+    # and request-scoped owner/config metadata is retained.
     try:
+        source_config: dict[str, Any] = dict(getattr(checkpoint_tuple, "config", {}) or {})
+        source_configurable: dict[str, Any] = dict(source_config.get("configurable", {}) or {})
+        parent_checkpoint_id = source_configurable.get("checkpoint_id")
+        if not parent_checkpoint_id:
+            raise RuntimeError("Source checkpoint is missing checkpoint_id")
+        write_config: dict[str, Any] = {
+            **source_config,
+            "configurable": {
+                **source_configurable,
+                "thread_id": thread_id,
+                "checkpoint_ns": source_configurable.get("checkpoint_ns", ""),
+                "checkpoint_id": parent_checkpoint_id,
+            },
+        }
+
+        channel_versions: dict[str, Any] = dict(checkpoint.get("channel_versions", {}) or {})
+        new_versions: dict[str, Any] = {}
+        for channel in body.values or {}:
+            version = checkpointer.get_next_version(channel_versions.get(channel), None)
+            channel_versions[channel] = version
+            new_versions[channel] = version
+        checkpoint["channel_versions"] = channel_versions
         new_config = await checkpointer.aput(write_config, checkpoint, metadata, new_versions)
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to update state for thread %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to update thread state")
+        raise HTTPException(status_code=500, detail="Failed to update thread state") from exc
 
     new_checkpoint_id: str | None = None
     if isinstance(new_config, dict):

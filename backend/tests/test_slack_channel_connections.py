@@ -14,15 +14,20 @@ from sqlalchemy.pool import NullPool
 from app.channels.message_bus import MessageBus, OutboundMessage
 
 _DATABASE_URL: str | None = None
+_OWNED_ENGINES = []
 
 
 @pytest_asyncio.fixture()
 async def _postgres_database(migrated_postgres_database_url):
     global _DATABASE_URL
     _DATABASE_URL = migrated_postgres_database_url
+    _OWNED_ENGINES.clear()
     try:
         yield
     finally:
+        for engine in _OWNED_ENGINES:
+            await engine.dispose()
+        _OWNED_ENGINES.clear()
         _DATABASE_URL = None
 
 
@@ -31,6 +36,7 @@ async def _make_repo(_tmp_path):
 
     assert _DATABASE_URL is not None
     engine = create_async_engine(_DATABASE_URL, poolclass=NullPool)
+    _OWNED_ENGINES.append(engine)
     repo = ChannelConnectionRepository(
         async_sessionmaker(engine, expire_on_commit=False),
         cipher=ChannelCredentialCipher.from_key("slack-secret"),

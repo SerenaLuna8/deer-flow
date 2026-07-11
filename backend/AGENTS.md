@@ -324,6 +324,14 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | **GitHub Webhooks** (`/api/webhooks/github`) | `POST /` - receive GitHub App / repo webhook deliveries. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`; exempt from auth + CSRF because authenticity is enforced by HMAC. The route is fail-closed: mounted only when `GITHUB_WEBHOOK_SECRET` is set, or when explicit dev opt-in `DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1` is set. Recognized events include `ping`, `issues`, `issue_comment`, `pull_request`, `pull_request_review`, and `pull_request_review_comment`; unknown events return 200 with `handled=false`. Fan-out runtime failures return 503 so GitHub retries; permanent/non-retryable conditions such as `channels.github.enabled: false`, unknown events, malformed payloads, or unavailable channel service return 200 with a skipped/handled response. |
 | **GitHub Event-Driven Agents** | Custom agents can declare a `github:` block in their `config.yaml` to bind to repos and event triggers. Webhook fan-out publishes one `InboundMessage` per matching binding to the channel bus; `GitHubChannel` routes those messages through `ChannelManager`. The response `dispatch` summarizes matched/fired/skipped agents. |
 
+`POST /api/threads/{id}/state` 会基于实际读取到的 checkpoint 创建一个新的子
+checkpoint，而不是覆盖原记录。新记录使用新的 UUID6；写入配置保留原
+checkpoint 的 `checkpoint_id` 作为 parent，同时保留 `thread_id`、
+`checkpoint_ns` 和 owner 相关配置。接口会为每个更新的 channel 调用
+`get_next_version`，同步推进 `channel_versions`，并把 `new_versions` 交给
+saver 持久化非基础类型的 blob。请求显式携带历史 `checkpoint_id` 时，新记录
+从该历史节点分支，parent 链仍可继续遍历。
+
 **Workspace change review**: `packages/harness/deerflow/workspace_changes/`
 captures a pre-run and post-run snapshot of the thread-owned `workspace` and
 `outputs` directories. `runtime/runs/worker.py` performs the filesystem scan via

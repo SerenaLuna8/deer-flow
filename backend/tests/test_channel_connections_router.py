@@ -21,6 +21,7 @@ from deerflow.config.app_config import AppConfig, reset_app_config, set_app_conf
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
 _DATABASE_URL: str | None = None
+_OWNED_ENGINES = []
 
 pytestmark = [pytest.mark.postgres, pytest.mark.usefixtures("_postgres_database")]
 
@@ -29,9 +30,13 @@ pytestmark = [pytest.mark.postgres, pytest.mark.usefixtures("_postgres_database"
 async def _postgres_database(migrated_postgres_database_url):
     global _DATABASE_URL
     _DATABASE_URL = migrated_postgres_database_url
+    _OWNED_ENGINES.clear()
     try:
         yield
     finally:
+        for engine in _OWNED_ENGINES:
+            await engine.dispose()
+        _OWNED_ENGINES.clear()
         _DATABASE_URL = None
 
 
@@ -67,6 +72,7 @@ async def _make_repo(_tmp_path):
 
     assert _DATABASE_URL is not None
     engine = create_async_engine(_DATABASE_URL, poolclass=NullPool)
+    _OWNED_ENGINES.append(engine)
     repo = ChannelConnectionRepository(async_sessionmaker(engine, expire_on_commit=False))
     repo.close = engine.dispose  # type: ignore[method-assign]
     return repo
