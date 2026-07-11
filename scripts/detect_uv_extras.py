@@ -3,13 +3,11 @@
 
 Order of resolution:
 1. `UV_EXTRAS` env var. Comma- or whitespace-separated names so multiple
-   extras can be layered (e.g. ``UV_EXTRAS=postgres,ollama``). The same
+   extras can be layered (e.g. ``UV_EXTRAS=ollama,redis``). The same
    parsing semantics apply in the Docker dev container via
    ``docker/dev-entrypoint.sh`` and in the production Docker image build via
    ``backend/Dockerfile``.
 2. Auto-detection from config.yaml — currently maps:
-   - database.backend == postgres        -> postgres
-   - checkpointer.type == postgres       -> postgres
    - stream_bridge.type == redis         -> redis
 3. Runtime environment toggles that enable optional backends:
    - DEER_FLOW_STREAM_BRIDGE_REDIS_URL   -> redis
@@ -20,7 +18,7 @@ is dropped with a stderr warning so a stray shell metacharacter in `.env`
 cannot reach the `uv sync` invocation downstream.
 
 Output: space-separated `--extra <name>` flags ready for splat into
-`uv sync`, e.g. `--extra postgres`. Empty output means "no extras".
+`uv sync`, e.g. `--extra redis`. Empty output means "no extras".
 
 Intentionally implemented with the standard library only: this script must run
 *before* `uv sync` has populated the venv, so it cannot depend on PyYAML.
@@ -227,10 +225,6 @@ def detect_from_config(path: Path) -> list[str]:
         return []
     lines = text.splitlines()
     extras: set[str] = set()
-    if (section_value(lines, "database", "backend") or "").lower() == "postgres":
-        extras.add("postgres")
-    if (section_value(lines, "checkpointer", "type") or "").lower() == "postgres":
-        extras.add("postgres")
     if (section_value(lines, "stream_bridge", "type") or "").lower() == "redis":
         extras.add("redis")
     if (nested_section_value(lines, "channels.discord", "enabled") or "").lower() == "true":

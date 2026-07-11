@@ -125,16 +125,16 @@ def test_section_value_does_not_descend_into_grandchildren():
     assert detect.section_value(yaml_lines, "database", "backend") == "sqlite"
 
 
-def test_detect_from_config_postgres_via_database(tmp_path):
+def test_detect_from_config_ignores_database_backend(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("database:\n  backend: postgres\n  postgres_url: $DATABASE_URL\n")
-    assert detect.detect_from_config(cfg) == ["postgres"]
+    assert detect.detect_from_config(cfg) == []
 
 
-def test_detect_from_config_postgres_via_checkpointer(tmp_path):
+def test_detect_from_config_ignores_checkpointer_backend(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("checkpointer:\n  type: postgres\n  connection_string: postgresql://localhost/db\n")
-    assert detect.detect_from_config(cfg) == ["postgres"]
+    assert detect.detect_from_config(cfg) == []
 
 
 def test_detect_from_config_sqlite_returns_no_extras(tmp_path):
@@ -155,18 +155,18 @@ def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
-def test_detect_from_config_combines_postgres_and_redis(tmp_path):
+def test_detect_from_config_only_detects_redis_for_database_config(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("database:\n  backend: postgres\nstream_bridge:\n  type: redis\n")
     # Sorted unique extras across all detectors.
-    assert detect.detect_from_config(cfg) == ["postgres", "redis"]
+    assert detect.detect_from_config(cfg) == ["redis"]
 
 
-def test_detect_from_config_dedupes_when_both_present(tmp_path):
+def test_detect_from_config_ignores_both_database_sections(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("checkpointer:\n  type: postgres\ndatabase:\n  backend: postgres\n")
     # Sorted unique extras, no double-counting.
-    assert detect.detect_from_config(cfg) == ["postgres"]
+    assert detect.detect_from_config(cfg) == []
 
 
 def test_detect_from_config_missing_file_returns_empty(tmp_path):
@@ -199,7 +199,7 @@ def test_resolve_extras_combines_uv_extras_with_redis_url_env(isolated_cwd, monk
 
 def test_resolve_extras_falls_back_to_config(isolated_cwd):
     (isolated_cwd / "config.yaml").write_text("database:\n  backend: postgres\n")
-    assert detect.resolve_extras() == ["postgres"]
+    assert detect.resolve_extras() == []
 
 
 def test_resolve_extras_respects_explicit_config_path(tmp_path, monkeypatch):
@@ -209,7 +209,7 @@ def test_resolve_extras_respects_explicit_config_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(elsewhere))
 
-    assert detect.resolve_extras() == ["postgres"]
+    assert detect.resolve_extras() == []
 
 
 def test_resolve_extras_no_config_no_env(isolated_cwd):
@@ -220,7 +220,7 @@ def test_resolve_extras_finds_backend_subdir_config(isolated_cwd):
     sub = isolated_cwd / "backend"
     sub.mkdir()
     (sub / "config.yaml").write_text("database:\n  backend: postgres\n")
-    assert detect.resolve_extras() == ["postgres"]
+    assert detect.resolve_extras() == []
 
 
 def test_resolve_extras_root_config_takes_precedence(isolated_cwd):

@@ -256,10 +256,11 @@ make down   # Stop and remove containers
 
 Access: http://localhost:2026
 
-For persistent deployments, configure `database.backend` as `sqlite` or
-`postgres`. The selected backend is shared by the LangGraph checkpointer,
-LangGraph Store, and DeerFlow application data. The deprecated `checkpointer`
-section, when present, overrides the first two for backward compatibility.
+DeerFlow requires PostgreSQL for persistence. Set `DATABASE_URL` to a
+`postgresql://...` or `postgresql+asyncpg://...` connection URL; the unified
+`database` section supplies the LangGraph checkpointer, LangGraph Store, and
+DeerFlow application data. PostgreSQL drivers are installed by default, and
+the former independent `checkpointer` section is no longer accepted.
 
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 

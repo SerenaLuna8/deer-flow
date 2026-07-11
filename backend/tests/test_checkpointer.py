@@ -10,10 +10,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 import deerflow.config.app_config as app_config_module
+import deerflow.config.checkpointer_config as checkpointer_config_module
+from deerflow.config.app_config import AppConfig
 from deerflow.config.checkpointer_config import (
-    CheckpointerConfig,
     ensure_config_loaded,
     get_checkpointer_config,
     load_checkpointer_config_from_dict,
@@ -38,6 +40,15 @@ def reset_state():
     set_checkpointer_config(None)
     reset_checkpointer()
     reset_store()
+
+
+def _runtime_config(type_: str, connection_string: str | None = None) -> SimpleNamespace:
+    """Exercise task-3 legacy provider branches without reopening config input."""
+    return SimpleNamespace(type=type_, connection_string=connection_string)
+
+
+def _set_runtime_config(type_: str, connection_string: str | None = None) -> None:
+    checkpointer_config_module._checkpointer_config = _runtime_config(type_, connection_string)
 
 
 class _BlockingSingletonContext:
@@ -124,39 +135,35 @@ def _call_getter_concurrently(getter, workers: int = 8) -> list[object]:
 
 
 class TestCheckpointerConfig:
-    def test_load_memory_config(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
-        config = get_checkpointer_config()
-        assert config is not None
-        assert config.type == "memory"
-        assert config.connection_string is None
-
-    def test_load_sqlite_config(self):
-        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "/tmp/test.db"})
-        config = get_checkpointer_config()
-        assert config is not None
-        assert config.type == "sqlite"
-        assert config.connection_string == "/tmp/test.db"
-
-    def test_load_postgres_config(self):
-        load_checkpointer_config_from_dict({"type": "postgres", "connection_string": "postgresql://localhost/db"})
+    def test_compat_config_is_derived_from_database(self):
+        with pytest.deprecated_call(match="DatabaseConfig"):
+            load_checkpointer_config_from_dict({"url": "postgresql+asyncpg://localhost/deerflow"})
         config = get_checkpointer_config()
         assert config is not None
         assert config.type == "postgres"
-        assert config.connection_string == "postgresql://localhost/db"
+        assert config.connection_string == "postgresql://localhost/deerflow"
 
-    def test_default_connection_string_is_none(self):
-        config = CheckpointerConfig(type="memory")
-        assert config.connection_string is None
+    @pytest.mark.parametrize("legacy", [{"type": "memory"}, {"type": "sqlite", "connection_string": "/tmp/test.db"}])
+    def test_compat_config_rejects_non_postgres_legacy_backends(self, legacy):
+        with pytest.deprecated_call():
+            with pytest.raises(ValidationError):
+                load_checkpointer_config_from_dict(legacy)
 
     def test_set_config_to_none(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
+        with pytest.deprecated_call():
+            load_checkpointer_config_from_dict({"url": "postgresql://localhost/deerflow"})
         set_checkpointer_config(None)
         assert get_checkpointer_config() is None
 
+    def test_compat_state_rejects_non_database_derived_values(self):
+        with pytest.raises(TypeError, match="derived from DatabaseConfig"):
+            set_checkpointer_config(_runtime_config("sqlite", "/tmp/test.db"))
+
     def test_ensure_config_loaded_loads_app_config_when_uninitialized(self):
         def fake_get_app_config():
-            load_checkpointer_config_from_dict({"type": "memory"})
+            with pytest.deprecated_call():
+                load_checkpointer_config_from_dict({"url": "postgresql://localhost/deerflow"})
+            return SimpleNamespace(database=DatabaseConfig(url="postgresql://localhost/deerflow"))
 
         with patch("deerflow.config.app_config.get_app_config", side_effect=fake_get_app_config) as mock_get_app_config:
             ensure_config_loaded()
@@ -164,49 +171,47 @@ class TestCheckpointerConfig:
         mock_get_app_config.assert_called_once()
         config = get_checkpointer_config()
         assert config is not None
-        assert config.type == "memory"
+        assert config.type == "postgres"
 
     def test_ensure_config_loaded_skips_explicit_config(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
+        with pytest.deprecated_call():
+            load_checkpointer_config_from_dict({"url": "postgresql://localhost/deerflow"})
 
         with patch("deerflow.config.app_config.get_app_config") as mock_get_app_config:
             ensure_config_loaded()
 
         mock_get_app_config.assert_not_called()
 
-    def test_invalid_type_raises(self):
-        with pytest.raises(Exception):
-            load_checkpointer_config_from_dict({"type": "unknown"})
-
-    def test_connection_string_description_matches_runtime_defaults(self):
-        description = CheckpointerConfig.model_fields["connection_string"].description
-
-        assert description is not None
-        assert "Optional for sqlite" in description
-        assert "defaults to 'store.db'" in description
-        assert "Required for postgres" in description
+    def test_app_config_rejects_independent_checkpointer_section(self):
+        with pytest.raises(ValidationError, match="checkpointer.*removed|removed.*checkpointer"):
+            AppConfig.model_validate(
+                {
+                    "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                    "database": {"url": "postgresql://localhost/deerflow"},
+                    "checkpointer": {"type": "postgres", "connection_string": "postgresql://localhost/other"},
+                }
+            )
 
 
 class TestHarnessPackaging:
-    def test_pyproject_declares_postgres_extra(self):
+    def test_harness_default_dependencies_are_postgres_only(self):
         pyproject_path = Path(__file__).resolve().parents[1] / "packages" / "harness" / "pyproject.toml"
         data = tomllib.loads(pyproject_path.read_text())
 
-        optional_dependencies = data["project"]["optional-dependencies"]
-        assert "postgres" in optional_dependencies
-        assert optional_dependencies["postgres"] == [
-            "asyncpg>=0.29",
-            "langgraph-checkpoint-postgres>=3.0.5",
-            "psycopg[binary]>=3.3.3",
-            "psycopg-pool>=3.3.0",
-        ]
+        dependencies = data["project"]["dependencies"]
+        assert "asyncpg>=0.29" in dependencies
+        assert "psycopg[binary,pool]>=3.2" in dependencies
+        assert "langgraph-checkpoint-postgres>=3.0.5" in dependencies
+        assert not any(dependency.startswith("aiosqlite") for dependency in dependencies)
+        assert not any(dependency.startswith("langgraph-checkpoint-sqlite") for dependency in dependencies)
+        assert "postgres" not in data["project"]["optional-dependencies"]
 
-    def test_workspace_pyproject_forwards_postgres_extra_to_harness(self):
+    def test_workspace_pyproject_has_no_postgres_extra(self):
         pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
         data = tomllib.loads(pyproject_path.read_text())
 
         optional_dependencies = data["project"]["optional-dependencies"]
-        assert optional_dependencies["postgres"] == ["deerflow-harness[postgres]"]
+        assert "postgres" not in optional_dependencies
 
     def test_postgres_missing_dependency_messages_recommend_package_extra(self):
         assert "deerflow-harness[postgres]" in POSTGRES_INSTALL
@@ -231,41 +236,41 @@ class TestGetCheckpointer:
         assert isinstance(cp, InMemorySaver)
 
     def test_memory_returns_in_memory_saver(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
+        _set_runtime_config("memory")
         from langgraph.checkpoint.memory import InMemorySaver
 
         cp = get_checkpointer()
         assert isinstance(cp, InMemorySaver)
 
     def test_memory_singleton(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
+        _set_runtime_config("memory")
         cp1 = get_checkpointer()
         cp2 = get_checkpointer()
         assert cp1 is cp2
 
     def test_reset_clears_singleton(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
+        _set_runtime_config("memory")
         cp1 = get_checkpointer()
         reset_checkpointer()
         cp2 = get_checkpointer()
         assert cp1 is not cp2
 
     def test_sqlite_raises_when_package_missing(self):
-        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "/tmp/test.db"})
+        _set_runtime_config("sqlite", "/tmp/test.db")
         with patch.dict(sys.modules, {"langgraph.checkpoint.sqlite": None}):
             reset_checkpointer()
             with pytest.raises(ImportError, match="langgraph-checkpoint-sqlite"):
                 get_checkpointer()
 
     def test_postgres_raises_when_package_missing(self):
-        load_checkpointer_config_from_dict({"type": "postgres", "connection_string": "postgresql://localhost/db"})
+        _set_runtime_config("postgres", "postgresql://localhost/db")
         with patch.dict(sys.modules, {"langgraph.checkpoint.postgres": None}):
             reset_checkpointer()
             with pytest.raises(ImportError, match="langgraph-checkpoint-postgres"):
                 get_checkpointer()
 
     def test_postgres_raises_when_connection_string_missing(self):
-        load_checkpointer_config_from_dict({"type": "postgres"})
+        _set_runtime_config("postgres")
         mock_saver = MagicMock()
         mock_module = MagicMock()
         mock_module.PostgresSaver = mock_saver
@@ -276,7 +281,7 @@ class TestGetCheckpointer:
 
     def test_sqlite_creates_saver(self):
         """SQLite checkpointer is created when package is available."""
-        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "/tmp/test.db"})
+        _set_runtime_config("sqlite", "/tmp/test.db")
 
         mock_saver_instance = MagicMock()
         mock_cm = MagicMock()
@@ -306,7 +311,7 @@ class TestGetCheckpointer:
         using the harness package from an external virtualenv where the
         .deer-flow directory has not been created).
         """
-        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "relative/test.db"})
+        _set_runtime_config("sqlite", "relative/test.db")
 
         mock_saver_instance = MagicMock()
         mock_cm = MagicMock()
@@ -336,7 +341,7 @@ class TestGetCheckpointer:
 
     def test_sqlite_ensure_parent_dir_before_connect(self):
         """ensure_sqlite_parent_dir must be called before from_conn_string."""
-        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "relative/test.db"})
+        _set_runtime_config("sqlite", "relative/test.db")
 
         call_order = []
 
@@ -372,7 +377,7 @@ class TestGetCheckpointer:
 
     def test_postgres_creates_saver(self):
         """Postgres checkpointer is created when packages are available."""
-        load_checkpointer_config_from_dict({"type": "postgres", "connection_string": "postgresql://localhost/db"})
+        _set_runtime_config("postgres", "postgresql://localhost/db")
 
         mock_saver_instance = MagicMock()
         mock_cm = MagicMock()
@@ -396,14 +401,14 @@ class TestGetCheckpointer:
 
 class TestSyncSingletonThreadSafety:
     def test_store_reset_clears_singleton(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
+        _set_runtime_config("memory")
         store1 = get_store()
         reset_store()
         store2 = get_store()
         assert store1 is not store2
 
     def test_concurrent_checkpointer_getter_creates_one_instance(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
+        _set_runtime_config("memory")
         factory = _BlockingSingletonFactory()
 
         with patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", side_effect=factory.context_manager):
@@ -421,7 +426,7 @@ class TestSyncSingletonThreadSafety:
         assert factory.enter_count() == 1
 
     def test_concurrent_store_getter_creates_one_instance(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
+        _set_runtime_config("memory")
         factory = _BlockingSingletonFactory()
 
         with patch("deerflow.runtime.store.provider._sync_store_cm", side_effect=factory.context_manager):
@@ -443,7 +448,7 @@ class TestSyncSingletonThreadSafety:
 
         def fake_ensure_config_loaded():
             assert not tracking_lock.locked()
-            load_checkpointer_config_from_dict({"type": "memory"})
+            _set_runtime_config("memory")
 
         with (
             patch("deerflow.runtime.checkpointer.provider._checkpointer_lock", tracking_lock),
@@ -459,7 +464,7 @@ class TestSyncSingletonThreadSafety:
 
         def fake_ensure_config_loaded():
             assert not tracking_lock.locked()
-            load_checkpointer_config_from_dict({"type": "memory"})
+            _set_runtime_config("memory")
 
         with (
             patch("deerflow.runtime.store.provider._store_lock", tracking_lock),
@@ -471,7 +476,7 @@ class TestSyncSingletonThreadSafety:
         assert tracking_lock.acquired.is_set()
 
     def test_checkpointer_reset_waits_for_initialization(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
+        _set_runtime_config("memory")
         factory = _BlockingSingletonFactory()
 
         with (
@@ -501,7 +506,7 @@ class TestSyncSingletonThreadSafety:
         assert factory.exit_count() == 1
 
     def test_store_reset_waits_for_initialization(self):
-        load_checkpointer_config_from_dict({"type": "memory"})
+        _set_runtime_config("memory")
         factory = _BlockingSingletonFactory()
 
         with (
@@ -538,7 +543,7 @@ class TestAsyncCheckpointer:
         from deerflow.runtime.checkpointer.async_provider import _prepare_sqlite_checkpointer_path, make_checkpointer
 
         mock_config = MagicMock()
-        mock_config.checkpointer = CheckpointerConfig(type="sqlite", connection_string="relative/test.db")
+        mock_config.checkpointer = _runtime_config("sqlite", "relative/test.db")
 
         mock_saver = AsyncMock()
         mock_cm = AsyncMock()
@@ -576,7 +581,7 @@ class TestAsyncCheckpointer:
         from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 
         mock_config = MagicMock()
-        mock_config.checkpointer = CheckpointerConfig(type="postgres", connection_string="postgresql://localhost/db")
+        mock_config.checkpointer = _runtime_config("postgres", "postgresql://localhost/db")
 
         mock_saver = AsyncMock()
 
@@ -623,7 +628,7 @@ class TestAsyncCheckpointer:
         from deerflow.config.database_config import DatabaseConfig
         from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 
-        db_config = DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db")
+        db_config = DatabaseConfig(url="postgresql://localhost/db")
         mock_config = MagicMock()
         mock_config.checkpointer = None
         mock_config.database = db_config
@@ -666,10 +671,9 @@ class TestAsyncCheckpointer:
     @pytest.mark.anyio
     async def test_database_sqlite_creates_parent_dir_via_to_thread(self):
         """Unified database SQLite setup should also move path IO off the event loop."""
-        from deerflow.config.database_config import DatabaseConfig
         from deerflow.runtime.checkpointer.async_provider import _prepare_database_sqlite_checkpointer_path, make_checkpointer
 
-        db_config = DatabaseConfig(backend="sqlite", sqlite_dir="relative-data")
+        db_config = SimpleNamespace(backend="sqlite", checkpointer_sqlite_path="relative-data/deerflow.db")
         mock_config = MagicMock()
         mock_config.checkpointer = None
         mock_config.database = db_config
@@ -706,16 +710,15 @@ class TestAsyncCheckpointer:
 
 
 class TestStoreDatabaseConfig:
-    def test_sync_store_falls_back_to_memory_when_config_file_is_missing(self):
-        """The sync Store keeps its no-config fallback for embedded callers."""
-        from langgraph.store.memory import InMemoryStore
-
+    def test_sync_store_does_not_silently_fallback_without_database_config(self):
+        """A missing database config cannot reopen the old memory contract."""
         with (
             patch("deerflow.runtime.store.provider.ensure_config_loaded"),
             patch("deerflow.runtime.store.provider.get_checkpointer_config", return_value=None),
             patch("deerflow.runtime.store.provider.get_app_config", side_effect=FileNotFoundError),
         ):
-            assert isinstance(get_store(), InMemoryStore)
+            with pytest.raises(ValidationError):
+                get_store()
 
     @pytest.mark.anyio
     async def test_async_postgres_store_uses_database_config(self, caplog):
@@ -724,8 +727,8 @@ class TestStoreDatabaseConfig:
 
         caplog.set_level("WARNING", logger="deerflow.runtime.store.async_provider")
         app_config = SimpleNamespace(
-            checkpointer=None,
-            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+            checkpointer=_runtime_config("postgres", "postgresql://localhost/db"),
+            database=DatabaseConfig(url="postgresql://localhost/db"),
         )
         mock_store = AsyncMock()
         mock_cm = AsyncMock()
@@ -749,8 +752,8 @@ class TestStoreDatabaseConfig:
         from deerflow.runtime.store.async_provider import make_store
         from deerflow.runtime.store.provider import ensure_sqlite_parent_dir
 
-        db_config = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
-        app_config = SimpleNamespace(checkpointer=None, database=db_config)
+        db_config = SimpleNamespace(backend="sqlite", checkpointer_sqlite_path=str(tmp_path / "deerflow.db"))
+        app_config = SimpleNamespace(checkpointer=_runtime_config("sqlite", db_config.checkpointer_sqlite_path), database=db_config)
         mock_store = AsyncMock()
         mock_cm = AsyncMock()
         mock_cm.__aenter__.return_value = mock_store
@@ -781,8 +784,8 @@ class TestStoreDatabaseConfig:
         from deerflow.runtime.store.provider import store_context
 
         app_config = SimpleNamespace(
-            checkpointer=None,
-            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+            checkpointer=_runtime_config("postgres", "postgresql://localhost/db"),
+            database=DatabaseConfig(url="postgresql://localhost/db"),
         )
         expected_store = object()
         factory = MagicMock(return_value=nullcontext(expected_store))
@@ -801,8 +804,8 @@ class TestStoreDatabaseConfig:
     def test_sync_store_singleton_uses_database_config(self):
         """The cached sync Store factory must resolve database config before locking."""
         app_config = SimpleNamespace(
-            checkpointer=None,
-            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+            checkpointer=_runtime_config("postgres", "postgresql://localhost/db"),
+            database=DatabaseConfig(url="postgresql://localhost/db"),
         )
         expected_store = object()
         factory = MagicMock(return_value=nullcontext(expected_store))
@@ -823,8 +826,8 @@ class TestStoreDatabaseConfig:
         from deerflow.runtime.store.provider import store_context
 
         app_config = SimpleNamespace(
-            checkpointer=CheckpointerConfig(type="memory"),
-            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+            checkpointer=_runtime_config("memory"),
+            database=DatabaseConfig(url="postgresql://localhost/db"),
         )
         expected_store = object()
         factory = MagicMock(return_value=nullcontext(expected_store))
@@ -847,8 +850,8 @@ class TestStoreDatabaseConfig:
         from deerflow.runtime.store.provider import store_context
 
         app_config = SimpleNamespace(
-            checkpointer=None,
-            database=DatabaseConfig(backend="memory"),
+            checkpointer=_runtime_config("memory"),
+            database=SimpleNamespace(backend="memory"),
         )
         with patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config):
             with store_context() as store:
@@ -861,13 +864,14 @@ class TestStoreDatabaseConfig:
 
 
 class TestAppConfigLoadsCheckpointer:
-    def test_load_checkpointer_section(self):
-        """load_checkpointer_config_from_dict populates the global config."""
+    def test_compat_loader_derives_postgres_config(self):
+        """The temporary loader accepts only the DatabaseConfig shape."""
         set_checkpointer_config(None)
-        load_checkpointer_config_from_dict({"type": "memory"})
+        with pytest.deprecated_call():
+            load_checkpointer_config_from_dict({"url": "postgresql://localhost/deerflow"})
         cfg = get_checkpointer_config()
         assert cfg is not None
-        assert cfg.type == "memory"
+        assert cfg.type == "postgres"
 
 
 # ---------------------------------------------------------------------------
@@ -882,7 +886,7 @@ class TestClientCheckpointerFallback:
 
         from deerflow.client import DeerFlowClient
 
-        load_checkpointer_config_from_dict({"type": "memory"})
+        _set_runtime_config("memory")
 
         captured_kwargs = {}
 
@@ -920,7 +924,7 @@ class TestClientCheckpointerFallback:
         """An explicitly provided checkpointer is used even when config checkpointer is set."""
         from deerflow.client import DeerFlowClient
 
-        load_checkpointer_config_from_dict({"type": "memory"})
+        _set_runtime_config("memory")
 
         explicit_cp = MagicMock()
         captured_kwargs = {}

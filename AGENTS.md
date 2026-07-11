@@ -62,6 +62,12 @@ servers + skills). Both real files are gitignored and may be edited at runtime v
 Gateway API. Config schema and resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
 
+Persistence configuration is PostgreSQL-only: `database.url` resolves from
+`DATABASE_URL`, PostgreSQL drivers are default dependencies, and a standalone
+`checkpointer` section is rejected. The runtime providers still contain legacy
+SQLite branches pending their dedicated cleanup; those branches are not part of
+the supported configuration contract.
+
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.

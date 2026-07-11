@@ -1,102 +1,69 @@
-"""Unified database backend configuration.
-
-Controls BOTH the LangGraph checkpointer and the DeerFlow application
-persistence layer (runs, threads metadata, users, etc.). The user
-configures one backend; the system handles physical separation details.
-
-SQLite mode: checkpointer and app share a single .db file
-({sqlite_dir}/deerflow.db) with WAL journal mode enabled on every
-connection. WAL allows concurrent readers and a single writer without
-blocking, making a unified file safe for both workloads.  Writers
-that contend for the lock wait via the default 5-second sqlite3
-busy timeout rather than failing immediately.
-
-Postgres mode: both use the same database URL but maintain independent
-connection pools with different lifecycles.
-
-Memory mode: checkpointer uses MemorySaver, app uses in-memory stores.
-No database is initialized.
-
-Sensitive values (postgres_url) should use $VAR syntax in config.yaml
-to reference environment variables from .env:
-
-    database:
-      backend: postgres
-      postgres_url: $DATABASE_URL
-
-The $VAR resolution is handled by AppConfig.resolve_env_variables()
-before this config is instantiated -- DatabaseConfig itself does not
-need to do any environment variable processing.
-"""
+"""PostgreSQL-only database configuration."""
 
 from __future__ import annotations
 
 import os
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DatabaseConfig(BaseModel):
-    backend: Literal["memory", "sqlite", "postgres"] = Field(
-        default="memory",
-        description=("Storage backend for both checkpointer and application data. 'memory' for development (no persistence across restarts), 'sqlite' for single-node deployment, 'postgres' for production multi-node deployment."),
-    )
-    sqlite_dir: str = Field(
-        default=".deer-flow/data",
-        description=("Directory for the SQLite database file. Both checkpointer and application data share {sqlite_dir}/deerflow.db."),
-    )
-    postgres_url: str = Field(
-        default="",
-        description=(
-            "PostgreSQL connection URL, shared by checkpointer and app. "
-            "Use $DATABASE_URL in config.yaml to reference .env. "
-            "Example: postgresql://user:pass@host:5432/deerflow "
-            "(the +asyncpg driver suffix is added automatically where needed)."
-        ),
-    )
-    echo_sql: bool = Field(
-        default=False,
-        description="Echo all SQL statements to log (debug only).",
-    )
-    pool_size: int = Field(
-        default=5,
-        description="Connection pool size for the app ORM engine (postgres only).",
-    )
+    """Connection settings shared by DeerFlow persistence and LangGraph."""
 
-    # -- Derived helpers (not user-configured) --
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    pool_size: int = Field(default=5, ge=1)
+    max_overflow: int = Field(default=10, ge=0)
+    pool_timeout_seconds: int = Field(default=30, ge=1)
+    statement_timeout_seconds: int = Field(default=30, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_url_from_environment(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "url" not in data:
+            database_url = os.getenv("DATABASE_URL")
+            if database_url is not None:
+                return {**data, "url": database_url}
+        return data
+
+    @field_validator("url")
+    @classmethod
+    def _validate_postgres_url(cls, value: str) -> str:
+        if not value.startswith(("postgresql://", "postgresql+asyncpg://")):
+            raise ValueError("database.url must be a PostgreSQL URL using postgresql:// or postgresql+asyncpg://")
+        return value
 
     @property
-    def _resolved_sqlite_dir(self) -> str:
-        """Resolve sqlite_dir to an absolute path (relative to CWD)."""
-        from pathlib import Path
-
-        return str(Path(self.sqlite_dir).resolve())
-
-    @property
-    def sqlite_path(self) -> str:
-        """Unified SQLite file path shared by checkpointer and app."""
-        return os.path.join(self._resolved_sqlite_dir, "deerflow.db")
-
-    # Backward-compatible aliases
-    @property
-    def checkpointer_sqlite_path(self) -> str:
-        """SQLite file path for the LangGraph checkpointer (alias for sqlite_path)."""
-        return self.sqlite_path
+    def sqlalchemy_url(self) -> str:
+        """Return the PostgreSQL URL expected by SQLAlchemy's async engine."""
+        if self.url.startswith("postgresql+asyncpg://"):
+            return self.url
+        return self.url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
     @property
-    def app_sqlite_path(self) -> str:
-        """SQLite file path for application ORM data (alias for sqlite_path)."""
-        return self.sqlite_path
+    def checkpointer_url(self) -> str:
+        """Return the driver-neutral PostgreSQL URL expected by the checkpointer."""
+        if self.url.startswith("postgresql+asyncpg://"):
+            return self.url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        return self.url
+
+    # Temporary read-only runtime aliases. They preserve the PostgreSQL path
+    # until task 3 removes backend branching; they do not expose a selectable
+    # backend or accept legacy constructor fields.
+    @property
+    def backend(self) -> Literal["postgres"]:
+        return "postgres"
+
+    @property
+    def postgres_url(self) -> str:
+        return self.checkpointer_url
 
     @property
     def app_sqlalchemy_url(self) -> str:
-        """SQLAlchemy async URL for the application ORM engine."""
-        if self.backend == "sqlite":
-            return f"sqlite+aiosqlite:///{self.sqlite_path}"
-        if self.backend == "postgres":
-            url = self.postgres_url
-            if url.startswith("postgresql://"):
-                url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-            return url
-        raise ValueError(f"No SQLAlchemy URL for backend={self.backend!r}")
+        return self.sqlalchemy_url
+
+    @property
+    def echo_sql(self) -> bool:
+        return False

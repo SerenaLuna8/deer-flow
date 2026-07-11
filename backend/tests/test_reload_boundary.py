@@ -86,10 +86,9 @@ def test_appconfig_descriptions_retain_original_field_documentation():
     descriptions = {
         "log_level": "debug/info/warning/error",
         "logging": "Structured logging and request trace correlation settings.",
-        "database": "memory, sqlite, or postgres",
+        "database": "PostgreSQL connection",
         "sandbox": "Sandbox provider",
         "run_events": "memory for dev",
-        "checkpointer": "state-persistence checkpointer",
         "stream_bridge": "Stream bridge",
         "channel_connections": "IM channel connection",
     }

@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import warnings
 from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
@@ -14,7 +15,6 @@ from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.auth_config import AuthAppConfig
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
-from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
@@ -47,12 +47,6 @@ from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_searc
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-
-
-CONFIG_FILE_DATABASE_DEFAULTS = {
-    "backend": "sqlite",
-    "sqlite_dir": ".deer-flow/data",
-}
 
 
 class CircuitBreakerConfig(BaseModel):
@@ -188,7 +182,7 @@ class AppConfig(BaseModel):
         default_factory=DatabaseConfig,
         description=format_field_description(
             "database",
-            field_doc="Unified database backend for run/feedback metadata (memory, sqlite, or postgres).",
+            field_doc="PostgreSQL connection shared by LangGraph persistence and DeerFlow application data.",
         ),
     )
     run_events: RunEventsConfig = Field(
@@ -205,13 +199,6 @@ class AppConfig(BaseModel):
             field_doc="Scheduled task runtime configuration (background poller for one-time and cron agent runs).",
         ),
     )
-    checkpointer: CheckpointerConfig | None = Field(
-        default=None,
-        description=format_field_description(
-            "checkpointer",
-            field_doc="LangGraph state-persistence checkpointer configuration.",
-        ),
-    )
     stream_bridge: StreamBridgeConfig | None = Field(
         default=None,
         description=format_field_description(
@@ -219,6 +206,22 @@ class AppConfig(BaseModel):
             field_doc="Stream bridge connecting agent workers to SSE endpoints.",
         ),
     )
+
+    @property
+    def checkpointer(self):
+        """Deprecated runtime-only view derived from ``database``.
+
+        This is deliberately not a Pydantic field: config input containing a
+        top-level ``checkpointer`` section is rejected by validation.
+        """
+        from deerflow.config.checkpointer_config import CheckpointerConfig
+
+        warnings.warn(
+            "AppConfig.checkpointer is deprecated; use AppConfig.database",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return CheckpointerConfig(database=self.database)
 
     # Name -> config lookup tables, (re)built after validation by
     # ``_build_name_indexes``. They make ``get_model_config`` / ``get_tool_config``
@@ -243,13 +246,12 @@ class AppConfig(BaseModel):
         Dropping the ``None`` lets each field fall back to its default: list
         sections become ``[]`` via ``default_factory=list`` and object sections
         get their default config. This generalizes the earlier list-only
-        handling to every section that defines a default. The ``database``
-        section is independent and still owned by ``_apply_database_defaults``
-        (in ``from_file``), which applies concrete defaults beyond null-coercion.
         Required sections without a default (``sandbox``) intentionally still
         error when null — there is nothing to fall back to.
         """
         if isinstance(data, dict):
+            if "checkpointer" in data:
+                raise ValueError("the independent checkpointer configuration has been removed; configure database.url instead")
             return {key: value for key, value in data.items() if value is not None}
         return data
 
@@ -303,8 +305,6 @@ class AppConfig(BaseModel):
         cls._check_config_version(config_data, resolved_path)
 
         config_data = cls.resolve_env_variables(config_data)
-        cls._apply_database_defaults(config_data)
-
         # Load circuit_breaker config if present
         if "circuit_breaker" in config_data:
             config_data["circuit_breaker"] = config_data["circuit_breaker"]
@@ -334,10 +334,6 @@ class AppConfig(BaseModel):
 
     @classmethod
     def _apply_singleton_configs(cls, config: Self, acp_agents: dict[str, ACPAgentConfig]) -> None:
-        from deerflow.config.checkpointer_config import get_checkpointer_config
-
-        previous_checkpointer_config = get_checkpointer_config()
-
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
         load_memory_config_from_dict(config.memory.model_dump())
@@ -345,30 +341,8 @@ class AppConfig(BaseModel):
         load_subagents_config_from_dict(config.subagents.model_dump())
         load_tool_search_config_from_dict(config.tool_search.model_dump())
         load_guardrails_config_from_dict(config.guardrails.model_dump())
-        load_checkpointer_config_from_dict(config.checkpointer.model_dump() if config.checkpointer is not None else None)
         load_stream_bridge_config_from_dict(config.stream_bridge.model_dump() if config.stream_bridge is not None else None)
         load_acp_config_from_dict({name: agent.model_dump() for name, agent in acp_agents.items()})
-
-        if previous_checkpointer_config != config.checkpointer:
-            # These runtime singletons derive their backend from checkpointer config.
-            # Keep imports local to avoid cycles: both providers import get_app_config.
-            from deerflow.runtime.checkpointer import reset_checkpointer
-            from deerflow.runtime.store import reset_store
-
-            reset_checkpointer()
-            reset_store()
-
-    @classmethod
-    def _apply_database_defaults(cls, config_data: dict[str, Any]) -> None:
-        """Apply config.yaml defaults for persistence when the section is absent."""
-        database_config = config_data.get("database")
-        if database_config is None:
-            database_config = {}
-            config_data["database"] = database_config
-        if not isinstance(database_config, dict):
-            return
-        for key, value in CONFIG_FILE_DATABASE_DEFAULTS.items():
-            database_config.setdefault(key, value)
 
     @classmethod
     def _check_config_version(cls, config_data: dict, config_path: Path) -> None:

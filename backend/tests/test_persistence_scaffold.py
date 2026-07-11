@@ -10,9 +10,11 @@ Tests:
 
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -21,46 +23,65 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 class TestDatabaseConfig:
-    def test_defaults(self):
+    def test_url_defaults_from_environment(self, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@db:5432/deerflow")
         c = DatabaseConfig()
-        assert c.backend == "memory"
+        assert c.url == "postgresql://user:pass@db:5432/deerflow"
         assert c.pool_size == 5
 
-    def test_sqlite_paths_unified(self):
-        c = DatabaseConfig(backend="sqlite", sqlite_dir="./mydata")
-        assert c.sqlite_path.endswith("deerflow.db")
-        assert "mydata" in c.sqlite_path
-        # Backward-compatible aliases point to the same file
-        assert c.checkpointer_sqlite_path == c.sqlite_path
-        assert c.app_sqlite_path == c.sqlite_path
+    def test_missing_url_and_environment_raises(self, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        with pytest.raises(ValidationError, match="url"):
+            DatabaseConfig()
 
-    def test_app_sqlalchemy_url_sqlite(self):
-        c = DatabaseConfig(backend="sqlite", sqlite_dir="./data")
-        url = c.app_sqlalchemy_url
-        assert url.startswith("sqlite+aiosqlite:///")
-        assert "deerflow.db" in url
+    @pytest.mark.parametrize("url", ["", "sqlite+aiosqlite:///deerflow.db", "memory://", "mysql://localhost/deerflow"])
+    def test_non_postgres_urls_are_rejected(self, url):
+        with pytest.raises(ValidationError, match="PostgreSQL"):
+            DatabaseConfig(url=url)
 
-    def test_app_sqlalchemy_url_postgres(self):
-        c = DatabaseConfig(
-            backend="postgres",
-            postgres_url="postgresql://u:p@h:5432/db",
-        )
-        url = c.app_sqlalchemy_url
-        assert url.startswith("postgresql+asyncpg://")
-        assert "u:p@h:5432/db" in url
+    def test_postgres_url_derives_driver_specific_urls(self):
+        c = DatabaseConfig(url="postgresql://u:p@h:5432/db")
+        assert c.sqlalchemy_url == "postgresql+asyncpg://u:p@h:5432/db"
+        assert c.checkpointer_url == "postgresql://u:p@h:5432/db"
 
-    def test_app_sqlalchemy_url_postgres_already_asyncpg(self):
-        c = DatabaseConfig(
-            backend="postgres",
-            postgres_url="postgresql+asyncpg://u:p@h:5432/db",
-        )
-        url = c.app_sqlalchemy_url
-        assert url.count("asyncpg") == 1
+    def test_asyncpg_url_is_not_double_prefixed(self):
+        c = DatabaseConfig(url="postgresql+asyncpg://u:p@h:5432/db")
+        assert c.sqlalchemy_url == "postgresql+asyncpg://u:p@h:5432/db"
+        assert c.checkpointer_url == "postgresql://u:p@h:5432/db"
 
-    def test_memory_has_no_url(self):
-        c = DatabaseConfig(backend="memory")
-        with pytest.raises(ValueError, match="No SQLAlchemy URL"):
-            _ = c.app_sqlalchemy_url
+    def test_derived_urls_preserve_encoded_credentials_and_query(self):
+        url = "postgresql://user:p%40ss%2Fword@db.example:5433/deerflow?sslmode=require&application_name=deer%20flow"
+        c = DatabaseConfig(url=url)
+        assert c.sqlalchemy_url == url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        assert c.checkpointer_url == url
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("pool_size", 0),
+            ("max_overflow", -1),
+            ("pool_timeout_seconds", 0),
+            ("statement_timeout_seconds", 0),
+        ],
+    )
+    def test_pool_settings_enforce_lower_bounds(self, field, value):
+        with pytest.raises(ValidationError):
+            DatabaseConfig(url="postgresql://localhost/deerflow", **{field: value})
+
+    def test_example_config_uses_postgres_only_contract(self):
+        config_example = Path(__file__).resolve().parents[2] / "config.example.yaml"
+        text = config_example.read_text()
+        database_section = text[text.index("# Database\n") : text.index("# Run Events Configuration")]
+
+        assert "url: $DATABASE_URL" in database_section
+        assert "pool_size: 5" in database_section
+        assert "max_overflow: 10" in database_section
+        assert "pool_timeout_seconds: 30" in database_section
+        assert "statement_timeout_seconds: 30" in database_section
+        assert "backend:" not in database_section
+        assert "sqlite" not in database_section.lower()
+        assert "checkpointer:" not in database_section
+        assert "extra postgres" not in database_section
 
 
 # -- MemoryRunStore --

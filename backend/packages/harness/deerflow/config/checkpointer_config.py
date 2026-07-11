@@ -1,64 +1,81 @@
-"""Configuration for LangGraph checkpointer."""
+"""Deprecated compatibility shim for PostgreSQL checkpointer configuration.
 
+The independent ``checkpointer`` application setting has been removed. This
+module remains temporarily so the task-3 runtime cleanup can delete its legacy
+imports without coupling that cleanup to the public configuration migration.
+"""
+
+from __future__ import annotations
+
+import warnings
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-CheckpointerType = Literal["memory", "sqlite", "postgres"]
+from deerflow.config.database_config import DatabaseConfig
 
 
 class CheckpointerConfig(BaseModel):
-    """Configuration for LangGraph state persistence checkpointer."""
+    """Deprecated PostgreSQL view derived exclusively from DatabaseConfig."""
 
-    type: CheckpointerType = Field(
-        description="Checkpointer backend type. "
-        "'memory' is in-process only (lost on restart). "
-        "'sqlite' persists to a local file (requires langgraph-checkpoint-sqlite). "
-        "'postgres' persists to PostgreSQL (install with deerflow-harness[postgres])."
-    )
-    connection_string: str | None = Field(
-        default=None,
-        description="Connection string for sqlite (file path) or postgres (DSN). "
-        "Optional for sqlite and defaults to 'store.db' when omitted. "
-        "Required for postgres. "
-        "For sqlite, use a file path like '.deer-flow/checkpoints.db' or ':memory:' for in-memory. "
-        "For postgres, use a DSN like 'postgresql://user:pass@localhost:5432/db'.",
-    )
+    database: DatabaseConfig
+
+    @property
+    def type(self) -> Literal["postgres"]:
+        return "postgres"
+
+    @property
+    def connection_string(self) -> str:
+        return self.database.checkpointer_url
 
 
-# Global configuration instance — None means no checkpointer is configured.
 _checkpointer_config: CheckpointerConfig | None = None
 
 
+def _warn_deprecated() -> None:
+    warnings.warn(
+        "CheckpointerConfig is deprecated; derive checkpointer settings from DatabaseConfig instead",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
 def get_checkpointer_config() -> CheckpointerConfig | None:
-    """Get the current checkpointer configuration, or None if not configured."""
+    """Return the temporary PostgreSQL compatibility view, if initialized."""
     return _checkpointer_config
 
 
 def set_checkpointer_config(config: CheckpointerConfig | None) -> None:
-    """Set the checkpointer configuration."""
+    """Set the temporary compatibility view for legacy runtime imports."""
+    if config is not None and not isinstance(config, CheckpointerConfig):
+        raise TypeError("checkpointer compatibility state must be derived from DatabaseConfig")
     global _checkpointer_config
     _checkpointer_config = config
 
 
 def ensure_config_loaded() -> None:
-    """Lazily load app config when checkpointer config has not been initialized."""
-    from deerflow.config.app_config import _app_config, get_app_config
-
-    config = get_checkpointer_config()
-    if config is not None or _app_config is not None:
+    """Load AppConfig and derive the temporary PostgreSQL compatibility view."""
+    global _checkpointer_config
+    if _checkpointer_config is not None:
         return
 
+    from deerflow.config.app_config import _app_config, get_app_config
+
+    if _app_config is not None:
+        _checkpointer_config = CheckpointerConfig(database=_app_config.database)
+        return
     try:
-        get_app_config()
+        config = get_app_config()
     except FileNotFoundError:
-        pass
+        return
+    _checkpointer_config = CheckpointerConfig(database=config.database)
 
 
 def load_checkpointer_config_from_dict(config_dict: dict | None) -> None:
-    """Load checkpointer configuration from a dictionary."""
+    """Deprecated adapter accepting only the new DatabaseConfig dictionary."""
     global _checkpointer_config
     if config_dict is None:
         _checkpointer_config = None
         return
-    _checkpointer_config = CheckpointerConfig(**config_dict)
+    _warn_deprecated()
+    _checkpointer_config = CheckpointerConfig(database=DatabaseConfig.model_validate(config_dict))
