@@ -328,10 +328,19 @@ export DEER_FLOW_HOME
 
 # Extra flags for uvicorn
 if $DEV_MODE && ! $DAEMON_MODE; then
+    GATEWAY_WORKERS=1
     GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='$REPO_ROOT/backend/sandbox' --reload-exclude='$DEER_FLOW_HOME' --reload-exclude='$BACKEND_RUNTIME_HOME'"
 else
-    GATEWAY_EXTRA_FLAGS=""
+    GATEWAY_WORKERS="${GATEWAY_WORKERS:-1}"
+    case "$GATEWAY_WORKERS" in
+        0 | *[!0-9]*)
+            echo "✗ GATEWAY_WORKERS must be a positive integer."
+            exit 1
+            ;;
+    esac
+    GATEWAY_EXTRA_FLAGS="--workers $GATEWAY_WORKERS"
 fi
+export GATEWAY_WORKERS
 
 # ── Stop existing services (skip if restart already did it) ──────────────────
 

@@ -64,20 +64,20 @@ def test_single_worker_allows_startup_recovery(monkeypatch) -> None:
     assert _should_reconcile_orphaned_runs() is True
 
 
-def test_uvicorn_web_concurrency_also_disables_recovery(monkeypatch) -> None:
+def test_uvicorn_web_concurrency_is_not_used_as_application_worker_state(monkeypatch) -> None:
     from app.gateway.deps import _should_reconcile_orphaned_runs
 
     monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
     monkeypatch.setenv("WEB_CONCURRENCY", "2")
-    assert _should_reconcile_orphaned_runs() is False
+    assert _should_reconcile_orphaned_runs() is True
 
 
-def test_conflicting_worker_environment_is_treated_conservatively(monkeypatch) -> None:
+def test_authoritative_gateway_worker_count_wins_over_web_concurrency(monkeypatch) -> None:
     from app.gateway.deps import _should_reconcile_orphaned_runs
 
     monkeypatch.setenv("GATEWAY_WORKERS", "1")
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
-    assert _should_reconcile_orphaned_runs() is False
+    assert _should_reconcile_orphaned_runs() is True
 
 
 def test_postgres_only_runtime_exposes_no_worker_backend_gate() -> None:

@@ -180,6 +180,8 @@ services:
     working_dir: /app
     environment:
       - CI=true
+      # Reload mode is a single uvicorn worker; do not inherit a production override.
+      - GATEWAY_WORKERS=1
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CONFIG_PATH=/app/project/config.yaml

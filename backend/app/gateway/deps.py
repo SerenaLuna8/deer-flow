@@ -49,21 +49,15 @@ _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
 def _should_reconcile_orphaned_runs() -> bool:
     """Return whether startup recovery is safe for the configured worker count.
 
-    Docker starts uvicorn with ``--workers ${GATEWAY_WORKERS:-1}``; local
-    launchers omit ``--workers``, so uvicorn may instead honor
-    ``WEB_CONCURRENCY``. Any configured count other than exactly one is treated
-    conservatively as multi-worker/unknown.
+    Every supported launcher passes ``GATEWAY_WORKERS`` to both uvicorn's
+    explicit ``--workers`` argument and the application environment. Invalid
+    or non-positive values are treated conservatively as multi-worker/unknown.
     """
-    for variable in ("GATEWAY_WORKERS", "WEB_CONCURRENCY"):
-        raw_workers = os.getenv(variable)
-        if raw_workers is None or raw_workers.strip() == "":
-            continue
-        try:
-            if int(raw_workers) != 1:
-                return False
-        except ValueError:
-            return False
-    return True
+    raw_workers = os.getenv("GATEWAY_WORKERS", "1")
+    try:
+        return int(raw_workers) == 1
+    except ValueError:
+        return False
 
 
 async def _drain_inflight_runs(run_manager: RunManager) -> None:

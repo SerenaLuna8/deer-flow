@@ -84,7 +84,12 @@ async def test_cancelled_lock_holder_releases_session_lock(postgres_database_url
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_cancelled_alembic_offload_keeps_lock_until_worker_finishes(postgres_database_url: str, monkeypatch) -> None:
+@pytest.mark.parametrize("cancel_count", [2, 5])
+async def test_repeatedly_cancelled_alembic_offload_keeps_lock_until_worker_finishes(
+    postgres_database_url: str,
+    monkeypatch,
+    cancel_count: int,
+) -> None:
     engine = create_async_engine(postgres_database_url)
     probe_engine = create_async_engine(postgres_database_url)
     await bootstrap_schema(engine)
@@ -101,11 +106,12 @@ async def test_cancelled_alembic_offload_keeps_lock_until_worker_finishes(postgr
     task = asyncio.create_task(bootstrap_schema(engine))
     try:
         assert await asyncio.to_thread(started.wait, 2)
-        task.cancel()
-        await asyncio.sleep(0.1)
-
-        async with probe_engine.connect() as probe:
-            assert await probe.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": _PG_LOCK_KEY}) is False
+        for _ in range(cancel_count):
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            async with probe_engine.connect() as probe:
+                assert await probe.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": _PG_LOCK_KEY}) is False
 
         release.set()
         with pytest.raises(asyncio.CancelledError):

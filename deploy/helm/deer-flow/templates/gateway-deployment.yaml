@@ -65,6 +65,8 @@ spec:
           env:
             - name: CI
               value: "true"
+            - name: GATEWAY_WORKERS
+              value: "1"
             # Running as non-root uid 1000: suppress .pyc writes under the
             # root-owned /app (avoids PermissionError noise; harmless fallback).
             - name: PYTHONDONTWRITEBYTECODE

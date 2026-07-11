@@ -331,14 +331,23 @@ async def _postgres_lock(engine: AsyncEngine):
 async def _run_alembic_offload(function, *args) -> None:
     """Run synchronous Alembic work without releasing the DB lock on cancel."""
     task = asyncio.create_task(asyncio.to_thread(function, *args))
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
+    pending_cancellation: asyncio.CancelledError | None = None
+    while True:
         try:
             await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as exc:
+            # Each shield wait blocks on the worker again, so repeated cancels
+            # are absorbed without spinning until synchronous Alembic exits.
+            if pending_cancellation is None:
+                pending_cancellation = exc
         except Exception:  # noqa: BLE001 - cancellation remains authoritative
+            if pending_cancellation is None:
+                raise
             logger.exception("Alembic offload failed while bootstrap cancellation was pending")
-        raise
+            raise pending_cancellation
+    if pending_cancellation is not None:
+        raise pending_cancellation
 
 
 async def bootstrap_schema(engine: AsyncEngine) -> None:

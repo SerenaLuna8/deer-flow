@@ -116,6 +116,7 @@ services:
     working_dir: /app
     environment:
       - CI=true
+      - GATEWAY_WORKERS=${GATEWAY_WORKERS:-1}
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml

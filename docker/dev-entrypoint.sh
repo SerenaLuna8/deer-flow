@@ -97,6 +97,8 @@ fi
 
 # ── Hand off to uvicorn ─────────────────────────────────────────────────────
 
+GATEWAY_WORKERS=1
+export GATEWAY_WORKERS
 PYTHONPATH=. exec uv run uvicorn app.gateway.app:app \
     --host 0.0.0.0 --port 8001 \
     --reload \
