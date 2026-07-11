@@ -7,7 +7,7 @@
 
 ## 1. 目标
 
-M1 建立项目优先 SaaS 的项目治理基础闭环：系统只使用 PostgreSQL；用户登录后进入项目工作台；用户可以创建、查看、更新、进入和置顶自己的项目；所有项目 API 通过可信 `ProjectContext` 和作用域仓储授权。
+M1 同时完成迁移准备、PostgreSQL 切换和项目治理基础闭环。系统先清点并备份现有 SQLite 数据，再将全部 SQLite 持久化数据按原业务语义迁入 PostgreSQL；验证完成后，应用完全停止使用 SQLite。随后交付项目工作台、项目基础 API、可信 `ProjectContext` 和作用域仓储。
 
 M1 完成后，系统仍在旧版模式保留现有私有 Agent 对话体验，但尚不交付邀请、成员管理、共享资产版本、完整私有数据迁移、配额执行或项目删除。由于 Thread、run、file、memory 和 automation 尚未形成项目与所有者双重隔离，M1 不能单独作为多用户 SaaS 发布。
 
@@ -15,6 +15,11 @@ M1 完成后，系统仍在旧版模式保留现有私有 Agent 对话体验，�
 
 ### 2.1 范围内
 
+- 决策冻结、威胁模型、现有数据清单和迁移验收标准；
+- 所有现有 SQLite 数据源的发现、只读备份和一致性检查；
+- 现有 SQLite 表到 PostgreSQL 的一次性原样迁移；
+- 行数、主键、外键、关键字段、时间值和内容哈希验证；
+- 应用、LangGraph checkpointer、运行事件和 Scheduler 完全切换到 PostgreSQL；
 - PostgreSQL-only 配置和启动检查；
 - 数据库创建、迁移和检查脚本；
 - 平台角色 `system_admin | user`；
@@ -36,7 +41,7 @@ M1 完成后，系统仍在旧版模式保留现有私有 Agent 对话体验，�
 - 项目删除、恢复和隐私中心；
 - Agent、Skill、MCP 项目持久化和版本；
 - 项目凭据；
-- 现有 Thread、run、file、memory、automation 的项目字段回填；
+- 现有 Thread、run、file、memory、automation 的项目字段回填和业务模型转换；
 - PostgreSQL 任务队列和 Worker 租约重构；
 - 配额、审计和 `/system` 管理页面；
 - pgvector；
@@ -183,6 +188,7 @@ M1 将置顶和最近进入记录保存在成员关系上，因为它们是用�
 
 - 新 migration 只面向 PostgreSQL。
 - migration 不包含 SQLite batch mode 或方言分支。
+- SQLite 只由一次性数据迁移脚本以只读方式访问，不属于应用运行后端。
 - schema 变更只通过 Alembic 执行。
 - `Base.metadata.create_all()` 不作为运行时 schema 初始化方式。
 - migration 必须支持在空数据库和现有 DeerFlow 数据库上执行。
@@ -217,6 +223,21 @@ M1 将置顶和最近进入记录保存在成员关系上，因为它们是用�
 
 脚本只允许固定或严格校验后的数据库名称，避免把标识符直接拼接为任意 SQL。脚本重复执行不得创建重复项目、成员关系或管理员。
 
+`backend/scripts/migrate_sqlite_to_postgres.py`：
+
+1. 发现或接收显式指定的 SQLite 来源路径；
+2. 以只读方式打开来源并执行完整性检查；
+3. 生成来源表、行数、主键范围和关联关系清单；
+4. 确认 PostgreSQL 目标 schema revision；
+5. 按外键依赖顺序分批复制所有现有持久化表；
+6. 转换 SQLite 与 PostgreSQL 的布尔值、JSON、时间和自增序列语义；
+7. 使用来源类型、表名和主键记录幂等迁移台账；
+8. 重置 PostgreSQL sequence；
+9. 验证行数、主键集合、关键字段和内容哈希；
+10. 输出脱敏迁移报告。
+
+迁移脚本不得删除、修改或重命名来源 SQLite 文件。失败批次必须回滚，且不能被迁移台账标记为完成。发现未知表、重复主键、损坏来源、无法解析的 JSON 或校验差异时停止切换，不允许跳过后继续。
+
 `backend/scripts/check_postgres.py`：
 
 - 验证连接；
@@ -228,6 +249,7 @@ M1 将置顶和最近进入记录保存在成员关系上，因为它们是用�
 Makefile 入口：
 
 - `make setup-db`
+- `make migrate-sqlite`
 - `make migrate-db`
 - `make check-db`
 
@@ -438,6 +460,11 @@ list_all_projects()
 
 - 空数据库 migration；
 - 现有数据库 migration；
+- 代表性 SQLite 快照的完整原样迁移；
+- 多个 SQLite 数据源的发现和重复来源防护；
+- 数据类型转换、sequence 重置和外键顺序；
+- 中途故障回滚和再次执行；
+- 未知表、损坏来源和校验差异时拒绝切换；
 - setup 脚本幂等；
 - 项目与 Admin 成员关系原子创建；
 - slug 并发冲突；
@@ -463,14 +490,26 @@ list_all_projects()
 
 ## 13. 数据迁移交付物
 
-虽然完整私有数据迁移属于后续里程碑，M1 必须交付：
+M1 必须先完成存储层原样迁移，再为后续项目化转换建立迁移基础。
+
+SQLite 到 PostgreSQL 原样迁移交付物：
+
+- 所有配置内 SQLite 数据源和表的清单；
+- 每个来源文件的只读备份、大小和 SHA-256；
+- 每张表的字段映射、复制顺序和数据类型转换规则；
+- 行数、主键集合、外键关联、关键字段和内容哈希报告；
+- migration ledger；
+- dry-run（试运行）模式；
+- 故障注入后的重复执行验证；
+- PostgreSQL 切换检查清单；
+- 只读 SQLite 回滚副本的保存位置和保留期限。
+
+后续项目化迁移基础：
 
 - 用户数量和平台角色清单；
 - 默认项目初始化报告；
 - 每个用户的项目成员关系验证；
-- 后续业务表回填使用的 migration ledger 基础；
-- dry-run 模式；
-- 重复执行验证；
+- 后续业务表增加 `project_id + owner_user_id` 时复用的 migration ledger；
 - 失败时不留下只有项目、没有 Admin 成员关系的半成品。
 
 ## 14. 可观测性
@@ -489,13 +528,17 @@ M1 记录：
 
 M1 发布前：
 
-1. 备份现有 PostgreSQL 数据库和本地用户数据；
-2. 执行 `make check-db`；
-3. dry-run 初始化；
-4. 执行 migration 和默认项目初始化；
-5. 运行 PostgreSQL 集成测试和项目 E2E；
-6. 启动 Gateway、Frontend 和 Nginx；
-7. 验证登录、工作台、创建、进入和现有对话。
+1. 停止 SQLite 新写入并进入维护窗口；
+2. 备份所有 SQLite 来源、本地用户数据和目标 PostgreSQL；
+3. 执行 SQLite 完整性检查和迁移 dry-run（试运行）；
+4. 创建并检查 PostgreSQL 目标 schema；
+5. 执行 SQLite 到 PostgreSQL 原样迁移；
+6. 验证行数、主键、关联、关键字段和内容哈希；
+7. 将应用配置切换到 PostgreSQL 并禁止 SQLite 回退；
+8. 执行项目 schema migration 和默认项目初始化；
+9. 运行 PostgreSQL 集成测试和项目 E2E；
+10. 启动 Gateway、Frontend 和 Nginx；
+11. 验证登录、现有对话、运行事件、定时任务、工作台、项目创建和进入。
 
 如果正式开放前失败，恢复数据库备份和原应用版本。正式开放并产生新项目写入后，不执行破坏性 downgrade；使用前向 migration 修复。
 
@@ -504,6 +547,10 @@ M1 发布前：
 M1 只有在以下条件全部满足时才算完成：
 
 - 系统不再提供 SQLite 或持久化内存后端；
+- 全部已识别 SQLite 持久化表已经原样迁入 PostgreSQL；
+- 来源和目标的行数、主键、关联、关键字段及内容哈希验证一致；
+- 应用、checkpointer、运行事件和 Scheduler 不再对 SQLite 产生新读写；
+- SQLite 来源只作为只读回滚副本保留，不参与应用运行；
 - 本地 Docker PostgreSQL 可以通过脚本创建和初始化 `deerflow`；
 - 所有 migration 使用真实 PostgreSQL 验证；
 - 平台角色与项目角色分离；
