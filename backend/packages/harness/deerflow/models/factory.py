@@ -245,6 +245,10 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort:
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
+    elif "reasoning_effort" in kwargs:
+        # The frontend supplies a per-run effort. Let it override the model
+        # default instead of passing the same constructor argument twice.
+        model_settings_from_config.pop("reasoning_effort", None)
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage / stream_chunk_timeout) see the canonical endpoint key.

@@ -446,6 +446,19 @@ def test_reasoning_effort_preserved_when_supported(monkeypatch):
     assert captured.get("reasoning_effort") == "minimal"
 
 
+def test_runtime_reasoning_effort_overrides_model_config(monkeypatch):
+    """Runtime effort must take precedence without passing the keyword twice."""
+    model = _make_model("effort-model", supports_reasoning_effort=True)
+    model.reasoning_effort = "medium"
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="effort-model", thinking_enabled=True, reasoning_effort="high")
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "high"
+
+
 # ---------------------------------------------------------------------------
 # thinking shortcut field
 # ---------------------------------------------------------------------------
