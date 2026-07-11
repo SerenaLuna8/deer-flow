@@ -372,110 +372,88 @@ def test_user_model_needs_setup_true():
     assert user.needs_setup is True
 
 
-def test_sqlite_round_trip_new_fields():
+@pytest.mark.anyio
+async def test_postgres_round_trip_new_fields(migrated_postgres_database_url):
     """needs_setup and token_version survive create → read round-trip.
 
     Uses the shared persistence engine (same one threads_meta, runs,
     run_events, and feedback use). The old separate .deer-flow/users.db
     file is gone.
     """
-    import asyncio
-    import tempfile
+    from app.gateway.auth.repositories.sql import SQLUserRepository
+    from deerflow.config.database_config import DatabaseConfig
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 
-    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-
-    async def _run() -> None:
-        from deerflow.persistence.engine import (
-            close_engine,
-            get_session_factory,
-            init_engine,
+    await init_engine(DatabaseConfig(url=migrated_postgres_database_url))
+    try:
+        repo = SQLUserRepository(get_session_factory())
+        user = User(
+            email="setup@test.com",
+            password_hash="fakehash",
+            system_role="admin",
+            needs_setup=True,
+            token_version=3,
         )
+        created = await repo.create_user(user)
+        assert created.needs_setup is True
+        assert created.token_version == 3
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            url = f"sqlite+aiosqlite:///{tmpdir}/scratch.db"
-            await init_engine("sqlite", url=url, sqlite_dir=tmpdir)
-            try:
-                repo = SQLiteUserRepository(get_session_factory())
-                user = User(
-                    email="setup@test.com",
-                    password_hash="fakehash",
-                    system_role="admin",
-                    needs_setup=True,
-                    token_version=3,
-                )
-                created = await repo.create_user(user)
-                assert created.needs_setup is True
-                assert created.token_version == 3
+        fetched = await repo.get_user_by_email("setup@test.com")
+        assert fetched is not None
+        assert fetched.needs_setup is True
+        assert fetched.token_version == 3
 
-                fetched = await repo.get_user_by_email("setup@test.com")
-                assert fetched is not None
-                assert fetched.needs_setup is True
-                assert fetched.token_version == 3
-
-                fetched.needs_setup = False
-                fetched.token_version = 4
-                await repo.update_user(fetched)
-                refetched = await repo.get_user_by_id(str(fetched.id))
-                assert refetched is not None
-                assert refetched.needs_setup is False
-                assert refetched.token_version == 4
-            finally:
-                await close_engine()
-
-    asyncio.run(_run())
+        fetched.needs_setup = False
+        fetched.token_version = 4
+        await repo.update_user(fetched)
+        refetched = await repo.get_user_by_id(str(fetched.id))
+        assert refetched is not None
+        assert refetched.needs_setup is False
+        assert refetched.token_version == 4
+    finally:
+        await close_engine()
 
 
-def test_update_user_raises_when_row_concurrently_deleted(tmp_path):
+@pytest.mark.anyio
+async def test_update_user_raises_when_row_concurrently_deleted(migrated_postgres_database_url):
     """Concurrent-delete during update_user must hard-fail, not silently no-op.
 
-    Earlier the SQLite repo returned the input unchanged when the row was
+    Earlier the SQL repo returned the input unchanged when the row was
     missing, making a phantom success path that admin password reset
     callers (`reset_admin`, `_ensure_admin_user`) would happily log as
     'password reset'. The new contract: raise ``UserNotFoundError`` so
     a vanished row never looks like a successful update.
     """
-    import asyncio
-    import tempfile
-
     from app.gateway.auth.repositories.base import UserNotFoundError
-    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.auth.repositories.sql import SQLUserRepository
+    from deerflow.config.database_config import DatabaseConfig
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.persistence.user.model import UserRow
 
-    async def _run() -> None:
-        from deerflow.persistence.engine import (
-            close_engine,
-            get_session_factory,
-            init_engine,
+    await init_engine(DatabaseConfig(url=migrated_postgres_database_url))
+    try:
+        sf = get_session_factory()
+        repo = SQLUserRepository(sf)
+        user = User(
+            email="ghost@test.com",
+            password_hash="fakehash",
+            system_role="user",
         )
-        from deerflow.persistence.user.model import UserRow
+        created = await repo.create_user(user)
 
-        with tempfile.TemporaryDirectory() as d:
-            url = f"sqlite+aiosqlite:///{d}/scratch.db"
-            await init_engine("sqlite", url=url, sqlite_dir=d)
-            try:
-                sf = get_session_factory()
-                repo = SQLiteUserRepository(sf)
-                user = User(
-                    email="ghost@test.com",
-                    password_hash="fakehash",
-                    system_role="user",
-                )
-                created = await repo.create_user(user)
+        # Simulate "row vanished underneath us" by deleting the row
+        # via the raw ORM session, then attempt to update.
+        async with sf() as session:
+            row = await session.get(UserRow, str(created.id))
+            assert row is not None
+            await session.delete(row)
+            await session.commit()
 
-                # Simulate "row vanished underneath us" by deleting the row
-                # via the raw ORM session, then attempt to update.
-                async with sf() as session:
-                    row = await session.get(UserRow, str(created.id))
-                    assert row is not None
-                    await session.delete(row)
-                    await session.commit()
-
-                created.needs_setup = True
-                with pytest.raises(UserNotFoundError):
-                    await repo.update_user(created)
-            finally:
-                await close_engine()
-
-    asyncio.run(_run())
+        created.needs_setup = True
+        with pytest.raises(UserNotFoundError):
+            await repo.update_user(created)
+    finally:
+        await close_engine()
 
 
 # ── Token Versioning ───────────────────────────────────────────────────────

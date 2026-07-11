@@ -595,15 +595,19 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
     return mock_client
 
 
-async def _make_channel_connection_repo(tmp_path: Path):
-    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
-    from deerflow.persistence.engine import get_session_factory, init_engine
+async def _make_channel_connection_repo(database_url: str):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
 
-    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'channel-connections.db'}", sqlite_dir=str(tmp_path))
-    return ChannelConnectionRepository(
-        get_session_factory(),
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
+
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    repo = ChannelConnectionRepository(
+        async_sessionmaker(engine, expire_on_commit=False),
         cipher=ChannelCredentialCipher.from_key("test-channel-key"),
     )
+    repo.close = engine.dispose  # type: ignore[method-assign]
+    return repo
 
 
 def _make_stream_part(event: str, data):
@@ -2814,7 +2818,9 @@ class TestResolveRunParamsUserId:
 
     def _manager(self):
         from app.channels.manager import ChannelManager
+        from app.gateway.github.run_policy import register_policy
 
+        register_policy()
         bus = MessageBus()
         store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
         return ChannelManager(bus=bus, store=store)
@@ -3824,7 +3830,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
 
 class TestChannelManagerConnectionRouting:
-    def test_connection_scoped_conversations_do_not_share_threads(self, tmp_path, monkeypatch):
+    def test_connection_scoped_conversations_do_not_share_threads(self, tmp_path, monkeypatch, migrated_postgres_database_url):
         from app.channels.manager import ChannelManager
         from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
         from deerflow.persistence.engine import close_engine
@@ -3832,7 +3838,7 @@ class TestChannelManagerConnectionRouting:
         monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
 
         async def go():
-            repo = await _make_channel_connection_repo(tmp_path)
+            repo = await _make_channel_connection_repo(migrated_postgres_database_url)
             alice = await repo.upsert_connection(
                 owner_user_id="alice",
                 provider="slack",
@@ -4972,6 +4978,7 @@ class TestChannelService:
         from deerflow.config import paths as paths_module
         from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
+        monkeypatch.setattr("app.channels.service._make_connection_repo", lambda _config: object())
         monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
         monkeypatch.setattr(paths_module, "_paths", None)
         app_config = SimpleNamespace(
@@ -5000,6 +5007,7 @@ class TestChannelService:
         from deerflow.config import paths as paths_module
         from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
+        monkeypatch.setattr("app.channels.service._make_connection_repo", lambda _config: object())
         monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
         monkeypatch.setattr(paths_module, "_paths", None)
         ChannelRuntimeConfigStore().set_provider_config(
@@ -5041,6 +5049,7 @@ class TestChannelService:
         from deerflow.config import paths as paths_module
         from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
+        monkeypatch.setattr("app.channels.service._make_connection_repo", lambda _config: object())
         monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
         monkeypatch.setattr(paths_module, "_paths", None)
         ChannelRuntimeConfigStore().set_provider_config(
@@ -5075,6 +5084,7 @@ class TestChannelService:
         from deerflow.config import paths as paths_module
         from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
+        monkeypatch.setattr("app.channels.service._make_connection_repo", lambda _config: object())
         monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
         monkeypatch.setattr(paths_module, "_paths", None)
         ChannelRuntimeConfigStore().set_provider_config(

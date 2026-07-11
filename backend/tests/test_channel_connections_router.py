@@ -8,14 +8,29 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+import pytest_asyncio
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.channels.runtime_config_store import ChannelRuntimeConfigStore
 from app.gateway.auth.models import User
 from app.gateway.routers import channel_connections
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+_DATABASE_URL: str | None = None
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres_database(migrated_postgres_database_url):
+    global _DATABASE_URL
+    _DATABASE_URL = migrated_postgres_database_url
+    try:
+        yield
+    finally:
+        _DATABASE_URL = None
 
 
 @pytest.fixture(autouse=True)
@@ -45,12 +60,14 @@ def _non_admin_user() -> User:
     )
 
 
-async def _make_repo(tmp_path):
+async def _make_repo(_tmp_path):
     from deerflow.persistence.channel_connections import ChannelConnectionRepository
-    from deerflow.persistence.engine import get_session_factory, init_engine
 
-    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'router.db'}", sqlite_dir=str(tmp_path))
-    return ChannelConnectionRepository(get_session_factory())
+    assert _DATABASE_URL is not None
+    engine = create_async_engine(_DATABASE_URL, poolclass=NullPool)
+    repo = ChannelConnectionRepository(async_sessionmaker(engine, expire_on_commit=False))
+    repo.close = engine.dispose  # type: ignore[method-assign]
+    return repo
 
 
 def _make_app(
@@ -196,20 +213,6 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
     }
 
     anyio.run(repo.close)
-
-
-def test_get_providers_degrades_when_persistence_is_unavailable(monkeypatch):
-    monkeypatch.setattr(channel_connections, "get_session_factory", lambda: None)
-    app = _make_app(_enabled_connections_config(), None, _channels_config())
-
-    with TestClient(app) as client:
-        response = client.get("/api/channels/providers")
-
-    assert response.status_code == 200
-    by_provider = {item["provider"]: item for item in response.json()["providers"]}
-    assert by_provider["slack"]["configured"] is True
-    assert by_provider["slack"]["connectable"] is True
-    assert by_provider["slack"]["connection_status"] == "not_connected"
 
 
 def test_get_providers_reports_connected_without_binding_in_auth_disabled_mode(tmp_path, monkeypatch):

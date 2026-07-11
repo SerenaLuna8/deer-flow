@@ -7,18 +7,36 @@ from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
 from app.channels.message_bus import MessageBus, OutboundMessage
 
+_DATABASE_URL: str | None = None
 
-async def _make_repo(tmp_path):
+
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres_database(migrated_postgres_database_url):
+    global _DATABASE_URL
+    _DATABASE_URL = migrated_postgres_database_url
+    try:
+        yield
+    finally:
+        _DATABASE_URL = None
+
+
+async def _make_repo(_tmp_path):
     from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
-    from deerflow.persistence.engine import get_session_factory, init_engine
 
-    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'slack.db'}", sqlite_dir=str(tmp_path))
-    return ChannelConnectionRepository(
-        get_session_factory(),
+    assert _DATABASE_URL is not None
+    engine = create_async_engine(_DATABASE_URL, poolclass=NullPool)
+    repo = ChannelConnectionRepository(
+        async_sessionmaker(engine, expire_on_commit=False),
         cipher=ChannelCredentialCipher.from_key("slack-secret"),
     )
+    repo.close = engine.dispose  # type: ignore[method-assign]
+    return repo
 
 
 def test_slack_connect_command_binds_socket_mode_identity(tmp_path):

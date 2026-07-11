@@ -5,8 +5,29 @@ Memory tests run directly; DB and JSONL tests create stores inside each test.
 """
 
 import pytest
+import pytest_asyncio
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+_DATABASE_URL: str | None = None
+
+
+@pytest_asyncio.fixture
+async def _postgres_database(migrated_postgres_database_url):
+    global _DATABASE_URL
+    _DATABASE_URL = migrated_postgres_database_url
+    try:
+        yield
+    finally:
+        _DATABASE_URL = None
+
+
+async def _init_db() -> None:
+    from deerflow.config.database_config import DatabaseConfig
+    from deerflow.persistence.engine import init_engine
+
+    assert _DATABASE_URL is not None
+    await init_engine(DatabaseConfig(url=_DATABASE_URL))
 
 
 @pytest.fixture
@@ -322,12 +343,11 @@ class TestDbRunEventStore:
         assert "FOR UPDATE" not in compiled
 
     @pytest.mark.anyio
-    async def test_basic_crud(self, tmp_path):
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    async def test_basic_crud(self, _postgres_database):
+        from deerflow.persistence.engine import close_engine, get_session_factory
         from deerflow.runtime.events.store.db import DbRunEventStore
 
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        await _init_db()
         s = DbRunEventStore(get_session_factory())
 
         r = await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="hi")
@@ -344,12 +364,11 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
-    async def test_trace_content_truncation(self, tmp_path):
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    async def test_trace_content_truncation(self, _postgres_database):
+        from deerflow.persistence.engine import close_engine, get_session_factory
         from deerflow.runtime.events.store.db import DbRunEventStore
 
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        await _init_db()
         s = DbRunEventStore(get_session_factory(), max_trace_content=100)
 
         long = "x" * 200
@@ -364,12 +383,11 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
-    async def test_structured_content_round_trips(self, tmp_path):
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    async def test_structured_content_round_trips(self, _postgres_database):
+        from deerflow.persistence.engine import close_engine, get_session_factory
         from deerflow.runtime.events.store.db import DbRunEventStore
 
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        await _init_db()
         s = DbRunEventStore(get_session_factory())
 
         content = [{"type": "text", "text": "hello"}, {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}]
@@ -386,12 +404,11 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
-    async def test_pagination(self, tmp_path):
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    async def test_pagination(self, _postgres_database):
+        from deerflow.persistence.engine import close_engine, get_session_factory
         from deerflow.runtime.events.store.db import DbRunEventStore
 
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        await _init_db()
         s = DbRunEventStore(get_session_factory())
 
         for i in range(10):
@@ -412,12 +429,11 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
-    async def test_delete(self, tmp_path):
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    async def test_delete(self, _postgres_database):
+        from deerflow.persistence.engine import close_engine, get_session_factory
         from deerflow.runtime.events.store.db import DbRunEventStore
 
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        await _init_db()
         s = DbRunEventStore(get_session_factory())
 
         await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
@@ -433,13 +449,12 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
-    async def test_put_batch_seq_continuity(self, tmp_path):
+    async def test_put_batch_seq_continuity(self, _postgres_database):
         """Batch write produces continuous seq values with no gaps."""
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.persistence.engine import close_engine, get_session_factory
         from deerflow.runtime.events.store.db import DbRunEventStore
 
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        await _init_db()
         s = DbRunEventStore(get_session_factory())
 
         events = [{"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace"} for _ in range(50)]
@@ -449,12 +464,11 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
-    async def test_put_batch_accepts_structured_content(self, tmp_path):
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    async def test_put_batch_accepts_structured_content(self, _postgres_database):
+        from deerflow.persistence.engine import close_engine, get_session_factory
         from deerflow.runtime.events.store.db import DbRunEventStore
 
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        await _init_db()
         s = DbRunEventStore(get_session_factory())
 
         content = [{"messages": [{"type": "ai", "content": ""}]}]
@@ -480,12 +494,11 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
-    async def test_dict_content_keeps_legacy_metadata_flag(self, tmp_path):
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    async def test_dict_content_keeps_legacy_metadata_flag(self, _postgres_database):
+        from deerflow.persistence.engine import close_engine, get_session_factory
         from deerflow.runtime.events.store.db import DbRunEventStore
 
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        await _init_db()
         s = DbRunEventStore(get_session_factory())
 
         content = {"status": "success"}
@@ -523,14 +536,13 @@ class TestMakeRunEventStore:
         assert type(store).__name__ == "MemoryRunEventStore"
 
     @pytest.mark.anyio
-    async def test_db_backend_with_engine(self, tmp_path):
+    async def test_db_backend_with_engine(self, _postgres_database):
         from unittest.mock import MagicMock
 
-        from deerflow.persistence.engine import close_engine, init_engine
+        from deerflow.persistence.engine import close_engine
         from deerflow.runtime.events.store import make_run_event_store
 
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        await _init_db()
 
         config = MagicMock()
         config.backend = "db"
@@ -540,21 +552,6 @@ class TestMakeRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
-    async def test_db_backend_no_engine_falls_back(self):
-        """db backend without engine falls back to memory."""
-        from unittest.mock import MagicMock
-
-        from deerflow.persistence.engine import close_engine, init_engine
-        from deerflow.runtime.events.store import make_run_event_store
-
-        await init_engine("memory")  # no engine created
-
-        config = MagicMock()
-        config.backend = "db"
-        store = make_run_event_store(config)
-        assert type(store).__name__ == "MemoryRunEventStore"
-        await close_engine()
-
     @pytest.mark.anyio
     async def test_jsonl_backend(self):
         from unittest.mock import MagicMock

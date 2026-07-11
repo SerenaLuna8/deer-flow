@@ -5,6 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage
 
@@ -36,12 +40,27 @@ def test_pending_connect_code_is_none_when_connections_disabled():
     assert channel._pending_connect_code("/connect abc123") is None
 
 
-async def _make_repo(tmp_path, name: str):
-    from deerflow.persistence.channel_connections import ChannelConnectionRepository
-    from deerflow.persistence.engine import get_session_factory, init_engine
+_DATABASE_URL: str | None = None
 
-    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / f'{name}.db'}", sqlite_dir=str(tmp_path))
-    return ChannelConnectionRepository(get_session_factory())
+
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres_database(migrated_postgres_database_url):
+    global _DATABASE_URL
+    _DATABASE_URL = migrated_postgres_database_url
+    try:
+        yield
+    finally:
+        _DATABASE_URL = None
+
+
+async def _make_repo(_tmp_path, _name: str):
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository
+
+    assert _DATABASE_URL is not None
+    engine = create_async_engine(_DATABASE_URL, poolclass=NullPool)
+    repo = ChannelConnectionRepository(async_sessionmaker(engine, expire_on_commit=False))
+    repo.close = engine.dispose  # type: ignore[method-assign]
+    return repo
 
 
 async def _seed_state(repo, provider: str, state: str, owner_user_id: str = "deerflow-user-1") -> None:

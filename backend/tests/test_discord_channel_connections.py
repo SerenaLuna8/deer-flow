@@ -6,24 +6,24 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.channels.discord import DiscordChannel
 from app.channels.message_bus import InboundMessage, MessageBus
 
 
 @pytest.fixture
-async def repo(tmp_path):
+async def repo(migrated_postgres_database_url):
     from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
-    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 
-    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'discord.db'}", sqlite_dir=str(tmp_path))
+    engine = create_async_engine(migrated_postgres_database_url)
     try:
         yield ChannelConnectionRepository(
-            get_session_factory(),
+            async_sessionmaker(engine, expire_on_commit=False),
             cipher=ChannelCredentialCipher.from_key("discord-secret"),
         )
     finally:
-        await close_engine()
+        await engine.dispose()
 
 
 @pytest.mark.anyio

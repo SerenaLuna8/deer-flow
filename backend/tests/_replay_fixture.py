@@ -92,8 +92,7 @@ summarization:
 agents_api:
   enabled: true
 database:
-  backend: sqlite
-  sqlite_dir: {home / "db"}
+  url: $DATABASE_URL
 """
 
 

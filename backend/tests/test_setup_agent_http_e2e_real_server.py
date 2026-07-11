@@ -4,7 +4,7 @@ This test drives the **entire** FastAPI gateway through ``starlette.testclient.T
 
   starlette.testclient.TestClient (real ASGI stack)
     -> AuthMiddleware (real cookie parsing, real JWT decode)
-    -> /api/v1/auth/register endpoint (real password hash + sqlite write)
+    -> /api/v1/auth/register endpoint (real password hash + PostgreSQL write)
     -> /api/threads/{id}/runs/stream endpoint (real start_run config-assembly)
     -> background asyncio.create_task(run_agent) (real worker, real Runtime)
     -> langchain.agents.create_agent graph (real, with fake LLM)
@@ -54,7 +54,7 @@ def _build_fake_create_chat_model(agent_name: str):
 
 
 @pytest.fixture
-def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, migrated_postgres_database_url: str):
     """Stand up an isolated DeerFlow data root + config under tmp_path.
 
     - Sets ``DEER_FLOW_HOME`` so paths land under tmp_path, not the real
@@ -72,6 +72,7 @@ def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DEER_FLOW_HOME", str(home))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-key-not-used-because-llm-is-mocked")
     monkeypatch.setenv("OPENAI_API_BASE", "https://example.invalid")
+    monkeypatch.setenv("POSTGRES_RUNTIME_TEST_URL", migrated_postgres_database_url)
 
     # Hermetic config: do not depend on whether the dev machine has a real
     # ``config.yaml`` at the repo root. CI's ``actions/checkout`` only ships
@@ -105,17 +106,17 @@ sandbox:
 agents_api:
   enabled: true
 database:
-  backend: sqlite
+  url: $POSTGRES_RUNTIME_TEST_URL
 """
 
 
 def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reset every process-wide cache that would survive across tests.
 
-    This fixture stands up a full FastAPI app + sqlite DB + LangGraph runtime
+    This fixture stands up a full FastAPI app + PostgreSQL DB + LangGraph runtime
     inside ``tmp_path``. To get true per-test isolation we have to invalidate
     a handful of module-level caches that production normally never resets,
-    so they pick up our test-only ``DEER_FLOW_HOME`` and sqlite path:
+    so they pick up our test-only ``DEER_FLOW_HOME`` and database URL:
 
     - ``deerflow.config.app_config`` caches the parsed ``config.yaml``.
     - ``deerflow.config.paths`` caches the ``Paths`` singleton derived from
@@ -129,6 +130,7 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
     to call ``get_app_config()``/``get_paths()`` will surface the real
     incompatibility loudly.
     """
+    from app.gateway import deps as deps_module
     from deerflow.config import app_config as app_config_module
     from deerflow.config import paths as paths_module
     from deerflow.persistence import engine as engine_module
@@ -140,6 +142,8 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
         (paths_module, "_paths_singleton"),
         (engine_module, "_engine"),
         (engine_module, "_session_factory"),
+        (deps_module, "_cached_local_provider"),
+        (deps_module, "_cached_repo"),
     ):
         monkeypatch.setattr(module, attr, None, raising=False)
 
@@ -148,17 +152,16 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
 def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch):
     """Build a fresh FastAPI app inside a clean DEER_FLOW_HOME.
 
-    Each test gets its own sqlite DB and checkpoint store under ``tmp_path``,
+    Each test gets its own PostgreSQL DB and checkpoint store,
     with no cross-test contamination.
     """
     _reset_process_singletons(monkeypatch)
 
-    # Re-resolve the config from the test-only DEER_FLOW_HOME and pin its
-    # sqlite path into tmp_path so the lifespan-time engine init lands there.
+    # Re-resolve the config from the test-only DEER_FLOW_HOME so lifespan uses
+    # the isolated PostgreSQL URL supplied through the environment placeholder.
     from deerflow.config import app_config as app_config_module
 
-    cfg = app_config_module.get_app_config()
-    cfg.database.sqlite_dir = str(isolated_deer_flow_home / "db")
+    app_config_module.get_app_config()
 
     from app.gateway.app import create_app
 

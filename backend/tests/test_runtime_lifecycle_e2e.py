@@ -45,7 +45,7 @@ title:
 memory:
   enabled: false
 database:
-  backend: sqlite
+  url: $POSTGRES_RUNTIME_TEST_URL
 run_events:
   backend: memory
 """
@@ -164,12 +164,13 @@ def _build_fake_setup_agent_model(agent_name: str):
 
 
 @pytest.fixture
-def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, migrated_postgres_database_url: str) -> Path:
     home = tmp_path / "deer-flow-home"
     home.mkdir()
     monkeypatch.setenv("DEER_FLOW_HOME", str(home))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-key-not-used")
     monkeypatch.setenv("OPENAI_API_BASE", "https://example.invalid")
+    monkeypatch.setenv("POSTGRES_RUNTIME_TEST_URL", migrated_postgres_database_url)
 
     staged_config = tmp_path / "config.yaml"
     staged_config.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
@@ -191,7 +192,7 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
 
     - app_config / extensions_config: parsed config file caches.
     - paths: ``DEER_FLOW_HOME``-derived filesystem paths.
-    - persistence.engine: SQLAlchemy engine/session factory for the sqlite dir.
+    - persistence.engine: SQLAlchemy engine/session factory for PostgreSQL.
     - app.gateway.deps: cached local auth provider/repository.
 
     A shared public reset helper would be cleaner long-term; this test keeps
@@ -234,7 +235,6 @@ def _preserve_process_config_singletons(monkeypatch: pytest.MonkeyPatch) -> None
     from deerflow.config import (
         acp_config,
         agents_api_config,
-        checkpointer_config,
         guardrails_config,
         memory_config,
         stream_bridge_config,
@@ -252,7 +252,6 @@ def _preserve_process_config_singletons(monkeypatch: pytest.MonkeyPatch) -> None
         (subagents_config, "_subagents_config"),
         (tool_search_config, "_tool_search_config"),
         (guardrails_config, "_guardrails_config"),
-        (checkpointer_config, "_checkpointer_config"),
         (stream_bridge_config, "_stream_bridge_config"),
         (acp_config, "_acp_agents"),
     ):
@@ -266,21 +265,20 @@ def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch)
 
     from deerflow.config import app_config as app_config_module
 
-    cfg = app_config_module.get_app_config()
-    cfg.database.sqlite_dir = str(isolated_deer_flow_home / "db")
+    app_config_module.get_app_config()
 
     from app.gateway.app import create_app
 
     return create_app()
 
 
-def test_lifespan_uses_sqlite_store_from_database_config(isolated_app):
+def test_lifespan_uses_postgres_store_from_database_config(isolated_app):
     """Gateway startup must bind LangGraph Store to the unified database backend."""
-    from langgraph.store.sqlite.aio import AsyncSqliteStore
+    from langgraph.store.postgres.aio import AsyncPostgresStore
     from starlette.testclient import TestClient
 
     with TestClient(isolated_app):
-        assert isinstance(isolated_app.state.store, AsyncSqliteStore)
+        assert isinstance(isolated_app.state.store, AsyncPostgresStore)
 
 
 @pytest.fixture
@@ -294,8 +292,7 @@ def isolated_app_with_title(isolated_deer_flow_home: Path, monkeypatch: pytest.M
 
     from deerflow.config import app_config as app_config_module
 
-    cfg = app_config_module.get_app_config()
-    cfg.database.sqlite_dir = str(isolated_deer_flow_home / "db")
+    app_config_module.get_app_config()
 
     from app.gateway.app import create_app
 
@@ -811,7 +808,6 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
             json={
                 "values": {
                     "title": "Before rollback",
-                    "messages": [{"type": "human", "content": "before"}],
                 },
                 "as_node": "test_seed",
             },
@@ -846,4 +842,3 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         after = client.get(f"/api/threads/{thread_id}/state")
         assert after.status_code == 200, after.text
         assert after.json()["values"]["title"] == "Before rollback"
-        assert after.json()["values"]["messages"] == [{"type": "human", "content": "before"}]

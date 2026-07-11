@@ -358,11 +358,11 @@ async def test_memory_store_by_model_invariant_and_fallback():
     _assert_aggregate_shape(agg)
 
 
-async def _make_sql_repo(tmp_path):
+async def _make_sql_repo(database_url):
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import get_session_factory, init_engine
 
-    url = f"sqlite+aiosqlite:///{tmp_path / 'by-model.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    await init_engine(DatabaseConfig(url=database_url))
     return RunRepository(get_session_factory())
 
 
@@ -373,8 +373,8 @@ async def _close_sql_engine() -> None:
 
 
 @pytest.mark.anyio
-async def test_sql_store_by_model_invariant_and_fallback(tmp_path):
-    repo = await _make_sql_repo(tmp_path)
+async def test_sql_store_by_model_invariant_and_fallback(migrated_postgres_database_url):
+    repo = await _make_sql_repo(migrated_postgres_database_url)
     try:
         await _seed_all(repo)
         agg = await repo.aggregate_tokens_by_thread(_THREAD)
@@ -384,11 +384,11 @@ async def test_sql_store_by_model_invariant_and_fallback(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_memory_and_sql_stores_agree(tmp_path):
+async def test_memory_and_sql_stores_agree(migrated_postgres_database_url):
     """Memory and SQL stores must return byte-identical aggregations so
     behavior does not silently diverge based on database.backend choice."""
     mem = MemoryRunStore()
-    sql = await _make_sql_repo(tmp_path)
+    sql = await _make_sql_repo(migrated_postgres_database_url)
     try:
         await _seed_all(mem)
         await _seed_all(sql)
@@ -400,10 +400,10 @@ async def test_memory_and_sql_stores_agree(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_include_active_picks_up_running_progress_snapshot(tmp_path):
+async def test_include_active_picks_up_running_progress_snapshot(migrated_postgres_database_url):
     """``update_run_progress`` must persist ``token_usage_by_model`` so the
     ``include_active=true`` view of /token-usage reflects in-flight tokens."""
-    repo = await _make_sql_repo(tmp_path)
+    repo = await _make_sql_repo(migrated_postgres_database_url)
     try:
         await repo.put("run-active", thread_id=_THREAD, status="pending")
         # Transition to running so update_run_progress' status guard fires.

@@ -1,15 +1,33 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import pytest_asyncio
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
+_DATABASE_URL: str | None = None
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres_database(migrated_postgres_database_url):
+    global _DATABASE_URL
+    _DATABASE_URL = migrated_postgres_database_url
+    try:
+        yield
+    finally:
+        _DATABASE_URL = None
+
+
+def _database_config() -> DatabaseConfig:
+    assert _DATABASE_URL is not None
+    return DatabaseConfig(url=_DATABASE_URL)
+
 
 @pytest.mark.asyncio
 async def test_claim_due_tasks_claims_only_due_rows(tmp_path):
-    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    await init_engine_from_config(_database_config())
     sf = get_session_factory()
     assert sf is not None
     repo = ScheduledTaskRepository(sf)
@@ -63,7 +81,7 @@ async def test_claim_reclaims_task_stuck_in_running_with_expired_lease(tmp_path)
     and the old claim query only selected ``status == 'enabled'``, so a crash
     between claim and dispatch left the task permanently un-triggerable.
     """
-    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    await init_engine_from_config(_database_config())
     sf = get_session_factory()
     assert sf is not None
     repo = ScheduledTaskRepository(sf)
@@ -111,7 +129,7 @@ async def test_claim_reclaims_task_stuck_in_running_with_expired_lease(tmp_path)
 @pytest.mark.asyncio
 async def test_claim_skips_task_with_active_lease(tmp_path):
     """A task whose lease has not expired must not be reclaimed."""
-    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    await init_engine_from_config(_database_config())
     sf = get_session_factory()
     assert sf is not None
     repo = ScheduledTaskRepository(sf)

@@ -1,21 +1,35 @@
 """Tests for RunRepository (SQLAlchemy-backed RunStore).
 
-Uses a temp SQLite DB to test ORM-backed CRUD operations.
+Uses an isolated PostgreSQL database to test ORM-backed CRUD operations.
 """
 
 import pytest
+import pytest_asyncio
 from sqlalchemy.dialects import postgresql
 
 from deerflow.persistence.run import RunRepository
 from deerflow.runtime import RunManager, RunStatus
 from deerflow.runtime.runs.store.base import RunStore
 
+_DATABASE_URL: str | None = None
 
-async def _make_repo(tmp_path):
+
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres_database(migrated_postgres_database_url):
+    global _DATABASE_URL
+    _DATABASE_URL = migrated_postgres_database_url
+    try:
+        yield
+    finally:
+        _DATABASE_URL = None
+
+
+async def _make_repo(_tmp_path):
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import get_session_factory, init_engine
 
-    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    assert _DATABASE_URL is not None
+    await init_engine(DatabaseConfig(url=_DATABASE_URL))
     return RunRepository(get_session_factory())
 
 
@@ -422,11 +436,7 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_model_name_persistence(self, tmp_path):
         """RunRepository should persist, normalize, and truncate model_name correctly via SQL."""
-        from deerflow.persistence.engine import get_session_factory, init_engine
-
-        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
-        repo = RunRepository(get_session_factory())
+        repo = await _make_repo(tmp_path)
 
         await repo.put("run-1", thread_id="thread-1", model_name="gpt-4o")
         row = await repo.get("run-1")

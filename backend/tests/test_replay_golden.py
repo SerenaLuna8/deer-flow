@@ -44,7 +44,7 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.no_auto_user
-def test_replay_write_read_file_ultra_matches_golden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_replay_write_read_file_ultra_matches_golden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, migrated_postgres_database_url: str):
     scenario, mode = "write_read_file", "ultra"
     fixture_path = FIXTURE_DIR / f"{scenario}.{mode}.json"
     events_path = FIXTURE_DIR / f"{scenario}.{mode}.events.json"
@@ -54,6 +54,7 @@ def test_replay_write_read_file_ultra_matches_golden(tmp_path: Path, monkeypatch
     home.mkdir()
     monkeypatch.setenv("DEER_FLOW_HOME", str(home))
     monkeypatch.setenv("DEERFLOW_REPLAY_FIXTURE", str(fixture_path))
+    monkeypatch.setenv("DATABASE_URL", migrated_postgres_database_url)
 
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(build_config_yaml(model_block=REPLAY_MODEL_BLOCK, home=home), encoding="utf-8")
@@ -63,8 +64,7 @@ def test_replay_write_read_file_ultra_matches_golden(tmp_path: Path, monkeypatch
     _reset_process_singletons(monkeypatch)
     from deerflow.config import app_config as app_config_module
 
-    cfg = app_config_module.get_app_config()
-    cfg.database.sqlite_dir = str(home / "db")
+    app_config_module.get_app_config()
 
     # Fail loud on a replay miss. The gateway swallows a hash-miss into a normal
     # assistant error message, so the SSE *shapes* below stay green on a stale

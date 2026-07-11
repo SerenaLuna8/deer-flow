@@ -7,11 +7,13 @@ and unhappy paths / edge cases for all auth boundaries.
 
 import os
 import secrets
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import jwt as pyjwt
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -30,32 +32,44 @@ from app.gateway.csrf_middleware import (
 # ── Setup ────────────────────────────────────────────────────────────
 
 _TEST_SECRET = "test-secret-for-auth-type-system-tests-min32"
+_AUTH_CLIENT: TestClient | None = None
 
 
-@pytest.fixture(autouse=True)
-def _persistence_engine(tmp_path):
-    """Initialise a per-test SQLite engine + reset cached provider singletons.
+@asynccontextmanager
+async def _noop_lifespan(_app):
+    yield
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _persistence_engine(migrated_postgres_database_url):
+    """Initialise a per-test PostgreSQL engine + reset cached providers.
 
     The auth tests call real HTTP handlers that go through
-    ``SQLiteUserRepository`` → ``get_session_factory``. Each test gets
-    a fresh DB plus a clean ``deps._cached_*`` so the cached provider
+    ``SQLUserRepository`` → ``get_session_factory``. Each test gets a
+    migrated isolated database plus clean ``deps._cached_*`` state so the provider
     does not hold a dangling reference to the previous test's engine.
     """
-    import asyncio
-
     from app.gateway import deps
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import close_engine, init_engine
 
-    url = f"sqlite+aiosqlite:///{tmp_path}/auth_types.db"
-    asyncio.run(init_engine("sqlite", url=url, sqlite_dir=str(tmp_path)))
+    global _AUTH_CLIENT
+
     deps._cached_local_provider = None
     deps._cached_repo = None
-    try:
-        yield
-    finally:
-        deps._cached_local_provider = None
-        deps._cached_repo = None
-        asyncio.run(close_engine())
+    app = _make_auth_app()
+    app.router.lifespan_context = _noop_lifespan
+    with TestClient(app) as client:
+        assert client.portal is not None
+        client.portal.call(init_engine, DatabaseConfig(url=migrated_postgres_database_url))
+        _AUTH_CLIENT = client
+        try:
+            yield
+        finally:
+            deps._cached_local_provider = None
+            deps._cached_repo = None
+            client.portal.call(close_engine)
+            _AUTH_CLIENT = None
 
 
 def _setup_config():
@@ -516,7 +530,8 @@ def _make_auth_app():
 
 def _get_auth_client():
     """Get TestClient for auth API contract tests."""
-    return TestClient(_make_auth_app())
+    assert _AUTH_CLIENT is not None
+    return _AUTH_CLIENT
 
 
 def test_api_auth_me_no_cookie_returns_structured_401():

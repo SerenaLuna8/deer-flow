@@ -1559,27 +1559,27 @@ async def test_ensure_interrupted_title_skips_when_title_already_set():
 
 
 @pytest.mark.anyio
-async def test_ensure_interrupted_title_round_trip_with_real_sqlite_checkpointer(tmp_path):
-    """Full round-trip against a real ``AsyncSqliteSaver`` on a disk-backed DB.
+async def test_ensure_interrupted_title_round_trip_with_real_postgres_checkpointer(migrated_postgres_database_url):
+    """Full round-trip against the production ``AsyncPostgresSaver``.
 
-    Mirrors what Gateway constructs in production via ``make_checkpointer`` when
-    ``database.backend == "sqlite"``, then closes and re-opens the saver to
-    simulate a fresh connection. The fallback title must survive that boundary —
+    Closes and re-opens the saver to simulate a fresh connection. The fallback
+    title must survive that boundary —
     this is the scenario the #3874 review flagged as broken before the
     ``new_versions={"title": ...}`` fix.
     """
     from langchain_core.messages import HumanMessage
     from langgraph.checkpoint.base import empty_checkpoint
-    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.config.title_config import TitleConfig
 
-    db_path = str(tmp_path / "ckpt.db")
+    connection_url = DatabaseConfig(url=migrated_postgres_database_url).checkpointer_url
     thread_cfg = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
 
     # 1. Seed a first-turn checkpoint that has a human message and NO title —
     #    the same shape the agent leaves behind when interrupted mid-stream.
-    async with AsyncSqliteSaver.from_conn_string(db_path) as writer:
+    async with AsyncPostgresSaver.from_conn_string(connection_url) as writer:
         await writer.setup()
         ck = empty_checkpoint()
         ck["channel_values"] = {
@@ -1592,7 +1592,7 @@ async def test_ensure_interrupted_title_round_trip_with_real_sqlite_checkpointer
     #    the lifespan-owned checkpointer pool does for each request.
     title_config = TitleConfig(enabled=True, max_chars=40, max_words=20)
     app_config = SimpleNamespace(title=title_config)
-    async with AsyncSqliteSaver.from_conn_string(db_path) as worker_saver:
+    async with AsyncPostgresSaver.from_conn_string(connection_url) as worker_saver:
         title = await _ensure_interrupted_title(
             checkpointer=worker_saver,
             thread_id="thread-1",
@@ -1604,7 +1604,7 @@ async def test_ensure_interrupted_title_round_trip_with_real_sqlite_checkpointer
     #    invariant the #3874 review was guarding: ``new_versions={}`` would
     #    cause DB savers to drop the title blob, so a fresh aget_tuple would
     #    read back without it.
-    async with AsyncSqliteSaver.from_conn_string(db_path) as reader:
+    async with AsyncPostgresSaver.from_conn_string(connection_url) as reader:
         tup = await reader.aget_tuple(thread_cfg)
     assert tup is not None
     persisted = tup.checkpoint.get("channel_values", {}).get("title")

@@ -97,16 +97,16 @@ async def test_memory_no_task_id_returns_all():
     await _check_no_task_id_returns_all(MemoryRunEventStore())
 
 
-# -- DB backend (sqlite): exercises the JSON-field filter on a real dialect --
+# -- PostgreSQL DB backend: exercises the JSON-field filter on the runtime dialect --
 
 
 @pytest.mark.anyio
-async def test_db_task_id_filter(tmp_path):
+async def test_db_task_id_filter(migrated_postgres_database_url):
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
     from deerflow.runtime.events.store.db import DbRunEventStore
 
-    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    await init_engine(DatabaseConfig(url=migrated_postgres_database_url))
     try:
         await _check_task_id_filter(DbRunEventStore(get_session_factory()))
     finally:
@@ -114,12 +114,12 @@ async def test_db_task_id_filter(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_db_task_id_after_seq_paginate(tmp_path):
+async def test_db_task_id_after_seq_paginate(migrated_postgres_database_url):
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
     from deerflow.runtime.events.store.db import DbRunEventStore
 
-    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    await init_engine(DatabaseConfig(url=migrated_postgres_database_url))
     try:
         await _check_task_id_after_seq_paginate(DbRunEventStore(get_session_factory()))
     finally:
@@ -127,12 +127,12 @@ async def test_db_task_id_after_seq_paginate(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_db_no_task_id_returns_all(tmp_path):
+async def test_db_no_task_id_returns_all(migrated_postgres_database_url):
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
     from deerflow.runtime.events.store.db import DbRunEventStore
 
-    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    await init_engine(DatabaseConfig(url=migrated_postgres_database_url))
     try:
         await _check_no_task_id_returns_all(DbRunEventStore(get_session_factory()))
     finally:

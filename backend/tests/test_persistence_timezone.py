@@ -1,4 +1,4 @@
-"""Regression tests for #3120: SQLite-backed stores must emit tz-aware ISO timestamps.
+"""Regression tests for #3120: SQL stores must emit tz-aware ISO timestamps.
 
 SQLAlchemy's ``DateTime(timezone=True)`` is a no-op on SQLite because the
 backend has no native timezone type, so values read back are naive
@@ -22,11 +22,11 @@ def _assert_tz_aware(value: str | None, *, context: str) -> None:
     assert _TZ_SUFFIX_RE.search(value), f"{context}: timestamp lacks tz suffix: {value!r}"
 
 
-async def _init_sqlite(tmp_path):
+async def _init_postgres(database_url):
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import get_session_factory, init_engine
 
-    url = f"sqlite+aiosqlite:///{tmp_path / 'tz.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    await init_engine(DatabaseConfig(url=database_url))
     return get_session_factory()
 
 
@@ -37,17 +37,17 @@ async def _cleanup():
 
 
 @pytest.mark.anyio
-async def test_thread_meta_emits_tz_aware_timestamps(tmp_path):
+async def test_thread_meta_emits_tz_aware_timestamps(migrated_postgres_database_url):
     from deerflow.persistence.thread_meta import ThreadMetaRepository
 
-    repo = ThreadMetaRepository(await _init_sqlite(tmp_path))
+    repo = ThreadMetaRepository(await _init_postgres(migrated_postgres_database_url))
     try:
         created = await repo.create("t-tz", user_id="u1", display_name="tz")
         _assert_tz_aware(created["created_at"], context="thread_meta.create.created_at")
         _assert_tz_aware(created["updated_at"], context="thread_meta.create.updated_at")
 
         # Second read from DB exercises the same _row_to_dict path on a
-        # value that SQLite has round-tripped (where tzinfo is lost).
+        # value that PostgreSQL has round-tripped.
         fetched = await repo.get("t-tz", user_id="u1")
         _assert_tz_aware(fetched["created_at"], context="thread_meta.get.created_at")
         _assert_tz_aware(fetched["updated_at"], context="thread_meta.get.updated_at")
@@ -61,10 +61,10 @@ async def test_thread_meta_emits_tz_aware_timestamps(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_run_repository_emits_tz_aware_timestamps(tmp_path):
+async def test_run_repository_emits_tz_aware_timestamps(migrated_postgres_database_url):
     from deerflow.persistence.run import RunRepository
 
-    repo = RunRepository(await _init_sqlite(tmp_path))
+    repo = RunRepository(await _init_postgres(migrated_postgres_database_url))
     try:
         await repo.put("r-tz", thread_id="t-tz", user_id="u1")
         row = await repo.get("r-tz", user_id="u1")
@@ -75,10 +75,10 @@ async def test_run_repository_emits_tz_aware_timestamps(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_feedback_repository_emits_tz_aware_timestamps(tmp_path):
+async def test_feedback_repository_emits_tz_aware_timestamps(migrated_postgres_database_url):
     from deerflow.persistence.feedback import FeedbackRepository
 
-    repo = FeedbackRepository(await _init_sqlite(tmp_path))
+    repo = FeedbackRepository(await _init_postgres(migrated_postgres_database_url))
     try:
         record = await repo.create(run_id="r-tz", thread_id="t-tz", rating=1, user_id="u1")
         _assert_tz_aware(record["created_at"], context="feedback.create.created_at")
@@ -87,10 +87,10 @@ async def test_feedback_repository_emits_tz_aware_timestamps(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_run_event_store_emits_tz_aware_timestamps(tmp_path):
+async def test_run_event_store_emits_tz_aware_timestamps(migrated_postgres_database_url):
     from deerflow.runtime.events.store.db import DbRunEventStore
 
-    store = DbRunEventStore(await _init_sqlite(tmp_path))
+    store = DbRunEventStore(await _init_postgres(migrated_postgres_database_url))
     try:
         await store.put(
             thread_id="t-tz",

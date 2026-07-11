@@ -1,18 +1,32 @@
 """Tests for FeedbackRepository and follow-up association.
 
-Uses temp SQLite DB for ORM tests.
+Uses isolated PostgreSQL databases for ORM tests.
 """
 
 import pytest
+import pytest_asyncio
 
 from deerflow.persistence.feedback import FeedbackRepository
 
+_DATABASE_URL: str | None = None
 
-async def _make_feedback_repo(tmp_path):
+
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres_database(migrated_postgres_database_url):
+    global _DATABASE_URL
+    _DATABASE_URL = migrated_postgres_database_url
+    try:
+        yield
+    finally:
+        _DATABASE_URL = None
+
+
+async def _make_feedback_repo(_tmp_path):
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import get_session_factory, init_engine
 
-    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    assert _DATABASE_URL is not None
+    await init_engine(DatabaseConfig(url=_DATABASE_URL))
     return FeedbackRepository(get_session_factory())
 
 

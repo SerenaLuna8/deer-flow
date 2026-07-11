@@ -38,15 +38,15 @@ USER_A = SimpleNamespace(id="user-a", email="a@test.local")
 USER_B = SimpleNamespace(id="user-b", email="b@test.local")
 
 
-async def _make_engines(tmp_path):
-    """Initialize the shared engine against a per-test SQLite DB.
+async def _make_engines(database_url):
+    """Initialize the shared engine against a per-test PostgreSQL database.
 
     Returns a cleanup coroutine the caller should await at the end.
     """
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import close_engine, init_engine
 
-    url = f"sqlite+aiosqlite:///{tmp_path / 'isolation.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    await init_engine(DatabaseConfig(url=database_url))
     return close_engine
 
 
@@ -69,11 +69,11 @@ def _as_user(user):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_thread_meta_cross_user_isolation(tmp_path):
+async def test_thread_meta_cross_user_isolation(migrated_postgres_database_url):
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.thread_meta import ThreadMetaRepository
 
-    cleanup = await _make_engines(tmp_path)
+    cleanup = await _make_engines(migrated_postgres_database_url)
     try:
         repo = ThreadMetaRepository(get_session_factory())
 
@@ -116,12 +116,12 @@ async def test_thread_meta_cross_user_isolation(tmp_path):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_thread_meta_cross_user_mutation_denied(tmp_path):
+async def test_thread_meta_cross_user_mutation_denied(migrated_postgres_database_url):
     """User B cannot update or delete a thread owned by User A."""
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.thread_meta import ThreadMetaRepository
 
-    cleanup = await _make_engines(tmp_path)
+    cleanup = await _make_engines(migrated_postgres_database_url)
     try:
         repo = ThreadMetaRepository(get_session_factory())
 
@@ -155,11 +155,11 @@ async def test_thread_meta_cross_user_mutation_denied(tmp_path):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_runs_cross_user_isolation(tmp_path):
+async def test_runs_cross_user_isolation(migrated_postgres_database_url):
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.run import RunRepository
 
-    cleanup = await _make_engines(tmp_path)
+    cleanup = await _make_engines(migrated_postgres_database_url)
     try:
         repo = RunRepository(get_session_factory())
 
@@ -199,11 +199,11 @@ async def test_runs_cross_user_isolation(tmp_path):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_runs_cross_user_delete_denied(tmp_path):
+async def test_runs_cross_user_delete_denied(migrated_postgres_database_url):
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.run import RunRepository
 
-    cleanup = await _make_engines(tmp_path)
+    cleanup = await _make_engines(migrated_postgres_database_url)
     try:
         repo = RunRepository(get_session_factory())
 
@@ -227,12 +227,12 @@ async def test_runs_cross_user_delete_denied(tmp_path):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_run_events_cross_user_isolation(tmp_path):
+async def test_run_events_cross_user_isolation(migrated_postgres_database_url):
     """run_events holds raw conversation content — most sensitive leak vector."""
     from deerflow.persistence.engine import get_session_factory
     from deerflow.runtime.events.store.db import DbRunEventStore
 
-    cleanup = await _make_engines(tmp_path)
+    cleanup = await _make_engines(migrated_postgres_database_url)
     try:
         store = DbRunEventStore(get_session_factory())
 
@@ -297,12 +297,12 @@ async def test_run_events_cross_user_isolation(tmp_path):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_run_events_cross_user_delete_denied(tmp_path):
+async def test_run_events_cross_user_delete_denied(migrated_postgres_database_url):
     """User B cannot delete User A's event stream."""
     from deerflow.persistence.engine import get_session_factory
     from deerflow.runtime.events.store.db import DbRunEventStore
 
-    cleanup = await _make_engines(tmp_path)
+    cleanup = await _make_engines(migrated_postgres_database_url)
     try:
         store = DbRunEventStore(get_session_factory())
 
@@ -333,11 +333,11 @@ async def test_run_events_cross_user_delete_denied(tmp_path):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_feedback_cross_user_isolation(tmp_path):
+async def test_feedback_cross_user_isolation(migrated_postgres_database_url):
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.feedback import FeedbackRepository
 
-    cleanup = await _make_engines(tmp_path)
+    cleanup = await _make_engines(migrated_postgres_database_url)
     try:
         repo = FeedbackRepository(get_session_factory())
 
@@ -387,11 +387,11 @@ async def test_feedback_cross_user_isolation(tmp_path):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_feedback_cross_user_delete_denied(tmp_path):
+async def test_feedback_cross_user_delete_denied(migrated_postgres_database_url):
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.feedback import FeedbackRepository
 
-    cleanup = await _make_engines(tmp_path)
+    cleanup = await _make_engines(migrated_postgres_database_url)
     try:
         repo = FeedbackRepository(get_session_factory())
 
@@ -416,12 +416,12 @@ async def test_feedback_cross_user_delete_denied(tmp_path):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_repository_without_context_raises(tmp_path):
+async def test_repository_without_context_raises(migrated_postgres_database_url):
     """Defense-in-depth: calling repo methods without a user context errors."""
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.thread_meta import ThreadMetaRepository
 
-    cleanup = await _make_engines(tmp_path)
+    cleanup = await _make_engines(migrated_postgres_database_url)
     try:
         repo = ThreadMetaRepository(get_session_factory())
         # Contextvar is explicitly unset under @pytest.mark.no_auto_user.
@@ -436,12 +436,12 @@ async def test_repository_without_context_raises(tmp_path):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_explicit_none_bypasses_filter(tmp_path):
+async def test_explicit_none_bypasses_filter(migrated_postgres_database_url):
     """Migration scripts pass user_id=None to see all rows regardless of owner."""
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.thread_meta import ThreadMetaRepository
 
-    cleanup = await _make_engines(tmp_path)
+    cleanup = await _make_engines(migrated_postgres_database_url)
     try:
         repo = ThreadMetaRepository(get_session_factory())
 

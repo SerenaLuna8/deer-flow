@@ -8,11 +8,11 @@ from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadM
 
 
 @pytest.fixture
-async def repo(tmp_path):
+async def repo(migrated_postgres_database_url):
+    from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 
-    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    await init_engine(DatabaseConfig(url=migrated_postgres_database_url))
     yield ThreadMetaRepository(get_session_factory())
     await close_engine()
 

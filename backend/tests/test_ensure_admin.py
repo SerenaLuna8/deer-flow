@@ -19,8 +19,9 @@ _JWT_SECRET = "test-secret-key-ensure-admin-testing-min-32"
 
 
 @pytest.fixture(autouse=True)
-def _setup_auth_config():
+def _setup_auth_config(monkeypatch):
     set_auth_config(AuthConfig(jwt_secret=_JWT_SECRET))
+    monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", lambda: _make_session_factory())
     yield
     set_auth_config(AuthConfig(jwt_secret=_JWT_SECRET))
 

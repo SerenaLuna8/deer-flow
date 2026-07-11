@@ -11,6 +11,9 @@ from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock
 
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 
 
@@ -362,18 +365,17 @@ def test_allowed_users_filter_blocks_non_whitelisted_sender():
     _run(go())
 
 
-def test_connect_code_bypasses_allowed_users_filter(tmp_path: Path):
+def test_connect_code_bypasses_allowed_users_filter(migrated_postgres_database_url):
     from app.channels.wechat import WechatChannel
     from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
-    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 
     async def go():
         from datetime import UTC, datetime, timedelta
 
-        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'wechat.db'}", sqlite_dir=str(tmp_path))
+        engine = create_async_engine(migrated_postgres_database_url, poolclass=NullPool)
         try:
             repo = ChannelConnectionRepository(
-                get_session_factory(),
+                async_sessionmaker(engine, expire_on_commit=False),
                 cipher=ChannelCredentialCipher.from_key("wechat-secret"),
             )
             code = "wechat-bind-code"
@@ -417,7 +419,7 @@ def test_connect_code_bypasses_allowed_users_filter(tmp_path: Path):
             channel._send_connection_reply.assert_awaited_once()
             assert published == []
         finally:
-            await close_engine()
+            await engine.dispose()
 
     _run(go())
 

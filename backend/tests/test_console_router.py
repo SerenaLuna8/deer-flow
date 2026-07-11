@@ -131,8 +131,8 @@ def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
 
 
 @pytest.fixture()
-def session_factory(tmp_path):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'console.db'}", poolclass=NullPool)
+def session_factory(migrated_postgres_database_url):
+    engine = create_async_engine(migrated_postgres_database_url, poolclass=NullPool)
     sf = async_sessionmaker(engine, expire_on_commit=False)
 
     async def _setup() -> None:

@@ -7,8 +7,10 @@ and public accessibility (no auth cookie required).
 
 import asyncio
 import os
+from contextlib import asynccontextmanager
 
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-initialize-admin-min-32")
@@ -18,28 +20,29 @@ from app.gateway.auth.config import AuthConfig, set_auth_config
 _TEST_SECRET = "test-secret-key-initialize-admin-min-32"
 
 
-@pytest.fixture(autouse=True)
-def _setup_auth(tmp_path):
-    """Fresh SQLite engine + auth config per test."""
+@asynccontextmanager
+async def _noop_lifespan(_app):
+    yield
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _setup_auth(migrated_postgres_database_url):
+    """Reset auth state and provide one migrated PostgreSQL database."""
     from app.gateway import deps
     from app.gateway.routers.auth import _SETUP_STATUS_CACHE, _SETUP_STATUS_INFLIGHT
-    from deerflow.persistence.engine import close_engine, init_engine
 
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
-    url = f"sqlite+aiosqlite:///{tmp_path}/init_admin.db"
-    asyncio.run(init_engine("sqlite", url=url, sqlite_dir=str(tmp_path)))
     deps._cached_local_provider = None
     deps._cached_repo = None
     _SETUP_STATUS_CACHE.clear()
     _SETUP_STATUS_INFLIGHT.clear()
     try:
-        yield
+        yield migrated_postgres_database_url
     finally:
         deps._cached_local_provider = None
         deps._cached_repo = None
         _SETUP_STATUS_CACHE.clear()
         _SETUP_STATUS_INFLIGHT.clear()
-        asyncio.run(close_engine())
 
 
 @pytest.fixture()
@@ -49,10 +52,18 @@ def client(_setup_auth):
 
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
     app = create_app()
-    # Do NOT use TestClient as a context manager — that would trigger the
-    # full lifespan which requires config.yaml. The auth endpoints work
-    # without the lifespan (persistence engine is set up by _setup_auth).
-    yield TestClient(app)
+    app.router.lifespan_context = _noop_lifespan
+
+    from deerflow.config.database_config import DatabaseConfig
+    from deerflow.persistence.engine import close_engine, init_engine
+
+    with TestClient(app) as test_client:
+        assert test_client.portal is not None
+        test_client.portal.call(init_engine, DatabaseConfig(url=_setup_auth))
+        try:
+            yield test_client
+        finally:
+            test_client.portal.call(close_engine)
 
 
 def _init_payload(**extra):
