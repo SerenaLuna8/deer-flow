@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -43,6 +44,26 @@ logger = logging.getLogger(__name__)
 # them together if their sum must stay within the server's graceful-shutdown
 # timeout.
 _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+def _should_reconcile_orphaned_runs() -> bool:
+    """Return whether startup recovery is safe for the configured worker count.
+
+    Docker starts uvicorn with ``--workers ${GATEWAY_WORKERS:-1}``; local
+    launchers omit ``--workers``, so uvicorn may instead honor
+    ``WEB_CONCURRENCY``. Any configured count other than exactly one is treated
+    conservatively as multi-worker/unknown.
+    """
+    for variable in ("GATEWAY_WORKERS", "WEB_CONCURRENCY"):
+        raw_workers = os.getenv(variable)
+        if raw_workers is None or raw_workers.strip() == "":
+            continue
+        try:
+            if int(raw_workers) != 1:
+                return False
+        except ValueError:
+            return False
+    return True
 
 
 async def _drain_inflight_runs(run_manager: RunManager) -> None:
@@ -230,7 +251,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         from deerflow.persistence.thread_meta import make_thread_store
 
-        app.state.thread_store = make_thread_store(sf, app.state.store)
+        app.state.thread_store = make_thread_store(sf)
         from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
         from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
@@ -247,18 +268,21 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # RunManager with store backing for persistence
         app.state.run_manager = RunManager(store=app.state.run_store)
-        from deerflow.utils.time import now_iso
+        if _should_reconcile_orphaned_runs():
+            from deerflow.utils.time import now_iso
 
-        # Startup-only recovery: clean shutdowns return no active rows and
-        # the thread-status update below becomes a no-op.
-        recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
-            error="Gateway restarted before this run reached a durable final state.",
-            before=now_iso(),
-        )
-        sb_config = getattr(config, "stream_bridge", None)
-        cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
-        await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
-        await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+            # Without worker ownership/leases, startup recovery is safe only
+            # when this process is the sole worker.
+            recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
+                error="Gateway restarted before this run reached a durable final state.",
+                before=now_iso(),
+            )
+            sb_config = getattr(config, "stream_bridge", None)
+            cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
+            await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
+            await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+        else:
+            logger.warning("Skipping startup orphan-run recovery because the effective worker count is not exactly 1 and runs have no cross-worker ownership lease")
 
         try:
             yield

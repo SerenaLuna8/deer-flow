@@ -7,14 +7,14 @@ the real async store + background-loop wiring used by the TUI.
 import pytest
 from langgraph.store.memory import InMemoryStore
 
-from deerflow.persistence.thread_meta import make_thread_store
+from deerflow.persistence.thread_meta import MemoryThreadMetaStore, make_thread_store
 from deerflow.tui.persistence import ThreadMetaWriter, _LoopThread
 
 
 @pytest.fixture
 def writer_store_loop():
     loop = _LoopThread()
-    store = make_thread_store(None, store=InMemoryStore())
+    store = MemoryThreadMetaStore(InMemoryStore())
     writer = ThreadMetaWriter(loop, store)
     try:
         yield writer, store, loop
@@ -61,3 +61,8 @@ def test_disabled_writer_is_a_silent_noop():
         writer.set_title("x", "title")
     finally:
         loop.close()
+
+
+def test_make_thread_store_rejects_missing_postgres_session_factory() -> None:
+    with pytest.raises(TypeError, match="session factory"):
+        make_thread_store(None)

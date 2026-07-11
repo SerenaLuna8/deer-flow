@@ -19,7 +19,7 @@ async def _context(value):
 
 
 @pytest.mark.asyncio
-async def test_multi_worker_postgres_runtime_starts_without_backend_gate(monkeypatch):
+async def test_multi_worker_postgres_runtime_does_not_recover_another_workers_active_run(monkeypatch):
     monkeypatch.setenv("GATEWAY_WORKERS", "8")
     config = SimpleNamespace(
         database=SimpleNamespace(),
@@ -46,7 +46,38 @@ async def test_multi_worker_postgres_runtime_starts_without_backend_gate(monkeyp
             pass
 
     init_engine.assert_awaited_once_with(config.database)
-    run_manager.reconcile_orphaned_inflight_runs.assert_awaited_once()
+    run_manager.reconcile_orphaned_inflight_runs.assert_not_awaited()
+
+
+@pytest.mark.parametrize("workers", ["2", "8", "invalid", "0"])
+def test_only_explicit_single_worker_allows_startup_recovery(workers: str, monkeypatch) -> None:
+    from app.gateway.deps import _should_reconcile_orphaned_runs
+
+    monkeypatch.setenv("GATEWAY_WORKERS", workers)
+    assert _should_reconcile_orphaned_runs() is False
+
+
+def test_single_worker_allows_startup_recovery(monkeypatch) -> None:
+    from app.gateway.deps import _should_reconcile_orphaned_runs
+
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    assert _should_reconcile_orphaned_runs() is True
+
+
+def test_uvicorn_web_concurrency_also_disables_recovery(monkeypatch) -> None:
+    from app.gateway.deps import _should_reconcile_orphaned_runs
+
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    assert _should_reconcile_orphaned_runs() is False
+
+
+def test_conflicting_worker_environment_is_treated_conservatively(monkeypatch) -> None:
+    from app.gateway.deps import _should_reconcile_orphaned_runs
+
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    assert _should_reconcile_orphaned_runs() is False
 
 
 def test_postgres_only_runtime_exposes_no_worker_backend_gate() -> None:

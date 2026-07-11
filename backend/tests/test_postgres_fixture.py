@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import traceback
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncpg
@@ -41,8 +42,9 @@ def test_postgres_marker_fixture_skips_cleanly_without_url(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_create_failure_does_not_attempt_drop_and_disposes_admin_engine() -> None:
+    sensitive_url = "postgresql://user:secret@localhost/postgres"
     connection = MagicMock()
-    connection.execute = AsyncMock(side_effect=RuntimeError("create failed"))
+    connection.execute = AsyncMock(side_effect=RuntimeError(sensitive_url))
     context = AsyncMock()
     context.__aenter__.return_value = connection
     engine = MagicMock()
@@ -50,22 +52,26 @@ async def test_create_failure_does_not_attempt_drop_and_disposes_admin_engine() 
     engine.dispose = AsyncMock()
 
     with patch("postgres_utils.create_async_engine", return_value=engine):
-        with pytest.raises(RuntimeError, match="unable to create"):
-            async with temporary_postgres_database("postgresql://user:secret@localhost/postgres"):
+        with pytest.raises(RuntimeError, match="unable to create") as exc_info:
+            async with temporary_postgres_database(sensitive_url):
                 pass
 
+    formatted = "".join(traceback.format_exception(exc_info.value))
+    assert "secret" not in formatted
+    assert "postgresql://user" not in formatted
     assert engine.connect.call_count == 1
     engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_cleanup_failure_is_sanitized_and_disposes_admin_engine() -> None:
+    sensitive_url = "postgresql://user:secret@localhost/postgres"
     create_connection = MagicMock()
     create_connection.execute = AsyncMock()
     create_context = AsyncMock()
     create_context.__aenter__.return_value = create_connection
     cleanup_connection = MagicMock()
-    cleanup_connection.execute = AsyncMock(side_effect=RuntimeError("secret cleanup detail"))
+    cleanup_connection.execute = AsyncMock(side_effect=RuntimeError(sensitive_url))
     cleanup_context = AsyncMock()
     cleanup_context.__aenter__.return_value = cleanup_connection
     engine = MagicMock()
@@ -74,10 +80,13 @@ async def test_cleanup_failure_is_sanitized_and_disposes_admin_engine() -> None:
 
     with patch("postgres_utils.create_async_engine", return_value=engine):
         with pytest.raises(RuntimeError, match="unable to clean up") as exc_info:
-            async with temporary_postgres_database("postgresql://user:secret@localhost/postgres"):
+            async with temporary_postgres_database(sensitive_url):
                 pass
 
     assert "secret" not in str(exc_info.value)
+    formatted = "".join(traceback.format_exception(exc_info.value))
+    assert "secret" not in formatted
+    assert "postgresql://user" not in formatted
     engine.dispose.assert_awaited_once()
 
 

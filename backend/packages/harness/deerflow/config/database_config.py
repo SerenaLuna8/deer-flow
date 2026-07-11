@@ -13,7 +13,7 @@ class DatabaseConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    url: str
+    url: str = Field(repr=False)
     pool_size: int = Field(default=5, ge=1)
     max_overflow: int = Field(default=10, ge=0)
     pool_timeout_seconds: int = Field(default=30, ge=1)

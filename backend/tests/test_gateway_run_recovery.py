@@ -92,6 +92,7 @@ async def test_recovered_run_stream_end_skips_expired_stream():
 async def test_postgres_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     """PostgreSQL startup should recover stale active runs before serving requests."""
     app = FastAPI()
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
     config = SimpleNamespace(
         database=SimpleNamespace(),
         run_events=SimpleNamespace(backend="memory"),
@@ -115,7 +116,7 @@ async def test_postgres_runtime_reconciles_orphaned_runs_on_startup(monkeypatch)
     monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(stream_bridge))
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
-    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
+    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf: thread_store)
     monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
@@ -136,6 +137,7 @@ async def test_postgres_runtime_reconciles_orphaned_runs_on_startup(monkeypatch)
 async def test_postgres_runtime_does_not_mark_thread_error_when_newer_run_is_success(monkeypatch):
     """Startup recovery should not let an old orphaned run overwrite a newer terminal thread state."""
     app = FastAPI()
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
     config = SimpleNamespace(
         database=SimpleNamespace(),
         run_events=SimpleNamespace(backend="memory"),
@@ -159,7 +161,7 @@ async def test_postgres_runtime_does_not_mark_thread_error_when_newer_run_is_suc
     monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(stream_bridge))
     monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
-    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
+    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf: thread_store)
     monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 

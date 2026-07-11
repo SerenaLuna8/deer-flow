@@ -67,7 +67,8 @@ from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 logger = logging.getLogger(__name__)
 
@@ -280,9 +281,12 @@ async def _postgres_lock(engine: AsyncEngine):
     Idle-in-transaction protection
     ------------------------------
 
-    ``engine.connect()`` auto-begins a transaction on the first ``execute``,
-    and this connection then sits idle while ``asyncio.to_thread(_upgrade,
-    ...)`` runs alembic on a *different* pooled connection. Managed Postgres
+    A dedicated ``NullPool`` connection avoids consuming the application's
+    pool while alembic opens a different connection. This matters for valid
+    ``pool_size=1, max_overflow=0`` deployments, which would otherwise starve
+    during startup. The lock connection auto-begins a transaction on its first
+    ``execute`` and then sits idle while ``asyncio.to_thread(_upgrade, ...)``
+    runs alembic. Managed Postgres
     (RDS, Cloud SQL, Supabase) ships with ``idle_in_transaction_session_
     timeout`` set to 1-10 minutes by default; if alembic takes longer than
     that, the host kills this idle-in-transaction session, and because
@@ -298,26 +302,43 @@ async def _postgres_lock(engine: AsyncEngine):
     runs. Must execute *before* ``pg_advisory_lock`` so a slow lock acquire
     on a heavily-contended cluster is itself protected.
     """
-    async with engine.connect() as conn:
-        async with conn.begin():
-            await conn.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
-            await conn.execute(text("SET LOCAL statement_timeout = 0"))
-            await conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _PG_LOCK_KEY})
-            try:
-                logger.info("bootstrap: acquired postgres advisory lock key=0x%x", _PG_LOCK_KEY)
-                yield
-            finally:
+    lock_engine = create_async_engine(engine.url.render_as_string(hide_password=False), poolclass=NullPool)
+    try:
+        async with lock_engine.connect() as conn:
+            async with conn.begin():
+                await conn.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
+                await conn.execute(text("SET LOCAL statement_timeout = 0"))
+                await conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _PG_LOCK_KEY})
                 try:
-                    unlocked = await conn.scalar(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY})
-                    if unlocked is not True:
-                        logger.warning("bootstrap: postgres advisory lock was not held during unlock")
-                except Exception:  # noqa: BLE001
-                    logger.warning("bootstrap: pg_advisory_unlock raised; session close will release", exc_info=True)
+                    logger.info("bootstrap: acquired postgres advisory lock key=0x%x", _PG_LOCK_KEY)
+                    yield
+                finally:
+                    try:
+                        unlocked = await conn.scalar(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY})
+                        if unlocked is not True:
+                            logger.warning("bootstrap: postgres advisory lock was not held during unlock")
+                    except Exception:  # noqa: BLE001
+                        logger.warning("bootstrap: pg_advisory_unlock raised; session close will release", exc_info=True)
+    finally:
+        await lock_engine.dispose()
 
 
 # ---------------------------------------------------------------------------
 # Top-level entry point
 # ---------------------------------------------------------------------------
+
+
+async def _run_alembic_offload(function, *args) -> None:
+    """Run synchronous Alembic work without releasing the DB lock on cancel."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await asyncio.shield(task)
+        except Exception:  # noqa: BLE001 - cancellation remains authoritative
+            logger.exception("Alembic offload failed while bootstrap cancellation was pending")
+        raise
 
 
 async def bootstrap_schema(engine: AsyncEngine) -> None:
@@ -341,7 +362,7 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
             logger.info("bootstrap: branch=empty -> create_all + stamp head (%s)", head)
             async with engine.begin() as conn:
                 await conn.run_sync(_run_create_all_sync)
-            await asyncio.to_thread(_stamp, cfg, head)
+            await _run_alembic_offload(_stamp, cfg, head)
 
         elif decision == "legacy":
             logger.info(
@@ -361,12 +382,12 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
             # columns those revisions would add.
             async with engine.begin() as conn:
                 await conn.run_sync(_run_baseline_create_all_sync)
-            await asyncio.to_thread(_stamp, cfg, _BASELINE_REVISION)
-            await asyncio.to_thread(_upgrade, cfg, "head")
+            await _run_alembic_offload(_stamp, cfg, _BASELINE_REVISION)
+            await _run_alembic_offload(_upgrade, cfg, "head")
 
         elif decision == "versioned":
             logger.info("bootstrap: branch=versioned -> upgrade head (%s)", head)
-            await asyncio.to_thread(_upgrade, cfg, "head")
+            await _run_alembic_offload(_upgrade, cfg, "head")
 
         else:  # pragma: no cover -- defensive
             raise RuntimeError(f"bootstrap: unhandled decision {decision!r}")

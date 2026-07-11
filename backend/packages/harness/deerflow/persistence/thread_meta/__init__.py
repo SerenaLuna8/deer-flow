@@ -10,7 +10,6 @@ from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 
 if TYPE_CHECKING:
-    from langgraph.store.base import BaseStore
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -24,16 +23,13 @@ __all__ = [
 
 
 def make_thread_store(
-    session_factory: async_sessionmaker[AsyncSession] | None,
-    store: BaseStore | None = None,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> ThreadMetaStore:
-    """Create the appropriate ThreadMetaStore based on available backends.
+    """Create the PostgreSQL-backed ThreadMetaStore.
 
-    Returns a SQL-backed repository when a session factory is available,
-    otherwise falls back to the in-memory LangGraph Store implementation.
+    Tests that need an in-memory double construct ``MemoryThreadMetaStore``
+    directly instead of routing it through the production factory.
     """
-    if session_factory is not None:
-        return ThreadMetaRepository(session_factory)
-    if store is None:
-        raise ValueError("make_thread_store requires either a session_factory (SQL) or a store (memory)")
-    return MemoryThreadMetaStore(store)
+    if session_factory is None:
+        raise TypeError("make_thread_store requires a PostgreSQL session factory")
+    return ThreadMetaRepository(session_factory)

@@ -26,6 +26,12 @@ def test_database_config_has_no_runtime_compatibility_aliases() -> None:
         assert not hasattr(config, name)
 
 
+def test_database_config_repr_redacts_url_credentials() -> None:
+    config = DatabaseConfig(url="postgresql://user:secret@localhost/test")
+    assert "secret" not in repr(config)
+    assert "postgresql://" not in repr(config)
+
+
 @pytest.mark.asyncio
 async def test_init_engine_only_accepts_database_config() -> None:
     from deerflow.persistence.engine import init_engine
