@@ -93,7 +93,8 @@ def table_digest(connection: sqlite3.Connection, table_name: str) -> str:
 
     columns = [row[1] for row in table_info]
     primary_key = [row[1] for row in sorted(table_info, key=lambda row: row[5]) if row[5] > 0]
-    order_columns = primary_key or columns
+    primary_key_set = set(primary_key)
+    order_columns = primary_key + [column for column in columns if column not in primary_key_set] if primary_key else columns
     quoted_columns = [_quote_identifier(column) for column in columns]
     value_expressions = ", ".join(quoted_columns)
     type_expressions = ", ".join(f"typeof({column})" for column in quoted_columns)

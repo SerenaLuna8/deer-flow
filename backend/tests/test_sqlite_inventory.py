@@ -94,6 +94,20 @@ def test_composite_primary_key_uses_declared_key_order_for_stable_digest(tmp_pat
     assert first_table.digest == second_table.digest
 
 
+def test_nullable_composite_primary_key_uses_non_key_columns_as_tie_breakers(tmp_path: Path):
+    schema = "CREATE TABLE entries (tenant TEXT, external_id TEXT, payload TEXT, PRIMARY KEY (tenant, external_id))"
+    first = _database(
+        tmp_path / "first-nullable.sqlite",
+        (schema, "INSERT INTO entries VALUES (NULL, 'same', 'alpha')", "INSERT INTO entries VALUES (NULL, 'same', 'omega')"),
+    )
+    second = _database(
+        tmp_path / "second-nullable.sqlite",
+        (schema, "INSERT INTO entries VALUES (NULL, 'same', 'omega')", "INSERT INTO entries VALUES (NULL, 'same', 'alpha')"),
+    )
+
+    assert inspect_sqlite(first).tables[0].digest == inspect_sqlite(second).tables[0].digest
+
+
 def test_table_without_primary_key_sorts_by_all_columns_for_stable_digest(tmp_path: Path):
     first = _database(
         tmp_path / "first.sqlite",
