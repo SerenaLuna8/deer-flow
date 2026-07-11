@@ -61,27 +61,27 @@ def test_no_uv_extras_yields_empty_flags():
 
 
 def test_single_extra():
-    proc = _run("postgres")
+    proc = _run("ollama")
     assert proc.returncode == 0
-    assert proc.stdout.strip() == "--extra postgres"
+    assert proc.stdout.strip() == "--extra ollama"
 
 
 def test_multi_extra_comma_separated():
-    proc = _run("postgres,ollama")
+    proc = _run("ollama,redis")
     assert proc.returncode == 0
-    assert proc.stdout.strip() == "--extra postgres --extra ollama"
+    assert proc.stdout.strip() == "--extra ollama --extra redis"
 
 
 def test_multi_extra_whitespace_separated():
-    proc = _run("postgres ollama")
+    proc = _run("ollama redis")
     assert proc.returncode == 0
-    assert proc.stdout.strip() == "--extra postgres --extra ollama"
+    assert proc.stdout.strip() == "--extra ollama --extra redis"
 
 
 def test_multi_extra_mixed_separators():
-    proc = _run(" postgres ,  ollama ,")
+    proc = _run(" ollama ,  redis ,")
     assert proc.returncode == 0
-    assert proc.stdout.strip() == "--extra postgres --extra ollama"
+    assert proc.stdout.strip() == "--extra ollama --extra redis"
 
 
 def test_empty_string_yields_empty_flags():
@@ -96,9 +96,9 @@ def test_empty_string_yields_empty_flags():
         "; rm -rf /",  # the canonical injection attempt
         "$(whoami)",  # command substitution
         "`echo bad`",  # backticks
-        "postgres;evil",  # mixed legal+illegal in a single token
-        "1postgres",  # leading digit
-        "-postgres",  # leading hyphen
+        "ollama;evil",  # mixed legal+illegal in a single token
+        "1ollama",  # leading digit
+        "-ollama",  # leading hyphen
         "post gres extra/path",  # contains slash
     ],
 )
@@ -111,6 +111,6 @@ def test_metacharacters_abort_with_nonzero_exit(bad_value):
 
 def test_underscores_and_hyphens_in_name_are_allowed():
     """Mirrors uv's accepted shape for `[project.optional-dependencies]` keys."""
-    proc = _run("post_gres,post-gres")
+    proc = _run("custom_extra,custom-extra")
     assert proc.returncode == 0
-    assert proc.stdout.strip() == "--extra post_gres --extra post-gres"
+    assert proc.stdout.strip() == "--extra custom_extra --extra custom-extra"

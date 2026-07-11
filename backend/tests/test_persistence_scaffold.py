@@ -334,8 +334,9 @@ class TestEngineLifecycle:
         """If asyncpg is not installed, error message tells user what to do."""
         from deerflow.persistence.engine import init_engine
 
-        with (
-            patch.dict(sys.modules, {"asyncpg": None}),
-            pytest.raises(ImportError, match="uv sync --all-packages --extra postgres"),
-        ):
+        with patch.dict(sys.modules, {"asyncpg": None}), pytest.raises(ImportError) as exc_info:
             await init_engine("postgres", url="postgresql+asyncpg://x:x@localhost/x")
+
+        message = str(exc_info.value)
+        assert "asyncpg" in message
+        assert "install" in message.lower()

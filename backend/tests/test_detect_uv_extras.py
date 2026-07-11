@@ -1,7 +1,7 @@
 """Unit tests for scripts/detect_uv_extras.py.
 
-The detector resolves uv extras for `make dev` so that postgres (and any
-future opt-in extras) are not wiped on every restart — see Issue #2754.
+The detector resolves uv extras for `make dev` so that configured opt-in
+extras are not wiped on every restart — see Issue #2754.
 """
 
 from __future__ import annotations
@@ -32,10 +32,10 @@ def isolated_cwd(tmp_path, monkeypatch):
 
 
 def test_parse_env_extras_supports_comma_and_whitespace():
-    assert detect.parse_env_extras("postgres") == ["postgres"]
-    assert detect.parse_env_extras("postgres,ollama") == ["postgres", "ollama"]
-    assert detect.parse_env_extras("postgres ollama") == ["postgres", "ollama"]
-    assert detect.parse_env_extras(" postgres ,  ollama ,") == ["postgres", "ollama"]
+    assert detect.parse_env_extras("ollama") == ["ollama"]
+    assert detect.parse_env_extras("ollama,redis") == ["ollama", "redis"]
+    assert detect.parse_env_extras("ollama redis") == ["ollama", "redis"]
+    assert detect.parse_env_extras(" ollama ,  redis ,") == ["ollama", "redis"]
     assert detect.parse_env_extras("") == []
 
 
@@ -51,7 +51,7 @@ def test_parse_env_extras_drops_shell_metacharacters(capsys):
     assert detect.parse_env_extras(";") == []
     assert detect.parse_env_extras("$(whoami)") == []
     assert detect.parse_env_extras("`echo bad`") == []
-    assert detect.parse_env_extras("postgres;evil") == []  # single token, contains `;`
+    assert detect.parse_env_extras("ollama;evil") == []  # single token, contains `;`
     # Splitting on whitespace yields ['rm'] which is identifier-shaped, but the
     # destructive bits (`;`, `-rf`, `/`) are dropped.
     assert detect.parse_env_extras("; rm -rf /") == ["rm"]
@@ -62,17 +62,17 @@ def test_parse_env_extras_drops_shell_metacharacters(capsys):
 
 def test_parse_env_extras_rejects_leading_digits_and_punctuation():
     """Names must start with a letter — pyproject extras follow this shape."""
-    assert detect.parse_env_extras("1postgres") == []
-    assert detect.parse_env_extras("-postgres") == []
+    assert detect.parse_env_extras("1ollama") == []
+    assert detect.parse_env_extras("-ollama") == []
     # Hyphens and underscores inside the name are fine.
-    assert detect.parse_env_extras("post_gres") == ["post_gres"]
-    assert detect.parse_env_extras("post-gres") == ["post-gres"]
+    assert detect.parse_env_extras("custom_extra") == ["custom_extra"]
+    assert detect.parse_env_extras("custom-extra") == ["custom-extra"]
 
 
 def test_format_flags_emits_one_flag_per_extra():
     assert detect.format_flags([]) == ""
-    assert detect.format_flags(["postgres"]) == "--extra postgres"
-    assert detect.format_flags(["postgres", "ollama"]) == "--extra postgres --extra ollama"
+    assert detect.format_flags(["ollama"]) == "--extra ollama"
+    assert detect.format_flags(["ollama", "redis"]) == "--extra ollama --extra redis"
 
 
 def test_strip_comment_preserves_quoted_hash():
@@ -176,14 +176,14 @@ def test_detect_from_config_missing_file_returns_empty(tmp_path):
 def test_resolve_extras_env_overrides_config(isolated_cwd, monkeypatch):
     cfg = isolated_cwd / "config.yaml"
     cfg.write_text("database:\n  backend: sqlite\n")
-    monkeypatch.setenv("UV_EXTRAS", "postgres")
+    monkeypatch.setenv("UV_EXTRAS", "ollama")
 
-    assert detect.resolve_extras() == ["postgres"]
+    assert detect.resolve_extras() == ["ollama"]
 
 
 def test_resolve_extras_env_supports_multiple(isolated_cwd, monkeypatch):
-    monkeypatch.setenv("UV_EXTRAS", "postgres,ollama")
-    assert detect.resolve_extras() == ["postgres", "ollama"]
+    monkeypatch.setenv("UV_EXTRAS", "ollama,discord")
+    assert detect.resolve_extras() == ["ollama", "discord"]
 
 
 def test_resolve_extras_detects_redis_url_env_without_config(isolated_cwd, monkeypatch):
@@ -192,9 +192,9 @@ def test_resolve_extras_detects_redis_url_env_without_config(isolated_cwd, monke
 
 
 def test_resolve_extras_combines_uv_extras_with_redis_url_env(isolated_cwd, monkeypatch):
-    monkeypatch.setenv("UV_EXTRAS", "postgres")
+    monkeypatch.setenv("UV_EXTRAS", "ollama")
     monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
-    assert detect.resolve_extras() == ["postgres", "redis"]
+    assert detect.resolve_extras() == ["ollama", "redis"]
 
 
 def test_resolve_extras_falls_back_to_config(isolated_cwd):

@@ -140,3 +140,54 @@ Follow-up commit subject: `fix(config): reject legacy checkpointer mappings` (fi
 ### Concerns
 
 - Provider constants still contain stale optional-extra wording, intentionally left for task 3 as requested; no test now treats that wording as a supported contract.
+
+## Second review follow-up
+
+### STATUS
+
+PASS — removed every remaining test/script fixture that treated `postgres` as a valid optional extra while preserving PostgreSQL database behavior coverage.
+
+### Pre-change rg evidence
+
+The initial audit found improper optional-extra uses in:
+
+- `backend/tests/test_persistence_scaffold.py`: missing-`asyncpg` assertion matched `uv sync --all-packages --extra postgres`.
+- `backend/tests/test_detect_uv_extras.py`: parser, formatter, `UV_EXTRAS`, and expected flag fixtures used `postgres` as a legal extra.
+- `backend/tests/test_dev_entrypoint.py`: single/multi explicit extra and validation fixtures used `postgres`.
+- `backend/tests/test_deploy_uv_extras.py`: Dockerfile passthrough, invalid glob, deploy auto-detection expectations, and Python fallback expected a postgres extra.
+- `scripts/deploy.sh`: the flag-conversion comment used `--extra postgres` as its example.
+
+This was a review-contract correction limited to tests and a script comment, so no artificial production RED was created.
+
+### Changes
+
+- Missing-`asyncpg` coverage now asserts only that the error identifies `asyncpg` and supplies installation guidance; it no longer locks a removed extra command.
+- Legal explicit extra fixtures now use actual repository extras (`ollama`, `redis`, and `discord`).
+- Deploy auto-detection coverage now proves database configuration does not add postgres, while Discord/Redis detection and explicit-extra passthrough remain covered.
+- Invalid-name fixtures use neutral/real extra names rather than implying postgres is available as an optional dependency.
+
+### Post-change rg evidence
+
+The directed audit for `UV_EXTRAS.*postgres`, `--extra postgres`, postgres parser/formatter inputs, and postgres optional-dependency assertions returned no matches. Remaining `postgres` occurrences in the covered files are limited to PostgreSQL URL/backend behavior, the config-example negative assertion, and unrelated MCP server names.
+
+### GREEN
+
+Second-review coverage suite:
+
+```text
+127 passed in 5.89s
+```
+
+### Verification
+
+- Related ruff command: `All checks passed!`
+- `uv lock --check`: `Resolved 233 packages in 3ms`
+- `git diff --check`: passed
+
+### Commit
+
+Follow-up commit subject: `test(config): stop treating postgres as an extra` (final hash reported after commit).
+
+### Concerns
+
+- Stale provider error prose still mentions the removed postgres extra and remains intentionally deferred to task 3; tests now validate only generic actionable missing-`asyncpg` guidance.
