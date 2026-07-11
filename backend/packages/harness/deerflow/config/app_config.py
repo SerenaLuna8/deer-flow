@@ -249,10 +249,11 @@ class AppConfig(BaseModel):
         Required sections without a default (``sandbox``) intentionally still
         error when null — there is nothing to fall back to.
         """
-        if isinstance(data, dict):
-            if "checkpointer" in data:
+        if isinstance(data, Mapping):
+            copied_data = dict(data)
+            if "checkpointer" in copied_data:
                 raise ValueError("the independent checkpointer configuration has been removed; configure database.url instead")
-            return {key: value for key, value in data.items() if value is not None}
+            return {key: value for key, value in copied_data.items() if value is not None}
         return data
 
     @classmethod

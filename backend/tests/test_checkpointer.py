@@ -23,9 +23,7 @@ from deerflow.config.checkpointer_config import (
 )
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.runtime.checkpointer import get_checkpointer, reset_checkpointer
-from deerflow.runtime.checkpointer.provider import POSTGRES_INSTALL
 from deerflow.runtime.store import get_store, reset_store
-from deerflow.runtime.store.provider import POSTGRES_STORE_INSTALL
 
 
 @pytest.fixture(autouse=True)
@@ -212,13 +210,6 @@ class TestHarnessPackaging:
 
         optional_dependencies = data["project"]["optional-dependencies"]
         assert "postgres" not in optional_dependencies
-
-    def test_postgres_missing_dependency_messages_recommend_package_extra(self):
-        assert "deerflow-harness[postgres]" in POSTGRES_INSTALL
-        assert "deerflow-harness[postgres]" in POSTGRES_STORE_INSTALL
-        assert "uv sync --all-packages --extra postgres" in POSTGRES_INSTALL
-        assert "uv sync --all-packages --extra postgres" in POSTGRES_STORE_INSTALL
-
 
 # ---------------------------------------------------------------------------
 # Factory tests

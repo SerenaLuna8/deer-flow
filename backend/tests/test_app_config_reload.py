@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections import UserDict
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,20 @@ from deerflow.config.title_config import get_title_config, load_title_config_fro
 from deerflow.config.tool_search_config import get_tool_search_config, load_tool_search_config_from_dict
 from deerflow.runtime.checkpointer import reset_checkpointer
 from deerflow.runtime.store import reset_store
+
+
+class _ConfigMapping(Mapping[str, object]):
+    def __init__(self, data: dict[str, object]) -> None:
+        self._data = data
+
+    def __getitem__(self, key: str) -> object:
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
 
 
 def _reset_config_singletons() -> None:
@@ -102,6 +118,20 @@ def _write_config_with_sections(path: Path, sections: dict | None = None) -> Non
 
 def _write_extensions_config(path: Path) -> None:
     path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("mapping_type", [UserDict, _ConfigMapping])
+def test_app_config_rejects_checkpointer_from_any_mapping(mapping_type):
+    data = mapping_type(
+        {
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "database": {"url": "postgresql://localhost/deerflow"},
+            "checkpointer": {"type": "postgres", "connection_string": "postgresql://localhost/other"},
+        }
+    )
+
+    with pytest.raises(ValidationError, match="checkpointer.*removed|removed.*checkpointer"):
+        AppConfig.model_validate(data)
 
 
 def test_app_config_defaults_missing_database_url_from_environment(tmp_path, monkeypatch):

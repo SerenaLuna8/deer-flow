@@ -90,3 +90,53 @@ All checks passed!
 
 - Legacy SQLite/memory branches still exist in engine/checkpointer/store providers by design; task 3 must remove them and delete the temporary aliases/shim.
 - Verification was limited to the brief-specified focused suites plus reload-boundary regression; the full backend suite was not requested or run.
+
+## Review follow-up
+
+### STATUS
+
+PASS — resolved the 1 Important and 2 Minor review findings.
+
+### Changes
+
+- `AppConfig` now normalizes every `collections.abc.Mapping` input to a copied `dict` before null-section filtering and rejects a top-level `checkpointer` key for `dict`, `UserDict`, and custom Mapping inputs alike.
+- Removed tests that locked the deleted `deerflow-harness[postgres]` and `--extra postgres` installation guidance. The default dependency contract remains covered by pyproject assertions.
+- Corrected the Console entry in `backend/AGENTS.md`: public configuration is PostgreSQL-only through `database.url`; the memory guard is internal legacy code pending task 3 and cannot be selected through AppConfig.
+
+### RED
+
+The new focused Mapping regression failed before the validator fix:
+
+```text
+2 failed, 13 deselected in 0.20s
+```
+
+Both `UserDict` and a custom `Mapping` were accepted without raising, confirming that `checkpointer` could escape the dict-only validator.
+
+### GREEN
+
+Focused Mapping regression after the fix:
+
+```text
+2 passed, 13 deselected in 0.16s
+```
+
+Review-requested coverage suite:
+
+```text
+105 passed in 0.76s
+```
+
+### Verification
+
+- Related ruff command: `All checks passed!`
+- `uv lock --check`: `Resolved 233 packages in 4ms`
+- `git diff --check`: passed
+
+### Commit
+
+Follow-up commit subject: `fix(config): reject legacy checkpointer mappings` (final hash reported after commit).
+
+### Concerns
+
+- Provider constants still contain stale optional-extra wording, intentionally left for task 3 as requested; no test now treats that wording as a supported contract.
