@@ -81,4 +81,34 @@ describe("project presentation contracts", () => {
     );
     expect(source).not.toMatch(/threads|createThread|router\.push/iu);
   });
+
+  test("project dialogs expose synchronous submit contracts", () => {
+    for (const file of [
+      "create-project-dialog.tsx",
+      "edit-project-dialog.tsx",
+    ]) {
+      const source = readFileSync(
+        resolve(process.cwd(), "src/components/projects", file),
+        "utf8",
+      );
+      expect(source).toMatch(/onSubmit: \(input: [^)]+\) => void;/u);
+      expect(source).not.toContain("mutateAsync");
+    }
+    const workbench = readFileSync(
+      resolve(process.cwd(), "src/components/projects/project-workbench.tsx"),
+      "utf8",
+    );
+    expect(workbench).not.toContain("mutateAsync");
+    expect(workbench).toContain("create.mutate(input)");
+    expect(workbench).toContain("update.mutate(input)");
+  });
+
+  test("home error state offers retry without rendering stale enter data", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/components/projects/project-home-loader.tsx"),
+      "utf8",
+    );
+    expect(source).toContain("重试");
+    expect(source).not.toContain("enter.data ?? projectQuery.data");
+  });
 });

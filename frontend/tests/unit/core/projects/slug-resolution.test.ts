@@ -1,6 +1,10 @@
 import { describe, expect, test, rs } from "@rstest/core";
 
-import { ProjectApiError, findProjectBySlug } from "@/core/projects/api";
+import {
+  ProjectApiError,
+  findProjectBySlug,
+  listAllProjects,
+} from "@/core/projects/api";
 import { CAPABILITIES, type ProjectPage } from "@/core/projects/types";
 
 const project = (slug: string, id: string) => ({
@@ -79,5 +83,45 @@ describe("project slug resolution", () => {
     await expect(findProjectBySlug("alpha", undefined, list)).rejects.toBe(
       aborted,
     );
+  });
+});
+
+describe("project list pagination", () => {
+  test("aggregates every page and forwards one abort signal", async () => {
+    const signal = new AbortController().signal;
+    const pinned = {
+      ...project("second-page", "33333333-3333-4333-8333-333333333333"),
+      is_pinned: true,
+    };
+    const list = rs
+      .fn()
+      .mockResolvedValueOnce({
+        items: Array.from({ length: 100 }, (_, index) =>
+          project(
+            `project-${index}`,
+            `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+          ),
+        ),
+        next_cursor: "page-2",
+      })
+      .mockResolvedValueOnce({ items: [pinned], next_cursor: null });
+
+    const page = await listAllProjects({ query: "project" }, signal, list);
+    expect(page.items).toHaveLength(101);
+    expect(page.items.at(-1)).toEqual(pinned);
+    expect(page.next_cursor).toBeNull();
+    expect(list.mock.calls).toEqual([
+      [{ query: "project", limit: 100 }, signal],
+      [{ query: "project", limit: 100, cursor: "page-2" }, signal],
+    ]);
+  });
+
+  test("fails closed when the all-project cursor loops", async () => {
+    const list = rs.fn(() =>
+      Promise.resolve({ items: [], next_cursor: "same-cursor" }),
+    );
+    await expect(listAllProjects({}, undefined, list)).rejects.toMatchObject({
+      code: "PROJECT_RESPONSE_INVALID",
+    });
   });
 });

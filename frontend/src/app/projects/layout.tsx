@@ -5,12 +5,14 @@ import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-f
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 export const dynamic = "force-dynamic";
 
 export default async function ProjectsLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  if (isStaticWebsiteOnly()) redirect("/workspace");
   const result = await getServerSideUser();
   switch (result.tag) {
     case "authenticated":

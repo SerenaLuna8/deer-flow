@@ -121,7 +121,10 @@ export function CommandPalette() {
           <div className="space-y-3 text-sm">
             {[
               { keys: `${metaKey}K`, label: t.shortcuts.openCommandPalette },
-              { keys: `${metaKey}${shiftKey}N`, label: t.sidebar.newChat },
+              {
+                keys: `${metaKey}${shiftKey}N`,
+                label: showLegacyChats ? t.sidebar.newChat : "项目工作台",
+              },
               { keys: `${metaKey}B`, label: t.shortcuts.toggleSidebar },
               { keys: `${metaKey},`, label: t.common.settings },
               {

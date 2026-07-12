@@ -272,6 +272,46 @@ test("project workbench exposes loading-safe API error and retry", async ({
   await expect(page.getByTestId("project-empty")).toBeVisible();
 });
 
+test("project create conflict stays handled and shows a safe message", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectsAPI(page);
+  const pageErrors: Error[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+
+  await page.goto("/workspace/projects");
+  await page.getByRole("button", { name: "创建项目" }).first().click();
+  const dialog = page.getByRole("dialog", { name: "创建项目" });
+  await dialog.getByLabel("项目名称").fill("Duplicate Research");
+  await dialog.getByLabel("项目标识").fill("research-lab");
+  await dialog.getByRole("button", { name: "创建项目" }).click();
+
+  await expect(dialog.getByRole("alert")).toHaveText(
+    "这个项目标识已存在，请换一个后重试。",
+  );
+  expect(pageErrors).toEqual([]);
+});
+
+test("project home retries a failed slug lookup without stale data", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const api = await mockProjectsAPI(page);
+  api.failNextList();
+
+  await page.goto("/projects/research-lab");
+  const alert = page.getByText("项目服务暂时不可用，请稍后重试。", {
+    exact: true,
+  });
+  await expect(alert).toContainText("项目服务暂时不可用，请稍后重试。", {
+    timeout: 12_000,
+  });
+  await page.getByRole("button", { name: "重试" }).click();
+  await expect(page.getByTestId("project-home")).toBeVisible();
+  expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
+});
+
 test("project home stays private-work disabled in dark mobile layout", async ({
   page,
 }) => {

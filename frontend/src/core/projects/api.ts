@@ -197,6 +197,37 @@ export async function listProjects(
 
 export type ProjectListFunction = typeof listProjects;
 
+export async function listAllProjects(
+  filters: ProjectFilters = {},
+  signal?: AbortSignal,
+  list: ProjectListFunction = listProjects,
+): Promise<ProjectPage> {
+  const items: Project[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  while (true) {
+    const page = await list(
+      {
+        ...filters,
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
+      },
+      signal,
+    );
+    items.push(...page.items);
+    if (page.next_cursor === null) return { items, next_cursor: null };
+    if (seenCursors.has(page.next_cursor)) {
+      throw new ProjectApiError(
+        502,
+        "PROJECT_RESPONSE_INVALID",
+        "Project response was invalid",
+      );
+    }
+    seenCursors.add(page.next_cursor);
+    cursor = page.next_cursor;
+  }
+}
+
 export async function findProjectBySlug(
   slug: string,
   signal?: AbortSignal,

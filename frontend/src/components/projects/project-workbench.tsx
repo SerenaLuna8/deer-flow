@@ -160,9 +160,7 @@ export function ProjectWorkbench({ userId }: { userId: string }) {
         onOpenChange={setCreateOpen}
         pending={create.isPending}
         errorMessage={create.error ? projectErrorMessage(create.error) : null}
-        onSubmit={async (input: CreateProjectInput) => {
-          await create.mutateAsync(input);
-        }}
+        onSubmit={(input: CreateProjectInput) => create.mutate(input)}
       />
       <EditProjectDialog
         project={editingProject}
@@ -170,9 +168,7 @@ export function ProjectWorkbench({ userId }: { userId: string }) {
         onOpenChange={(open) => !open && setEditingProject(null)}
         pending={update.isPending}
         errorMessage={update.error ? projectErrorMessage(update.error) : null}
-        onSubmit={async (input) => {
-          await update.mutateAsync(input);
-        }}
+        onSubmit={(input) => update.mutate(input)}
       />
     </WorkspaceContainer>
   );

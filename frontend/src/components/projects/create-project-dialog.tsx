@@ -24,7 +24,7 @@ export function CreateProjectDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSubmit: (input: CreateProjectInput) => Promise<void>;
+  onSubmit: (input: CreateProjectInput) => void;
   pending: boolean;
   errorMessage: string | null;
 }) {
@@ -53,7 +53,7 @@ export function CreateProjectDialog({
           className="space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
-            void onSubmit({
+            onSubmit({
               slug,
               display_name: displayName,
               description,

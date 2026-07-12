@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, test, rs } from "@rstest/core";
 import { QueryClient } from "@tanstack/react-query";
 
@@ -43,6 +46,34 @@ describe("project mutation account scope", () => {
     scope.dispose();
     expect(afterChange.signal.aborted).toBe(true);
     expect(scope.isCurrent(afterChange)).toBe(false);
+  });
+
+  test("reactivates safely after a Strict Effects cleanup", async () => {
+    const client = new QueryClient();
+    const scope = createProjectMutationScope("u1", project.id);
+    scope.activate();
+    const stale = scope.begin();
+    scope.dispose();
+    scope.activate();
+    const current = scope.begin();
+
+    expect(scope.isCurrent(stale)).toBe(false);
+    expect(stale.signal.aborted).toBe(true);
+    expect(scope.isCurrent(current)).toBe(true);
+    expect(await commitProjectMutation(client, scope, stale, project)).toBe(
+      false,
+    );
+    expect(await commitProjectMutation(client, scope, current, project)).toBe(
+      true,
+    );
+  });
+
+  test("hook effect setup activates the scope before cleanup disposes it", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/core/projects/hooks.ts"),
+      "utf8",
+    );
+    expect(source).toMatch(/useEffect\(\(\) => \{\s*scope\.activate\(\)/u);
   });
 
   test("drops stale mutation responses without touching any account cache", async () => {

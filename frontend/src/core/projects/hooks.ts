@@ -11,7 +11,7 @@ import {
   enterProject,
   findProjectBySlug,
   getProject,
-  listProjects,
+  listAllProjects,
   pinProject,
   ProjectApiError,
   updateProject,
@@ -38,6 +38,7 @@ export interface ProjectMutationToken {
 }
 
 export interface ProjectMutationScope {
+  activate: () => void;
   begin: () => ProjectMutationToken;
   finish: (token: ProjectMutationToken) => void;
   update: (userId: string | null, projectId: string | null) => void;
@@ -61,6 +62,11 @@ export function createProjectMutationScope(
   };
 
   return {
+    activate() {
+      if (!disposed) return;
+      disposed = false;
+      generation += 1;
+    },
     begin() {
       const controller = new AbortController();
       controllers.add(controller);
@@ -129,6 +135,7 @@ function useProjectMutationScope(
     scope.update(userId ?? null, projectId ?? null);
   }, [scope, userId, projectId]);
   useEffect(() => {
+    scope.activate();
     return () => scope.dispose();
   }, [scope]);
   return scope;
@@ -177,7 +184,7 @@ export function useProjects(
     queryKey: accountProjectsKey(userId ?? "", filters),
     queryFn: ({ signal }) => {
       requireProjectIdentity(userId);
-      return listProjects(filters, signal);
+      return listAllProjects(filters, signal);
     },
     enabled: Boolean(userId),
   });

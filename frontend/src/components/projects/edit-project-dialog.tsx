@@ -26,7 +26,7 @@ export function EditProjectDialog({
   project: Project | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSubmit: (input: PatchProjectInput) => Promise<void>;
+  onSubmit: (input: PatchProjectInput) => void;
   pending: boolean;
   errorMessage: string | null;
 }) {
@@ -52,7 +52,11 @@ export function EditProjectDialog({
           className="space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
-            void onSubmit({ display_name: displayName, description, icon });
+            onSubmit({
+              display_name: displayName,
+              description,
+              icon,
+            });
           }}
         >
           <label className="grid gap-2 text-sm">

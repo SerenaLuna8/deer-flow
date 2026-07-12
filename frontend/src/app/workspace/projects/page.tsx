@@ -1,10 +1,9 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { ProjectWorkbench } from "@/components/projects/project-workbench";
-import { useAuth } from "@/core/auth/AuthProvider";
+import { ProjectWorkbenchPage } from "@/components/projects/project-workbench-page";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
-export default function ProjectsWorkbenchPage() {
-  const { user } = useAuth();
-  if (!user) return null;
-  return <ProjectWorkbench userId={user.id} />;
+export default function ProjectsPage() {
+  if (isStaticWebsiteOnly()) redirect("/workspace");
+  return <ProjectWorkbenchPage />;
 }
