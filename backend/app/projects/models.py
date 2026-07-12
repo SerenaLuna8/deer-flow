@@ -51,6 +51,7 @@ class ProjectView:
     is_suspended: bool
     membership_version: int
     request_id: str
+    deletion_effective_at: datetime | None = None
 
 
 @dataclass(frozen=True)

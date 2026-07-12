@@ -138,6 +138,7 @@ class ProjectRepository:
             project.is_suspended,
             membership.version,
             request_id,
+            project.deletion_effective_at,
         )
 
     async def update(self, context: ProjectContext, changes: ProjectChanges) -> ProjectView:
@@ -188,19 +189,61 @@ class ProjectRepository:
         except DBAPIError:
             raise ProjectDatabaseUnavailable() from None
 
-    async def list_for_user(self, user_id: uuid.UUID, query: str | None, pinned: bool | None, cursor: str | None, limit: int, request_id: str) -> ProjectPage:
+    async def list_for_user(
+        self,
+        user_id: uuid.UUID,
+        query: str | None,
+        pinned: bool | None,
+        cursor: str | None,
+        limit: int,
+        request_id: str,
+        include_recoverable: bool = False,
+    ) -> ProjectPage:
         try:
             async with self.session.begin():
-                return await self._list_in_transaction(user_id, query, pinned, cursor, limit, request_id)
+                return await self._list_in_transaction(
+                    user_id,
+                    query,
+                    pinned,
+                    cursor,
+                    limit,
+                    request_id,
+                    include_recoverable,
+                )
         except DBAPIError:
             raise ProjectDatabaseUnavailable() from None
 
-    async def _list_in_transaction(self, user_id: uuid.UUID, query: str | None, pinned: bool | None, cursor: str | None, limit: int, request_id: str) -> ProjectPage:
+    async def _list_in_transaction(
+        self,
+        user_id: uuid.UUID,
+        query: str | None,
+        pinned: bool | None,
+        cursor: str | None,
+        limit: int,
+        request_id: str,
+        include_recoverable: bool,
+    ) -> ProjectPage:
         member_count = select(func.count()).where(ProjectMembershipRow.project_id == ProjectRow.id, ProjectMembershipRow.status == "active").correlate(ProjectRow).scalar_subquery()
+        project_visibility = ProjectRow.status == "active"
+        if include_recoverable:
+            project_visibility = or_(
+                project_visibility,
+                and_(
+                    ProjectRow.status == "pending_deletion",
+                    ProjectRow.deletion_effective_at.is_not(None),
+                    ProjectRow.deletion_effective_at > func.now(),
+                    ProjectMembershipRow.role == ProjectRole.ADMIN.value,
+                ),
+            )
         statement = (
             select(ProjectRow, ProjectMembershipRow, member_count.label("member_count"))
             .join(ProjectRow, ProjectRow.id == ProjectMembershipRow.project_id)
-            .where(ProjectMembershipRow.user_id == str(user_id), ProjectMembershipRow.status == "active", ProjectRow.status == "active", ProjectRow.is_suspended.is_(False))
+            .where(
+                ProjectMembershipRow.user_id == str(user_id),
+                ProjectMembershipRow.status == "active",
+                project_visibility,
+                ProjectRow.is_suspended.is_(False),
+            )
         )
         if query:
             escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

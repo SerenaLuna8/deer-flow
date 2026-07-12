@@ -57,6 +57,13 @@ class ProjectMembershipVersionConflict(Exception):
         super().__init__("Project membership changed")
 
 
+class ProjectDeletionStateConflict(Exception):
+    code = "project_deletion_state_conflict"
+
+    def __init__(self) -> None:
+        super().__init__("Project deletion state does not allow this operation")
+
+
 class ProjectBootstrapFailed(Exception):
     def __init__(self, code: str) -> None:
         self.code = code

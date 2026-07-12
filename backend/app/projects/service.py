@@ -68,12 +68,32 @@ class ProjectService:
             raise ProjectValidationFailed("invalid_pinned")
         return await self.repository.pin(context, pinned)
 
-    async def list(self, user_id: uuid.UUID, *, query: str | None = None, pinned: bool | None = None, cursor: str | None = None, limit: int = 20, request_id: str) -> ProjectPage:
+    async def list(
+        self,
+        user_id: uuid.UUID,
+        *,
+        query: str | None = None,
+        pinned: bool | None = None,
+        cursor: str | None = None,
+        limit: int = 20,
+        include_recoverable: bool = False,
+        request_id: str,
+    ) -> ProjectPage:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ProjectValidationFailed("invalid_limit")
         if pinned is not None and type(pinned) is not bool:
             raise ProjectValidationFailed("invalid_pinned")
+        if type(include_recoverable) is not bool:
+            raise ProjectValidationFailed("invalid_include_recoverable")
         normalized_query = None
         if query is not None:
             normalized_query = _text(query, field="query", minimum=0, maximum=120).strip() or None
-        return await self.repository.list_for_user(user_id, normalized_query, pinned, cursor, limit, request_id)
+        return await self.repository.list_for_user(
+            user_id,
+            normalized_query,
+            pinned,
+            cursor,
+            limit,
+            request_id,
+            include_recoverable,
+        )
