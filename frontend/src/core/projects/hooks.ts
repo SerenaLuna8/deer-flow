@@ -2,9 +2,11 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type MutateOptions,
   type QueryClient,
+  type UseMutationResult,
 } from "@tanstack/react-query";
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 import {
   changeProjectMemberRole,
@@ -219,6 +221,241 @@ export function currentScopedGovernanceData<T>(
   if (result.token.userId !== (currentUserId ?? null)) return undefined;
   if (result.token.projectId !== (currentProjectId ?? null)) return undefined;
   return scope.isCurrent(result.token) ? result.data : undefined;
+}
+
+function isCurrentProjectMutationToken(
+  scope: ProjectMutationScope,
+  token: ProjectMutationToken | null,
+  currentUserId: string | null | undefined,
+  currentProjectId: string | null | undefined,
+): boolean {
+  return Boolean(
+    token?.userId === (currentUserId ?? null) &&
+    token.projectId === (currentProjectId ?? null) &&
+    scope.isCurrent(token),
+  );
+}
+
+interface ProjectMutationObserverState<TData, TError, TVariables> {
+  readonly data: TData | undefined;
+  readonly error: TError | null;
+  readonly failureCount: number;
+  readonly failureReason: TError | null;
+  readonly isError: boolean;
+  readonly isIdle: boolean;
+  readonly isPaused: boolean;
+  readonly isPending: boolean;
+  readonly isSuccess: boolean;
+  readonly status: "idle" | "pending" | "error" | "success";
+  readonly submittedAt: number;
+  readonly variables: TVariables | undefined;
+}
+
+export function currentProjectMutationObserverState<TData, TError, TVariables>(
+  scope: ProjectMutationScope,
+  token: ProjectMutationToken | null,
+  state: ProjectMutationObserverState<TData, TError, TVariables>,
+  currentUserId: string | null | undefined,
+  currentProjectId: string | null | undefined,
+) {
+  if (
+    (token === null && state.isIdle) ||
+    isCurrentProjectMutationToken(scope, token, currentUserId, currentProjectId)
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    data: undefined,
+    error: null,
+    failureCount: 0,
+    failureReason: null,
+    isError: false,
+    isIdle: true,
+    isPaused: false,
+    isPending: false,
+    isSuccess: false,
+    status: "idle" as const,
+    submittedAt: 0,
+    variables: undefined,
+  };
+}
+
+export function commitCurrentProjectMutationCallback(
+  scope: ProjectMutationScope,
+  token: ProjectMutationToken,
+  currentUserId: string | null | undefined,
+  currentProjectId: string | null | undefined,
+  isLatestAttempt: boolean,
+  callback: () => void,
+): boolean {
+  if (
+    !isLatestAttempt ||
+    !isCurrentProjectMutationToken(
+      scope,
+      token,
+      currentUserId,
+      currentProjectId,
+    )
+  ) {
+    return false;
+  }
+  callback();
+  return true;
+}
+
+function useCurrentGovernanceMutation<TData, TError, TVariables, TContext>(
+  mutation: UseMutationResult<
+    ScopedGovernanceResult<TData>,
+    TError,
+    TVariables,
+    TContext
+  >,
+  scope: ProjectMutationScope,
+  currentUserId: string | null | undefined,
+  currentProjectId: string | null | undefined,
+) {
+  const activeTokenRef = useRef<ProjectMutationToken | null>(null);
+  const latestAttemptRef = useRef(0);
+  const identityRef = useRef({
+    userId: currentUserId ?? null,
+    projectId: currentProjectId ?? null,
+  });
+  const rawMutate = mutation.mutate;
+  const rawMutateAsync = mutation.mutateAsync;
+  const rawReset = mutation.reset;
+
+  useLayoutEffect(() => {
+    const nextUserId = currentUserId ?? null;
+    const nextProjectId = currentProjectId ?? null;
+    if (
+      identityRef.current.userId !== nextUserId ||
+      identityRef.current.projectId !== nextProjectId
+    ) {
+      latestAttemptRef.current += 1;
+      activeTokenRef.current = null;
+      rawReset();
+      identityRef.current = { userId: nextUserId, projectId: nextProjectId };
+    }
+  }, [currentProjectId, currentUserId, rawReset]);
+
+  useLayoutEffect(
+    () => () => {
+      latestAttemptRef.current += 1;
+      activeTokenRef.current = null;
+    },
+    [],
+  );
+
+  const reset = useCallback(() => {
+    latestAttemptRef.current += 1;
+    activeTokenRef.current = null;
+    rawReset();
+  }, [rawReset]);
+
+  const guardedOptions = useCallback(
+    (
+      token: ProjectMutationToken,
+      attempt: number,
+      options?: MutateOptions<
+        ScopedGovernanceResult<TData>,
+        TError,
+        TVariables,
+        TContext
+      >,
+    ):
+      | MutateOptions<
+          ScopedGovernanceResult<TData>,
+          TError,
+          TVariables,
+          TContext
+        >
+      | undefined => {
+      if (!options) return undefined;
+      const commit = (callback: () => void) =>
+        commitCurrentProjectMutationCallback(
+          scope,
+          token,
+          currentUserId,
+          currentProjectId,
+          latestAttemptRef.current === attempt,
+          callback,
+        );
+      return {
+        onSuccess: (data, variables, onMutateResult, context) => {
+          commit(() =>
+            options.onSuccess?.(data, variables, onMutateResult, context),
+          );
+        },
+        onError: (error, variables, onMutateResult, context) => {
+          commit(() =>
+            options.onError?.(error, variables, onMutateResult, context),
+          );
+        },
+        onSettled: (data, error, variables, onMutateResult, context) => {
+          commit(() =>
+            options.onSettled?.(
+              data,
+              error,
+              variables,
+              onMutateResult,
+              context,
+            ),
+          );
+        },
+      };
+    },
+    [currentProjectId, currentUserId, scope],
+  );
+
+  const mutate = useCallback(
+    (
+      variables: TVariables,
+      options?: MutateOptions<
+        ScopedGovernanceResult<TData>,
+        TError,
+        TVariables,
+        TContext
+      >,
+    ) => {
+      const token = scope.begin();
+      scope.finish(token);
+      const attempt = latestAttemptRef.current + 1;
+      latestAttemptRef.current = attempt;
+      activeTokenRef.current = token;
+      rawMutate(variables, guardedOptions(token, attempt, options));
+    },
+    [guardedOptions, rawMutate, scope],
+  );
+
+  const mutateAsync = useCallback(
+    (
+      variables: TVariables,
+      options?: MutateOptions<
+        ScopedGovernanceResult<TData>,
+        TError,
+        TVariables,
+        TContext
+      >,
+    ) => {
+      const token = scope.begin();
+      scope.finish(token);
+      const attempt = latestAttemptRef.current + 1;
+      latestAttemptRef.current = attempt;
+      activeTokenRef.current = token;
+      return rawMutateAsync(variables, guardedOptions(token, attempt, options));
+    },
+    [guardedOptions, rawMutateAsync, scope],
+  );
+
+  const observerState = currentProjectMutationObserverState(
+    scope,
+    activeTokenRef.current,
+    { ...mutation, data: mutation.data?.data },
+    currentUserId,
+    currentProjectId,
+  );
+  return { ...mutation, ...observerState, mutate, mutateAsync, reset };
 }
 
 async function runScopedMutation(
@@ -438,13 +675,11 @@ export function useChangeProjectMemberRole(
         ),
       );
     },
-    onSuccess: ({ token }) =>
-      invalidateProjectGovernanceQueries(queryClient, scope, token),
+    onSuccess: ({ token }) => {
+      void invalidateProjectGovernanceQueries(queryClient, scope, token);
+    },
   });
-  return {
-    ...mutation,
-    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
-  };
+  return useCurrentGovernanceMutation(mutation, scope, userId, projectId);
 }
 
 export function useRemoveProjectMember(
@@ -468,13 +703,11 @@ export function useRemoveProjectMember(
         ),
       );
     },
-    onSuccess: ({ token }) =>
-      invalidateProjectGovernanceQueries(queryClient, scope, token),
+    onSuccess: ({ token }) => {
+      void invalidateProjectGovernanceQueries(queryClient, scope, token);
+    },
   });
-  return {
-    ...mutation,
-    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
-  };
+  return useCurrentGovernanceMutation(mutation, scope, userId, projectId);
 }
 
 export function useLeaveProject(
@@ -493,13 +726,11 @@ export function useLeaveProject(
         leaveProject(identity.projectId ?? "", version, signal),
       );
     },
-    onSuccess: ({ token }) =>
-      invalidateProjectGovernanceQueries(queryClient, scope, token),
+    onSuccess: ({ token }) => {
+      void invalidateProjectGovernanceQueries(queryClient, scope, token);
+    },
   });
-  return {
-    ...mutation,
-    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
-  };
+  return useCurrentGovernanceMutation(mutation, scope, userId, projectId);
 }
 
 export function useCreateProjectInvitation(
@@ -518,13 +749,11 @@ export function useCreateProjectInvitation(
         createProjectInvitation(identity.projectId ?? "", input, signal),
       );
     },
-    onSuccess: ({ token }) =>
-      invalidateProjectGovernanceQueries(queryClient, scope, token),
+    onSuccess: ({ token }) => {
+      void invalidateProjectGovernanceQueries(queryClient, scope, token);
+    },
   });
-  return {
-    ...mutation,
-    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
-  };
+  return useCurrentGovernanceMutation(mutation, scope, userId, projectId);
 }
 
 export function useRevokeProjectInvitation(
@@ -548,13 +777,11 @@ export function useRevokeProjectInvitation(
         ),
       );
     },
-    onSuccess: ({ token }) =>
-      invalidateProjectGovernanceQueries(queryClient, scope, token),
+    onSuccess: ({ token }) => {
+      void invalidateProjectGovernanceQueries(queryClient, scope, token);
+    },
   });
-  return {
-    ...mutation,
-    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
-  };
+  return useCurrentGovernanceMutation(mutation, scope, userId, projectId);
 }
 
 export function useClaimProjectInvitation() {
@@ -576,18 +803,16 @@ export function useRedeemProjectInvitation(userId: string | null | undefined) {
       requireProjectIdentity(userId);
       return runScopedGovernanceMutation(scope, redeemProjectInvitation);
     },
-    onSuccess: ({ data, token }) =>
-      invalidateProjectGovernanceQueries(
+    onSuccess: ({ data, token }) => {
+      void invalidateProjectGovernanceQueries(
         queryClient,
         scope,
         token,
         data.project_id,
-      ),
+      );
+    },
   });
-  return {
-    ...mutation,
-    data: currentScopedGovernanceData(scope, mutation.data, userId, null),
-  };
+  return useCurrentGovernanceMutation(mutation, scope, userId, null);
 }
 
 export function useRequestProjectDeletion(
@@ -606,13 +831,11 @@ export function useRequestProjectDeletion(
         requestProjectDeletion(identity.projectId ?? "", signal),
       );
     },
-    onSuccess: ({ token }) =>
-      invalidateProjectGovernanceQueries(queryClient, scope, token),
+    onSuccess: ({ token }) => {
+      void invalidateProjectGovernanceQueries(queryClient, scope, token);
+    },
   });
-  return {
-    ...mutation,
-    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
-  };
+  return useCurrentGovernanceMutation(mutation, scope, userId, projectId);
 }
 
 export function useRestoreProject(
@@ -631,11 +854,9 @@ export function useRestoreProject(
         restoreProject(identity.projectId ?? "", signal),
       );
     },
-    onSuccess: ({ token }) =>
-      invalidateProjectGovernanceQueries(queryClient, scope, token),
+    onSuccess: ({ token }) => {
+      void invalidateProjectGovernanceQueries(queryClient, scope, token);
+    },
   });
-  return {
-    ...mutation,
-    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
-  };
+  return useCurrentGovernanceMutation(mutation, scope, userId, projectId);
 }

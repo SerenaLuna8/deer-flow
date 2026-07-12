@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -26,10 +26,6 @@ export function ProjectLifecyclePanel() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const canManage = project.capabilities.includes("project.lifecycle.manage");
 
-  useEffect(() => {
-    if (deletion.data) router.replace("/workspace");
-  }, [deletion.data, router]);
-
   if (!canManage) return null;
 
   return (
@@ -41,7 +37,8 @@ export function ProjectLifecyclePanel() {
         项目生命周期
       </h2>
       <p className="text-muted-foreground mt-2 max-w-2xl text-sm">
-        请求删除后，项目立即停止进入和治理，并在恢复窗口结束后永久删除。
+        请求删除后，项目立即停止进入和治理；恢复窗口结束后将无法自助恢复，M2
+        不执行物理清除。
       </p>
       {deletion.error && (
         <p role="alert" className="text-destructive mt-3 text-sm">
@@ -70,7 +67,11 @@ export function ProjectLifecyclePanel() {
               type="button"
               variant="destructive"
               disabled={deletion.isPending}
-              onClick={() => deletion.mutate()}
+              onClick={() =>
+                deletion.mutate(undefined, {
+                  onSuccess: () => router.replace("/workspace"),
+                })
+              }
             >
               确认请求删除
             </Button>

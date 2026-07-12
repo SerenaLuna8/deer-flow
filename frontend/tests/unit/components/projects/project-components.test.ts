@@ -124,4 +124,17 @@ describe("project presentation contracts", () => {
     expect(loaderSource).toContain("useCurrentProject");
     expect(loaderSource).not.toMatch(/useProjectBySlug|useEnterProject/u);
   });
+
+  test("lifecycle copy does not claim M2 physically deletes projects", () => {
+    const source = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/projects/settings/project-lifecycle-panel.tsx",
+      ),
+      "utf8",
+    );
+    expect(source).toContain("恢复窗口结束后将无法自助恢复");
+    expect(source).toMatch(/M2\s+不执行物理清除/u);
+    expect(source).not.toContain("永久删除");
+  });
 });

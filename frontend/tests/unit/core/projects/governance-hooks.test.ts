@@ -2,7 +2,9 @@ import { describe, expect, test, rs } from "@rstest/core";
 import { QueryClient } from "@tanstack/react-query";
 
 import {
+  commitCurrentProjectMutationCallback,
   createProjectMutationScope,
+  currentProjectMutationObserverState,
   currentScopedGovernanceData,
   invalidateProjectGovernanceQueries,
 } from "@/core/projects/hooks";
@@ -113,5 +115,88 @@ describe("project governance query scope", () => {
     expect(
       currentScopedGovernanceData(scope, result, "u1", "p2"),
     ).toBeUndefined();
+  });
+
+  test.each(["success", "error", "pending"] as const)(
+    "hides the complete stale %s observer state after identity changes",
+    (status) => {
+      const scope = createProjectMutationScope("u1", "p1");
+      const token = scope.begin();
+      const rawState = {
+        data: status === "success" ? { ok: true } : undefined,
+        error: status === "error" ? new Error("old failure") : null,
+        failureCount: status === "error" ? 1 : 0,
+        failureReason: status === "error" ? new Error("old failure") : null,
+        isError: status === "error",
+        isIdle: false,
+        isPaused: false,
+        isPending: status === "pending",
+        isSuccess: status === "success",
+        status,
+        submittedAt: 123,
+        variables: { version: 1 },
+      };
+
+      scope.update("u2", "p2");
+
+      expect(
+        currentProjectMutationObserverState(scope, token, rawState, "u2", "p2"),
+      ).toMatchObject({
+        data: undefined,
+        error: null,
+        failureCount: 0,
+        failureReason: null,
+        isError: false,
+        isIdle: true,
+        isPaused: false,
+        isPending: false,
+        isSuccess: false,
+        status: "idle",
+        submittedAt: 0,
+        variables: undefined,
+      });
+    },
+  );
+
+  test("rejects both success and failure callbacks from an old identity or attempt", () => {
+    const scope = createProjectMutationScope("u1", "p1");
+    const oldIdentity = scope.begin();
+    const callback = rs.fn();
+
+    scope.update("u2", "p2");
+    expect(
+      commitCurrentProjectMutationCallback(
+        scope,
+        oldIdentity,
+        "u2",
+        "p2",
+        true,
+        callback,
+      ),
+    ).toBe(false);
+    expect(
+      commitCurrentProjectMutationCallback(
+        scope,
+        oldIdentity,
+        "u2",
+        "p2",
+        false,
+        callback,
+      ),
+    ).toBe(false);
+    expect(callback).not.toHaveBeenCalled();
+
+    const oldAttempt = scope.begin();
+    expect(
+      commitCurrentProjectMutationCallback(
+        scope,
+        oldAttempt,
+        "u2",
+        "p2",
+        false,
+        callback,
+      ),
+    ).toBe(false);
+    expect(callback).not.toHaveBeenCalled();
   });
 });

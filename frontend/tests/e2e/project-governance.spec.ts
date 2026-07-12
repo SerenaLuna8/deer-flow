@@ -100,6 +100,7 @@ async function mockProjectGovernance(
   let currentMembers = structuredClone(members);
   let projectInvitations = [structuredClone(invitation)];
   let projectState = structuredClone(currentProject);
+  let projectVisible = true;
   let recoverableVisible = true;
   const claimBodies: unknown[] = [];
   const redeemBodies: Array<string | null> = [];
@@ -140,12 +141,13 @@ async function mockProjectGovernance(
         return;
       }
       if (path.endsWith("/api/projects") && method === "GET") {
+        const activeItems = projectVisible ? [currentProject] : [];
         const items = url.searchParams.has("include_recoverable")
           ? [
-              currentProject,
+              ...activeItems,
               ...(recoverableVisible ? [recoverableProject] : []),
             ]
-          : [currentProject];
+          : activeItems;
         await json(route, { items, next_cursor: null });
         return;
       }
@@ -193,6 +195,7 @@ async function mockProjectGovernance(
         path.endsWith(`/api/projects/${PROJECT_ID}/leave`) &&
         method === "POST"
       ) {
+        projectVisible = false;
         await json(route, { ...currentMembers[0], status: "left", version: 5 });
         return;
       }
@@ -259,6 +262,7 @@ async function mockProjectGovernance(
         path.endsWith(`/api/projects/${PROJECT_ID}/deletion`) &&
         method === "POST"
       ) {
+        projectVisible = false;
         projectState = {
           ...projectState,
           status: "pending_deletion",
@@ -348,6 +352,31 @@ test("authenticated SSO callback executes before returning to invite redemption"
   await expect(page).toHaveURL(/\/invite$/);
   await expect(page.getByRole("heading", { name: "邀请已接受" })).toBeVisible();
   expect(api.redeemBodies).toEqual([null]);
+});
+
+test("local login and SSO callback reject escaping next paths but keep /invite", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectGovernance(page);
+  await page.route("**/api/v1/auth/me", async (route) => {
+    await json(route, {
+      id: "default",
+      email: "default@test.local",
+      system_role: "system_admin",
+      needs_setup: false,
+    });
+  });
+
+  for (const next of ["/%5Cevil", "//evil.example", "https:"]) {
+    await page.goto(`/login?next=${next}`);
+    await expect(page).toHaveURL(/\/workspace$/);
+    await page.goto(`/auth/callback?next=${next}`);
+    await expect(page).toHaveURL(/\/workspace$/);
+  }
+
+  await page.goto("/login?next=/invite");
+  await expect(page).toHaveURL(/\/invite$/);
 });
 
 test("workspace separates invitations and recoverable projects from active projects", async ({
