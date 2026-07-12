@@ -58,6 +58,17 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 Platform authorization uses `system_role: "system_admin" | "user"`. The project-level
 role name `admin` is a separate membership concept and must not be accepted as a
 platform role in frontend schemas or admin-only UI gates.
+
+Project server state lives under `src/core/projects/`. Its Zod contracts are strict and
+capabilities always come from the Gateway response; UI code must never infer capabilities
+from a project role. Every project query key starts with the authenticated account ID.
+Account changes and logout cancel in-flight TanStack queries before clearing the provider-
+owned QueryClient, so data or late responses from one account cannot enter another account's
+cache. `AuthProvider` therefore must always render inside `QueryClientProvider`; do not add a
+module-level QueryClient singleton or mount a new AuthProvider without that outer provider.
+The M1 `PROJECT_PRIVATE_WORKSPACE` feature constant is hard-disabled and must not be made
+environment- or user-configurable before the later private-work milestone.
+
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
 - **`content/`** — MDX content (blog posts, docs) rendered by the app

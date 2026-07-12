@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { useRouter, usePathname } from "next/navigation";
 import React, {
   createContext,
@@ -10,9 +11,12 @@ import React, {
   type ReactNode,
 } from "react";
 
+import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+
 import { isStaticWebsiteOnly } from "../static-mode";
 
-import { type User, buildLoginUrl } from "./types";
+import { transitionAccountQueries } from "./account-query-client";
+import { type User, buildLoginUrl, userSchema } from "./types";
 
 // Re-export for consumers
 export type { User };
@@ -26,7 +30,7 @@ interface AuthContextType {
   isLoading: boolean;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
-  applyUser: (user: User | null) => void;
+  applyUser: (user: User | null) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -47,6 +51,7 @@ interface AuthProviderProps {
 export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(initialUser);
   const [isLoading, setIsLoading] = useState(false);
+  const queryClient = useQueryClient();
   const router = useRouter();
   const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
@@ -58,9 +63,20 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * already fetched it. Equivalent to setUser, exposed with a stable name
    * so consumers don't reach into React internals.
    */
-  const applyUser = useCallback((next: User | null) => {
-    setUser(next);
-  }, []);
+  const userRef = React.useRef<User | null>(initialUser);
+  const applyEpochRef = React.useRef(0);
+  const applyUser = useCallback(
+    async (next: User | null) => {
+      const epoch = ++applyEpochRef.current;
+      const previousId = userRef.current?.id ?? null;
+      const nextId = next?.id ?? null;
+      await transitionAccountQueries(queryClient, previousId, nextId);
+      if (epoch !== applyEpochRef.current) return;
+      userRef.current = next;
+      setUser(next);
+    },
+    [queryClient],
+  );
 
   /**
    * Fetch current user from FastAPI
@@ -76,11 +92,11 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       });
 
       if (res.ok) {
-        const data = await res.json();
-        setUser(data);
+        const parsed = userSchema.safeParse(await res.json());
+        await applyUser(parsed.success ? parsed.data : null);
       } else if (res.status === 401) {
         // Session expired or invalid
-        setUser(null);
+        await applyUser(null);
         // Redirect to login if on a protected route
         if (pathname?.startsWith("/workspace")) {
           router.push(buildLoginUrl(pathname));
@@ -88,11 +104,11 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       }
     } catch (err) {
       console.error("Failed to refresh user:", err);
-      setUser(null);
+      await applyUser(null);
     } finally {
       setIsLoading(false);
     }
-  }, [staticMode, pathname, router]);
+  }, [staticMode, pathname, router, applyUser]);
 
   /**
    * Logout - call FastAPI logout endpoint and clear local state
@@ -106,7 +122,12 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * logout used to.
    */
   const logout = useCallback(async () => {
-    // Immediately clear local state to prevent UI flicker
+    applyEpochRef.current += 1;
+    const previousId = userRef.current?.id ?? null;
+    userRef.current = null;
+    void transitionAccountQueries(queryClient, previousId, null, {
+      force: true,
+    });
     setUser(null);
 
     if (staticMode) {
@@ -116,7 +137,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
     let logoutFailed = false;
     try {
-      const res = await fetch("/api/v1/auth/logout", {
+      const res = await fetchWithAuth("/api/v1/auth/logout", {
         method: "POST",
         credentials: "include",
       });
@@ -135,7 +156,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
     // Redirect to home page
     router.push("/");
-  }, [staticMode, router]);
+  }, [staticMode, router, queryClient]);
 
   /**
    * Handle visibility change - refresh user when tab becomes visible again.

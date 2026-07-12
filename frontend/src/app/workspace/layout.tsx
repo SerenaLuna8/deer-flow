@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { QueryClientProvider } from "@/components/query-client-provider";
 import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
@@ -17,9 +18,11 @@ export default async function WorkspaceLayout({
   switch (result.tag) {
     case "authenticated":
       return (
-        <AuthProvider initialUser={result.user}>
-          <WorkspaceContent>{children}</WorkspaceContent>
-        </AuthProvider>
+        <QueryClientProvider>
+          <AuthProvider initialUser={result.user}>
+            <WorkspaceContent>{children}</WorkspaceContent>
+          </AuthProvider>
+        </QueryClientProvider>
       );
     case "needs_setup":
       redirect("/setup");
@@ -32,9 +35,11 @@ export default async function WorkspaceLayout({
       // already mounts the banner inside its sidebar layout, so renderBanner
       // stays false here to avoid double-mounting.
       return (
-        <GatewayOfflineFallback>
-          <WorkspaceContent gatewayUnavailable>{children}</WorkspaceContent>
-        </GatewayOfflineFallback>
+        <QueryClientProvider>
+          <GatewayOfflineFallback>
+            <WorkspaceContent gatewayUnavailable>{children}</WorkspaceContent>
+          </GatewayOfflineFallback>
+        </QueryClientProvider>
       );
     case "config_error":
       throw new Error(result.message);

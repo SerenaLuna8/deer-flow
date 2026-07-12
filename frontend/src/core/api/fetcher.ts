@@ -16,6 +16,15 @@ export function isStateChangingMethod(method: string): boolean {
 
 const CSRF_COOKIE_PREFIX = "csrf_token=";
 
+export class AuthRequiredError extends Error {
+  readonly status = 401;
+
+  constructor() {
+    super("Authentication required");
+    this.name = "AuthRequiredError";
+  }
+}
+
 /**
  * Read the ``csrf_token`` cookie set by the gateway at login.
  *
@@ -82,7 +91,7 @@ export async function fetch(
 
   if (res.status === 401) {
     window.location.href = buildLoginUrl(window.location.pathname);
-    throw new Error("Unauthorized");
+    throw new AuthRequiredError();
   }
 
   return res;

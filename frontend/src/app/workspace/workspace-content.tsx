@@ -1,7 +1,6 @@
 import { cookies } from "next/headers";
 import { Toaster } from "sonner";
 
-import { QueryClientProvider } from "@/components/query-client-provider";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { CommandPalette } from "@/components/workspace/command-palette";
 import { GatewayOfflineBanner } from "@/components/workspace/gateway-offline-banner";
@@ -28,7 +27,7 @@ export async function WorkspaceContent({
   );
 
   return (
-    <QueryClientProvider>
+    <>
       <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
         <WorkspaceSidebar />
         <SidebarInset className="min-w-0">
@@ -38,6 +37,6 @@ export async function WorkspaceContent({
       </SidebarProvider>
       <CommandPalette />
       <Toaster position="top-center" />
-    </QueryClientProvider>
+    </>
   );
 }
