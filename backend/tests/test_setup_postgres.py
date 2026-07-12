@@ -215,7 +215,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_complete_bootstrap_lock_uses_dedicated_timeout_free_transaction_and_cleanup(monkeypatch) -> None:
+async def test_complete_bootstrap_lock_uses_dedicated_autocommit_session_and_cleanup(monkeypatch) -> None:
     calls = []
     connection = MagicMock()
 
@@ -224,14 +224,12 @@ async def test_complete_bootstrap_lock_uses_dedicated_timeout_free_transaction_a
 
     async def scalar(statement, *_args):
         calls.append(str(statement))
+        if "current_setting" in str(statement):
+            return "0"
         return True
 
     connection.execute = AsyncMock(side_effect=execute)
     connection.scalar = AsyncMock(side_effect=scalar)
-    transaction = MagicMock()
-    transaction.__aenter__ = AsyncMock(return_value=None)
-    transaction.__aexit__ = AsyncMock(return_value=None)
-    connection.begin.return_value = transaction
     connection_context = MagicMock()
     connection_context.__aenter__ = AsyncMock(return_value=connection)
     connection_context.__aexit__ = AsyncMock(return_value=None)
@@ -244,15 +242,60 @@ async def test_complete_bootstrap_lock_uses_dedicated_timeout_free_transaction_a
         calls.append("bootstrap")
 
     assert calls == [
-        "SET LOCAL idle_in_transaction_session_timeout = 0",
-        "SET LOCAL statement_timeout = 0",
+        "SET statement_timeout = 0",
+        "SET idle_in_transaction_session_timeout = 0",
+        "SELECT current_setting('idle_session_timeout', true)",
+        "SET idle_session_timeout = 0",
         "SELECT pg_advisory_lock(:lock_key)",
         "bootstrap",
         "SELECT pg_advisory_unlock(:lock_key)",
         "dispose",
     ]
-    transaction.__aexit__.assert_awaited_once()
+    connection.begin.assert_not_called()
     connection_context.__aexit__.assert_awaited_once()
+
+
+def test_bootstrap_lock_engine_is_nullpool_autocommit(monkeypatch) -> None:
+    factory = MagicMock(return_value=object())
+    monkeypatch.setattr(setup_postgres, "create_async_engine", factory)
+
+    setup_postgres._create_bootstrap_lock_engine("postgresql://owner:private-password@localhost/deerflow_test_1_abc")
+
+    assert factory.call_args.kwargs == {
+        "poolclass": setup_postgres.NullPool,
+        "isolation_level": "AUTOCOMMIT",
+    }
+
+
+@pytest.mark.asyncio
+async def test_complete_bootstrap_lock_skips_idle_session_timeout_when_server_lacks_setting(monkeypatch) -> None:
+    statements = []
+    connection = MagicMock()
+
+    async def execute(statement, *_args):
+        statements.append(str(statement))
+
+    async def scalar(statement, *_args):
+        statements.append(str(statement))
+        if "current_setting" in str(statement):
+            return None
+        return True
+
+    connection.execute = AsyncMock(side_effect=execute)
+    connection.scalar = AsyncMock(side_effect=scalar)
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=connection)
+    context.__aexit__ = AsyncMock(return_value=None)
+    lock_engine = MagicMock()
+    lock_engine.connect.return_value = context
+    lock_engine.dispose = AsyncMock()
+    monkeypatch.setattr(setup_postgres, "_create_bootstrap_lock_engine", lambda _url: lock_engine)
+
+    async with setup_postgres._complete_bootstrap_lock("postgresql://owner:private-password@localhost/deerflow_test_1_abc"):
+        pass
+
+    assert "SELECT current_setting('idle_session_timeout', true)" in statements
+    assert "SET idle_session_timeout = 0" not in statements
 
 
 @pytest.mark.asyncio
@@ -487,3 +530,14 @@ async def test_real_postgres_concurrent_setup_owner_bootstrap_and_check(
     assert result.healthy is True
     assert result.current_revision == result.head_revision
     assert result.missing_tables == ()
+
+    async with setup_postgres._complete_bootstrap_lock(database_url):
+        inspector = await setup_postgres.asyncpg.connect(setup_postgres._asyncpg_url(admin_url))
+        try:
+            coordination_state = await inspector.fetchval(
+                "SELECT state FROM pg_stat_activity WHERE datname=$1 AND query LIKE '%pg_advisory_lock%' ORDER BY backend_start DESC LIMIT 1",
+                database,
+            )
+        finally:
+            await inspector.close()
+        assert coordination_state == "idle"

@@ -168,7 +168,11 @@ async def _bootstrap_langgraph_schemas(database_url: str) -> None:
 def _create_bootstrap_lock_engine(database_url: str) -> AsyncEngine:
     """Create a dedicated non-pooled engine for setup coordination only."""
     config = DatabaseConfig(url=database_url)
-    return create_async_engine(config.sqlalchemy_url, poolclass=NullPool)
+    return create_async_engine(
+        config.sqlalchemy_url,
+        poolclass=NullPool,
+        isolation_level="AUTOCOMMIT",
+    )
 
 
 @asynccontextmanager
@@ -177,24 +181,26 @@ async def _complete_bootstrap_lock(database_url: str):
     lock_engine = _create_bootstrap_lock_engine(database_url)
     try:
         async with lock_engine.connect() as connection:
-            async with connection.begin():
-                await connection.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
-                await connection.execute(text("SET LOCAL statement_timeout = 0"))
-                await connection.execute(
-                    text("SELECT pg_advisory_lock(:lock_key)"),
-                    {"lock_key": _BOOTSTRAP_LOCK_KEY},
-                )
+            await connection.execute(text("SET statement_timeout = 0"))
+            await connection.execute(text("SET idle_in_transaction_session_timeout = 0"))
+            idle_session_timeout = await connection.scalar(text("SELECT current_setting('idle_session_timeout', true)"))
+            if idle_session_timeout is not None:
+                await connection.execute(text("SET idle_session_timeout = 0"))
+            await connection.execute(
+                text("SELECT pg_advisory_lock(:lock_key)"),
+                {"lock_key": _BOOTSTRAP_LOCK_KEY},
+            )
+            try:
+                yield
+            finally:
                 try:
-                    yield
-                finally:
-                    try:
-                        await connection.scalar(
-                            text("SELECT pg_advisory_unlock(:lock_key)"),
-                            {"lock_key": _BOOTSTRAP_LOCK_KEY},
-                        )
-                    except Exception:
-                        # Closing the dedicated session releases a session lock.
-                        pass
+                    await connection.scalar(
+                        text("SELECT pg_advisory_unlock(:lock_key)"),
+                        {"lock_key": _BOOTSTRAP_LOCK_KEY},
+                    )
+                except Exception:
+                    # Closing the dedicated session releases a session lock.
+                    pass
     finally:
         await lock_engine.dispose()
 
