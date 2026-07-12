@@ -755,6 +755,11 @@ active 状态统一返回 `project_not_found`。UUID 对象按 project ID 解析
 并重复检查 active membership 与 active、未暂停项目；陈旧 context 与 outsider 统一
 `project_not_found`。列表从 membership 出发，使用 pinned、last-entered、created-at、UUID
 四键 keyset cursor，不允许 offset；member count 只聚合 active membership，禁止 N+1。
+`resolve_project_context` 和每个 repository public 方法分别拥有一个显式 transaction；
+resolver 的单条 joined SELECT 退出后先结束只读 transaction，mutation 再在自己的 transaction
+中复查完整 scope/version，并把写入与 read-back 放在同一 transaction，只有 read-back 成功
+才 commit。调用方不得预先开启 transaction；该误用的 `InvalidRequestError` 不得伪装成
+数据库不可用。
 
 ### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
 

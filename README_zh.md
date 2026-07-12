@@ -137,6 +137,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    同一 not-found 语义，避免泄漏项目是否存在。
    项目列表和修改同样强制使用成员作用域；列表使用稳定 keyset cursor，置顶和最近进入
    只修改当前成员自己的偏好，不影响项目中的其他成员。
+   `ProjectContext` 解析和后续 repository 操作各自结束自己的 transaction；修改操作会在
+   同一 transaction 内再次核对成员版本并完成 read-back，确认结果有效后才提交。
    为避免误删项目，项目表或成员关系表存在数据时，数据库会拒绝降级到 0004；必须先按
    运维方案迁出数据，不能依赖 downgrade 自动删除。
 

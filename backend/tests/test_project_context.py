@@ -3,14 +3,15 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import event, text
+from sqlalchemy.exc import DBAPIError, InvalidRequestError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.projects.context import resolve_project_context
-from app.projects.errors import ProjectNotFound
+from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
 from app.projects.models import ProjectRole
 
 
@@ -44,7 +45,8 @@ from app.projects.models import ProjectRole
 )
 async def test_resolver_fails_closed_on_ambiguous_or_unknown_database_rows(rows) -> None:
     result = SimpleNamespace(all=lambda: rows)
-    session = SimpleNamespace(execute=AsyncMock(return_value=result))
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
 
     with pytest.raises(ProjectNotFound) as exc_info:
         await resolve_project_context(
@@ -58,6 +60,28 @@ async def test_resolver_fails_closed_on_ambiguous_or_unknown_database_rows(rows)
     assert exc_info.value.code == "project_not_found"
     assert str(exc_info.value) == "Project not found"
     assert exc_info.value.__dict__ == {}
+
+
+@pytest.mark.asyncio
+async def test_resolver_maps_only_dbapi_failures_to_safe_error() -> None:
+    session = MagicMock()
+    session.execute = AsyncMock(
+        side_effect=DBAPIError(
+            "SELECT secret",
+            {"url": "postgresql://owner:password@db/deerflow"},
+            Exception("driver failed"),
+            False,
+        )
+    )
+    with pytest.raises(ProjectDatabaseUnavailable) as exc_info:
+        await resolve_project_context(session, uuid.uuid4(), uuid.uuid4(), "req")
+    assert str(exc_info.value) == "Project storage unavailable"
+    assert "SELECT" not in str(exc_info.value)
+
+    misuse = MagicMock()
+    misuse.begin.side_effect = InvalidRequestError("transaction already begun")
+    with pytest.raises(InvalidRequestError, match="already begun"):
+        await resolve_project_context(misuse, uuid.uuid4(), uuid.uuid4(), "req")
 
 
 @pytest.mark.asyncio
@@ -165,5 +189,28 @@ async def test_resolve_project_context_is_single_statement_and_fail_closed(
                     await resolve_project_context(session, hidden_user_id, identifier, "req-hidden")
             errors.append((exc_info.value.code, str(exc_info.value), exc_info.value.__dict__))
         assert errors == [("project_not_found", "Project not found", {})] * len(hidden_cases)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_resolver_dbapi_failure_rolls_back_and_session_is_reusable(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            original_execute = session.execute
+
+            async def fail_statement(*_args, **_kwargs):
+                return await original_execute(text("SELECT 1 / 0"))
+
+            session.execute = fail_statement  # type: ignore[method-assign]
+            with pytest.raises(ProjectDatabaseUnavailable):
+                await resolve_project_context(session, uuid.uuid4(), uuid.uuid4(), "req")
+            assert session.in_transaction() is False
+            session.execute = original_execute  # type: ignore[method-assign]
+            assert (await session.execute(text("SELECT 1"))).scalar_one() == 1
     finally:
         await engine.dispose()

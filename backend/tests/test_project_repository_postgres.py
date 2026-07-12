@@ -9,6 +9,7 @@ from sqlalchemy import event, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.projects.context import resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
 from app.projects.models import CreateProject, ProjectChanges
 from app.projects.repository import ProjectRepository
@@ -30,10 +31,18 @@ async def test_repository_create_scope_personal_state_and_cursor(migrated_postgr
         async with factory() as session:
             repository = ProjectRepository(session)
             context = await repository.create_with_admin(owner, CreateProject("alpha", "Alpha"), "req")
+            assert session.in_transaction() is False
+            context = await resolve_project_context(session, owner, context.project_id, "req-resolved")
+            assert session.in_transaction() is False
             view = await repository.get(context)
+            assert session.in_transaction() is False
             assert view.member_count == 1 and view.agent_count == view.skill_count == view.mcp_count == 0
+            assert (await repository.update(context, ProjectChanges(display_name="Alpha Updated"))).display_name == "Alpha Updated"
+            assert session.in_transaction() is False
             await repository.pin(context, True)
+            assert session.in_transaction() is False
             entered = await repository.enter(context, datetime.now(UTC))
+            assert session.in_transaction() is False
             assert entered.is_pinned is True and entered.last_entered_at is not None
             page = await repository.list_for_user(owner, None, None, None, 1, "req-list")
             assert [item.id for item in page.items] == [context.project_id]

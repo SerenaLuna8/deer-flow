@@ -4,10 +4,11 @@ import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import and_, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.capabilities import Capability, capabilities_for
-from app.projects.errors import ProjectForbidden, ProjectNotFound
+from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound
 from app.projects.models import ProjectRole
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
@@ -60,7 +61,11 @@ async def resolve_project_context(
             ProjectRow.is_suspended.is_(False),
         )
     )
-    rows = (await session.execute(statement)).all()
+    try:
+        async with session.begin():
+            rows = (await session.execute(statement)).all()
+    except DBAPIError:
+        raise ProjectDatabaseUnavailable() from None
     if len(rows) != 1:
         raise ProjectNotFound()
     row = rows[0]
