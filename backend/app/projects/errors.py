@@ -43,6 +43,20 @@ class ProjectDatabaseUnavailable(Exception):
         super().__init__("Project storage unavailable")
 
 
+class ProjectLastAdmin(Exception):
+    code = "project_last_admin"
+
+    def __init__(self) -> None:
+        super().__init__("Project must keep an active admin")
+
+
+class ProjectMembershipVersionConflict(Exception):
+    code = "project_membership_version_conflict"
+
+    def __init__(self) -> None:
+        super().__init__("Project membership changed")
+
+
 class ProjectBootstrapFailed(Exception):
     def __init__(self, code: str) -> None:
         self.code = code

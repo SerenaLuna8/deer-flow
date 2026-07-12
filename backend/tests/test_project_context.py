@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -212,5 +212,55 @@ async def test_resolver_dbapi_failure_rolls_back_and_session_is_reusable(
             assert session.in_transaction() is False
             session.execute = original_execute  # type: ignore[method-assign]
             assert (await session.execute(text("SELECT 1"))).scalar_one() == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+@pytest.mark.parametrize("status", ["left", "removed"])
+async def test_ended_membership_cannot_resolve_project_context(
+    migrated_postgres_database_url: str,
+    status: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    user_id, project_id, membership_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    now = datetime.now(UTC)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,:email,'user',:now,false,0)"""
+                ),
+                {"id": str(user_id), "email": f"{status}@example.com", "now": now},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO projects (id,slug,display_name,created_by_user_id)
+                    VALUES (:id,:slug,'Ended membership',:user_id)"""
+                ),
+                {"id": project_id, "slug": f"ended-{status}", "user_id": str(user_id)},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO project_memberships
+                    (id,project_id,user_id,role,status,ended_at,retention_until,ended_by_user_id,end_reason)
+                    VALUES (:id,:project_id,:user_id,'admin',:status,:now,:retention,:user_id,:status)"""
+                ),
+                {
+                    "id": membership_id,
+                    "project_id": project_id,
+                    "user_id": str(user_id),
+                    "status": status,
+                    "now": now,
+                    "retention": now + timedelta(days=30),
+                },
+            )
+
+        async with session_factory() as session:
+            with pytest.raises(ProjectNotFound):
+                await resolve_project_context(session, user_id, project_id, "req-ended")
     finally:
         await engine.dispose()

@@ -1,248 +1,125 @@
-# Task 2 Report: PostgreSQL-only dependencies and configuration
+# Task 2 报告：成员 repository 与业务不变量
 
-## STATUS
+## 结果
 
-PASS — PostgreSQL-only configuration and dependency contract implemented and verified. No real database was accessed.
+Task 2 已实现成员列表、角色变更、移除和主动退出的 service/repository 边界。所有成员 mutation 都在 repository-owned transaction 中先锁 project、再锁目标 membership；最后一名 active Admin、membership version、跨项目资源隐藏和 membership 生命周期元数据均由该事务边界保护。
 
-## Changed files
-
-- `backend/packages/harness/pyproject.toml`
-- `backend/pyproject.toml`
-- `backend/uv.lock`
-- `backend/packages/harness/deerflow/config/database_config.py`
-- `backend/packages/harness/deerflow/config/app_config.py`
-- `backend/packages/harness/deerflow/config/checkpointer_config.py`
-- `backend/packages/harness/deerflow/config/reload_boundary.py`
-- `config.example.yaml`
-- `scripts/detect_uv_extras.py`
-- `backend/tests/test_persistence_scaffold.py`
-- `backend/tests/test_checkpointer.py`
-- `backend/tests/test_detect_uv_extras.py`
-- `backend/tests/test_app_config_reload.py`
-- `backend/tests/test_reload_boundary.py`
-- `README.md`
-- `AGENTS.md`
-- `backend/AGENTS.md`
-- `.superpowers/sdd/task-2-report.md`
-
-Task 1 files `backend/scripts/sqlite_inventory.py` and `backend/tests/test_sqlite_inventory.py` were not modified.
+`MembershipView` 按协调结论精确包含：`membership_id`、`user_id`、`account_email`、`role`、`status`、`version`、`joined_at`。列表只允许 active 项目成员读取，并只返回 active membership。
 
 ## RED
 
-Before production changes, the required focused command failed for the expected old multi-backend reasons:
+先新增：
 
-```text
-29 failed, 77 passed in 0.93s
+- `backend/tests/test_project_membership_service.py`
+- `backend/tests/test_project_membership_repository_postgres.py`
+- `backend/tests/test_project_context.py` 中 left/removed resolver 回归用例
+
+运行：
+
+```bash
+cd backend
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest \
+  tests/test_project_membership_service.py \
+  tests/test_project_membership_repository_postgres.py -q
 ```
 
-Failures covered the missing `url`/URL derivation API, acceptance of SQLite/memory URLs, absent pool constraints, accepted standalone checkpointer config, PostgreSQL dependencies remaining optional, database-driven postgres extra detection, and the old SQLite example contract.
+结果：预期失败，2 个测试文件均在收集阶段失败；`ProjectLastAdmin` 和成员模块尚不存在。没有先写生产实现。
 
 ## GREEN
 
-Required focused suite:
+本代理可安全执行的 focused 验证：
 
-```text
-107 passed in 0.74s
+```bash
+cd backend
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest \
+  tests/test_project_membership_service.py \
+  tests/test_project_membership_repository_postgres.py \
+  tests/test_project_context.py -q
 ```
 
-AppConfig regressions:
+结果：`15 passed, 8 skipped`。8 个 skip 都是因为当前非授权测试进程没有 `POSTGRES_TEST_URL`。
 
-```text
-18 passed in 0.20s
+相关项目回归：
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest \
+  tests/test_project_capabilities.py \
+  tests/test_project_service.py \
+  tests/test_projects_router.py \
+  tests/test_project_membership_service.py \
+  tests/test_project_context.py -q
 ```
 
-Reload-boundary contract:
+结果：`37 passed, 5 skipped, 1 warning`；warning 是既有 Starlette/httpx deprecation。
 
-```text
-10 passed in 0.16s
+格式与静态检查：
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run ruff check \
+  app/projects/membership_models.py \
+  app/projects/membership_repository.py \
+  app/projects/membership_service.py \
+  app/projects/errors.py \
+  tests/test_project_membership_service.py \
+  tests/test_project_membership_repository_postgres.py \
+  tests/test_project_context.py
 ```
 
-## Ruff
+结果：`All checks passed!`；同一文件集合 `ruff format --check` 通过。
 
-The brief-specified ruff command completed with:
+## 真实 PostgreSQL 覆盖
 
-```text
-All checks passed!
+`backend/tests/test_project_membership_repository_postgres.py` 使用既有 `migrated_postgres_database_url`，由 fixture 创建随机 `deerflow_test_*` 数据库，覆盖：
+
+- role/remove/leave 同时递增目标 membership `version` 和 project `membership_version`；
+- project `FOR UPDATE` 发生在 membership `FOR UPDATE` 之前；
+- 两名 Admin 并发自降级只有一个成功，数据库仍有一名 active Admin；
+- stale expected version 无写入；
+- change/remove 使用跨项目 membership ID 均为 `ProjectNotFound`；
+- removed membership 不再出现在成员列表；
+- left/removed 立即不能解析 `ProjectContext`；
+- `ended_at`、30 天 `retention_until`、`ended_by_user_id`、`end_reason` 正确持久化。
+
+本代理尝试按协调路径从 `.env` 给 `POSTGRES_TEST_URL` 注入本机测试数据库，但 unsandboxed 审批拒绝了“从 `.env` 读取 DATABASE_URL 并执行数据库 mutation”；按安全策略没有绕过。主代理需要在显式授权环境运行：
+
+```bash
+cd backend
+source ../.env
+POSTGRES_TEST_URL="$DATABASE_URL" uv run pytest \
+  tests/test_project_membership_service.py \
+  tests/test_project_membership_repository_postgres.py \
+  tests/test_project_context.py -q
 ```
 
-## Lockfile
+## 文件
 
-- `uv lock` completed successfully.
-- `uv lock --check` resolved 233 packages successfully.
-- Lockfile contains default `asyncpg`, `langgraph-checkpoint-postgres`, and `psycopg` dependencies.
-- Lockfile contains neither `aiosqlite` nor `langgraph-checkpoint-sqlite`, and no postgres optional-extra marker remains.
+新增：
 
-## Commit
+- `backend/app/projects/membership_models.py`
+- `backend/app/projects/membership_repository.py`
+- `backend/app/projects/membership_service.py`
+- `backend/tests/test_project_membership_service.py`
+- `backend/tests/test_project_membership_repository_postgres.py`
 
-`refactor(database): require PostgreSQL configuration` (the enclosing commit; final hash reported to the parent task after creation).
+修改：
 
-## Self-review
+- `backend/app/projects/errors.py`
+- `backend/tests/test_project_context.py`
 
-- `DatabaseConfig` rejects empty, SQLite, memory, and non-PostgreSQL schemes and forbids legacy constructor fields.
-- URL prefix conversion preserves encoded credentials, host/port/database, and query strings without double-appending `asyncpg`.
-- The independent AppConfig checkpointer field and reload path are removed; old input raises a clear validation error.
-- The temporary checkpointer shim derives only from `DatabaseConfig`, emits deprecation warnings on compatibility access, and cannot accept legacy backend state through its public setter/loader.
-- Read-only PostgreSQL aliases keep task-3 runtime imports usable without reopening backend selection; no engine/provider branch was changed.
-- Config sample contains only `$DATABASE_URL` and non-secret pool defaults; no real credentials were added.
-- `git diff --check` passed, and task 1 files are untouched.
+`backend/app/projects/context.py` 已经只解析 active project + active membership，无需修改生产代码；本任务增加真实 PostgreSQL 回归测试锁定 left/removed 的 404 行为。
 
-## Concerns
+## 自审
 
-- Legacy SQLite/memory branches still exist in engine/checkpointer/store providers by design; task 3 must remove them and delete the temporary aliases/shim.
-- Verification was limited to the brief-specified focused suites plus reload-boundary regression; the full backend suite was not requested or run.
+- mutation 的调用顺序固定为 capability 检查 → transaction → project lock → actor context active/version 重新读取 → target membership lock（含 project scope）→ expected version → last Admin 检查 → mutation/read-back → commit。actor 检查刻意放在取得 project 锁之后，避免锁等待期间沿用旧 statement snapshot 的授权预筛选结果。
+- project 行锁串行化同一项目的所有成员 mutation，因此 Admin 计数不会在两个治理事务之间形成并发丢失更新；测试以双 session `asyncio.gather` 固定该竞态。
+- target membership 查询始终包含 `project_id`，跨项目 ID 不先做 unscoped lookup，不泄露资源存在性。
+- actor scope 同时绑定 context 的 user/project/membership/version 和 active 状态；自降级、自退出或自移除后旧 context 因 membership version/status 变化立即失效。
+- 降级、移除、退出均覆盖最后 Admin；角色保持为同一值不是状态变更，因此只 read-back，不递增 version。
+- mutation read-back 位于同一 transaction；任何 DBAPI failure 由 transaction rollback 后映射为无敏感信息的 `ProjectDatabaseUnavailable`。
+- 未实现 membership 重新激活或重新加入；该能力保留给 Task 3。
+- 没有修改 Task 2 列表外的架构/路由/前端文件；Task 9 负责最终 README/AGENTS 和里程碑文档同步。
 
-## Review follow-up
+## 顾虑
 
-### STATUS
-
-PASS — resolved the 1 Important and 2 Minor review findings.
-
-### Changes
-
-- `AppConfig` now normalizes every `collections.abc.Mapping` input to a copied `dict` before null-section filtering and rejects a top-level `checkpointer` key for `dict`, `UserDict`, and custom Mapping inputs alike.
-- Removed tests that locked the deleted `deerflow-harness[postgres]` and `--extra postgres` installation guidance. The default dependency contract remains covered by pyproject assertions.
-- Corrected the Console entry in `backend/AGENTS.md`: public configuration is PostgreSQL-only through `database.url`; the memory guard is internal legacy code pending task 3 and cannot be selected through AppConfig.
-
-### RED
-
-The new focused Mapping regression failed before the validator fix:
-
-```text
-2 failed, 13 deselected in 0.20s
-```
-
-Both `UserDict` and a custom `Mapping` were accepted without raising, confirming that `checkpointer` could escape the dict-only validator.
-
-### GREEN
-
-Focused Mapping regression after the fix:
-
-```text
-2 passed, 13 deselected in 0.16s
-```
-
-Review-requested coverage suite:
-
-```text
-105 passed in 0.76s
-```
-
-### Verification
-
-- Related ruff command: `All checks passed!`
-- `uv lock --check`: `Resolved 233 packages in 4ms`
-- `git diff --check`: passed
-
-### Commit
-
-Follow-up commit subject: `fix(config): reject legacy checkpointer mappings` (final hash reported after commit).
-
-### Concerns
-
-- Provider constants still contain stale optional-extra wording, intentionally left for task 3 as requested; no test now treats that wording as a supported contract.
-
-## Second review follow-up
-
-### STATUS
-
-PASS — removed every remaining test/script fixture that treated `postgres` as a valid optional extra while preserving PostgreSQL database behavior coverage.
-
-### Pre-change rg evidence
-
-The initial audit found improper optional-extra uses in:
-
-- `backend/tests/test_persistence_scaffold.py`: missing-`asyncpg` assertion matched `uv sync --all-packages --extra postgres`.
-- `backend/tests/test_detect_uv_extras.py`: parser, formatter, `UV_EXTRAS`, and expected flag fixtures used `postgres` as a legal extra.
-- `backend/tests/test_dev_entrypoint.py`: single/multi explicit extra and validation fixtures used `postgres`.
-- `backend/tests/test_deploy_uv_extras.py`: Dockerfile passthrough, invalid glob, deploy auto-detection expectations, and Python fallback expected a postgres extra.
-- `scripts/deploy.sh`: the flag-conversion comment used `--extra postgres` as its example.
-
-This was a review-contract correction limited to tests and a script comment, so no artificial production RED was created.
-
-### Changes
-
-- Missing-`asyncpg` coverage now asserts only that the error identifies `asyncpg` and supplies installation guidance; it no longer locks a removed extra command.
-- Legal explicit extra fixtures now use actual repository extras (`ollama`, `redis`, and `discord`).
-- Deploy auto-detection coverage now proves database configuration does not add postgres, while Discord/Redis detection and explicit-extra passthrough remain covered.
-- Invalid-name fixtures use neutral/real extra names rather than implying postgres is available as an optional dependency.
-
-### Post-change rg evidence
-
-The directed audit for `UV_EXTRAS.*postgres`, `--extra postgres`, postgres parser/formatter inputs, and postgres optional-dependency assertions returned no matches. Remaining `postgres` occurrences in the covered files are limited to PostgreSQL URL/backend behavior, the config-example negative assertion, and unrelated MCP server names.
-
-### GREEN
-
-Second-review coverage suite:
-
-```text
-127 passed in 5.89s
-```
-
-### Verification
-
-- Related ruff command: `All checks passed!`
-- `uv lock --check`: `Resolved 233 packages in 3ms`
-- `git diff --check`: passed
-
-### Commit
-
-Follow-up commit subject: `test(config): stop treating postgres as an extra` (final hash reported after commit).
-
-### Concerns
-
-- Stale provider error prose still mentions the removed postgres extra and remains intentionally deferred to task 3; tests now validate only generic actionable missing-`asyncpg` guidance.
-
-## Third review follow-up
-
-### STATUS
-
-PASS — removed the remaining public postgres-extra and selectable-backend guidance from build entrypoints, Helm defaults, and English/Chinese application documentation while preserving real optional extras.
-
-### RED
-
-The three new entrypoint regressions failed before the production changes:
-
-```text
-3 failed in 4.41s
-```
-
-They proved that the detector still accepted `postgres`, the development entrypoint still emitted `--extra postgres`, and the backend Dockerfile still passed the removed extra to `uv sync`.
-
-### Changes
-
-- `backend/Dockerfile` and `docker/dev-entrypoint.sh` now reject the removed `postgres` extra with actionable guidance; generic `UV_EXTRAS` support remains for actual extras.
-- `scripts/detect_uv_extras.py` ignores an explicitly supplied removed postgres extra and explains that PostgreSQL dependencies are installed by default; `scripts/serve.sh` documents only real optional extras.
-- English and Chinese application/configuration, deployment, operations, agent/thread, and harness documentation now presents only `database.url` and PostgreSQL backup/recovery.
-- Helm defaults and documentation now use config version 22 with `database.url`, without a selectable database backend or standalone checkpointer section.
-
-### GREEN
-
-Focused new regressions:
-
-```text
-3 passed in 0.18s
-```
-
-Affected entrypoint and persistence suites:
-
-```text
-88 passed in 5.29s
-```
-
-### Verification
-
-- Related ruff command: `All checks passed!`
-- `uv lock --check`: `Resolved 233 packages in 3ms`
-- `helm lint deploy/helm/deer-flow`: `1 chart(s) linted, 0 chart(s) failed`
-- Shell syntax checks passed for `docker/dev-entrypoint.sh`, `scripts/serve.sh`, and `scripts/deploy.sh`.
-- Prettier checks passed for all 14 changed English/Chinese MDX files.
-- `git diff --check`: passed.
-- The directed public-file audit for `--extra postgres`, `UV_EXTRAS=postgres`, selectable `database.backend`, `postgres_url`, and YAML `checkpointer:` found only `backend/docs/rfc-create-deerflow-agent.md`'s Python API annotation `checkpointer: BaseCheckpointSaver | None`; that internal programmatic parameter is not public application configuration.
-
-### Commit
-
-Follow-up commit subject: `fix(config): remove postgres extra entrypoints` (final hash reported after commit).
-
-### Concerns
-
-- Legacy provider implementation branches remain intentionally deferred to task 3; public configuration and operational guidance no longer expose them.
+- 唯一未在本代理环境完成的门禁是真实 PostgreSQL GREEN；测试已写全但必须由主代理显式授权执行后才能宣称 Task 2 完整通过。
+- `account_email` 是当前 users schema 唯一稳定账户标识，按协调结论供 active 项目成员列表使用；未来若增加 display name，应由后续 schema/API 变更替换显示层，而不是在本任务猜测派生值。
