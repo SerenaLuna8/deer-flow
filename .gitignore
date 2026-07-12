@@ -66,3 +66,6 @@ config.yaml.bak
 /frontend/playwright-report/
 .gstack/
 .worktrees
+
+# Subagent-Driven Development 本地产物
+.superpowers/sdd/*
