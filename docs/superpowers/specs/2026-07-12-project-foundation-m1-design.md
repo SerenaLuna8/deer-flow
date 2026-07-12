@@ -188,6 +188,8 @@ M1 将置顶和最近进入记录保存在成员关系上，因为它们是用�
 
 - 新 migration 只面向 PostgreSQL。
 - migration 不包含 SQLite batch mode 或方言分支。
+- 若 `projects` 或 `project_memberships` 任一非空，降级必须在任何写操作前失败，禁止丢弃项目数据。
+- `users` 角色约束探测必须绑定当前 schema 的 `users` 表；同名约束定义漂移时 fail closed。
 - SQLite 只由一次性数据迁移脚本以只读方式访问，不属于应用运行后端。
 - schema 变更只通过 Alembic 执行。
 - `Base.metadata.create_all()` 不作为运行时 schema 初始化方式。

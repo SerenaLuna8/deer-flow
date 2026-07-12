@@ -728,6 +728,9 @@ Project authorization is independent and lives in `project_memberships.role` as
 `admin|editor|runner|viewer`. Project IDs are native PostgreSQL UUIDs, while foreign
 keys to the pre-existing `users.id` deliberately remain `VARCHAR(36)` UUID strings.
 Do not grant project membership implicitly from a platform role.
+Revision 0005 refuses to downgrade while either project table contains data; operators
+must migrate that data explicitly before retrying. Its users-role constraint lookup is
+bound to the current schema's `users` table and fails closed on type or definition drift.
 
 ### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
 

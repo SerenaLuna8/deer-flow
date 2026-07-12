@@ -131,6 +131,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    `system_admin` 和 `user`；项目内的 `admin`、`editor`、`runner`、`viewer` 是独立权限，
    平台管理员不会因此自动成为任何项目的成员。旧数据库中的平台 `admin` 会在升级时
    自动映射为 `system_admin`。
+   为避免误删项目，项目表或成员关系表存在数据时，数据库会拒绝降级到 0004；必须先按
+   运维方案迁出数据，不能依赖 downgrade 自动删除。
 
    从旧版 SQLite 安装迁移时，先设置 `DATABASE_URL`，并把只读来源和 repo 外备份目录
    作为参数传入。先执行 dry-run；只有所有来源都通过 schema、冲突和语义预检后才移除

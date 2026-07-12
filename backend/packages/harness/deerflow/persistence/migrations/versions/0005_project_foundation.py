@@ -23,12 +23,44 @@ def upgrade() -> None:
     # the constraint can already exist even though Alembic is only at 0004.
     op.execute(
         """
-        DO $$ BEGIN
-          IF NOT EXISTS (
-            SELECT 1 FROM pg_constraint WHERE conname = 'ck_users_system_role'
-          ) THEN
+        DO $$
+        DECLARE
+          users_oid oid := to_regclass(format('%I.users', current_schema()));
+          existing_type "char";
+          actual_expression text;
+          expected_expression text;
+        BEGIN
+          SELECT contype INTO existing_type
+          FROM pg_constraint
+          WHERE conrelid = users_oid
+            AND conname = 'ck_users_system_role';
+
+          IF existing_type IS NULL THEN
             ALTER TABLE users ADD CONSTRAINT ck_users_system_role
               CHECK (system_role IN ('system_admin', 'user'));
+          ELSIF existing_type <> 'c' THEN
+            RAISE EXCEPTION
+              'Cannot upgrade 0005_project_foundation: users role constraint type drift';
+          ELSE
+            ALTER TABLE users ADD CONSTRAINT ck_users_system_role_contract_probe
+              CHECK (system_role IN ('system_admin', 'user')) NOT VALID;
+
+            SELECT pg_get_expr(conbin, conrelid) INTO actual_expression
+            FROM pg_constraint
+            WHERE conrelid = users_oid
+              AND conname = 'ck_users_system_role'
+              AND contype = 'c';
+            SELECT pg_get_expr(conbin, conrelid) INTO expected_expression
+            FROM pg_constraint
+            WHERE conrelid = users_oid
+              AND conname = 'ck_users_system_role_contract_probe'
+              AND contype = 'c';
+
+            IF actual_expression IS DISTINCT FROM expected_expression THEN
+              RAISE EXCEPTION
+                'Cannot upgrade 0005_project_foundation: users role constraint definition drift';
+            END IF;
+            ALTER TABLE users DROP CONSTRAINT ck_users_system_role_contract_probe;
           END IF;
         END $$
         """
@@ -81,6 +113,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    has_project_data = op.get_bind().execute(sa.text("SELECT EXISTS (SELECT 1 FROM projects LIMIT 1) OR EXISTS (SELECT 1 FROM project_memberships LIMIT 1)")).scalar_one()
+    if has_project_data:
+        raise RuntimeError("Refusing to downgrade 0005_project_foundation: project data exists")
+
     op.drop_index("ix_project_memberships_user_id", table_name="project_memberships")
     op.drop_table("project_memberships")
     op.drop_table("projects")

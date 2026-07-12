@@ -392,7 +392,7 @@ def _request_with_role(system_role: str):
 @pytest.mark.asyncio
 async def test_mcp_config_requires_admin_user():
     """MCP config is system-level executable configuration, not a normal user setting."""
-    await require_admin_user(_request_with_role("admin"), detail=_ADMIN_REQUIRED_DETAIL)
+    await require_admin_user(_request_with_role("system_admin"), detail=_ADMIN_REQUIRED_DETAIL)
 
     with pytest.raises(HTTPException) as exc_info:
         await require_admin_user(_request_with_role("user"), detail=_ADMIN_REQUIRED_DETAIL)
@@ -410,7 +410,7 @@ async def test_reset_mcp_tools_cache_endpoint_requires_admin_user(monkeypatch):
 
     monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
 
-    response = await reset_mcp_tools_cache_endpoint(_request_with_role("admin"))
+    response = await reset_mcp_tools_cache_endpoint(_request_with_role("system_admin"))
 
     assert called is True
     assert response.success is True
@@ -449,7 +449,7 @@ async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path
     monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
 
     response = await update_mcp_configuration(
-        _request_with_role("admin"),
+        _request_with_role("system_admin"),
         McpConfigUpdateRequest(
             mcp_servers={
                 "github": McpServerConfigResponse(
@@ -510,7 +510,7 @@ async def test_update_mcp_configuration_preserves_omitted_routing_and_tools(monk
     monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
 
     response = await update_mcp_configuration(
-        _request_with_role("admin"),
+        _request_with_role("system_admin"),
         McpConfigUpdateRequest(
             mcp_servers={
                 "postgres": McpServerConfigResponse(
@@ -566,7 +566,7 @@ async def test_update_mcp_configuration_preserves_server_extra_fields(monkeypatc
     monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
 
     response = await update_mcp_configuration(
-        _request_with_role("admin"),
+        _request_with_role("system_admin"),
         McpConfigUpdateRequest(
             mcp_servers={
                 "playwright": McpServerConfigResponse(
