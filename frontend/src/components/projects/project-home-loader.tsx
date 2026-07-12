@@ -7,12 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useEnterProject, useProjectBySlug } from "@/core/projects/hooks";
-import type { Project } from "@/core/projects/types";
 
 import { ProjectHome } from "./project-home";
 import {
+  commitProjectHomeAttempt,
+  createProjectHomeAttemptCoordinator,
   projectHomeIdentityKey,
   projectResultForIdentity,
+  type ProjectHomeAttemptToken,
   type ProjectHomeResult,
 } from "./project-home-state";
 import { projectErrorMessage } from "./project-view-model";
@@ -25,41 +27,70 @@ export function ProjectHomeLoader({ slug }: { slug: string }) {
   const { mutate: enterProject, reset: resetEnter } = enter;
   const identity = projectHomeIdentityKey(user?.id, slug, projectId);
   const identityRef = useRef(identity);
-  const enteredRef = useRef<string | null>(null);
-  const [attemptedIdentity, setAttemptedIdentity] = useState<string | null>(
-    null,
-  );
+  const attemptsRef = useRef(createProjectHomeAttemptCoordinator());
+  const activeAttemptRef = useRef<ProjectHomeAttemptToken | null>(null);
+  const [enterFailure, setEnterFailure] = useState<{
+    identity: string;
+    error: Error;
+  } | null>(null);
   const [enteredResult, setEnteredResult] = useState<ProjectHomeResult | null>(
     null,
   );
   identityRef.current = identity;
 
   const startEnter = useCallback(
-    (nextIdentity: string, project: Project) => {
-      enteredRef.current = nextIdentity;
-      setAttemptedIdentity(nextIdentity);
+    (nextIdentity: string): ProjectHomeAttemptToken | null => {
+      const token = attemptsRef.current.start(nextIdentity);
+      if (!token) return null;
+      activeAttemptRef.current = token;
+      setEnterFailure(null);
       enterProject(undefined, {
-        onSuccess: () => {
-          if (identityRef.current === nextIdentity) {
-            setEnteredResult({ identity: nextIdentity, project });
+        onSuccess: ({ project }) => {
+          const result = commitProjectHomeAttempt(
+            attemptsRef.current,
+            token,
+            identityRef.current,
+            nextIdentity,
+            project,
+          );
+          if (activeAttemptRef.current === token) {
+            activeAttemptRef.current = null;
+          }
+          if (result) {
+            setEnteredResult(result);
+          }
+        },
+        onError: (error) => {
+          if (
+            identityRef.current === nextIdentity &&
+            attemptsRef.current.fail(token)
+          ) {
+            activeAttemptRef.current = null;
+            setEnterFailure({ identity: nextIdentity, error });
           }
         },
       });
+      return token;
     },
     [enterProject],
   );
 
   useEffect(() => {
-    if (identity && enteredRef.current === identity) return;
+    const attempts = attemptsRef.current;
+    attempts.activate(identity);
     resetEnter();
-    enteredRef.current = null;
-    setAttemptedIdentity(null);
-    setEnteredResult(null);
     if (!identity || !projectQuery.data) return;
-    startEnter(identity, projectQuery.data);
+    startEnter(identity);
+    return () => {
+      const active = activeAttemptRef.current;
+      if (active?.identity !== identity) return;
+      attempts.dispose(active);
+      activeAttemptRef.current = null;
+    };
   }, [identity, projectQuery.data, resetEnter, startEnter]);
 
-  const enterError = attemptedIdentity === identity ? enter.error : null;
+  const enterError =
+    enterFailure?.identity === identity ? enterFailure.error : null;
   const error = projectQuery.error ?? enterError;
   if (error) {
     return (
@@ -79,9 +110,9 @@ export function ProjectHomeLoader({ slug }: { slug: string }) {
               }
               resetEnter();
               setEnteredResult(null);
-              enteredRef.current = null;
+              setEnterFailure(null);
               if (identity && projectQuery.data) {
-                startEnter(identity, projectQuery.data);
+                startEnter(identity);
               }
             }}
           >
@@ -96,7 +127,7 @@ export function ProjectHomeLoader({ slug }: { slug: string }) {
   }
 
   const project = projectResultForIdentity(identity, enteredResult);
-  if (!project || enter.isPending) {
+  if (!project) {
     return (
       <div
         data-testid="project-home-loading"

@@ -2,6 +2,8 @@ import { describe, expect, test } from "@rstest/core";
 import { MutationObserver, QueryClient } from "@tanstack/react-query";
 
 import {
+  commitProjectHomeAttempt,
+  createProjectHomeAttemptCoordinator,
   projectHomeIdentityKey,
   projectResultForIdentity,
 } from "@/components/projects/project-home-state";
@@ -53,5 +55,47 @@ describe("project home identity state", () => {
         project: oldProject,
       }),
     ).toBe(oldProject);
+  });
+
+  test("restarts an enter attempt after Strict Effects cleanup", () => {
+    const identity = projectHomeIdentityKey("u1", "alpha", oldProject.id)!;
+    const attempts = createProjectHomeAttemptCoordinator();
+
+    const first = attempts.start(identity);
+    expect(first).not.toBeNull();
+    attempts.dispose(first!);
+
+    const second = attempts.start(identity);
+    expect(second).not.toBeNull();
+    expect(second).not.toEqual(first);
+    expect(attempts.fail(first!)).toBe(false);
+    expect(attempts.complete(first!)).toBe(false);
+    expect(attempts.complete(second!)).toBe(true);
+    expect(attempts.start(identity)).toBeNull();
+    attempts.activate("other-account-and-slug");
+    expect(attempts.start(identity)).not.toBeNull();
+  });
+
+  test("commits the fresh project returned by enter instead of the lookup snapshot", () => {
+    const identity = projectHomeIdentityKey("u1", "alpha", oldProject.id)!;
+    const attempts = createProjectHomeAttemptCoordinator();
+    const token = attempts.start(identity)!;
+    const enteredProject = {
+      ...oldProject,
+      role: "editor",
+      last_entered_at: "2026-07-12T12:34:56Z",
+    } as Project;
+
+    const enteredResult = commitProjectHomeAttempt(
+      attempts,
+      token,
+      identity,
+      identity,
+      enteredProject,
+    );
+    const renderedProject = projectResultForIdentity(identity, enteredResult);
+
+    expect(renderedProject).toBe(enteredProject);
+    expect(renderedProject).not.toBe(oldProject);
   });
 });
