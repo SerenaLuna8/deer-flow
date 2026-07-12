@@ -2,10 +2,15 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   CAPABILITIES,
+  changeProjectMemberRoleSchema,
+  createdProjectInvitationSchema,
   createProjectInvitationSchema,
   INVITABLE_PROJECT_ROLES,
   PROJECT_ROLES,
+  projectInvitationSchema,
+  projectMembershipSchema,
   projectPageSchema,
+  redeemedProjectInvitationSchema,
   projectSchema,
 } from "@/core/projects/types";
 
@@ -27,6 +32,17 @@ const project = {
   is_suspended: false,
   membership_version: 1,
   request_id: "trace-1",
+} as const;
+
+const invitation = {
+  id: "22222222-2222-4222-8222-222222222222",
+  project_id: project.id,
+  invited_email: "new@example.com",
+  role: "editor",
+  status: "pending",
+  expires_at: "2026-07-19T08:00:00+00:00",
+  version: 1,
+  created_at: "2026-07-12T08:00:00+00:00",
 } as const;
 
 describe("project contracts", () => {
@@ -65,6 +81,49 @@ describe("project contracts", () => {
         role: "editor",
       }).success,
     ).toBe(true);
+
+    expect(
+      projectMembershipSchema.safeParse({
+        membership_id: "33333333-3333-4333-8333-333333333333",
+        user_id: "44444444-4444-4444-8444-444444444444",
+        account_email: "admin@example.com",
+        role: "admin",
+        status: "active",
+        version: 1,
+        joined_at: "2026-07-12T08:00:00+00:00",
+      }).success,
+    ).toBe(true);
+    expect(
+      changeProjectMemberRoleSchema.safeParse({ role: "admin", version: 1 })
+        .success,
+    ).toBe(true);
+  });
+
+  test("fails closed when invitation responses contain the Admin role", () => {
+    const contracts = [
+      [projectInvitationSchema, invitation],
+      [
+        createdProjectInvitationSchema,
+        { ...invitation, invite_url_fragment: "/invite#token=secret" },
+      ],
+      [
+        redeemedProjectInvitationSchema,
+        {
+          invitation_id: invitation.id,
+          project_id: project.id,
+          project_slug: project.slug,
+          membership_id: "33333333-3333-4333-8333-333333333333",
+          role: "editor",
+        },
+      ],
+    ] as const;
+
+    for (const [schema, response] of contracts) {
+      expect(schema.safeParse(response).success).toBe(true);
+      expect(schema.safeParse({ ...response, role: "admin" }).success).toBe(
+        false,
+      );
+    }
   });
 
   test("accepts the exact public response and rejects private or drifted fields", () => {

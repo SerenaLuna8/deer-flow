@@ -152,7 +152,7 @@ export const projectInvitationSchema = z
     id: projectIdSchema,
     project_id: projectIdSchema,
     invited_email: z.string().email(),
-    role: projectRoleSchema,
+    role: invitableProjectRoleSchema,
     status: invitationStatusSchema,
     expires_at: z.string().datetime({ offset: true }),
     version: z.number().int().positive(),
@@ -187,7 +187,7 @@ export const redeemedProjectInvitationSchema = z
     project_id: projectIdSchema,
     project_slug: z.string().min(1),
     membership_id: projectIdSchema,
-    role: projectRoleSchema,
+    role: invitableProjectRoleSchema,
   })
   .strict();
 

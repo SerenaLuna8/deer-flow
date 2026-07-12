@@ -304,6 +304,49 @@ export function commitCurrentProjectMutationCallback(
   return true;
 }
 
+export function guardProjectGovernanceMutationOptions<
+  TData,
+  TError,
+  TVariables,
+  TContext,
+>(
+  options: MutateOptions<TData, TError, TVariables, TContext> | undefined,
+  commit: (callback: () => void) => boolean,
+):
+  | MutateOptions<ScopedGovernanceResult<TData>, TError, TVariables, TContext>
+  | undefined {
+  if (!options) return undefined;
+  return {
+    onSuccess: (result, variables, onMutateResult, context) => {
+      commit(() =>
+        options.onSuccess?.(result.data, variables, onMutateResult, context),
+      );
+    },
+    onError: (error, variables, onMutateResult, context) => {
+      commit(() =>
+        options.onError?.(error, variables, onMutateResult, context),
+      );
+    },
+    onSettled: (result, error, variables, onMutateResult, context) => {
+      commit(() =>
+        options.onSettled?.(
+          result?.data,
+          error,
+          variables,
+          onMutateResult,
+          context,
+        ),
+      );
+    },
+  };
+}
+
+export async function unwrapProjectGovernanceMutationResult<TData>(
+  result: Promise<ScopedGovernanceResult<TData>>,
+): Promise<TData> {
+  return (await result).data;
+}
+
 function useCurrentGovernanceMutation<TData, TError, TVariables, TContext>(
   mutation: UseMutationResult<
     ScopedGovernanceResult<TData>,
@@ -357,12 +400,7 @@ function useCurrentGovernanceMutation<TData, TError, TVariables, TContext>(
     (
       token: ProjectMutationToken,
       attempt: number,
-      options?: MutateOptions<
-        ScopedGovernanceResult<TData>,
-        TError,
-        TVariables,
-        TContext
-      >,
+      options?: MutateOptions<TData, TError, TVariables, TContext>,
     ):
       | MutateOptions<
           ScopedGovernanceResult<TData>,
@@ -371,7 +409,6 @@ function useCurrentGovernanceMutation<TData, TError, TVariables, TContext>(
           TContext
         >
       | undefined => {
-      if (!options) return undefined;
       const commit = (callback: () => void) =>
         commitCurrentProjectMutationCallback(
           scope,
@@ -381,29 +418,7 @@ function useCurrentGovernanceMutation<TData, TError, TVariables, TContext>(
           latestAttemptRef.current === attempt,
           callback,
         );
-      return {
-        onSuccess: (data, variables, onMutateResult, context) => {
-          commit(() =>
-            options.onSuccess?.(data, variables, onMutateResult, context),
-          );
-        },
-        onError: (error, variables, onMutateResult, context) => {
-          commit(() =>
-            options.onError?.(error, variables, onMutateResult, context),
-          );
-        },
-        onSettled: (data, error, variables, onMutateResult, context) => {
-          commit(() =>
-            options.onSettled?.(
-              data,
-              error,
-              variables,
-              onMutateResult,
-              context,
-            ),
-          );
-        },
-      };
+      return guardProjectGovernanceMutationOptions(options, commit);
     },
     [currentProjectId, currentUserId, scope],
   );
@@ -411,12 +426,7 @@ function useCurrentGovernanceMutation<TData, TError, TVariables, TContext>(
   const mutate = useCallback(
     (
       variables: TVariables,
-      options?: MutateOptions<
-        ScopedGovernanceResult<TData>,
-        TError,
-        TVariables,
-        TContext
-      >,
+      options?: MutateOptions<TData, TError, TVariables, TContext>,
     ) => {
       const token = scope.begin();
       scope.finish(token);
@@ -431,19 +441,16 @@ function useCurrentGovernanceMutation<TData, TError, TVariables, TContext>(
   const mutateAsync = useCallback(
     (
       variables: TVariables,
-      options?: MutateOptions<
-        ScopedGovernanceResult<TData>,
-        TError,
-        TVariables,
-        TContext
-      >,
+      options?: MutateOptions<TData, TError, TVariables, TContext>,
     ) => {
       const token = scope.begin();
       scope.finish(token);
       const attempt = latestAttemptRef.current + 1;
       latestAttemptRef.current = attempt;
       activeTokenRef.current = token;
-      return rawMutateAsync(variables, guardedOptions(token, attempt, options));
+      return unwrapProjectGovernanceMutationResult(
+        rawMutateAsync(variables, guardedOptions(token, attempt, options)),
+      );
     },
     [guardedOptions, rawMutateAsync, scope],
   );

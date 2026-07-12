@@ -54,7 +54,7 @@ export function InvitationRedemption() {
       }
       setState({ status: "redeeming" });
       redeemInvitation(undefined, {
-        onSuccess: ({ data: result }) => {
+        onSuccess: (result) => {
           if (
             coordinatorRef.current.isCurrent(attempt, currentUserRef.current)
           ) {

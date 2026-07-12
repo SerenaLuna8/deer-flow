@@ -6,7 +6,9 @@ import {
   createProjectMutationScope,
   currentProjectMutationObserverState,
   currentScopedGovernanceData,
+  guardProjectGovernanceMutationOptions,
   invalidateProjectGovernanceQueries,
+  unwrapProjectGovernanceMutationResult,
 } from "@/core/projects/hooks";
 import {
   projectDetailKey,
@@ -15,7 +17,62 @@ import {
   projectMembersKey,
 } from "@/core/projects/query-keys";
 
+type PublicData = { invitationId: string };
+type Variables = { version: number };
+
 describe("project governance query scope", () => {
+  test("exposes unwrapped mutation data while retaining the callback attempt gate", async () => {
+    const scope = createProjectMutationScope("u1", "p1");
+    const token = scope.begin();
+    const data = { invitationId: "invitation-1" };
+    const variables = { version: 2 };
+    let isLatestAttempt = true;
+    const onSuccess = rs.fn();
+    const onSettled = rs.fn();
+    const guarded = guardProjectGovernanceMutationOptions<
+      PublicData,
+      Error,
+      Variables,
+      unknown
+    >({ onSuccess, onSettled }, (callback) =>
+      commitCurrentProjectMutationCallback(
+        scope,
+        token,
+        "u1",
+        "p1",
+        isLatestAttempt,
+        callback,
+      ),
+    );
+    expect(guarded).toBeDefined();
+    if (!guarded) return;
+    const internal = { data, token };
+    const context = {
+      client: new QueryClient(),
+      meta: undefined,
+    };
+
+    guarded.onSuccess?.(internal, variables, undefined, context);
+    guarded.onSettled?.(internal, null, variables, undefined, context);
+    expect(onSuccess).toHaveBeenCalledWith(data, variables, undefined, context);
+    expect(onSettled).toHaveBeenCalledWith(
+      data,
+      null,
+      variables,
+      undefined,
+      context,
+    );
+    await expect(
+      unwrapProjectGovernanceMutationResult(Promise.resolve(internal)),
+    ).resolves.toEqual(data);
+
+    isLatestAttempt = false;
+    guarded.onSuccess?.(internal, variables, undefined, context);
+    guarded.onSettled?.(internal, null, variables, undefined, context);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
   test("keys every workspace and project governance query by account", () => {
     expect(projectKeys.workspace("u1")).toEqual(["account", "u1", "projects"]);
     expect(projectMembersKey("u1", "p1")).toEqual([
