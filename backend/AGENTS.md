@@ -707,9 +707,18 @@ digest 写 migration ledger；引用行保留原 source key，并以归一化后
 
 **Authoring a new revision**:
 ```bash
-cd backend && make migrate-rev MSG="add foo column to runs"
+cd backend && POSTGRES_ADMIN_URL="postgresql://.../postgres" make migrate-rev MSG="add foo column to runs"
 ```
-This invokes `alembic revision --autogenerate` against the live ORM models. Review the generated file under `migrations/versions/` and switch raw `op.add_column` / `op.drop_column` calls to the idempotent helpers from `_helpers.py` before committing. Production migration execution goes through the same bootstrap API used by Gateway startup: `make migrate-db` exposes that path explicitly for an existing database, while `make setup-db` is the only command allowed to create the target database.
+This creates a random `deerflow_autogen_*` PostgreSQL database from the explicit
+maintenance URL, upgrades it from migration history, invokes `alembic revision
+--autogenerate` against the live ORM models, and drops the random database in a
+`finally` block. It never falls back to `DATABASE_URL`, and it rejects non-disposable
+database names. Review the generated file under `migrations/versions/` and switch raw
+`op.add_column` / `op.drop_column` calls to the idempotent helpers from `_helpers.py`
+before committing. Production migration execution goes through the same bootstrap API
+used by Gateway startup: `make migrate-db` exposes that path explicitly for an existing
+database, while `make setup-db` is the only production command allowed to create the
+target database.
 
 **Where things live**:
 - `migrations/env.py` — PostgreSQL-only alembic environment; delegates filtering to `_env_filters.py`
