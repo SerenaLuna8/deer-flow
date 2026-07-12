@@ -286,6 +286,7 @@ class UserReconciliationRequest:
 @dataclass(frozen=True)
 class AbsorbedUser:
     source_key: str
+    source_user_id: str
     target_key: str
     audit_digest: str
     canonical_digest: str
@@ -929,6 +930,11 @@ async def _migrate_business_table(
                         raise MigrationError("reconciled canonical user verification conflict")
                     already += 1
                     continue
+                if await connection.fetchval(
+                    'SELECT 1 FROM "users" WHERE "id" IS NOT DISTINCT FROM $1',
+                    absorbed_user.source_user_id,
+                ):
+                    raise MigrationError("absorbed legacy user target already exists")
                 if dry_run:
                     adopted += 1
                     continue
@@ -1840,6 +1846,7 @@ def _build_user_reconciliations(
         absorbed[source_index].append(
             AbsorbedUser(
                 row.source_key,
+                str(row.values["id"]),
                 canonical_target_key,
                 audit_digest,
                 canonical.digest,

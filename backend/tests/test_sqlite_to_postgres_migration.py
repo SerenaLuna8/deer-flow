@@ -380,6 +380,54 @@ def _add_scheduled_task(path: Path, task_id: str, user_id: str) -> None:
         )
 
 
+def _add_later_user_business_rows(path: Path, user_id: str) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """CREATE TABLE threads_meta (
+            thread_id TEXT PRIMARY KEY, assistant_id TEXT, user_id TEXT,
+            display_name TEXT, status TEXT NOT NULL, metadata_json JSON NOT NULL,
+            created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL);
+            CREATE TABLE runs (
+            run_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, assistant_id TEXT,
+            user_id TEXT, status TEXT NOT NULL, model_name TEXT,
+            multitask_strategy TEXT NOT NULL, metadata_json JSON NOT NULL,
+            kwargs_json JSON NOT NULL, error TEXT, message_count INTEGER NOT NULL,
+            first_human_message TEXT, last_ai_message TEXT,
+            total_input_tokens INTEGER NOT NULL, total_output_tokens INTEGER NOT NULL,
+            total_tokens INTEGER NOT NULL, llm_call_count INTEGER NOT NULL,
+            lead_agent_tokens INTEGER NOT NULL, subagent_tokens INTEGER NOT NULL,
+            middleware_tokens INTEGER NOT NULL, token_usage_by_model JSON NOT NULL,
+            follow_up_to_run_id TEXT, created_at TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP NOT NULL);
+            CREATE TABLE run_events (
+            id INTEGER PRIMARY KEY, thread_id TEXT NOT NULL, run_id TEXT NOT NULL,
+            user_id TEXT, event_type TEXT NOT NULL, category TEXT NOT NULL,
+            content TEXT NOT NULL, event_metadata JSON NOT NULL, seq INTEGER NOT NULL,
+            created_at TIMESTAMP NOT NULL);
+            CREATE TABLE feedback (
+            feedback_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+            user_id TEXT, message_id TEXT, rating INTEGER NOT NULL, comment TEXT,
+            created_at TIMESTAMP NOT NULL);"""
+        )
+        timestamp = "2026-07-12T00:00:00+00:00"
+        connection.execute(
+            "INSERT INTO threads_meta VALUES ('thread-later',NULL,?,'later','active','{}',?,?)",
+            (user_id, timestamp, timestamp),
+        )
+        connection.execute(
+            "INSERT INTO runs VALUES ('run-later','thread-later',NULL,?,'completed',NULL,'reject','{}','{}',NULL,0,NULL,NULL,0,0,0,0,0,0,0,'{}',NULL,?,?)",
+            (user_id, timestamp, timestamp),
+        )
+        connection.execute(
+            "INSERT INTO run_events VALUES (1,'thread-later','run-later',?,'run.completed','lifecycle','{}','{}',1,?)",
+            (user_id, timestamp),
+        )
+        connection.execute(
+            "INSERT INTO feedback VALUES ('feedback-later','run-later','thread-later',?,NULL,5,NULL,?)",
+            (user_id, timestamp),
+        )
+
+
 def _reconciliation_request(sources: list[Path], expected: int = 1) -> UserReconciliationRequest:
     return UserReconciliationRequest(
         source_sha256=tuple(hashlib.sha256(source.read_bytes()).hexdigest() for source in sources),
@@ -394,6 +442,7 @@ def test_explicit_user_reconciliation_builds_one_ordered_absorption(tmp_path: Pa
     _user_source_with_role(second, "legacy-admin", "same@example.invalid", "admin")
     _add_scheduled_task(first, "task-first", "canonical-user")
     _add_scheduled_task(second, "task-second", "legacy-admin")
+    _add_later_user_business_rows(second, "legacy-admin")
 
     plan = _preflight_cross_source([first, second], _reconciliation_request([first, second]))
 
@@ -517,6 +566,18 @@ def test_incomplete_or_non_opted_reconciliation_stops_before_target_connect(tmp_
 
 
 def test_fixed_user_reference_allowlist_remaps_owner_but_never_external_bot() -> None:
+    assert USER_REFERENCE_ALLOWLIST == frozenset(
+        {
+            ("threads_meta", "user_id"),
+            ("runs", "user_id"),
+            ("run_events", "user_id"),
+            ("feedback", "user_id"),
+            ("scheduled_tasks", "user_id"),
+            ("channel_connections", "owner_user_id"),
+            ("channel_oauth_states", "owner_user_id"),
+            ("channel_conversations", "owner_user_id"),
+        }
+    )
     assert ("channel_connections", "owner_user_id") in USER_REFERENCE_ALLOWLIST
     assert ("channel_connections", "bot_user_id") not in USER_REFERENCE_ALLOWLIST
     row = NormalizedRow(
@@ -607,6 +668,9 @@ async def test_absorbed_user_ledger_is_auditable_and_idempotent(tmp_path: Path) 
                 return dict(canonical.canonical_values)
             raise AssertionError(sql)
 
+        async def fetchval(self, *_args):
+            return None
+
         async def execute(self, sql, *args):
             assert "INSERT INTO migration_ledger" in sql
             self.ledger = {
@@ -642,6 +706,55 @@ async def test_absorbed_user_ledger_is_auditable_and_idempotent(tmp_path: Path) 
     assert connection.ledger["row_digest"] == canonical.audit_digest
     assert first_report.adopted == 1
     assert second_report.already_migrated == 1
+
+
+@pytest.mark.asyncio
+async def test_absorbed_user_rejects_preexisting_legacy_target_before_ledger(tmp_path: Path) -> None:
+    first = tmp_path / "first.db"
+    second = tmp_path / "second.db"
+    _user_source_with_role(first, "canonical-user", "same@example.invalid", "system_admin")
+    _user_source_with_role(second, "legacy-admin", "same@example.invalid", "admin")
+    plan = _preflight_cross_source([first, second], _reconciliation_request([first, second]))
+    decision = plan.per_source_reconciliations[1]
+
+    class Transaction:
+        async def start(self):
+            return None
+
+        async def rollback(self):
+            return None
+
+    class Connection:
+        def __init__(self):
+            self.ledger_written = False
+
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, sql, *_args):
+            if "FROM migration_ledger" in sql:
+                return None
+            raise AssertionError(sql)
+
+        async def fetchval(self, sql, *_args):
+            assert 'FROM "users"' in sql
+            return 1
+
+        async def execute(self, *_args):
+            self.ledger_written = True
+
+    connection = Connection()
+    with pytest.raises(MigrationError):
+        await _migrate_business_table(
+            connection,
+            second,
+            hashlib.sha256(second.read_bytes()).hexdigest(),
+            "users",
+            dry_run=False,
+            union_reference_keys=plan.per_source_reference_keys[1],
+            reconciliation=decision,
+        )
+    assert connection.ledger_written is False
 
 
 def test_migration_ledger_is_registered_with_unique_source_identity() -> None:
@@ -1141,6 +1254,7 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
     _add_scheduled_task(sources[0], "task-first", "canonical-user")
     _user_source_with_role(sources[1], "legacy-admin", "same@example.invalid", "admin")
     _add_scheduled_task(sources[1], "task-second", "legacy-admin")
+    _add_later_user_business_rows(sources[1], "legacy-admin")
     request = _reconciliation_request(sources)
     plan = _preflight_cross_source(sources, request)
 
@@ -1152,7 +1266,8 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
             union_reference_keys=plan.per_source_reference_keys[index],
             source_reconciliation=plan.per_source_reconciliations[index],
         )
-    for _replay in range(2):
+
+    async def migrate_all() -> None:
         for index, source in enumerate(sources):
             await migrate_source(
                 source,
@@ -1162,12 +1277,16 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
                 source_reconciliation=plan.per_source_reconciliations[index],
             )
 
+    await migrate_all()
     connection = await asyncpg.connect(_asyncpg_url(migrated_postgres_database_url))
     try:
         assert await connection.fetchval("SELECT COUNT(*) FROM users") == 1
         assert await connection.fetchval("SELECT system_role FROM users") == "system_admin"
         assert await connection.fetchval("SELECT COUNT(*) FROM scheduled_tasks") == 2
         assert await connection.fetchval("SELECT COUNT(DISTINCT user_id) FROM scheduled_tasks") == 1
+        for table in ("threads_meta", "runs", "run_events", "feedback"):
+            assert await connection.fetchval(f'SELECT COUNT(*) FROM "{table}"') == 1
+            assert await connection.fetchval(f'SELECT COUNT(*) FROM "{table}" WHERE user_id=$1', "canonical-user") == 1
         second_sha = hashlib.sha256(sources[1].read_bytes()).hexdigest()
         absorbed_key = plan.per_source_reconciliations[1].absorbed_users[0].source_key
         ledger = await connection.fetchrow(
@@ -1178,13 +1297,45 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
         assert ledger is not None
         assert ledger["status"] == "reconciled"
         assert ledger["target_key"] == plan.per_source_reconciliations[1].absorbed_users[0].target_key
-        assert (
-            await connection.fetchval(
-                "SELECT COUNT(*) FROM migration_ledger WHERE source_sha256=$1 AND source_table='scheduled_tasks'",
+        for table in ("threads_meta", "runs", "run_events", "feedback", "scheduled_tasks"):
+            source_rows = normalize_business_rows(sources[1], table)
+            remapped = _apply_user_reconciliation(table, source_rows, plan.per_source_reconciliations[1])
+            assert len(remapped) == 1
+            audit = await connection.fetchrow(
+                "SELECT target_key,row_digest,status FROM migration_ledger WHERE source_sha256=$1 AND source_table=$2 AND source_key=$3",
                 second_sha,
+                table,
+                source_rows[0].source_key,
             )
-            == 1
+            assert audit is not None
+            assert audit["target_key"] == remapped[0].target_key
+            assert audit["row_digest"] == remapped[0].digest
+            assert audit["status"] in {"migrated", "adopted"}
+        before_replay = (
+            await connection.fetchval("SELECT COUNT(*) FROM users"),
+            await connection.fetchval("SELECT COUNT(*) FROM scheduled_tasks"),
+            await connection.fetchval("SELECT COUNT(*) FROM threads_meta"),
+            await connection.fetchval("SELECT COUNT(*) FROM runs"),
+            await connection.fetchval("SELECT COUNT(*) FROM run_events"),
+            await connection.fetchval("SELECT COUNT(*) FROM feedback"),
+            await connection.fetchval("SELECT COUNT(*) FROM migration_ledger"),
         )
+    finally:
+        await connection.close()
+
+    await migrate_all()
+    connection = await asyncpg.connect(_asyncpg_url(migrated_postgres_database_url))
+    try:
+        after_replay = (
+            await connection.fetchval("SELECT COUNT(*) FROM users"),
+            await connection.fetchval("SELECT COUNT(*) FROM scheduled_tasks"),
+            await connection.fetchval("SELECT COUNT(*) FROM threads_meta"),
+            await connection.fetchval("SELECT COUNT(*) FROM runs"),
+            await connection.fetchval("SELECT COUNT(*) FROM run_events"),
+            await connection.fetchval("SELECT COUNT(*) FROM feedback"),
+            await connection.fetchval("SELECT COUNT(*) FROM migration_ledger"),
+        )
+        assert after_replay == before_replay
     finally:
         await connection.close()
 

@@ -679,6 +679,8 @@ Store 在 raw SQL transaction 内验证 timestamp/TTL/value 并提交 ledger 后
 被吸收 users 行不写第二个用户，而以 `status=reconciled`、canonical target key 和决策
 digest 写 migration ledger；引用行保留原 source key，并以归一化后的 target key/digest
 写 ledger。原 source、dry-run 和 backup 规则不变，snapshot 必须重建出完全相同的决策。
+首次写被吸收 users ledger 前还必须确认目标库不存在其 legacy 原 id；若已存在且没有匹配
+的 `reconciled` ledger，users 事务立即回滚，禁止把既有目标用户静默吸收。
 
 用户引用禁止按列名或未声明的 SQLAlchemy FK 猜测。固定 allowlist 仅为
 `threads_meta.user_id`、`runs.user_id`、`run_events.user_id`、`feedback.user_id`、

@@ -29,6 +29,8 @@ digest。迁移前的跨源 PK/unique/FK 计划、dry-run、backup snapshot 复�
 被吸收 users source row 写入 `migration_ledger`，状态为 `reconciled`，target key 指向
 canonical users row，digest 绑定原行、canonical 行和归并决策。所有 FK 改写行保留原
 source key，但 target key/digest 对应归一化后的目标行，因此重跑可验证且可审计。
+首次写该 ledger 前必须确认目标库中 legacy 原 user id 不存在；若已存在且尚无匹配的
+`reconciled` ledger，必须在 users 事务中失败并保持 ledger 不变。
 
 ## 安全边界
 
