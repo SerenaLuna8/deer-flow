@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import tempfile
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -193,6 +194,24 @@ class MigrationError(RuntimeError):
             fields.append(f"key={self.key_hash}")
         return " ".join(fields)
 
+    def enrich(
+        self,
+        *,
+        code: MigrationErrorCode | None = None,
+        table: str | None = None,
+        source_sha256: str | None = None,
+        source_key: str | None = None,
+    ) -> MigrationError:
+        if code is not None and self.code == MigrationErrorCode.MIGRATION:
+            self.code = code
+        if self.table is None and table is not None:
+            self.table = table
+        if self.source_sha256_prefix is None and source_sha256:
+            self.source_sha256_prefix = source_sha256[:12]
+        if self.key_hash is None and source_key:
+            self.key_hash = hashlib.sha256(source_key.encode()).hexdigest()[:12]
+        return self
+
 
 @dataclass(frozen=True)
 class SourceInspection:
@@ -255,7 +274,7 @@ class MigrationReport:
     deferred_empty: tuple[str, ...]
     verified: bool
     source_size_bytes: int = 0
-    atomicity: str = "ORM, checkpoint writes, and store rows commit with ledger per table; checkpoint Saver writes converge through conflict preflight, semantic read-back, and ledger replay"
+    atomicity: str = "ORM, checkpoint writes, and store rows commit with ledger per table; checkpoint and blobs use direct transactional insert-or-compare with in-transaction semantic reconstruction, followed by Saver read-back and replay-safe ledger convergence"
 
 
 @dataclass(frozen=True)
@@ -263,6 +282,7 @@ class UnionPlan:
     reference_keys: frozenset[tuple[str, tuple[str, ...], str]]
     per_source_reference_keys: tuple[frozenset[tuple[str, tuple[str, ...], str]], ...] = ()
     per_source_checkpoint_keys: tuple[frozenset[tuple[str, str, str]], ...] = ()
+    source_fingerprints: tuple[tuple[str, int], ...] = ()
 
 
 def _known_orm_columns() -> dict[str, frozenset[str]]:
@@ -273,23 +293,37 @@ def _known_orm_columns() -> dict[str, frozenset[str]]:
 
 
 def inspect_source(source: Path) -> SourceInspection:
-    for suffix in ("-wal", "-shm"):
-        sidecar = source.with_name(f"{source.name}{suffix}")
-        if sidecar.exists() and sidecar.stat().st_size:
-            raise MigrationError("active SQLite WAL/SHM sidecar detected")
     try:
         inventory = inspect_sqlite(source)
     except Exception as exc:
         raise MigrationError("SQLite source inventory or integrity check failed") from exc
+    for suffix in ("-wal", "-shm"):
+        sidecar = source.with_name(f"{source.name}{suffix}")
+        if sidecar.exists() and sidecar.stat().st_size:
+            raise MigrationError(
+                "active SQLite WAL/SHM sidecar detected",
+                code=MigrationErrorCode.FINGERPRINT,
+                source_sha256=inventory.sha256,
+            )
     known_columns = _known_orm_columns()
     deferred = []
     allowed = set(ORM_TABLE_ORDER) | LANGGRAPH_SOURCE_TABLES | SOURCE_METADATA_TABLES | DEFERRED_EMPTY_TABLES
     for table in inventory.tables:
         if table.name not in allowed:
-            raise MigrationError(f"unknown source table: {table.name}")
+            raise MigrationError(
+                f"unknown source table: {table.name}",
+                code=MigrationErrorCode.SCHEMA,
+                table=table.name,
+                source_sha256=inventory.sha256,
+            )
         if table.name in DEFERRED_EMPTY_TABLES:
             if table.row_count:
-                raise MigrationError(f"deferred source table is not empty: {table.name}")
+                raise MigrationError(
+                    f"deferred source table is not empty: {table.name}",
+                    code=MigrationErrorCode.CONFLICT,
+                    table=table.name,
+                    source_sha256=inventory.sha256,
+                )
             deferred.append(table.name)
         if table.name in known_columns:
             unknown = sorted(set(table.columns) - known_columns[table.name])
@@ -340,7 +374,11 @@ def inspect_source(source: Path) -> SourceInspection:
 
 def _require_fingerprint(inventory: SQLiteInventory, expected: tuple[str, int] | None) -> None:
     if expected is not None and (inventory.sha256, inventory.size_bytes) != expected:
-        raise MigrationError("SQLite source fingerprint changed after preflight")
+        raise MigrationError(
+            "SQLite source fingerprint changed after preflight",
+            code=MigrationErrorCode.FINGERPRINT,
+            source_sha256=inventory.sha256,
+        )
 
 
 def backup_source(
@@ -704,8 +742,10 @@ async def _migrate_business_table(
     inserted = adopted = already = planned = 0
     transaction = connection.transaction()
     await transaction.start()
+    current_source_key = None
     try:
         for row in rows:
+            current_source_key = row.source_key
             ledger = await _ledger_row(connection, source_sha256, table, row.source_key)
             if ledger is not None:
                 _validate_ledger(ledger, target_table=table, target_key=row.target_key, digest=row.digest)
@@ -749,11 +789,13 @@ async def _migrate_business_table(
             await transaction.rollback()
         else:
             await transaction.commit()
-    except Exception:
+    except Exception as exc:
         try:
             await transaction.rollback()
         except Exception:
             pass
+        if isinstance(exc, MigrationError):
+            raise exc.enrich(table=table, source_sha256=source_sha256, source_key=current_source_key)
         raise
     return TableMigrationReport(
         source_rows=len(rows),
@@ -1087,8 +1129,14 @@ async def _verify_writes_with_saver(target_url: str, writes: list[DecodedWrite])
         for (thread_id, namespace, checkpoint_id), rows in grouped.items():
             checkpoint = await saver.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace, "checkpoint_id": checkpoint_id}})
             expected = [(row.task_id, row.channel, row.value) for row in sorted(rows, key=lambda item: (item.task_id, item.idx))]
-            if checkpoint is None or _json_canonical(checkpoint.pending_writes) != _json_canonical(expected):
+            if checkpoint is None or not _pending_writes_contains(checkpoint.pending_writes, expected):
                 raise MigrationError("checkpoint write Saver semantic read-back failed")
+
+
+def _pending_writes_contains(actual: list[tuple[Any, Any, Any]], expected: list[tuple[Any, Any, Any]]) -> bool:
+    actual_counts = Counter(_json_canonical(item) for item in actual)
+    expected_counts = Counter(_json_canonical(item) for item in expected)
+    return all(actual_counts[item] >= count for item, count in expected_counts.items())
 
 
 def _decode_store_rows(source: Path) -> list[NormalizedRow]:
@@ -1336,6 +1384,8 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
         )
         if not preflight.verified:
             raise MigrationError("dry-run verification failed")
+        if (preflight.source_sha256, preflight.source_size_bytes) != union_plan.source_fingerprints[index]:
+            raise MigrationError("SQLite source fingerprint changed after ordered plan")
         preflights.append((source, preflight))
     if args.dry_run:
         for source, report in preflights:
@@ -1352,14 +1402,27 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
         )
         frozen_sources.append((source, _report, backup))
         print(f"备份: {backup.path.name} / SHA256 {backup.sha256[:12]}")
+    snapshot_paths = [item[2].path for item in frozen_sources]
+    snapshot_plan = _preflight_cross_source(snapshot_paths)
+    if snapshot_plan.source_fingerprints != union_plan.source_fingerprints:
+        raise MigrationError("backup snapshot plan fingerprint mismatch")
+    for index, snapshot in enumerate(snapshot_paths):
+        await migrate_source(
+            snapshot,
+            target_url,
+            dry_run=True,
+            expected_fingerprint=snapshot_plan.source_fingerprints[index],
+            union_reference_keys=snapshot_plan.per_source_reference_keys[index],
+            planned_checkpoint_keys=snapshot_plan.per_source_checkpoint_keys[index],
+        )
     for index, (source, _report, backup) in enumerate(frozen_sources):
         report = await migrate_source(
             backup.path,
             target_url,
             dry_run=False,
             expected_fingerprint=(_report.source_sha256, _report.source_size_bytes),
-            union_reference_keys=union_plan.per_source_reference_keys[index],
-            planned_checkpoint_keys=union_plan.per_source_checkpoint_keys[index],
+            union_reference_keys=snapshot_plan.per_source_reference_keys[index],
+            planned_checkpoint_keys=snapshot_plan.per_source_checkpoint_keys[index],
         )
         if not report.verified:
             raise MigrationError("migration verification failed")
@@ -1377,8 +1440,10 @@ def _preflight_cross_source(sources: list[Path]) -> UnionPlan:
         seen[identity] = digest
 
     business_rows: list[tuple[str, NormalizedRow]] = []
+    source_fingerprints = []
     for source in sources:
         inspection = inspect_source(source)
+        source_fingerprints.append((inspection.inventory.sha256, inspection.inventory.size_bytes))
         table_names = {table.name for table in inspection.inventory.tables}
         for table in ORM_TABLE_ORDER:
             if table in table_names:
@@ -1439,6 +1504,7 @@ def _preflight_cross_source(sources: list[Path]) -> UnionPlan:
         frozenset(reference_keys),
         tuple(per_source_refs),
         tuple(per_source_checkpoints),
+        tuple(source_fingerprints),
     )
 
 

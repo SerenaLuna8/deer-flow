@@ -17,11 +17,13 @@ from deerflow.persistence.migration_ledger import MigrationLedgerRow
 from scripts.migrate_sqlite_to_postgres import (
     DecodedCheckpoint,
     MigrationError,
+    MigrationErrorCode,
     MigrationReport,
     TableMigrationReport,
     UnionPlan,
     _business_unique_keys,
     _json_canonical,
+    _pending_writes_contains,
     _preflight_cross_source,
     _run_cli,
     _strict_insert_checkpoint,
@@ -88,6 +90,17 @@ def test_cli_redacts_target_url_and_business_error(
     assert secret not in rendered
     assert "synthetic business value" not in rendered
     assert "postgresql://" not in rendered
+
+
+def test_safe_error_context_enriches_without_overwriting_and_hashes_key() -> None:
+    error = MigrationError("conflict", code=MigrationErrorCode.CONFLICT, table="users")
+    error.enrich(table="runs", source_sha256="a" * 64, source_key='["private-business-key"]')
+    rendered = error.safe_fields()
+    assert "code=conflict" in rendered
+    assert "table=users" in rendered
+    assert "source=aaaaaaaaaaaa" in rendered
+    assert "key=" in rendered
+    assert "private-business-key" not in rendered
 
 
 def _sqlite(path: Path, statements: str) -> None:
@@ -468,6 +481,7 @@ async def test_multi_source_cli_preflights_every_source_before_backup_or_write(t
             frozenset(),
             (frozenset(), frozenset()),
             (frozenset(), frozenset()),
+            (("a" * 64, 0), ("a" * 64, 0)),
         ),
     )
     monkeypatch.setattr("scripts.migrate_sqlite_to_postgres.migrate_source", fake_migrate)
@@ -481,7 +495,14 @@ async def test_multi_source_cli_preflights_every_source_before_backup_or_write(t
         "postgresql://credential-must-not-render@localhost/deerflow_test_1_abc",
     )
 
-    assert calls == [("one.db", True), ("two.db", True), ("one.bak", False), ("two.bak", False)]
+    assert calls == [
+        ("one.db", True),
+        ("two.db", True),
+        ("one.bak", True),
+        ("two.bak", True),
+        ("one.bak", False),
+        ("two.bak", False),
+    ]
     assert backups == ["one.db", "two.db"]
 
 
@@ -506,6 +527,14 @@ def test_channel_active_identity_partial_unique_ignores_revoked_only() -> None:
     connected = dict(base, status="connected")
     assert "uq_channel_connection_active_identity" not in {name for name, _key in _business_unique_keys("channel_connections", revoked)}
     assert "uq_channel_connection_active_identity" in {name for name, _key in _business_unique_keys("channel_connections", connected)}
+
+
+def test_saver_pending_writes_verifier_allows_extra_and_requires_multiplicity() -> None:
+    expected = [("task-a", "result", {"ok": True}), ("task-a", "result", {"ok": True})]
+    actual = [("earlier-task", "result", 1), *expected]
+    assert _pending_writes_contains(actual, expected) is True
+    assert _pending_writes_contains(actual[:-1], expected) is False
+    assert _pending_writes_contains([("task-a", "result", {"ok": False}), *actual[:1]], expected) is False
 
 
 @pytest.mark.asyncio
