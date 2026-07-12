@@ -22,6 +22,7 @@ class RedactedURL(str):
 
 
 _TEST_DATABASE_PATTERN = re.compile(r"deerflow_test_[0-9]+_[0-9a-f]{32}\Z")
+_CLEANUP_FAILURE_NOTE = "cleanup of isolated PostgreSQL test database also failed"
 
 
 def _validate_test_database_name(database: str) -> None:
@@ -37,6 +38,22 @@ def replace_database(url: str, database: str) -> str:
     return parsed.set(database=database).render_as_string(hide_password=False)
 
 
+def _raise_or_note_cleanup_failure(
+    primary_error: BaseException | None,
+    cleanup_error: BaseException,
+) -> None:
+    if primary_error is not None:
+        if _CLEANUP_FAILURE_NOTE not in getattr(primary_error, "__notes__", ()):
+            primary_error.add_note(_CLEANUP_FAILURE_NOTE)
+        return
+    if isinstance(cleanup_error, asyncio.CancelledError):
+        cleanup_error.args = ()
+        raise cleanup_error
+    if isinstance(cleanup_error, Exception):
+        raise RuntimeError("unable to clean up isolated PostgreSQL test database") from None
+    raise cleanup_error
+
+
 @asynccontextmanager
 async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
     """Create a generated test database and always terminate/drop it."""
@@ -44,6 +61,7 @@ async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
     _validate_test_database_name(database)
 
     admin_engine = create_async_engine(replace_database(admin_url, "postgres"), isolation_level="AUTOCOMMIT")
+    primary_error: BaseException | None = None
     try:
         try:
             async with admin_engine.connect() as connection:
@@ -67,14 +85,12 @@ async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
                     )
                     await connection.execute(text(f'DROP DATABASE IF EXISTS "{database}"'))
             except BaseException as cleanup_error:
-                if body_error is not None:
-                    body_error.add_note("cleanup of isolated PostgreSQL test database also failed")
-                elif isinstance(cleanup_error, asyncio.CancelledError):
-                    cleanup_error.args = ()
-                    raise
-                elif isinstance(cleanup_error, Exception):
-                    raise RuntimeError("unable to clean up isolated PostgreSQL test database") from None
-                else:
-                    raise
+                _raise_or_note_cleanup_failure(body_error, cleanup_error)
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
-        await admin_engine.dispose()
+        try:
+            await admin_engine.dispose()
+        except BaseException as cleanup_error:
+            _raise_or_note_cleanup_failure(primary_error, cleanup_error)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import inspect as sa_inspect
@@ -184,6 +184,8 @@ async def test_empty_bootstrap_cleanup_waits_through_repeated_cancellation() -> 
     completed = asyncio.Event()
 
     class Connection:
+        execute = AsyncMock()
+
         async def run_sync(self, _function):
             started.set()
             await release.wait()
@@ -213,3 +215,62 @@ async def test_empty_bootstrap_cleanup_waits_through_repeated_cancellation() -> 
     await helper
     assert completed.is_set() is True
     assert not any(task.get_name() == "deerflow-empty-bootstrap-cleanup" for task in asyncio.all_tasks())
+
+    assert 0 < bootstrap_module._EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS
+    assert bootstrap_module._EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS <= bootstrap_module._EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS
+    assert [str(await_call.args[0]) for await_call in Connection.execute.await_args_list] == [
+        "SELECT set_config('lock_timeout', :value, true)",
+        "SELECT set_config('statement_timeout', :value, true)",
+    ]
+    assert [await_call.args[1] for await_call in Connection.execute.await_args_list] == [
+        {"value": f"{bootstrap_module._EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS}ms"},
+        {"value": f"{bootstrap_module._EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS}ms"},
+    ]
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_failed_empty_bootstrap_cleanup_is_bounded_by_database_deadline(
+    postgres_database_url: str,
+    monkeypatch,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    holder_engine = create_async_engine(postgres_database_url)
+    probe_engine = create_async_engine(postgres_database_url)
+    stamp_started = threading.Event()
+    release_stamp = threading.Event()
+    stamp_error = RuntimeError("stamp failed")
+
+    def fail_stamp(*_args, **_kwargs):
+        stamp_started.set()
+        release_stamp.wait(timeout=2)
+        raise stamp_error
+
+    monkeypatch.setattr(bootstrap_module, "_stamp", fail_stamp)
+    monkeypatch.setattr(bootstrap_module, "_EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS", 100)
+    monkeypatch.setattr(bootstrap_module, "_EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS", 250)
+    task = asyncio.create_task(bootstrap_schema(engine))
+    try:
+        assert await asyncio.to_thread(stamp_started.wait, 1)
+        async with holder_engine.begin() as holder:
+            await holder.execute(text("LOCK TABLE runs IN ACCESS SHARE MODE"))
+            release_stamp.set()
+            started = asyncio.get_running_loop().time()
+            with pytest.raises(RuntimeError, match="stamp failed") as exc_info:
+                await asyncio.wait_for(task, timeout=2)
+            assert exc_info.value is stamp_error
+            assert asyncio.get_running_loop().time() - started < 1.5
+            assert not any(pending.get_name() == "deerflow-empty-bootstrap-cleanup" for pending in asyncio.all_tasks())
+            async with probe_engine.connect() as probe:
+                assert await probe.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": bootstrap_module._PG_LOCK_KEY}) is True
+                await probe.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": bootstrap_module._PG_LOCK_KEY},
+                )
+    finally:
+        release_stamp.set()
+        if not task.done():
+            task.cancel()
+        await engine.dispose()
+        await holder_engine.dispose()
+        await probe_engine.dispose()

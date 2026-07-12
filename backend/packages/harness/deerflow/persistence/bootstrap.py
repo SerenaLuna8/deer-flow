@@ -91,6 +91,12 @@ _BASELINE_REVISION = "0001_baseline"
 # releases the prior lock).
 _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
 
+# Failed empty-schema cleanup must finish before the advisory lock is released,
+# but destructive DDL must not wait forever on another session's table lock.
+# Connection acquisition remains bounded by the engine's configured pool_timeout.
+_EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS = 5_000
+_EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS = 10_000
+
 
 # Tables created by ``0001_baseline.upgrade()``. The legacy branch restricts
 # its ``create_all`` backfill to this set so it does NOT pre-empt later
@@ -267,11 +273,21 @@ async def _attempt_failed_empty_bootstrap_cleanup(engine: AsyncEngine) -> None:
 
     Caller cancellation is deliberately absorbed while cleanup is in flight:
     returning early would release the advisory lock while destructive cleanup
-    was still running on a detached task.
+    was still running on a detached task. Once a connection is acquired (which
+    is governed by the engine's pool_timeout), transaction-local PostgreSQL
+    deadlines bound lock waits and the cleanup statement itself.
     """
 
     async def cleanup() -> None:
         async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT set_config('lock_timeout', :value, true)"),
+                {"value": f"{_EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS}ms"},
+            )
+            await conn.execute(
+                text("SELECT set_config('statement_timeout', :value, true)"),
+                {"value": f"{_EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS}ms"},
+            )
             await conn.run_sync(_reset_failed_empty_bootstrap_sync)
 
     task = asyncio.create_task(cleanup(), name="deerflow-empty-bootstrap-cleanup")
