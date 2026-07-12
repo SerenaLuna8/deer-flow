@@ -666,6 +666,10 @@ snapshot，不再重新读取可能变化的原 source。checkpoint+blob 在一�
 内直接重建并核对 semantic digest，writes 在同事务核对完整 PK、task_path/channel/value
 后才写 ledger，提交后再用 Saver pending_writes 二次验证。channel active identity 的 partial
 unique 显式使用 `status != 'revoked'`，revoked 行不参与冲突集合。
+Store 在 raw SQL transaction 内验证 timestamp/TTL/value 并提交 ledger 后，还必须通过
+`AsyncPostgresStore.aget(..., refresh_ttl=False)` 做公共 API semantic read-back。迁移错误只
+输出结构化安全字段（code、table、source SHA 前缀、stable key hash），不得渲染原始异常、
+业务值、路径或连接 URL。
 
 **Authoring a new revision**:
 ```bash

@@ -32,6 +32,7 @@ from scripts.migrate_sqlite_to_postgres import (
     _preflight_foreign_keys,
     _run_cli,
     _strict_insert_checkpoint,
+    _verify_store_rows_with_api,
     backup_source,
     decode_checkpoint_rows,
     inspect_source,
@@ -215,8 +216,11 @@ def test_inspect_source_rejects_unknown_columns_and_preserves_source(tmp_path: P
 def test_inspect_source_rejects_incomplete_schema_even_when_empty(tmp_path: Path) -> None:
     source = tmp_path / "incomplete-empty.db"
     _sqlite(source, "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL);")
-    with pytest.raises(MigrationError, match="unsupported users source schema"):
+    with pytest.raises(MigrationError, match="unsupported users source schema") as captured:
         inspect_source(source)
+    assert captured.value.code == MigrationErrorCode.SCHEMA
+    assert captured.value.table == "users"
+    assert captured.value.source_sha256_prefix is not None
 
 
 def test_ledger_default_timestamp_is_timezone_aware() -> None:
@@ -813,6 +817,33 @@ def test_langgraph_source_rejects_bad_checkpoint_primary_key(tmp_path: Path) -> 
     _sqlite(source, "CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, checkpoint_id TEXT, parent_checkpoint_id TEXT, type TEXT, checkpoint BLOB, metadata BLOB, PRIMARY KEY (thread_id, checkpoint_id));")
     with pytest.raises(MigrationError, match="unsupported checkpoints source primary key"):
         inspect_source(source)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["green", "missing", "mismatch"])
+async def test_store_public_api_semantic_readback(mode: str) -> None:
+    row = SimpleNamespace(
+        values={"prefix": "synthetic.namespace", "key": "key", "value": {"answer": 42}},
+        source_key='["synthetic.namespace","key"]',
+    )
+
+    class Store:
+        async def aget(self, namespace, key, refresh_ttl=False):
+            assert namespace == ("synthetic", "namespace")
+            assert key == "key"
+            assert refresh_ttl is False
+            if mode == "missing":
+                return None
+            return SimpleNamespace(value={"answer": 42 if mode == "green" else 7})
+
+    if mode == "green":
+        await _verify_store_rows_with_api(Store(), [row], "a" * 64)
+    else:
+        with pytest.raises(MigrationError) as captured:
+            await _verify_store_rows_with_api(Store(), [row], "a" * 64)
+        assert captured.value.table == "store"
+        assert captured.value.source_sha256_prefix == "a" * 12
+        assert captured.value.key_hash is not None
 
 
 @pytest.mark.asyncio

@@ -311,6 +311,15 @@ def inspect_source(source: Path) -> SourceInspection:
             )
     known_columns = _known_orm_columns()
     deferred = []
+
+    def schema_error(message: str, table_name: str) -> MigrationError:
+        return MigrationError(
+            message,
+            code=MigrationErrorCode.SCHEMA,
+            table=table_name,
+            source_sha256=inventory.sha256,
+        )
+
     allowed = set(ORM_TABLE_ORDER) | LANGGRAPH_SOURCE_TABLES | SOURCE_METADATA_TABLES | DEFERRED_EMPTY_TABLES
     for table in inventory.tables:
         if table.name not in allowed:
@@ -332,11 +341,11 @@ def inspect_source(source: Path) -> SourceInspection:
         if table.name in known_columns:
             unknown = sorted(set(table.columns) - known_columns[table.name])
             if unknown:
-                raise MigrationError(f"{table.name} has unknown columns: {', '.join(unknown)}")
+                raise schema_error(f"{table.name} has unknown columns: {', '.join(unknown)}", table.name)
             if frozenset(table.columns) != SOURCE_SCHEMA_SIGNATURES[table.name]:
-                raise MigrationError(f"unsupported {table.name} source schema")
+                raise schema_error(f"unsupported {table.name} source schema", table.name)
             if table.primary_key != SOURCE_PRIMARY_KEYS[table.name]:
-                raise MigrationError(f"unsupported {table.name} source primary key")
+                raise schema_error(f"unsupported {table.name} source primary key", table.name)
         if table.name == "checkpoints":
             expected = {
                 "thread_id",
@@ -348,9 +357,9 @@ def inspect_source(source: Path) -> SourceInspection:
                 "metadata",
             }
             if set(table.columns) != expected:
-                raise MigrationError("unsupported checkpoints source schema")
+                raise schema_error("unsupported checkpoints source schema", table.name)
             if table.primary_key != ("thread_id", "checkpoint_ns", "checkpoint_id"):
-                raise MigrationError("unsupported checkpoints source primary key")
+                raise schema_error("unsupported checkpoints source primary key", table.name)
         if table.name == "writes":
             expected = {
                 "thread_id",
@@ -363,16 +372,16 @@ def inspect_source(source: Path) -> SourceInspection:
                 "value",
             }
             if set(table.columns) != expected:
-                raise MigrationError("unsupported writes source schema")
+                raise schema_error("unsupported writes source schema", table.name)
             if table.primary_key != ("thread_id", "checkpoint_ns", "checkpoint_id", "task_id", "idx"):
-                raise MigrationError("unsupported writes source primary key")
+                raise schema_error("unsupported writes source primary key", table.name)
         if table.name == "store":
             required = {"prefix", "key", "value", "created_at", "updated_at"}
             allowed_store = required | {"expires_at", "ttl_minutes"}
             if not required.issubset(table.columns) or not set(table.columns).issubset(allowed_store):
-                raise MigrationError("unsupported store source schema")
+                raise schema_error("unsupported store source schema", table.name)
             if table.primary_key != ("prefix", "key"):
-                raise MigrationError("unsupported store source primary key")
+                raise schema_error("unsupported store source primary key", table.name)
     return SourceInspection(inventory=inventory, deferred_empty=tuple(sorted(deferred)))
 
 
@@ -547,9 +556,13 @@ def decode_checkpoint_rows(source: Path) -> tuple[list[DecodedCheckpoint], list[
     serde = JsonPlusSerializer()
     checkpoints: list[DecodedCheckpoint] = []
     writes: list[DecodedWrite] = []
+    current_table = None
+    current_key = None
     try:
         if "checkpoints" in tables:
             for row in _read_rows(source, "checkpoints"):
+                current_table = "checkpoints"
+                current_key = _json_canonical([row["thread_id"], row["checkpoint_ns"], row["checkpoint_id"]])
                 checkpoint = serde.loads_typed((row["type"], bytes(row["checkpoint"])))
                 metadata = json.loads(bytes(row["metadata"]) if row["metadata"] is not None else b"{}")
                 if not isinstance(checkpoint, dict) or not isinstance(metadata, dict):
@@ -566,6 +579,8 @@ def decode_checkpoint_rows(source: Path) -> tuple[list[DecodedCheckpoint], list[
                 )
         if "writes" in tables:
             for row in _read_rows(source, "writes"):
+                current_table = "writes"
+                current_key = _json_canonical([row["thread_id"], row["checkpoint_ns"], row["checkpoint_id"], row["task_id"], row["idx"]])
                 writes.append(
                     DecodedWrite(
                         str(row["thread_id"]),
@@ -580,7 +595,13 @@ def decode_checkpoint_rows(source: Path) -> tuple[list[DecodedCheckpoint], list[
     except MigrationError:
         raise
     except Exception as exc:
-        raise MigrationError("unable to decode LangGraph checkpoint source") from exc
+        raise MigrationError(
+            "unable to decode LangGraph checkpoint source",
+            code=MigrationErrorCode.DECODE,
+            table=current_table,
+            source_sha256=inspection.inventory.sha256,
+            source_key=current_key,
+        ) from exc
     checkpoints = _order_checkpoints(checkpoints)
     writes.sort(key=lambda row: (row.thread_id, row.checkpoint_ns, row.checkpoint_id, row.task_id, row.idx))
     return checkpoints, writes
@@ -847,14 +868,14 @@ async def _migrate_checkpoints(
     inserted = adopted = already = planned = 0
     source_checkpoint_ids = {(item.thread_id, item.checkpoint_ns, item.checkpoint_id) for item in checkpoints}
     for row in checkpoints:
+        source_key = _checkpoint_identity(row)
         if row.parent_checkpoint_id and (row.thread_id, row.checkpoint_ns, row.parent_checkpoint_id) not in source_checkpoint_ids:
             if (row.thread_id, row.checkpoint_ns, row.parent_checkpoint_id) in planned_checkpoint_keys:
                 parent = True
             else:
                 parent = await saver.aget_tuple({"configurable": {"thread_id": row.thread_id, "checkpoint_ns": row.checkpoint_ns, "checkpoint_id": row.parent_checkpoint_id}})
             if parent is None:
-                raise MigrationError("checkpoint parent missing from source and target")
-        source_key = _checkpoint_identity(row)
+                raise MigrationError("checkpoint parent missing from source and target").enrich(table="checkpoints", source_sha256=source_sha256, source_key=source_key)
         digest = _checkpoint_digest(row)
         ledger = await _ledger_row(connection, source_sha256, "checkpoints", source_key)
         config = {
@@ -875,7 +896,7 @@ async def _migrate_checkpoints(
                 target_tuple.metadata,
             )
             if _checkpoint_digest(target_row) != digest:
-                raise MigrationError("target checkpoint conflict")
+                raise MigrationError("target checkpoint conflict").enrich(table="checkpoints", source_sha256=source_sha256, source_key=source_key)
             if ledger is not None:
                 _validate_ledger(ledger, target_table="checkpoints", target_key=source_key, digest=digest)
                 already += 1
@@ -1027,14 +1048,14 @@ async def _migrate_writes_rows(
     if len(identities) != len(set(identities)):
         raise MigrationError("duplicate checkpoint write source identity")
     for row in writes:
+        source_key = _write_identity(row)
         if (row.thread_id, row.checkpoint_ns, row.checkpoint_id) not in planned_checkpoint_keys and not await connection.fetchval(
             "SELECT 1 FROM checkpoints WHERE thread_id=$1 AND checkpoint_ns=$2 AND checkpoint_id=$3",
             row.thread_id,
             row.checkpoint_ns,
             row.checkpoint_id,
         ):
-            raise MigrationError("checkpoint write references missing checkpoint")
-        source_key = _write_identity(row)
+            raise MigrationError("checkpoint write references missing checkpoint").enrich(table="writes", source_sha256=source_sha256, source_key=source_key)
         digest = _write_digest(row.channel, row.value)
         ledger = await _ledger_row(connection, source_sha256, "writes", source_key)
         target = await connection.fetchrow(
@@ -1049,7 +1070,7 @@ async def _migrate_writes_rows(
             target_value = serde.loads_typed((target["type"], bytes(target["blob"])))
             target_digest = _write_digest(target["channel"], target_value, target["task_path"])
             if target_digest != digest:
-                raise MigrationError("target checkpoint write conflict")
+                raise MigrationError("target checkpoint write conflict").enrich(table="writes", source_sha256=source_sha256, source_key=source_key)
             if ledger is not None:
                 _validate_ledger(ledger, target_table="checkpoint_writes", target_key=source_key, digest=digest)
                 already += 1
@@ -1152,10 +1173,17 @@ def _decode_store_rows(source: Path) -> list[NormalizedRow]:
         return []
     rows = []
     for row in _read_rows(source, "store"):
+        key = _json_canonical([str(row["prefix"]), str(row["key"])])
         try:
             value = json.loads(row["value"])
         except Exception as exc:
-            raise MigrationError("invalid JSON in LangGraph store") from exc
+            raise MigrationError(
+                "invalid JSON in LangGraph store",
+                code=MigrationErrorCode.DECODE,
+                table="store",
+                source_sha256=inspection.inventory.sha256,
+                source_key=key,
+            ) from exc
         ttl_minutes = row["ttl_minutes"] if "ttl_minutes" in row.keys() else None
         if ttl_minutes is not None:
             numeric_ttl = float(ttl_minutes)
@@ -1171,7 +1199,6 @@ def _decode_store_rows(source: Path) -> list[NormalizedRow]:
             "expires_at": _parse_datetime(row["expires_at"], table="store", column="expires_at") if "expires_at" in row.keys() else None,
             "ttl_minutes": ttl_minutes,
         }
-        key = _json_canonical([values["prefix"], values["key"]])
         rows.append(NormalizedRow(key, key, values, hashlib.sha256(_json_canonical(values).encode()).hexdigest()))
     return sorted(rows, key=lambda item: item.source_key.encode())
 
@@ -1266,6 +1293,33 @@ async def _migrate_store(
         )
 
 
+async def _verify_store_rows_with_api(store: Any, rows: list[NormalizedRow], source_sha256: str) -> None:
+    for row in rows:
+        try:
+            namespace = tuple(row.values["prefix"].split("."))
+            item = await store.aget(namespace, row.values["key"], refresh_ttl=False)
+            if item is None or _json_canonical(item.value) != _json_canonical(row.values["value"]):
+                raise MigrationError("store public API semantic read-back failed")
+        except MigrationError as exc:
+            raise exc.enrich(
+                table="store",
+                source_sha256=source_sha256,
+                source_key=row.source_key,
+            )
+
+
+async def _verify_store_with_api(target_url: str, source: Path, source_sha256: str) -> None:
+    from langgraph.store.postgres.aio import AsyncPostgresStore
+
+    try:
+        from scripts.setup_postgres import _asyncpg_url
+    except ModuleNotFoundError:
+        from setup_postgres import _asyncpg_url
+    rows = _decode_store_rows(source)
+    async with AsyncPostgresStore.from_conn_string(_asyncpg_url(target_url)) as store:
+        await _verify_store_rows_with_api(store, rows, source_sha256)
+
+
 async def _reset_run_event_sequence(connection: Any) -> None:
     sequence = await connection.fetchval("SELECT pg_get_serial_sequence('run_events', 'id')")
     if sequence:
@@ -1340,6 +1394,8 @@ async def migrate_source(
                 inspection.inventory.sha256,
                 dry_run=dry_run,
             )
+            if not dry_run:
+                await _verify_store_with_api(target_url, source, inspection.inventory.sha256)
         if not dry_run and "run_events" in reports:
             await _reset_run_event_sequence(connection)
     except MigrationError:
