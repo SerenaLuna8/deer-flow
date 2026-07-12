@@ -175,3 +175,41 @@ async def test_empty_bootstrap_cleanup_failure_preserves_cancellation(
     finally:
         release.set()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_empty_bootstrap_cleanup_waits_through_repeated_cancellation() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+
+    class Connection:
+        async def run_sync(self, _function):
+            started.set()
+            await release.wait()
+            completed.set()
+
+    class Begin:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    helper = asyncio.create_task(bootstrap_module._attempt_failed_empty_bootstrap_cleanup(Engine()))
+    await started.wait()
+    helper.cancel("first cleanup wait cancellation")
+    await asyncio.sleep(0)
+    helper.cancel("second cleanup wait cancellation")
+    await asyncio.sleep(0)
+
+    assert helper.done() is False
+    assert completed.is_set() is False
+    release.set()
+    await helper
+    assert completed.is_set() is True
+    assert not any(task.get_name() == "deerflow-empty-bootstrap-cleanup" for task in asyncio.all_tasks())

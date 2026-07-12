@@ -90,7 +90,6 @@ _BASELINE_REVISION = "0001_baseline"
 # change without coordinating a one-time migration (a key change effectively
 # releases the prior lock).
 _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
-_EMPTY_BOOTSTRAP_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 # Tables created by ``0001_baseline.upgrade()``. The legacy branch restricts
@@ -264,30 +263,34 @@ def _reset_failed_empty_bootstrap_sync(sync_conn: Any) -> None:
 
 
 async def _attempt_failed_empty_bootstrap_cleanup(engine: AsyncEngine) -> None:
-    """Best-effort bounded cleanup that never replaces the primary failure."""
+    """Finish best-effort cleanup without replacing the primary failure.
+
+    Caller cancellation is deliberately absorbed while cleanup is in flight:
+    returning early would release the advisory lock while destructive cleanup
+    was still running on a detached task.
+    """
 
     async def cleanup() -> None:
         async with engine.begin() as conn:
             await conn.run_sync(_reset_failed_empty_bootstrap_sync)
 
-    task = asyncio.create_task(cleanup())
-
-    def consume_result(done: asyncio.Task[None]) -> None:
+    task = asyncio.create_task(cleanup(), name="deerflow-empty-bootstrap-cleanup")
+    while True:
         try:
-            done.exception()
+            await asyncio.shield(task)
+            return
+        except asyncio.CancelledError:
+            if not task.done():
+                continue
+            try:
+                task.result()
+            except BaseException:
+                pass
+            logger.error("bootstrap: empty-schema cleanup did not complete; original failure preserved")
+            return
         except BaseException:
-            pass
-
-    task.add_done_callback(consume_result)
-    try:
-        await asyncio.wait_for(
-            asyncio.shield(task),
-            timeout=_EMPTY_BOOTSTRAP_CLEANUP_TIMEOUT_SECONDS,
-        )
-    except BaseException:
-        if not task.done():
-            task.cancel()
-        logger.error("bootstrap: empty-schema cleanup did not complete; original failure preserved")
+            logger.error("bootstrap: empty-schema cleanup did not complete; original failure preserved")
+            return
 
 
 def _stamp(cfg: AlembicConfig, revision: str) -> None:

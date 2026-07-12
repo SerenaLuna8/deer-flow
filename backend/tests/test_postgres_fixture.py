@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import traceback
 from importlib import import_module
@@ -118,6 +119,67 @@ async def test_body_failure_is_preserved_when_cleanup_also_fails() -> None:
     assert "postgresql://user" not in formatted
     assert "cleanup of isolated PostgreSQL test database also failed" in formatted
     engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_body_failure_is_preserved_when_cleanup_is_cancelled() -> None:
+    engine = _fixture_engine_with_cleanup_error(asyncio.CancelledError("secondary cancel"))
+    sentinel = ValueError("body sentinel")
+
+    with patch("postgres_utils.create_async_engine", return_value=engine):
+        with pytest.raises(ValueError, match="body sentinel") as exc_info:
+            async with temporary_postgres_database("postgresql://user:secret@localhost/postgres"):
+                raise sentinel
+
+    assert exc_info.value is sentinel
+    assert "cleanup of isolated PostgreSQL test database also failed" in "".join(traceback.format_exception(exc_info.value))
+
+
+@pytest.mark.asyncio
+async def test_body_cancellation_identity_survives_second_cleanup_cancellation() -> None:
+    engine = _fixture_engine_with_cleanup_error(asyncio.CancelledError("secondary cancel"))
+    sentinel = asyncio.CancelledError("primary cancel")
+
+    with patch("postgres_utils.create_async_engine", return_value=engine):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            async with temporary_postgres_database("postgresql://user:secret@localhost/postgres"):
+                raise sentinel
+
+    assert exc_info.value is sentinel
+    formatted = "".join(traceback.format_exception(exc_info.value))
+    assert "primary cancel" in formatted
+    assert "secondary cancel" not in formatted
+    assert "secret" not in formatted
+
+
+@pytest.mark.asyncio
+async def test_cleanup_only_cancellation_is_preserved_without_sensitive_text() -> None:
+    sensitive_url = "postgresql://user:secret@localhost/postgres"
+    sentinel = asyncio.CancelledError(sensitive_url)
+    engine = _fixture_engine_with_cleanup_error(sentinel)
+
+    with patch("postgres_utils.create_async_engine", return_value=engine):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            async with temporary_postgres_database(sensitive_url):
+                pass
+
+    assert exc_info.value is sentinel
+    assert "secret" not in "".join(traceback.format_exception(exc_info.value))
+
+
+def _fixture_engine_with_cleanup_error(cleanup_error: BaseException):
+    create_connection = MagicMock()
+    create_connection.execute = AsyncMock()
+    create_context = AsyncMock()
+    create_context.__aenter__.return_value = create_connection
+    cleanup_connection = MagicMock()
+    cleanup_connection.execute = AsyncMock(side_effect=cleanup_error)
+    cleanup_context = AsyncMock()
+    cleanup_context.__aenter__.return_value = cleanup_connection
+    engine = MagicMock()
+    engine.connect.side_effect = [create_context, cleanup_context]
+    engine.dispose = AsyncMock()
+    return engine
 
 
 @pytest.mark.postgres

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import uuid
@@ -65,10 +66,15 @@ async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
                         {"database": database},
                     )
                     await connection.execute(text(f'DROP DATABASE IF EXISTS "{database}"'))
-            except Exception:
+            except BaseException as cleanup_error:
                 if body_error is not None:
                     body_error.add_note("cleanup of isolated PostgreSQL test database also failed")
-                else:
+                elif isinstance(cleanup_error, asyncio.CancelledError):
+                    cleanup_error.args = ()
+                    raise
+                elif isinstance(cleanup_error, Exception):
                     raise RuntimeError("unable to clean up isolated PostgreSQL test database") from None
+                else:
+                    raise
     finally:
         await admin_engine.dispose()
