@@ -3,10 +3,24 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import urlsplit
+
+PROJECT_ROOT = Path(
+    os.getenv("DEER_FLOW_PROJECT_ROOT") or Path(__file__).resolve().parents[1]
+).resolve()
+
+
+class PostgresEndpointResult(NamedTuple):
+    ok: bool
+    detail: str
+    fix: str = ""
 
 
 def configure_stdio() -> None:
@@ -57,6 +71,70 @@ def parse_node_major(version_text: str) -> int | None:
     return int(major_str)
 
 
+def _database_url() -> str | None:
+    """Read DATABASE_URL without requiring python-dotenv or overriding the shell."""
+    configured = os.getenv("DATABASE_URL")
+    if configured:
+        return configured
+    try:
+        lines = (PROJECT_ROOT / ".env").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        candidate = line.strip()
+        if not candidate or candidate.startswith("#"):
+            continue
+        if candidate.startswith("export "):
+            candidate = candidate.removeprefix("export ").lstrip()
+        key, separator, value = candidate.partition("=")
+        if separator and key.strip() == "DATABASE_URL":
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            return value or None
+    return None
+
+
+def check_postgres_endpoint() -> PostgresEndpointResult:
+    """Run an install-safe TCP preflight without importing backend packages."""
+    database_url = _database_url()
+    if not database_url:
+        return PostgresEndpointResult(
+            False,
+            "DATABASE_URL 未设置",
+            "设置 PostgreSQL DATABASE_URL，然后运行 make setup-db 和 make check-db",
+        )
+    try:
+        parsed = urlsplit(database_url)
+        if parsed.scheme not in {"postgresql", "postgresql+asyncpg"}:
+            raise ValueError
+        host = parsed.hostname
+        port = parsed.port or 5432
+        database = parsed.path.lstrip("/")
+        if not host or not database or "/" in database:
+            raise ValueError
+    except (TypeError, ValueError):
+        return PostgresEndpointResult(
+            False,
+            "DATABASE_URL 不是有效的 PostgreSQL URL",
+            "使用 postgresql://<user>:<password>@<host>:5432/<database>，然后运行 make setup-db",
+        )
+
+    safe_endpoint = f"{host}:{port}/{database}"
+    try:
+        connection = socket.create_connection((host, port), timeout=1.5)
+        close = getattr(connection, "close", None)
+        if close is not None:
+            close()
+    except OSError:
+        return PostgresEndpointResult(
+            False,
+            f"PostgreSQL TCP 端点不可达 ({safe_endpoint})",
+            "确认本地 Docker PostgreSQL 已启动并暴露 5432，再运行 make check-db",
+        )
+    return PostgresEndpointResult(True, safe_endpoint)
+
+
 def main() -> int:
     configure_stdio()
     print("==========================================")
@@ -75,9 +153,7 @@ def main() -> int:
             if major is not None and major >= 22:
                 print(f"  OK Node.js {node_version.lstrip('v')} (>= 22 required)")
             else:
-                print(
-                    f"  FAIL Node.js {node_version.lstrip('v')} found, but version 22+ is required"
-                )
+                print(f"  FAIL Node.js {node_version.lstrip('v')} found, but version 22+ is required")
                 print("    Install from: https://nodejs.org/")
                 failed = True
         else:
@@ -87,6 +163,16 @@ def main() -> int:
     else:
         print("  FAIL Node.js not found (version 22+ required)")
         print("    Install from: https://nodejs.org/")
+        failed = True
+
+    print()
+    print("Checking PostgreSQL...")
+    postgres = check_postgres_endpoint()
+    if postgres.ok:
+        print(f"  OK PostgreSQL endpoint {postgres.detail}")
+    else:
+        print(f"  FAIL {postgres.detail}")
+        print(f"    {postgres.fix}")
         failed = True
 
     print()

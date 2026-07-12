@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import asdict
 from importlib import import_module
 from pathlib import Path
 from typing import Literal
@@ -677,6 +678,42 @@ def check_env_file(project_root: Path) -> CheckResult:
     )
 
 
+def _run_postgres_check(_project_root: Path, database_url: str) -> dict:
+    """Delegate all database SQL/revision checks to the backend read-only checker."""
+    from scripts.check_postgres import run_check
+
+    return asdict(run_check(database_url))
+
+
+def check_postgres(project_root: Path) -> CheckResult:
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return CheckResult(
+            "PostgreSQL",
+            "fail",
+            "DATABASE_URL 未设置",
+            fix="设置 DATABASE_URL，运行 make setup-db，然后运行 make check-db",
+        )
+    try:
+        result = _run_postgres_check(project_root, database_url)
+    except Exception:
+        return CheckResult(
+            "PostgreSQL",
+            "fail",
+            "只读健康检查失败",
+            fix="运行 make check-db 查看脱敏状态；如 revision 或表缺失，运行 make migrate-db",
+        )
+    if not result.get("healthy"):
+        return CheckResult(
+            "PostgreSQL",
+            "fail",
+            "连接、Alembic revision 或必需表检查未通过",
+            fix="运行 make check-db 查看脱敏状态；如 revision 或表缺失，运行 make migrate-db",
+        )
+    detail = f"{result['host']}:{result['port']}/{result['database']}, revision {result['current_revision']}"
+    return CheckResult("PostgreSQL", "ok", detail)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -722,6 +759,9 @@ def main() -> int:
         check_models_configured(config_path),
     ]
     sections.append(("Configuration", cfg_checks))
+
+    # ── Database ──────────────────────────────────────────────────────────────
+    sections.append(("Database", [check_postgres(project_root)]))
 
     # ── LLM Provider ──────────────────────────────────────────────────────────
     llm_checks: list[CheckResult] = [

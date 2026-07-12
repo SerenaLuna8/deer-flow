@@ -67,6 +67,9 @@ Persistence configuration is PostgreSQL-only: `database.url` resolves from
 `checkpointer` section is rejected. ORM sessions, schema bootstrap, LangGraph
 checkpointers, and LangGraph stores are all PostgreSQL implementations; runtime
 startup validates but never creates the target database.
+M1 不使用 PostgreSQL RLS。应用授权依赖认证身份、不可变 `ProjectContext` 和强制作用域
+repository；应用连接使用普通非 superuser role，只有显式 setup/migration 脚本属于 trusted
+operations。M1 尚不能作为完整多用户 SaaS 发布。
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
@@ -83,6 +86,10 @@ make support-bundle  # Generate redacted troubleshooting summary, AI issue draft
 make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
+make setup-db    # 显式创建并完整初始化 PostgreSQL 目标库
+make migrate-db  # 升级已存在 PostgreSQL 目标库
+make migrate-sqlite ARGS="..."  # 只读预检、备份并迁移 legacy SQLite
+make check-db    # 只读检查连接、Alembic head 与必需表
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)
 make stop        # Stop all running services
@@ -133,3 +140,6 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+- **PostgreSQL release gate** — `.github/workflows/project-foundation-postgres-tests.yml`
+  使用临时 `deerflow_test_*` 数据库运行迁移与项目隔离测试；缺少 `POSTGRES_TEST_URL` 只能在
+  本地明确 skip，CI 必须设置并硬失败。

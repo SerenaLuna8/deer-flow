@@ -40,6 +40,56 @@ class TestCheckConfigExists:
         assert result.status == "ok"
 
 
+class TestCheckPostgres:
+    def test_database_url_is_required(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        result = doctor.check_postgres(tmp_path)
+        assert result.status == "fail"
+        assert "DATABASE_URL" in (result.fix or "")
+
+    def test_healthy_database_reports_only_redacted_metadata(self, tmp_path, monkeypatch):
+        secret = "credential-must-not-render"
+        monkeypatch.setenv(
+            "DATABASE_URL",
+            f"postgresql://owner:{secret}@db.internal:5432/deerflow",
+        )
+        monkeypatch.setattr(
+            doctor,
+            "_run_postgres_check",
+            lambda _root, _url: {
+                "healthy": True,
+                "host": "db.internal",
+                "port": 5432,
+                "database": "deerflow",
+                "current_revision": "0005_project_foundation",
+                "head_revision": "0005_project_foundation",
+                "missing_tables": (),
+            },
+        )
+        result = doctor.check_postgres(tmp_path)
+        assert result.status == "ok"
+        assert "db.internal:5432/deerflow" in result.detail
+        assert secret not in f"{result.detail}\n{result.fix}"
+        assert "owner" not in result.detail
+
+    def test_database_failure_is_generic_and_points_to_existing_commands(self, tmp_path, monkeypatch):
+        secret = "credential-must-not-render"
+        monkeypatch.setenv(
+            "DATABASE_URL",
+            f"postgresql://owner:{secret}@localhost:5432/deerflow",
+        )
+
+        def fail(_root, _url):
+            raise RuntimeError(f"driver leaked {secret}")
+
+        monkeypatch.setattr(doctor, "_run_postgres_check", fail)
+        result = doctor.check_postgres(tmp_path)
+        assert result.status == "fail"
+        assert "make check-db" in (result.fix or "")
+        assert "make migrate-db" in (result.fix or "")
+        assert secret not in f"{result.detail}\n{result.fix}"
+
+
 # ---------------------------------------------------------------------------
 # check_config_version
 # ---------------------------------------------------------------------------

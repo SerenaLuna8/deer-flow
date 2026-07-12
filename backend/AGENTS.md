@@ -653,6 +653,9 @@ setup/application pool，也绝不能持有 transaction/virtualxid（LangGraph �
 `SET idle_session_timeout = 0`，避免合法并发锁等待或长 DDL 被托管 PostgreSQL 误杀。
 `idle_session_timeout` 先通过 `current_setting(..., true)` 探测，旧版 PostgreSQL 不支持时
 跳过该项，不能因 unknown parameter 阻断 setup。
+M1 明确不使用 PostgreSQL RLS。应用 role 必须是普通非 superuser；路由只能通过可信
+`ProjectContext` 和强制作用域 `ProjectRepository` 访问项目数据。建库、schema migration
+和 SQLite cutover 是显式 trusted operations，不得把 unscoped repository 暴露给普通路由。
 专用 session 关闭自动恢复设置并作为 unlock 兜底，禁止放宽运行期连接超时。
 取锁必须使用 `pg_try_advisory_lock` + client-side 短轮询，禁止阻塞式
 `pg_advisory_lock`：后者等待时自身持有 virtualxid，会与 LangGraph
@@ -698,6 +701,14 @@ digest 写 migration ledger；引用行保留原 source key，并以归一化后
 写 ledger。原 source、dry-run 和 backup 规则不变，snapshot 必须重建出完全相同的决策。
 首次写被吸收 users ledger 前还必须确认目标库不存在其 legacy 原 id；若已存在且没有匹配
 的 `reconciled` ledger，users 事务立即回滚，禁止把既有目标用户静默吸收。
+
+**M1 PostgreSQL 发布门禁**：`tests/integration/test_m1_postgres_cutover.py` 串联
+inventory、backup、0004→SQLite migration→head、完整 runtime schema、默认项目 bootstrap
+与来源不变性；`tests/integration/test_project_isolation_postgres.py` 验证跨项目/账户 API、
+`ProjectContext` 和 repository scope。两者只复用 `POSTGRES_TEST_URL` 创建随机
+`deerflow_test_*` 数据库，缺变量才 skip，连接或清理失败必须 fail。CI 入口为
+`.github/workflows/project-foundation-postgres-tests.yml`；本地命令：
+`POSTGRES_TEST_URL="$DATABASE_URL" uv run pytest -m "postgres and integration" tests/integration -q`。
 
 用户引用禁止按列名或未声明的 SQLAlchemy FK 猜测。固定 allowlist 仅为
 `threads_meta.user_id`、`runs.user_id`、`run_events.user_id`、`feedback.user_id`、

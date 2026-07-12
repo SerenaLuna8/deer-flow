@@ -28,6 +28,7 @@ Consider the setup successful when all of the following are true:
 
 - The DeerFlow repository is cloned and the current working directory is the repo root.
 - `config.yaml` exists.
+- `DATABASE_URL` points to an existing PostgreSQL database and `make check-db` passes.
 - For Docker setup, `make docker-init` completed successfully and Docker prerequisites are prepared, but services are not assumed to be running yet.
 - For local setup, `make check` passed or reported no missing prerequisites, and `make install` completed successfully.
 - The user receives the exact next command to launch DeerFlow.
@@ -40,6 +41,8 @@ Consider the setup successful when all of the following are true:
 - Detect whether `config.yaml` already exists.
 - If `config.yaml` does not exist, run `make config`.
 - Detect whether Docker is available and the daemon is reachable with `docker info`.
+- Require an explicit PostgreSQL-only `DATABASE_URL`. Do not read or print its password. If the target database does not exist, ask the user to provide `POSTGRES_ADMIN_URL` and run `make setup-db`; otherwise run `make migrate-db`, then `make check-db`.
+- The application compose stack does not provision PostgreSQL. When Docker is available, a standalone `postgres:17-alpine` container is acceptable, but use placeholders for credentials and keep the application role non-superuser. DeerFlow does not use RLS; project access is enforced by `ProjectContext` and scoped repositories.
 - If Docker is available:
   - Run `make docker-init`.
   - Treat this as Docker prerequisite preparation only. Do not claim that app services, compose validation, or image builds have already succeeded.
@@ -61,6 +64,7 @@ Use the lightest verification that matches the chosen setup path.
 
 For Docker setup:
 
+- Confirm `make check-db` completed successfully before treating the environment as launchable.
 - Confirm `make docker-init` completed successfully.
 - Confirm `config.yaml` exists.
 - State explicitly that Docker services were not started and `make docker-start` is still the first real launch step.
@@ -68,6 +72,7 @@ For Docker setup:
 
 For local setup:
 
+- Confirm `make check-db` completed successfully.
 - Confirm `make install` completed successfully.
 - Confirm `config.yaml` exists.
 - Do not leave background services running unless the user asked for that.
@@ -81,6 +86,7 @@ Return a short status report with:
 3. Files created or detected: for example `config.yaml`
 4. Remaining user action: model config, env var values, auth files, or nothing
 5. Exact next command to start DeerFlow
+6. PostgreSQL host/database and Alembic revision from redacted check output; never include the URL, username, or password
 
 ## EXECUTE NOW
 

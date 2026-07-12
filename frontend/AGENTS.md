@@ -72,6 +72,8 @@ external identity application, logout, and unmount invalidate older generations,
 query-cache transition and identity commit must recheck the same generation.
 The M1 `PROJECT_PRIVATE_WORKSPACE` feature constant is hard-disabled and must not be made
 environment- or user-configurable before the later private-work milestone.
+M1 仍保留旧版私有对话兼容路径，但 Thread、run、file、memory、automation 尚未完成项目与
+owner 双重隔离，因此项目优先界面不能被描述或发布为完整多用户 SaaS。
 Project-first mode sends the normal `/workspace` landing and primary navigation to
 `/workspace/projects`; static demo builds preserve their existing chat landing and must not
 expose a project entry that can call the project API. Project slug URLs are resolved only by

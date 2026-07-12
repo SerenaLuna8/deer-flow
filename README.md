@@ -264,6 +264,41 @@ the former independent `checkpointer` section is no longer accepted. Runtime
 startup validates the configured database but does not create it; provision the
 target database before starting DeerFlow.
 
+### PostgreSQL 初始化与 SQLite 切换（M1）
+
+M1 运行期只支持 PostgreSQL，不提供 SQLite 回退，也不依赖 PostgreSQL RLS。授权边界由
+认证身份、`ProjectContext` 和强制作用域 repository 共同执行；应用连接使用普通非
+superuser role，建库与 migration 属于显式 trusted operations。
+
+本地可启动独立 PostgreSQL 容器（当前 DeerFlow compose stack 不会自动创建数据库）：
+
+```bash
+export POSTGRES_PASSWORD='<local-password>'
+docker run --name deerflow-postgres -d -p 5432:5432 \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+  -e POSTGRES_DB=postgres postgres:17-alpine
+docker exec deerflow-postgres psql -U postgres -d postgres \
+  -c "CREATE ROLE deerflow LOGIN PASSWORD '<app-password>'"
+export POSTGRES_ADMIN_URL='postgresql+asyncpg://postgres:<url-encoded-local-password>@127.0.0.1:5432/postgres'
+export DATABASE_URL='postgresql+asyncpg://deerflow:<url-encoded-app-password>@127.0.0.1:5432/deerflow'
+make setup-db
+make check-db
+```
+
+已有目标库只需运行 `make migrate-db`。从 legacy SQLite 切换时，先进入维护窗口，保留
+repo 外只读备份，并先 dry-run：
+
+```bash
+make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups --dry-run"
+make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups"
+make check-db
+```
+
+迁移器不会修改 SQLite `db`/`wal`/`shm` 来源；失败时保持旧版本和只读备份，修复后重跑。
+产生 PostgreSQL 新写入后使用前向 migration 修复，不执行破坏性 downgrade。M1 的
+`project_private_workspace` 仍硬关闭，Thread、run、file、memory、automation 尚未完成
+项目与 owner 双重隔离，因此不能把 M1 当作完整多用户 SaaS 发布。
+
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 > [!IMPORTANT]

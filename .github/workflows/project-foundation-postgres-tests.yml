@@ -1,0 +1,109 @@
+name: Project Foundation PostgreSQL Gates
+
+on:
+  push:
+    branches: [main, 2.0.x-dev]
+    paths:
+      - "backend/**"
+      - "scripts/check.py"
+      - "scripts/doctor.py"
+      - ".github/workflows/project-foundation-postgres-tests.yml"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "backend/**"
+      - "scripts/check.py"
+      - "scripts/doctor.py"
+      - ".github/workflows/project-foundation-postgres-tests.yml"
+
+concurrency:
+  group: project-foundation-postgres-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-release-gates:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: deerflow-ci-only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      POSTGRES_TEST_URL: postgresql+asyncpg://postgres:deerflow-ci-only@127.0.0.1:5432/postgres
+      POSTGRES_ADMIN_URL: postgresql+asyncpg://postgres:deerflow-ci-only@127.0.0.1:5432/postgres
+      DATABASE_URL: postgresql+asyncpg://deerflow_ci_app:deerflow-ci-app-only@127.0.0.1:5432/deerflow
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: Create least-privilege CI application role
+        working-directory: backend
+        run: |
+          uv run python -c '
+          import asyncio, os, asyncpg
+          from scripts.setup_postgres import _asyncpg_url
+          async def main():
+              connection = await asyncpg.connect(_asyncpg_url(os.environ["POSTGRES_ADMIN_URL"]))
+              exists = await connection.fetchval("SELECT 1 FROM pg_roles WHERE rolname=$1", "deerflow_ci_app")
+              if not exists:
+                  password = await connection.fetchval("SELECT quote_literal($1)", "deerflow-ci-app-only")
+                  await connection.execute(f"CREATE ROLE deerflow_ci_app LOGIN PASSWORD {password}")
+              await connection.close()
+          asyncio.run(main())
+          '
+
+      - name: Set up and verify application database
+        working-directory: backend
+        run: |
+          make setup-db
+          make check-db
+
+      - name: Run PostgreSQL migration and project release gates
+        working-directory: backend
+        run: >-
+          uv run pytest -q
+          tests/integration/test_m1_postgres_cutover.py
+          tests/integration/test_project_isolation_postgres.py
+          tests/test_postgres_fixture.py
+          tests/test_persistence_bootstrap.py
+          tests/test_persistence_bootstrap_concurrency.py
+          tests/test_project_schema_postgres.py
+          tests/test_default_project_bootstrap.py
+          tests/test_project_repository_postgres.py
+          tests/test_project_context.py
+          tests/test_projects_router.py
+          tests/test_sqlite_inventory.py
+          tests/test_sqlite_to_postgres_migration.py
+
+      - name: Run PostgreSQL scripts and project lint gates
+        working-directory: backend
+        run: |
+          uv run pytest -q tests/test_setup_postgres.py tests/test_check_postgres.py tests/test_check_script.py tests/test_doctor.py
+          make lint

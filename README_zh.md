@@ -128,6 +128,25 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    命令输出不会显示 username、password 或完整 URL。
    Gateway 启动只验证和升级已配置的目标数据库，不会自动建库。
 
+   当前 DeerFlow compose stack 不会自动启动 PostgreSQL。本地可单独启动容器，以下值均为
+   占位符，密码中的特殊字符写入 URL 前必须编码：
+
+   ```bash
+   export POSTGRES_PASSWORD='<local-password>'
+   docker run --name deerflow-postgres -d -p 5432:5432 \
+     -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+     -e POSTGRES_DB=postgres postgres:17-alpine
+   docker exec deerflow-postgres psql -U postgres -d postgres \
+     -c "CREATE ROLE deerflow LOGIN PASSWORD '<app-password>'"
+   export POSTGRES_ADMIN_URL='postgresql+asyncpg://postgres:<url-encoded-local-password>@127.0.0.1:5432/postgres'
+   export DATABASE_URL='postgresql+asyncpg://deerflow:<url-encoded-app-password>@127.0.0.1:5432/deerflow'
+   make setup-db
+   make check-db
+   ```
+
+   M1 不使用 PostgreSQL RLS；认证身份、`ProjectContext` 和强制作用域 repository 是应用
+   授权边界。应用 role 应为普通非 superuser，建库和 migration 只通过显式脚本执行。
+
    当前 PostgreSQL schema 会创建项目与项目成员关系基础表。平台角色仅为
    `system_admin` 和 `user`；项目内的 `admin`、`editor`、`runner`、`viewer` 是独立权限，
    平台管理员不会因此自动成为任何项目的成员。旧数据库中的平台 `admin` 会在升级时
@@ -155,6 +174,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    `/projects/<project_slug>` 使用独立的认证和查询容器，不继承旧聊天工作区外壳。项目首页
    明确提示“对话和记忆私有，Agent、Skill 和 MCP 共享”，当前只展示三类共享资产占位。
    M1 的项目私有工作区保持硬关闭，不读取环境变量或用户覆盖，也不会创建或跳转 Thread。
+   Thread、run、file、memory、automation 尚未完成项目与 owner 双重隔离，因此 M1 不能
+   作为完整多用户 SaaS 发布。
    为避免误删项目，项目表或成员关系表存在数据时，数据库会拒绝降级到 0004；必须先按
    运维方案迁出数据，不能依赖 downgrade 自动删除。
 
