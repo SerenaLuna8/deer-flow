@@ -71,6 +71,28 @@ def test_make_recipe_never_interpolates_migration_message_into_shell() -> None:
     assert marker not in result.stderr
 
 
+def test_make_export_preserves_make_function_payloads_as_literal_text(tmp_path) -> None:
+    backend_dir = Path(__file__).resolve().parents[1]
+    error_result = subprocess.run(
+        ["make", "-n", "migrate-rev", "MSG=$(error AUTOGEN_MAKE_FUNCTION_EXECUTED)"],
+        cwd=backend_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert error_result.returncode == 0
+    assert "AUTOGEN_MAKE_FUNCTION_EXECUTED" not in error_result.stderr
+
+    marker = tmp_path / "make-function-marker"
+    shell_result = subprocess.run(
+        ["make", "-n", "migrate-rev", f"MSG=$(shell touch {marker})"],
+        cwd=backend_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert shell_result.returncode == 0
+    assert not marker.exists()
+
+
 def test_migration_message_validation_rejects_empty_long_and_control_characters(autogen_module, monkeypatch) -> None:
     for value in ("", " ", "x" * 201, "hello\nworld", "hello\tworld", "hello\x7fworld"):
         monkeypatch.setenv("MIGRATION_MESSAGE", value)

@@ -44,7 +44,7 @@ detect-blocking-io:
 # target -- the single execution path keeps ops mistakes off the table.
 # The script creates a random PostgreSQL database from explicit
 # POSTGRES_ADMIN_URL, upgrades it to head, diffs the live models, then drops it.
-migrate-rev: export MIGRATION_MESSAGE := $(MSG)
+migrate-rev: export MIGRATION_MESSAGE := $(value MSG)
 migrate-rev:
 	@if [ -z "$$MIGRATION_MESSAGE" ]; then echo 'usage: make migrate-rev MSG="describe the change"'; exit 1; fi
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python scripts/_autogen_revision.py
