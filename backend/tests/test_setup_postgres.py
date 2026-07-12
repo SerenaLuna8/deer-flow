@@ -73,6 +73,136 @@ def test_setup_engine_factory_returns_a_fresh_engine_per_call(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_langgraph_bootstrap_uses_explicit_url_in_saver_then_store_order(monkeypatch) -> None:
+    calls = []
+    database_url = "postgresql://owner:private-password@localhost/deerflow_test_1_abc"
+
+    class Context:
+        def __init__(self, name):
+            self.name = name
+
+        async def __aenter__(self):
+            calls.append(f"{self.name}:enter")
+            return self
+
+        async def setup(self):
+            calls.append(f"{self.name}:setup")
+
+        async def __aexit__(self, *_args):
+            calls.append(f"{self.name}:exit")
+
+    class Provider:
+        def __init__(self, name):
+            self.name = name
+
+        def from_conn_string(self, url):
+            assert url == setup_postgres._asyncpg_url(database_url)
+            calls.append(f"{self.name}:factory")
+            return Context(self.name)
+
+    monkeypatch.setattr(setup_postgres, "AsyncPostgresSaver", Provider("saver"))
+    monkeypatch.setattr(setup_postgres, "AsyncPostgresStore", Provider("store"))
+
+    await setup_postgres._bootstrap_langgraph_schemas(database_url)
+    await setup_postgres._bootstrap_langgraph_schemas(database_url)
+
+    assert (
+        calls
+        == [
+            "saver:factory",
+            "saver:enter",
+            "saver:setup",
+            "saver:exit",
+            "store:factory",
+            "store:enter",
+            "store:setup",
+            "store:exit",
+        ]
+        * 2
+    )
+
+
+@pytest.mark.asyncio
+async def test_langgraph_bootstrap_failure_is_sanitized_and_closes_context(monkeypatch) -> None:
+    calls = []
+
+    class Context:
+        def __init__(self, name, fail=False):
+            self.name = name
+            self.fail = fail
+
+        async def __aenter__(self):
+            calls.append(f"{self.name}:enter")
+            return self
+
+        async def setup(self):
+            calls.append(f"{self.name}:setup")
+            if self.fail:
+                raise RuntimeError("postgresql://owner:private-password@localhost/private-db")
+
+        async def __aexit__(self, *_args):
+            calls.append(f"{self.name}:exit")
+
+    class Provider:
+        def __init__(self, name, fail=False):
+            self.name = name
+            self.fail = fail
+
+        def from_conn_string(self, _url):
+            return Context(self.name, self.fail)
+
+    monkeypatch.setattr(setup_postgres, "AsyncPostgresSaver", Provider("saver"))
+    monkeypatch.setattr(setup_postgres, "AsyncPostgresStore", Provider("store", fail=True))
+    database_url = "postgresql://owner:private-password@localhost/deerflow_test_1_abc"
+
+    with pytest.raises(setup_postgres.PostgresSetupError) as captured:
+        await setup_postgres._bootstrap_langgraph_schemas(database_url)
+
+    rendered = "".join(__import__("traceback").format_exception(captured.value))
+    assert "private-password" not in rendered
+    assert "postgresql://" not in rendered
+    assert calls == ["saver:enter", "saver:setup", "saver:exit", "store:enter", "store:setup", "store:exit"]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeypatch) -> None:
+    calls = []
+    connection = AsyncMock()
+
+    async def execute(statement, *_args):
+        calls.append(str(statement))
+
+    connection.execute.side_effect = execute
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=connection)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine = MagicMock()
+    engine.connect.return_value = connection_context
+    engine.dispose = AsyncMock(side_effect=lambda: calls.append("dispose"))
+    monkeypatch.setattr(setup_postgres, "_create_setup_engine", lambda _config: engine)
+
+    async def bootstrap(_engine):
+        calls.append("orm")
+
+    async def langgraph(_database_url):
+        calls.append("langgraph")
+
+    monkeypatch.setattr(setup_postgres, "bootstrap_schema", bootstrap)
+    monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", langgraph)
+    monkeypatch.setattr(setup_postgres, "_get_head_revision", lambda: "head")
+
+    assert await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc") == "head"
+    assert calls == [
+        "SELECT 1",
+        "SELECT pg_advisory_lock(:lock_key)",
+        "orm",
+        "langgraph",
+        "SELECT pg_advisory_unlock(:lock_key)",
+        "dispose",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ensure_database_uses_parameterized_lookups_and_quoted_identifiers(monkeypatch) -> None:
     connection = _connection()
     connect = AsyncMock(return_value=connection)

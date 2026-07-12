@@ -120,9 +120,12 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    ```
 
    `setup-db` 不会创建或修改 role；目标 role 必须已存在。后续只升级已存在数据库时
-   使用 `make migrate-db`，它不读取管理员连接，也不会创建数据库。`make check-db`
-   只读检查 PostgreSQL 版本、Alembic revision 和必需表。命令输出不会显示 username、
-   password 或完整 URL。Gateway 启动只验证和升级已配置的目标数据库，不会自动建库。
+   使用 `make migrate-db`，它不读取管理员连接，也不会创建数据库。`setup-db` 和
+   `migrate-db` 都会先初始化 ORM/Alembic，再用同一个显式 `DATABASE_URL` 幂等初始化
+   LangGraph checkpointer/store 完整 schema。`make check-db` 只读检查 PostgreSQL 版本、
+   Alembic revision、业务表以及 checkpoint/store 必需表；只到 Alembic head 但缺少
+   LangGraph 表仍会判定为不健康。命令输出不会显示 username、password 或完整 URL。
+   Gateway 启动只验证和升级已配置的目标数据库，不会自动建库。
 
    从旧版 SQLite 安装迁移时，先设置 `DATABASE_URL`，并把只读来源和 repo 外备份目录
    作为参数传入。先执行 dry-run；只有所有来源都通过 schema、冲突和语义预检后才移除

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import asyncpg
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.store.postgres.aio import AsyncPostgresStore
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -24,6 +26,7 @@ _IDENTIFIER_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,62}\Z")
 _POSTGRESQL_DRIVERS = frozenset({"postgresql", "postgresql+asyncpg"})
 _DUPLICATE_DATABASE_SQLSTATE = "42P04"
 _SETUP_LOCK_KEY = 0x0DEE_12F1_5E7D_0004
+_BOOTSTRAP_LOCK_KEY = 0x0DEE_12F1_5E7D_0005
 
 
 class PostgresSetupError(RuntimeError):
@@ -148,12 +151,35 @@ def _create_setup_engine(config: DatabaseConfig) -> AsyncEngine:
     )
 
 
+async def _bootstrap_langgraph_schemas(database_url: str) -> None:
+    """Idempotently initialize LangGraph checkpointer and store tables."""
+    connection_url = _asyncpg_url(database_url)
+    try:
+        async with AsyncPostgresSaver.from_conn_string(connection_url) as saver:
+            await saver.setup()
+        async with AsyncPostgresStore.from_conn_string(connection_url) as store:
+            await store.setup()
+    except Exception:
+        raise PostgresSetupError("LangGraph PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和数据库状态") from None
+
+
 async def _bootstrap_existing(database_url: str) -> str:
     engine = _create_setup_engine(DatabaseConfig(url=database_url))
     try:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
-        await bootstrap_schema(engine)
+            await connection.execute(
+                text("SELECT pg_advisory_lock(:lock_key)"),
+                {"lock_key": _BOOTSTRAP_LOCK_KEY},
+            )
+            try:
+                await bootstrap_schema(engine)
+                await _bootstrap_langgraph_schemas(database_url)
+            finally:
+                await connection.execute(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": _BOOTSTRAP_LOCK_KEY},
+                )
         return _get_head_revision()
     except Exception:
         raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None

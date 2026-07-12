@@ -637,10 +637,14 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the author
 **本地初始化与检查**：`make setup-db` 仅从显式 `POSTGRES_ADMIN_URL` 取得连接
 `postgres` maintenance database 的管理员连接，并从显式 `DATABASE_URL` 取得目标连接。
 它验证 database/role identifier、确认目标 role 已存在、并发安全地创建目标数据库，随后
-复用 `bootstrap_schema` 升级到 Alembic head；它不创建 role，也不提升权限。`make
-migrate-db` 只 bootstrap 已存在目标数据库，不读取管理员连接；`make check-db` 只执行
-参数化只读查询，报告 PostgreSQL 版本、current/head revision 和必需表。三个命令均不输出
-username、password 或完整 URL。Gateway runtime 仍只验证目标库，绝不自动创建数据库。
+在覆盖完整 bootstrap 的目标库 advisory lock 内复用 `bootstrap_schema` 升级到 Alembic
+head，并用同一个显式 `DATABASE_URL` 幂等执行 LangGraph
+`AsyncPostgresSaver.setup()` / `AsyncPostgresStore.setup()`；它不创建 role，也不提升权限。
+`make migrate-db` 对已存在目标库执行相同的 ORM/Alembic + LangGraph 完整初始化，但不读取
+管理员连接；`make check-db` 只执行参数化只读查询，除业务表外还要求
+`checkpoint_migrations`、`checkpoints`、`checkpoint_blobs`、`checkpoint_writes`、
+`store_migrations`、`store`。三个命令均不输出 username、password 或完整 URL。Gateway
+runtime 仍只验证目标库，绝不自动创建数据库。
 
 **一次性 SQLite 数据迁移**：`make migrate-sqlite ARGS="..."` 调用
 `scripts/migrate_sqlite_to_postgres.py`。脚本只通过 Task 1 的 `mode=ro` /

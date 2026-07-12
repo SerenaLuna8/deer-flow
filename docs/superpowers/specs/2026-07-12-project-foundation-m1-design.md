@@ -196,6 +196,12 @@ M1 将置顶和最近进入记录保存在成员关系上，因为它们是用�
 
 ## 6. PostgreSQL 初始化
 
+初始化的完成条件同时包含 DeerFlow ORM/Alembic schema 与 LangGraph checkpointer/store
+schema。`setup-db` 和 migrate-only 路径必须使用同一个显式目标 URL，在完整 bootstrap
+advisory lock 内依次执行 ORM/Alembic、`AsyncPostgresSaver.setup()`、
+`AsyncPostgresStore.setup()`；健康检查必须把 checkpoint/store migration 与数据表纳入
+必需表集合。
+
 ### 6.1 配置
 
 使用 `DATABASE_URL`。密码中的特殊字符必须进行 URL 编码。日志只能打印脱敏后的 host、port 和 database。
