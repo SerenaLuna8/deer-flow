@@ -1624,11 +1624,24 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
 def _preflight_cross_source(sources: list[Path]) -> UnionPlan:
     seen: dict[tuple[str, str], str] = {}
 
-    def register(table: str, key: str, digest: str) -> None:
-        identity = (table, key)
+    def register(
+        registry_table: str,
+        key: str,
+        digest: str,
+        *,
+        source_sha256: str,
+        error_table: str | None = None,
+    ) -> None:
+        identity = (registry_table, key)
         previous = seen.get(identity)
         if previous is not None and previous != digest:
-            raise MigrationError(f"cross-source target conflict in {table}")
+            raise MigrationError(
+                f"cross-source target conflict in {registry_table}",
+                code=MigrationErrorCode.CONFLICT,
+                table=error_table or registry_table,
+                source_sha256=source_sha256,
+                source_key=key,
+            )
         seen[identity] = digest
 
     business_rows: list[tuple[str, NormalizedRow]] = []
@@ -1641,26 +1654,64 @@ def _preflight_cross_source(sources: list[Path]) -> UnionPlan:
             if table in table_names:
                 for row in normalize_business_rows(source, table):
                     business_rows.append((table, row))
-                    register(table, row.target_key, row.digest)
+                    register(
+                        table,
+                        row.target_key,
+                        row.digest,
+                        source_sha256=inspection.inventory.sha256,
+                    )
                     for constraint_name, unique_key in _business_unique_keys(table, row.values):
-                        register(f"{table}.{constraint_name}", unique_key, row.digest)
+                        register(
+                            f"{table}.{constraint_name}",
+                            unique_key,
+                            row.digest,
+                            source_sha256=inspection.inventory.sha256,
+                            error_table=table,
+                        )
         checkpoints, writes = decode_checkpoint_rows(source)
         for row in checkpoints:
-            register("checkpoints", _checkpoint_identity(row), _checkpoint_digest(row))
+            register(
+                "checkpoints",
+                _checkpoint_identity(row),
+                _checkpoint_digest(row),
+                source_sha256=inspection.inventory.sha256,
+            )
             versions = row.checkpoint.get("channel_versions", {})
             for channel, value in row.checkpoint.get("channel_values", {}).items():
                 if value is None or isinstance(value, (str, int, float, bool)):
                     continue
                 if channel not in versions:
-                    raise MigrationError("checkpoint blob channel has no version")
+                    raise MigrationError(
+                        "checkpoint blob channel has no version",
+                        code=MigrationErrorCode.CONFLICT,
+                        table="checkpoint_blobs",
+                        source_sha256=inspection.inventory.sha256,
+                        source_key=_json_canonical([row.thread_id, row.checkpoint_ns, channel]),
+                    )
                 blob_key = _json_canonical([row.thread_id, row.checkpoint_ns, channel, str(versions[channel])])
                 blob_digest = hashlib.sha256(_json_canonical(value).encode()).hexdigest()
-                register("checkpoint_blobs", blob_key, blob_digest)
+                register(
+                    "checkpoint_blobs",
+                    blob_key,
+                    blob_digest,
+                    source_sha256=inspection.inventory.sha256,
+                )
         for row in writes:
             digest = _write_digest(row.channel, row.value)
-            register("checkpoint_writes", _write_identity(row), digest)
+            register(
+                "checkpoint_writes",
+                _write_identity(row),
+                digest,
+                source_sha256=inspection.inventory.sha256,
+                error_table="writes",
+            )
         for row in _decode_store_rows(source):
-            register("store", row.target_key, row.digest)
+            register(
+                "store",
+                row.target_key,
+                row.digest,
+                source_sha256=inspection.inventory.sha256,
+            )
     import deerflow.persistence.models  # noqa: F401
     from deerflow.persistence.base import Base
 

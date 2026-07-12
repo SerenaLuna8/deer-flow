@@ -760,6 +760,49 @@ def test_cross_source_preflight_stops_conflicting_target_primary_key(tmp_path: P
         _preflight_cross_source([first, second])
 
 
+def test_real_two_source_preflight_conflict_reaches_cli_as_safe_fields(tmp_path: Path, monkeypatch, capsys) -> None:
+    first = tmp_path / "private-first.db"
+    second = tmp_path / "private-second.db"
+    _user_source(first, [("private-shared-id", "private-first@example.invalid", 0)])
+    _user_source(second, [("private-shared-id", "private-second@example.invalid", 0)])
+    second_sha = hashlib.sha256(second.read_bytes()).hexdigest()
+    monkeypatch.setenv("SAFE_DATABASE_URL", "postgresql://owner:private-password@localhost/deerflow")
+
+    result = main(
+        [
+            "--source",
+            str(first),
+            "--source",
+            str(second),
+            "--target-url-env",
+            "SAFE_DATABASE_URL",
+            "--backup-dir",
+            str(tmp_path / "private-backup"),
+            "--dry-run",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert result == 1
+    assert "code=conflict" in rendered
+    assert "table=users" in rendered
+    assert f"source={second_sha[:12]}" in rendered
+    assert "key=" in rendered
+    for secret in (
+        "private-shared-id",
+        "private-first@example.invalid",
+        "private-second@example.invalid",
+        "private-first.db",
+        "private-second.db",
+        "private-backup",
+        "private-password",
+        "postgresql://",
+        "cross-source target conflict",
+    ):
+        assert secret not in rendered
+
+
 def test_channel_active_identity_partial_unique_ignores_revoked_only() -> None:
     base = {
         "id": "c",
