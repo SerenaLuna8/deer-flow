@@ -744,6 +744,14 @@ Revision 0005 refuses to downgrade while either project table contains data; ope
 must migrate that data explicitly before retrying. Its users-role constraint lookup is
 bound to the current schema's `users` table and fails closed on type or definition drift.
 
+**项目授权边界**：`app.projects` 持有唯一的 role → capability 显式矩阵和不可变
+`ProjectContext`。解析器只接受认证域的 UUID user ID，并用一个 SQL statement 联结项目与
+active membership；项目不存在、外部用户、平台 `system_admin` 未入项目、暂停项目和非
+active 状态统一返回 `project_not_found`。UUID 对象按 project ID 解析，字符串始终按 slug
+解析（即使字符串形似 UUID），禁止接收客户端 role/capability 作为授权依据。
+`app.projects` 可以依赖 `deerflow.persistence.projects`，harness 永远不得反向 import
+`app.*`。
+
 ### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
 
 A terminal-native UI over the embedded harness, exposed as the `deerflow` console script (`[project.scripts]` in `packages/harness/pyproject.toml`). It is a UI shell over `DeerFlowClient` and does **not** fork agent behavior. `textual` is an optional dependency (`deerflow-harness[tui]`; also in the backend dev group); the console script degrades to headless help when it is absent. Full guide: [docs/TUI.md](docs/TUI.md).
