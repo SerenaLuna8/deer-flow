@@ -134,9 +134,18 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("key_hash"),
     )
+    op.create_index(
+        "ix_project_invitation_rate_limits_expires_at",
+        "project_invitation_rate_limits",
+        ["expires_at"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(
+        "ix_project_invitation_rate_limits_expires_at",
+        table_name="project_invitation_rate_limits",
+    )
     op.drop_table("project_invitation_rate_limits")
     op.drop_index(
         "uq_project_invitations_pending_email",

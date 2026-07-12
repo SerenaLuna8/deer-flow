@@ -18,7 +18,11 @@ class ProjectInvitationRateLimitRow(Base):
     key_hash: Mapped[str] = mapped_column(CHAR(64), primary_key=True)
     failure_count: Mapped[int] = mapped_column(Integer, nullable=False)
     window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
 
     __table_args__ = (

@@ -158,7 +158,7 @@ claim cookie 名为 `project_invitation_claim`。服务端使用带固定 domain
 
 claim API 对有效、无效和已受限 token 返回完全相同的 status、body 和同形状 opaque cookie。无效或受限路径签发带随机 invitation UUID 和输入 token hash 的不可用 claim；认证加密使客户端不能读取或对比 invitation UUID。claim 不返回 invitation 状态、邮箱、项目或任何 token 存在性信息。
 
-邀请 claim/redeem 失败限流使用独立 PostgreSQL 表 `project_invitation_rate_limits`，固定窗口阈值沿用登录规则：5 次、5 分钟。表只保存 SHA-256 key、失败次数、窗口起止时间和更新时间；claim key 对 action + 可信客户端 IP 整体 hash，redeem key 再加入当前账户规范化 email 后整体 hash，不保存原始 IP 或 email。失败通过 `INSERT ... ON CONFLICT DO UPDATE` 原子累加，检查在事务中锁定单行；成功清除对应计数。claim 受限时仍返回上述通用响应和不可用同形状 cookie，redeem 受限时统一安全失败为 `PROJECT_INVITATION_INVALID`，不新增可用于枚举的公共错误语义。
+邀请 claim/redeem 失败限流使用独立 PostgreSQL 表 `project_invitation_rate_limits`，固定窗口阈值沿用登录规则：5 次、5 分钟。表只保存 SHA-256 key、失败次数、窗口起止时间和更新时间；claim key 对 action + 可信客户端 IP 整体 hash，redeem key 再加入当前账户规范化 email 后整体 hash，不保存原始 IP 或 email。失败通过 `INSERT ... ON CONFLICT DO UPDATE` 原子累加，检查在事务中锁定单行；成功清除对应计数。每次 admission 在同一事务中完成当前 key 的原子计数后，按 `expires_at` 索引选择最多 100 条过期行，使用 `FOR UPDATE SKIP LOCKED` 后删除所选 key，禁止无界全表删除，并保证并发请求不会为清理任务互相等待。claim 受限时仍返回上述通用响应和不可用同形状 cookie，redeem 受限时统一安全失败为 `PROJECT_INVITATION_INVALID`，不新增可用于枚举的公共错误语义。
 
 并发兑换只有一个事务成功，其他请求返回稳定 `409`，不能创建重复 membership。
 

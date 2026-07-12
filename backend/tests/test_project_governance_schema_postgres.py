@@ -88,6 +88,7 @@ async def test_m2_schema_has_governance_constraints(
             invitation_indexes = await conn.run_sync(lambda sync: inspect(sync).get_indexes("project_invitations"))
             rate_limit_columns = await conn.run_sync(lambda sync: inspect(sync).get_columns("project_invitation_rate_limits"))
             rate_limit_checks = await conn.run_sync(lambda sync: inspect(sync).get_check_constraints("project_invitation_rate_limits"))
+            rate_limit_indexes = await conn.run_sync(lambda sync: inspect(sync).get_indexes("project_invitation_rate_limits"))
             version = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
 
         assert PROJECT_COLUMNS <= {column["name"] for column in project_columns}
@@ -113,6 +114,7 @@ async def test_m2_schema_has_governance_constraints(
             "ck_project_invitation_rate_limits_key_hash",
             "ck_project_invitation_rate_limits_failure_count",
         } <= {constraint["name"] for constraint in rate_limit_checks}
+        assert "ix_project_invitation_rate_limits_expires_at" in {index["name"] for index in rate_limit_indexes}
         _assert_token_hash_is_char_64(invitation_columns)
         assert (
             "deletion_requested_by_user_id",
@@ -203,12 +205,36 @@ async def test_m1_database_upgrades_to_m2_without_losing_project_data(
             version = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
             tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
             invitation_columns = await conn.run_sync(lambda sync: inspect(sync).get_columns("project_invitations"))
+            rate_limit_indexes = await conn.run_sync(lambda sync: inspect(sync).get_indexes("project_invitation_rate_limits"))
 
         assert project == ("active", None, None, None)
         assert membership == ("active", None, None, None, None)
         assert "project_invitations" in tables
         _assert_token_hash_is_char_64(invitation_columns)
+        assert "ix_project_invitation_rate_limits_expires_at" in {index["name"] for index in rate_limit_indexes}
         assert version == "0006_project_governance"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_m2_downgrade_removes_rate_limit_expiry_index_with_table(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        cfg = _get_alembic_config(engine)
+        await asyncio.to_thread(command.upgrade, cfg, "0006_project_governance")
+        async with engine.connect() as conn:
+            indexes = await conn.run_sync(lambda sync: inspect(sync).get_indexes("project_invitation_rate_limits"))
+        assert "ix_project_invitation_rate_limits_expires_at" in {index["name"] for index in indexes}
+
+        await asyncio.to_thread(command.downgrade, cfg, "0005_project_foundation")
+        async with engine.connect() as conn:
+            tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
+            version = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
+        assert "project_invitation_rate_limits" not in tables
+        assert version == "0005_project_foundation"
     finally:
         await engine.dispose()
 

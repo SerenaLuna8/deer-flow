@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timedelta
 
-from sqlalchemy import case, delete
+from sqlalchemy import case, delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,7 @@ from deerflow.persistence.projects.invitation_rate_limit_model import (
 
 MAX_INVITATION_ATTEMPTS = 5
 INVITATION_RATE_LIMIT_WINDOW = timedelta(minutes=5)
+INVITATION_RATE_LIMIT_CLEANUP_BATCH_SIZE = 100
 
 
 def hash_rate_limit_key(value: str) -> str:
@@ -63,9 +64,23 @@ class InvitationRateLimitRepository:
         ).returning(
             ProjectInvitationRateLimitRow.failure_count,
         )
+        expired_keys = (
+            select(ProjectInvitationRateLimitRow.key_hash)
+            .where(ProjectInvitationRateLimitRow.expires_at <= now)
+            .order_by(
+                ProjectInvitationRateLimitRow.expires_at,
+                ProjectInvitationRateLimitRow.key_hash,
+            )
+            .limit(INVITATION_RATE_LIMIT_CLEANUP_BATCH_SIZE)
+            .with_for_update(skip_locked=True)
+        )
+        cleanup = delete(ProjectInvitationRateLimitRow).where(ProjectInvitationRateLimitRow.key_hash.in_(expired_keys))
         try:
             async with self.session.begin():
+                # Lock/count this attempt first. Concurrent cleanups then skip each
+                # other's active admission keys instead of forming a lock cycle.
                 row = (await self.session.execute(statement)).one()
+                await self.session.execute(cleanup)
                 return row.failure_count <= MAX_INVITATION_ATTEMPTS
         except DBAPIError:
             raise ProjectDatabaseUnavailable() from None
