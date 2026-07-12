@@ -16,6 +16,7 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.migration_ledger import MigrationLedgerRow
 from scripts.migrate_sqlite_to_postgres import (
     DecodedCheckpoint,
+    DecodedWrite,
     MigrationError,
     MigrationErrorCode,
     MigrationReport,
@@ -23,8 +24,12 @@ from scripts.migrate_sqlite_to_postgres import (
     UnionPlan,
     _business_unique_keys,
     _json_canonical,
+    _migrate_checkpoints,
+    _migrate_writes_rows,
+    _order_checkpoints,
     _pending_writes_contains,
     _preflight_cross_source,
+    _preflight_foreign_keys,
     _run_cli,
     _strict_insert_checkpoint,
     backup_source,
@@ -506,6 +511,30 @@ async def test_multi_source_cli_preflights_every_source_before_backup_or_write(t
     assert backups == ["one.db", "two.db"]
 
 
+@pytest.mark.asyncio
+async def test_backup_snapshot_plan_fingerprint_mismatch_stops_before_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source.db"
+    plans = iter(
+        [
+            UnionPlan(frozenset(), (frozenset(),), (frozenset(),), (("a" * 64, 1),)),
+            UnionPlan(frozenset(), (frozenset(),), (frozenset(),), (("b" * 64, 1),)),
+        ]
+    )
+    monkeypatch.setattr("scripts.migrate_sqlite_to_postgres._preflight_cross_source", lambda _sources: next(plans))
+
+    async def fake_migrate(_source, _target, dry_run, **_kwargs):
+        assert dry_run is True
+        return MigrationReport("a" * 64, True, {}, (), True, source_size_bytes=1)
+
+    monkeypatch.setattr("scripts.migrate_sqlite_to_postgres.migrate_source", fake_migrate)
+    monkeypatch.setattr(
+        "scripts.migrate_sqlite_to_postgres.backup_source",
+        lambda *_args: SimpleNamespace(path=tmp_path / "snapshot.bak", sha256="a" * 64),
+    )
+    with pytest.raises(MigrationError, match="backup snapshot plan fingerprint mismatch"):
+        await _run_cli(SimpleNamespace(source=[source], dry_run=False, backup_dir=tmp_path), "postgresql://safe")
+
+
 def test_cross_source_preflight_stops_conflicting_target_primary_key(tmp_path: Path) -> None:
     first = tmp_path / "first.db"
     second = tmp_path / "second.db"
@@ -689,3 +718,140 @@ async def test_real_postgres_semantic_migration_and_idempotent_replay(
         )
     finally:
         await probe.close()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_conflict_rolls_back_new_blob_state() -> None:
+    class Transaction:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            self.snapshot = (
+                dict(self.connection.blobs),
+                dict(self.connection.checkpoints),
+                list(self.connection.ledger),
+            )
+            return self
+
+        async def __aexit__(self, exc_type, *_args):
+            if exc_type:
+                self.connection.blobs, self.connection.checkpoints, self.connection.ledger = self.snapshot
+            return False
+
+    class Connection:
+        def __init__(self):
+            self.blobs = {}
+            self.checkpoints = {"cp-1": "existing"}
+            self.ledger = ["existing-ledger"]
+
+        def transaction(self):
+            return Transaction(self)
+
+        async def fetchval(self, sql, *args):
+            if "checkpoint_blobs" in sql:
+                self.blobs[(args[2], args[3])] = args[5]
+                return args[3]
+            return None
+
+        async def fetchrow(self, sql, *_args):
+            if "parent_checkpoint_id" in sql:
+                return {"parent_checkpoint_id": None, "checkpoint": {"id": "cp-1", "channel_values": {}, "channel_versions": {}}, "metadata": {}}
+            raise AssertionError(sql)
+
+    connection = Connection()
+    row = DecodedCheckpoint("t", "", "cp-1", None, {"id": "cp-1", "channel_values": {"messages": HumanMessage(content="source")}, "channel_versions": {"messages": "1"}}, {})
+    with pytest.raises(MigrationError, match="transactional semantic conflict"):
+        await _strict_insert_checkpoint(connection, row)
+    assert connection.blobs == {}
+    assert connection.checkpoints == {"cp-1": "existing"}
+    assert connection.ledger == ["existing-ledger"]
+
+
+@pytest.mark.asyncio
+async def test_planned_checkpoint_write_dry_run_has_no_checkpoint_lookup_or_mutation() -> None:
+    class Connection:
+        async def fetchval(self, *_args):
+            raise AssertionError("checkpoint lookup")
+
+        async def fetchrow(self, *_args):
+            return None
+
+        async def execute(self, *_args):
+            raise AssertionError("mutation")
+
+    write = DecodedWrite("t", "", "cp", "task", 0, "result", {"ok": True})
+    report = await _migrate_writes_rows(Connection(), "a" * 64, [write], dry_run=True, planned_checkpoint_keys=frozenset({("t", "", "cp")}))
+    assert report.planned_insert == 1
+
+
+@pytest.mark.asyncio
+async def test_ordered_fk_plan_accepts_earlier_and_rejects_later() -> None:
+    target = Base.metadata.tables["channel_credentials"]
+    values = {column.name: None for column in target.columns}
+    values["connection_id"] = "connection-1"
+    row = SimpleNamespace(values=values)
+
+    class Connection:
+        def __init__(self):
+            self.lookups = 0
+
+        async def fetchval(self, *_args):
+            self.lookups += 1
+            return None
+
+    key = ("channel_connections", ("id",), _json_canonical(["connection-1"]))
+    earlier = Connection()
+    await _preflight_foreign_keys(earlier, target, row, frozenset({key}))
+    assert earlier.lookups == 0
+    with pytest.raises(MigrationError, match="missing foreign key target"):
+        await _preflight_foreign_keys(Connection(), target, row, frozenset())
+
+
+def test_langgraph_source_rejects_bad_checkpoint_primary_key(tmp_path: Path) -> None:
+    source = tmp_path / "bad-checkpoint-pk.db"
+    _sqlite(source, "CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, checkpoint_id TEXT, parent_checkpoint_id TEXT, type TEXT, checkpoint BLOB, metadata BLOB, PRIMARY KEY (thread_id, checkpoint_id));")
+    with pytest.raises(MigrationError, match="unsupported checkpoints source primary key"):
+        inspect_source(source)
+
+
+@pytest.mark.asyncio
+async def test_ordered_two_source_checkpoint_parent_visibility() -> None:
+    child = DecodedCheckpoint("t", "", "child", "parent", {"id": "child", "channel_values": {}, "channel_versions": {}}, {})
+
+    class Connection:
+        async def fetchrow(self, *_args):
+            return None
+
+    class Saver:
+        async def aget_tuple(self, *_args):
+            return None
+
+    report = await _migrate_checkpoints(
+        Connection(),
+        Saver(),
+        "a" * 64,
+        [child],
+        dry_run=True,
+        planned_checkpoint_keys=frozenset({("t", "", "parent")}),
+    )
+    assert report.planned_insert == 1
+    with pytest.raises(MigrationError, match="parent missing"):
+        await _migrate_checkpoints(Connection(), Saver(), "a" * 64, [child], dry_run=True)
+
+
+def test_duplicate_checkpoint_and_write_identities_fail_closed() -> None:
+    checkpoint = DecodedCheckpoint("t", "", "cp", None, {"id": "cp", "channel_values": {}, "channel_versions": {}}, {})
+    with pytest.raises(MigrationError, match="duplicate checkpoint source key"):
+        _order_checkpoints([checkpoint, checkpoint])
+
+
+@pytest.mark.asyncio
+async def test_duplicate_write_identity_fails_before_target_access() -> None:
+    class Connection:
+        async def fetchval(self, *_args):
+            raise AssertionError("must fail before target access")
+
+    write = DecodedWrite("t", "", "cp", "task", 0, "result", 1)
+    with pytest.raises(MigrationError, match="duplicate checkpoint write source identity"):
+        await _migrate_writes_rows(Connection(), "a" * 64, [write, write], dry_run=True)

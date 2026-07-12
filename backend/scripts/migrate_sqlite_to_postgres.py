@@ -274,7 +274,11 @@ class MigrationReport:
     deferred_empty: tuple[str, ...]
     verified: bool
     source_size_bytes: int = 0
-    atomicity: str = "ORM, checkpoint writes, and store rows commit with ledger per table; checkpoint and blobs use direct transactional insert-or-compare with in-transaction semantic reconstruction, followed by Saver read-back and replay-safe ledger convergence"
+    atomicity: str = (
+        "ORM, checkpoint writes, and store rows commit with ledger per table; checkpoint and blobs use direct "
+        "transactional insert-or-compare with in-transaction semantic reconstruction, followed by Saver read-back "
+        "and replay-safe ledger convergence"
+    )
 
 
 @dataclass(frozen=True)
@@ -1019,6 +1023,9 @@ async def _migrate_writes_rows(
 ) -> TableMigrationReport:
     serde = JsonPlusSerializer()
     inserted = adopted = already = planned = 0
+    identities = [_write_identity(row) for row in writes]
+    if len(identities) != len(set(identities)):
+        raise MigrationError("duplicate checkpoint write source identity")
     for row in writes:
         if (row.thread_id, row.checkpoint_ns, row.checkpoint_id) not in planned_checkpoint_keys and not await connection.fetchval(
             "SELECT 1 FROM checkpoints WHERE thread_id=$1 AND checkpoint_ns=$2 AND checkpoint_id=$3",
