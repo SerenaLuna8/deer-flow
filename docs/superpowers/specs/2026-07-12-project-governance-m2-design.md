@@ -113,7 +113,7 @@ M2 不提前显示尚未实现的 Agent、Skill、MCP、私有工作或自动化
 
 ### 4.3 读取规则
 
-- 所有 active 成员可以查看成员显示名、角色和加入时间；
+- 所有 active 成员可以查看项目内 active 成员的账户邮箱（`account_email`）、角色和加入时间；
 - 只有具备 `project.members.manage` 的成员可以查看邀请列表、创建/撤销邀请、变更角色和移除成员；
 - left/removed 成员不能解析 `ProjectContext`，项目内读取统一返回 `404`；
 - 项目外用户不能根据 membership ID 判断成员是否存在。

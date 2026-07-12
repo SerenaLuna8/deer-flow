@@ -161,6 +161,7 @@ git commit -m "feat(projects): add M2 governance schema"
 
 **接口：**
 
+- 产生：`MembershipView(membership_id, user_id, account_email, role, status, version, joined_at)`。
 - 产生：`MembershipService.list_members(context)`。
 - 产生：`MembershipService.change_role(context, membership_id, role, expected_version)`。
 - 产生：`MembershipService.remove(context, membership_id, expected_version)`。
