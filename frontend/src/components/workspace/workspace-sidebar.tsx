@@ -8,6 +8,8 @@ import {
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { PROJECT_FIRST_MODE } from "@/core/projects/features";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import { WorkspaceChannelsList } from "./channels/workspace-channels-list";
 import { RecentChatList } from "./recent-chat-list";
@@ -19,6 +21,7 @@ export function WorkspaceSidebar({
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
   const { open: isSidebarOpen } = useSidebar();
+  const showLegacyChats = !PROJECT_FIRST_MODE || isStaticWebsiteOnly();
   return (
     <>
       <Sidebar variant="sidebar" collapsible="icon" {...props}>
@@ -27,8 +30,8 @@ export function WorkspaceSidebar({
         </SidebarHeader>
         <SidebarContent>
           <WorkspaceNavChatList />
-          <WorkspaceChannelsList />
-          {isSidebarOpen && <RecentChatList />}
+          {showLegacyChats && <WorkspaceChannelsList />}
+          {showLegacyChats && isSidebarOpen && <RecentChatList />}
         </SidebarContent>
         <SidebarFooter>
           <WorkspaceNavMenu />

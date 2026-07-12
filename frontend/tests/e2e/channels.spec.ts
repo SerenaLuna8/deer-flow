@@ -91,31 +91,24 @@ function mockChannelsAPI(
   });
 }
 
+async function openChannelsSettings(page: Page) {
+  await page.goto("/workspace/chats/new");
+  const sidebar = page.locator("[data-sidebar='sidebar']");
+  await sidebar.getByRole("button", { name: /Settings and more/ }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Channels" }).click();
+  return page.getByRole("dialog", { name: "Settings" });
+}
+
 test.describe("IM channels", () => {
   test("sidebar and settings expose channel connections", async ({ page }) => {
     mockLangGraphAPI(page);
     mockChannelsAPI(page);
 
-    await page.goto("/workspace/chats/new");
-
-    const sidebar = page.locator("[data-sidebar='sidebar']");
-    await expect(sidebar.getByText("Channels")).toBeVisible({
-      timeout: 15_000,
-    });
-    await expect(sidebar.getByText("Telegram")).toBeVisible();
-    await expect(sidebar.getByText("Slack")).toBeVisible();
-    await expect(sidebar.getByText("Discord")).toBeVisible();
-    await expect(sidebar.getByText("Feishu")).toBeVisible();
-    await expect(sidebar.getByText("DingTalk")).toBeVisible();
-    await expect(sidebar.getByText("WeChat")).toBeVisible();
-    await expect(sidebar.getByText("WeCom")).toBeVisible();
+    const dialog = await openChannelsSettings(page);
     await expect(
-      sidebar.getByRole("button", { name: "Connected" }),
-    ).toHaveCount(7);
-
-    await sidebar.getByRole("button", { name: /Settings and more/ }).click();
-    await page.getByRole("menuitem", { name: "Settings" }).click();
-    await page.getByRole("button", { name: "Channels" }).click();
+      page.locator("[data-sidebar='sidebar']").getByText("Channels"),
+    ).toHaveCount(0);
 
     await expect(page.getByText("Telegram direct messages")).toBeVisible();
     await expect(page.getByText("Slack workspace messages")).toBeVisible();
@@ -125,7 +118,6 @@ test.describe("IM channels", () => {
     await expect(page.getByText("WeChat iLink messages")).toBeVisible();
     await expect(page.getByText("WeCom messages")).toBeVisible();
 
-    const dialog = page.getByRole("dialog", { name: "Settings" });
     await expect(dialog.getByRole("button", { name: "Modify" })).toHaveCount(7);
   });
 
@@ -222,12 +214,18 @@ test.describe("IM channels", () => {
 
     void page.route("**/api/channels/slack/connect", (route) => route.abort());
 
-    await page.goto("/workspace/chats/new");
-
-    const sidebar = page.locator("[data-sidebar='sidebar']");
-    await expect(sidebar.getByText("Slack")).toBeVisible({ timeout: 15_000 });
-    await expect(sidebar.getByText("Discord")).toBeHidden();
-    const connectButton = sidebar.getByRole("button", { name: "Connect" });
+    const settingsDialog = await openChannelsSettings(page);
+    await expect(
+      settingsDialog.getByText("Slack", { exact: true }),
+    ).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(
+      settingsDialog.getByText("Discord", { exact: true }),
+    ).toHaveCount(0);
+    const connectButton = settingsDialog.getByRole("button", {
+      name: "Connect",
+    });
     await expect(connectButton).toBeEnabled();
 
     await connectButton.click();
@@ -245,10 +243,7 @@ test.describe("IM channels", () => {
     await setupDialog.getByRole("button", { name: "Save and connect" }).click();
 
     await expect(setupDialog).toBeHidden();
-    await expect(
-      sidebar.getByRole("button", { name: "Connected" }),
-    ).toBeVisible();
-    await sidebar.getByRole("button", { name: "Connected" }).click();
+    await settingsDialog.getByRole("button", { name: "Modify" }).click();
     await expect(
       page.getByRole("dialog", { name: "Modify Slack" }),
     ).toBeVisible();
@@ -292,11 +287,13 @@ test.describe("IM channels", () => {
       },
     );
 
-    await page.goto("/workspace/chats/new");
-
-    const sidebar = page.locator("[data-sidebar='sidebar']");
-    await expect(sidebar.getByText("Slack")).toBeVisible({ timeout: 15_000 });
-    await sidebar.getByRole("button", { name: "Connect" }).click();
+    const settingsDialog = await openChannelsSettings(page);
+    await expect(
+      settingsDialog.getByText("Slack", { exact: true }),
+    ).toBeVisible({
+      timeout: 15_000,
+    });
+    await settingsDialog.getByRole("button", { name: "Connect" }).click();
 
     await expect(
       page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
@@ -384,11 +381,13 @@ test.describe("IM channels", () => {
       });
     });
 
-    await page.goto("/workspace/chats/new");
-
-    const sidebar = page.locator("[data-sidebar='sidebar']");
-    await expect(sidebar.getByText("Slack")).toBeVisible({ timeout: 15_000 });
-    await sidebar.getByRole("button", { name: "Connect" }).click();
+    const settingsDialog = await openChannelsSettings(page);
+    await expect(
+      settingsDialog.getByText("Slack", { exact: true }),
+    ).toBeVisible({
+      timeout: 15_000,
+    });
+    await settingsDialog.getByRole("button", { name: "Connect" }).click();
 
     const setupDialog = page.getByRole("dialog", { name: "Connect Slack" });
     await expect(setupDialog).toBeVisible();
@@ -436,11 +435,13 @@ test.describe("IM channels", () => {
       },
     ]);
 
-    await page.goto("/workspace/chats/new");
-
-    const sidebar = page.locator("[data-sidebar='sidebar']");
-    await expect(sidebar.getByText("Feishu")).toBeVisible({ timeout: 15_000 });
-    await sidebar.getByRole("button", { name: "Connected" }).click();
+    const settingsDialog = await openChannelsSettings(page);
+    await expect(
+      settingsDialog.getByText("Feishu", { exact: true }),
+    ).toBeVisible({
+      timeout: 15_000,
+    });
+    await settingsDialog.getByRole("button", { name: "Modify" }).click();
 
     const setupDialog = page.getByRole("dialog", { name: "Modify Feishu" });
     await expect(setupDialog).toBeVisible();

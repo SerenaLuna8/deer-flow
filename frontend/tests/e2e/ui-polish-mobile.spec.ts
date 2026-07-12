@@ -13,7 +13,12 @@ test.describe("UI polish mobile regressions", () => {
 
     await page.getByRole("button", { name: /toggle sidebar/i }).click();
 
-    await expect(page.getByRole("link", { name: /new chat/i })).toBeVisible();
+    await expect(
+      page
+        .locator("[data-mobile='true'][data-sidebar='sidebar']")
+        .getByRole("link", { name: /项目工作台/i })
+        .first(),
+    ).toBeVisible();
     await expect(page.getByRole("link", { name: /agents/i })).toBeVisible();
     await expect
       .poll(() => page.evaluate(() => document.documentElement.scrollWidth))

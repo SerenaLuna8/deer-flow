@@ -46,11 +46,12 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace/chats/[thread_id]` (chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace/projects` (project workbench), `/projects/[project_slug]` (independent project home), `/workspace/chats/[thread_id]` (legacy chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
   - `workspace/` — Chat page components (messages, artifacts, settings)
+  - `projects/` — Project workbench cards/dialogs and the independent project-home shell
   - `landing/` — Landing page sections
   - `docs/` — Docs / MDX rendering components
 - **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
@@ -71,6 +72,14 @@ external identity application, logout, and unmount invalidate older generations,
 query-cache transition and identity commit must recheck the same generation.
 The M1 `PROJECT_PRIVATE_WORKSPACE` feature constant is hard-disabled and must not be made
 environment- or user-configurable before the later private-work milestone.
+Project-first mode sends the normal `/workspace` landing and primary navigation to
+`/workspace/projects`; static demo builds preserve their existing chat landing and must not
+expose a project entry that can call the project API. Project slug URLs are resolved only by
+paging the member-scoped list endpoint and exact-matching the returned slug; UUID-only detail,
+enter, pin, and update endpoints must never receive a slug. `/projects/[project_slug]` has its
+own server-side auth, QueryClient, and AuthProvider layout and must not be nested in
+`WorkspaceContent`. Its private-work CTA remains visibly disabled and has no thread or router
+integration until the private-work milestone.
 
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)

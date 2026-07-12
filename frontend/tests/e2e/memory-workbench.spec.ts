@@ -551,7 +551,9 @@ test("memory loading state announces localized progress", async ({ page }) => {
 test("learned fact source navigates to its originating thread", async ({
   page,
 }) => {
-  mockLangGraphAPI(page);
+  mockLangGraphAPI(page, {
+    threads: [{ thread_id: MOCK_THREAD_ID, title: "Fact source thread" }],
+  });
   await mockMemoryAPI(page, narrowMemoryFixture);
   await page.goto("/workspace/memory");
 

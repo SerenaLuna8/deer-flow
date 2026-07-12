@@ -51,27 +51,16 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
     });
   });
 
-  test("sidebar recent chats loads more threads when scrolling to the bottom", async ({
+  test("project-first sidebar does not publish recent chats", async ({
     page,
   }) => {
     mockLangGraphAPI(page, { threads: THREADS });
 
     await page.goto("/workspace/chats/new");
 
-    // The 50th thread (end of first page) appears in the sidebar.
-    await expect(page.getByText(FIRST_PAGE_LAST).first()).toBeVisible({
-      timeout: 15_000,
-    });
-    // The 51st has not been fetched yet.
+    await expect(page.getByText(FIRST_PAGE_LAST)).toHaveCount(0);
     await expect(page.getByText(SECOND_PAGE_FIRST)).toHaveCount(0);
-
-    // Scroll the sidebar sentinel into view to trigger the next page.
-    const sentinel = page.getByTestId("recent-chat-list-sentinel");
-    await sentinel.scrollIntoViewIfNeeded();
-
-    await expect(page.getByText(SECOND_PAGE_FIRST).first()).toBeVisible({
-      timeout: 15_000,
-    });
+    await expect(page.getByTestId("recent-chat-list-sentinel")).toHaveCount(0);
   });
 
   test("chats list page does NOT auto-paginate while a search filter is active", async ({

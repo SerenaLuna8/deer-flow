@@ -2,6 +2,7 @@
 
 import {
   KeyboardIcon,
+  FolderKanbanIcon,
   MessageSquarePlusIcon,
   SettingsIcon,
 } from "lucide-react";
@@ -25,6 +26,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "@/core/i18n/hooks";
+import { PROJECT_FIRST_MODE } from "@/core/projects/features";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
 
 import { SettingsDialog } from "./settings";
@@ -36,11 +39,14 @@ export function CommandPalette() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isMac, setIsMac] = useState(false);
+  const showLegacyChats = !PROJECT_FIRST_MODE || isStaticWebsiteOnly();
 
   const handleNewChat = useCallback(() => {
-    router.push("/workspace/chats/new");
+    router.push(
+      showLegacyChats ? "/workspace/chats/new" : "/workspace/projects",
+    );
     setOpen(false);
-  }, [router]);
+  }, [router, showLegacyChats]);
 
   const handleOpenSettings = useCallback(() => {
     setOpen(false);
@@ -79,8 +85,12 @@ export function CommandPalette() {
           <CommandEmpty>{t.shortcuts.noResults}</CommandEmpty>
           <CommandGroup heading={t.shortcuts.actions}>
             <CommandItem onSelect={handleNewChat}>
-              <MessageSquarePlusIcon className="mr-2 h-4 w-4" />
-              {t.sidebar.newChat}
+              {showLegacyChats ? (
+                <MessageSquarePlusIcon className="mr-2 h-4 w-4" />
+              ) : (
+                <FolderKanbanIcon className="mr-2 h-4 w-4" />
+              )}
+              {showLegacyChats ? t.sidebar.newChat : "项目工作台"}
               <CommandShortcut>
                 {metaKey}
                 {shiftKey}N

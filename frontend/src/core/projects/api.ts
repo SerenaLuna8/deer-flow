@@ -195,6 +195,47 @@ export async function listProjects(
   return parsed.data;
 }
 
+export type ProjectListFunction = typeof listProjects;
+
+export async function findProjectBySlug(
+  slug: string,
+  signal?: AbortSignal,
+  list: ProjectListFunction = listProjects,
+): Promise<Project> {
+  const normalizedSlug = slug.trim();
+  if (!normalizedSlug) {
+    throw new ProjectApiError(
+      422,
+      "PROJECT_VALIDATION_FAILED",
+      "Project validation failed",
+    );
+  }
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  while (true) {
+    const filters: ProjectFilters = {
+      query: normalizedSlug,
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    };
+    const page = await list(filters, signal);
+    const exact = page.items.find((project) => project.slug === normalizedSlug);
+    if (exact) return exact;
+    if (page.next_cursor === null) {
+      throw new ProjectApiError(404, "PROJECT_NOT_FOUND", "Project not found");
+    }
+    if (seenCursors.has(page.next_cursor)) {
+      throw new ProjectApiError(
+        502,
+        "PROJECT_RESPONSE_INVALID",
+        "Project response was invalid",
+      );
+    }
+    seenCursors.add(page.next_cursor);
+    cursor = page.next_cursor;
+  }
+}
+
 export async function createProject(
   input: CreateProjectInput,
   signal?: AbortSignal,

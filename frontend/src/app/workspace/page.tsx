@@ -3,6 +3,7 @@ import path from "path";
 
 import { redirect } from "next/navigation";
 
+import { workspaceLandingPath } from "@/core/projects/features";
 import { env } from "@/env";
 
 export default function WorkspacePage() {
@@ -13,8 +14,9 @@ export default function WorkspacePage() {
       })
       .find((thread) => thread.isDirectory() && !thread.name.startsWith("."));
     if (firstThread) {
-      return redirect(`/workspace/chats/${firstThread.name}`);
+      return redirect(workspaceLandingPath(true, firstThread.name));
     }
+    return redirect(workspaceLandingPath(true, null));
   }
-  return redirect("/workspace/chats/new");
+  return redirect(workspaceLandingPath(false, null));
 }

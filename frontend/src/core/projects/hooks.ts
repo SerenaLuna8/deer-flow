@@ -9,6 +9,7 @@ import { useEffect, useLayoutEffect, useRef } from "react";
 import {
   createProject,
   enterProject,
+  findProjectBySlug,
   getProject,
   listProjects,
   pinProject,
@@ -17,6 +18,7 @@ import {
 } from "./api";
 import {
   accountProjectsKey,
+  projectBySlugKey,
   projectDetailKey,
   projectKeys,
 } from "./query-keys";
@@ -192,6 +194,27 @@ export function useProject(
       return getProject(identity.projectId ?? "", signal);
     },
     enabled: Boolean(userId && projectId),
+  });
+}
+
+export function useProjectBySlug(
+  userId: string | null | undefined,
+  slug: string | null | undefined,
+) {
+  return useQuery({
+    queryKey: projectBySlugKey(userId ?? "", slug ?? ""),
+    queryFn: ({ signal }) => {
+      requireProjectIdentity(userId);
+      if (!slug) {
+        throw new ProjectApiError(
+          422,
+          "PROJECT_VALIDATION_FAILED",
+          "Project validation failed",
+        );
+      }
+      return findProjectBySlug(slug, signal);
+    },
+    enabled: Boolean(userId && slug),
   });
 }
 

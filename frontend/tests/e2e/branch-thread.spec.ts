@@ -57,6 +57,7 @@ test.describe("Branch from turn", () => {
       new RegExp(`/workspace/chats/${MOCK_THREAD_ID_2}$`),
     );
     await expect(page.getByText("Second answer")).toBeVisible();
+    await page.goto("/workspace/chats");
     const branchThreadLink = page.locator(
       `a[href="/workspace/chats/${MOCK_THREAD_ID_2}"]`,
     );

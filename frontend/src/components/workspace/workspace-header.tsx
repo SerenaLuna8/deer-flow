@@ -1,6 +1,6 @@
 "use client";
 
-import { MessageSquarePlus } from "lucide-react";
+import { FolderKanbanIcon, MessageSquarePlus } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -12,6 +12,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useI18n } from "@/core/i18n/hooks";
+import { PROJECT_FIRST_MODE } from "@/core/projects/features";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +20,8 @@ export function WorkspaceHeader({ className }: { className?: string }) {
   const { t } = useI18n();
   const { state } = useSidebar();
   const pathname = usePathname();
+  const staticMode = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
+  const showLegacyChats = !PROJECT_FIRST_MODE || staticMode;
   return (
     <>
       <div
@@ -52,12 +55,25 @@ export function WorkspaceHeader({ className }: { className?: string }) {
       <SidebarMenu>
         <SidebarMenuItem>
           <SidebarMenuButton
-            isActive={pathname === "/workspace/chats/new"}
+            isActive={
+              showLegacyChats
+                ? pathname === "/workspace/chats/new"
+                : pathname.startsWith("/workspace/projects")
+            }
             asChild
           >
-            <Link className="text-muted-foreground" href="/workspace/chats/new">
-              <MessageSquarePlus size={16} />
-              <span>{t.sidebar.newChat}</span>
+            <Link
+              className="text-muted-foreground"
+              href={
+                showLegacyChats ? "/workspace/chats/new" : "/workspace/projects"
+              }
+            >
+              {showLegacyChats ? (
+                <MessageSquarePlus size={16} />
+              ) : (
+                <FolderKanbanIcon size={16} />
+              )}
+              <span>{showLegacyChats ? t.sidebar.newChat : "项目工作台"}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

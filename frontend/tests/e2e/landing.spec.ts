@@ -38,8 +38,7 @@ test.describe("Landing page", () => {
     const getStarted = page.getByRole("link", { name: /get started/i });
     await getStarted.click();
 
-    // Should redirect to /workspace/chats/new
-    await page.waitForURL("**/workspace/chats/new");
-    await expect(page).toHaveURL(/\/workspace\/chats\/new/);
+    await page.waitForURL("**/workspace/projects");
+    await expect(page).toHaveURL(/\/workspace\/projects/);
   });
 });

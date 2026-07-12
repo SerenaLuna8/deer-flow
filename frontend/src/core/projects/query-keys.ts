@@ -38,3 +38,7 @@ export function accountProjectsKey(
 export function projectDetailKey(userId: string, projectId: string) {
   return [...projectKeys.details(userId), projectId, "detail"] as const;
 }
+
+export function projectBySlugKey(userId: string, slug: string) {
+  return [...projectKeys.lists(userId), "slug", slug] as const;
+}

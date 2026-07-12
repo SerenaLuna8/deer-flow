@@ -4,6 +4,7 @@ import {
   BotIcon,
   BrainIcon,
   CalendarClock,
+  FolderKanbanIcon,
   MessagesSquare,
   SparklesIcon,
   WrenchIcon,
@@ -28,6 +29,8 @@ import {
 } from "@/components/workspace/workspace-capability-links";
 import { useAgentsApiEnabled } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import { PROJECT_FIRST_MODE } from "@/core/projects/features";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 const capabilityIcons = {
   memory: BrainIcon,
@@ -39,17 +42,40 @@ export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
   const { enabled: agentsEnabled } = useAgentsApiEnabled();
+  const staticMode = isStaticWebsiteOnly();
+  const showLegacyChats = !PROJECT_FIRST_MODE || staticMode;
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton isActive={pathname === "/workspace/chats"} asChild>
-            <Link className="text-muted-foreground" href="/workspace/chats">
-              <MessagesSquare />
-              <span>{t.sidebar.chats}</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
+        {!staticMode && (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={pathname.startsWith("/workspace/projects")}
+              asChild
+            >
+              <Link
+                className="text-muted-foreground"
+                href="/workspace/projects"
+              >
+                <FolderKanbanIcon />
+                <span>项目工作台</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
+        {showLegacyChats && (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={pathname === "/workspace/chats"}
+              asChild
+            >
+              <Link className="text-muted-foreground" href="/workspace/chats">
+                <MessagesSquare />
+                <span>{t.sidebar.chats}</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
         <SidebarMenuItem>
           {agentsEnabled ? (
             <SidebarMenuButton
