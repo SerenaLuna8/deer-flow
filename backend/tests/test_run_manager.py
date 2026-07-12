@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import re
-import sqlite3
 from typing import Any
 
 import pytest
@@ -16,13 +15,19 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
 
+class PostgresDriverError(Exception):
+    def __init__(self, message: str, sqlstate: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
 @pytest.fixture
 def manager() -> RunManager:
     return RunManager()
 
 
 class FlakyStatusRunStore(MemoryRunStore):
-    """Memory run store that simulates transient SQLite status-write failures."""
+    """Memory run store that simulates transient PostgreSQL write failures."""
 
     def __init__(self, *, status_failures: int) -> None:
         super().__init__()
@@ -33,7 +38,7 @@ class FlakyStatusRunStore(MemoryRunStore):
         self.status_update_attempts += 1
         if self.status_failures > 0:
             self.status_failures -= 1
-            raise sqlite3.OperationalError("database is locked")
+            raise PostgresDriverError("serialization failure", "40001")
         return await super().update_status(run_id, status, error=error)
 
 
@@ -57,7 +62,7 @@ class PermanentStatusRunStore(MemoryRunStore):
         raise SQLAlchemyDatabaseError(
             "UPDATE runs SET status = :status WHERE run_id = :run_id",
             {"status": status, "run_id": run_id},
-            sqlite3.DatabaseError("no such table: runs"),
+            PostgresDriverError("undefined table", "42P01"),
         )
 
 
@@ -70,7 +75,7 @@ class FailingStatusRunStore(MemoryRunStore):
 
     async def update_status(self, run_id, status, *, error=None):
         self.status_update_attempts += 1
-        raise sqlite3.OperationalError("database is locked")
+        raise PostgresDriverError("lock not available", "55P03")
 
 
 class MissingCompletionRunStore(MemoryRunStore):

@@ -1,4 +1,4 @@
-"""Dialect-aware JSON value matching for SQLAlchemy (SQLite + PostgreSQL)."""
+"""PostgreSQL JSON value matching for SQLAlchemy."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ _KEY_CHARSET_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 # Allowed value types for metadata filter values (same set accepted by JsonMatch).
 ALLOWED_FILTER_VALUE_TYPES: tuple[type, ...] = (type(None), bool, int, float, str)
 
-# SQLite raises an overflow when binding values outside signed 64-bit range;
 # PostgreSQL overflows during BIGINT cast. Reject at validation time instead.
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
@@ -46,8 +45,8 @@ def validate_metadata_filter_value(value: object) -> bool:
     SQLAlchemy's ``inherit_cache`` invariant when ``value`` is unhashable.
 
     Integer values are additionally restricted to the signed 64-bit range
-    ``[-2**63, 2**63 - 1]``: SQLite overflows when binding larger values
-    and PostgreSQL overflows during the ``BIGINT`` cast.
+    ``[-2**63, 2**63 - 1]`` because PostgreSQL overflows during the
+    ``BIGINT`` cast.
     """
     if not isinstance(value, ALLOWED_FILTER_VALUE_TYPES):
         return False
@@ -58,10 +57,9 @@ def validate_metadata_filter_value(value: object) -> bool:
 
 
 class JsonMatch(ColumnElement):
-    """Dialect-portable ``column[key] == value`` for JSON columns.
+    """PostgreSQL ``column[key] == value`` for JSON columns.
 
-    Compiles to ``json_type``/``json_extract`` on SQLite and
-    ``json_typeof``/``->>`` on PostgreSQL, with type-safe comparison
+    Compiles to ``json_typeof``/``->>`` with type-safe comparison
     that distinguishes bool vs int and NULL vs missing key.
 
     *key* must be a single literal key matching ``[A-Za-z0-9_-]+``.
@@ -100,24 +98,10 @@ class _Dialect:
     num_cast: str
     int_types: tuple[str, ...]
     int_cast: str
-    # None for SQLite where json_type already returns 'integer'/'real';
-    # regex literal for PostgreSQL where json_typeof returns 'number' for
-    # both ints and floats, so an extra guard prevents CAST errors on floats.
     int_guard: str | None
     string_type: str
     bool_type: str | None
 
-
-_SQLITE = _Dialect(
-    null_type="null",
-    num_types=("integer", "real"),
-    num_cast="REAL",
-    int_types=("integer",),
-    int_cast="INTEGER",
-    int_guard=None,
-    string_type="text",
-    bool_type=None,
-)
 
 _PG = _Dialect(
     null_type="null",
@@ -165,17 +149,6 @@ def _build_clause(compiler: SQLCompiler, typeof: str, extract: str, value: objec
     return f"({typeof} = '{dialect.string_type}' AND {extract} = {bp})"
 
 
-@compiles(JsonMatch, "sqlite")
-def _compile_sqlite(element: JsonMatch, compiler: SQLCompiler, **kw: Any) -> str:
-    if not validate_metadata_filter_key(element.key):
-        raise ValueError(f"Key escaped validation: {element.key!r}")
-    col = compiler.process(element.column, **kw)
-    path = f'$."{element.key}"'
-    typeof = f"json_type({col}, '{path}')"
-    extract = f"json_extract({col}, '{path}')"
-    return _build_clause(compiler, typeof, extract, element.value, _SQLITE, **kw)
-
-
 @compiles(JsonMatch, "postgresql")
 def _compile_pg(element: JsonMatch, compiler: SQLCompiler, **kw: Any) -> str:
     if not validate_metadata_filter_key(element.key):
@@ -188,7 +161,7 @@ def _compile_pg(element: JsonMatch, compiler: SQLCompiler, **kw: Any) -> str:
 
 @compiles(JsonMatch)
 def _compile_default(element: JsonMatch, compiler: SQLCompiler, **kw: Any) -> str:
-    raise NotImplementedError(f"JsonMatch supports only sqlite and postgresql; got dialect: {compiler.dialect.name}")
+    raise NotImplementedError(f"JsonMatch supports only postgresql; got dialect: {compiler.dialect.name}")
 
 
 def json_match(column: ColumnElement, key: str, value: object) -> JsonMatch:

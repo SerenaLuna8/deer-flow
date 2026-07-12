@@ -118,26 +118,10 @@ title:
   model_name: null  # null = 快速本地 fallback；填模型名才启用 LLM 标题
 ```
 
-3. **配置持久化（可选）**
+3. **持久化**
 
-如果需要在本地开发时持久化 title：
-
-```python
-# checkpointer.py
-from langgraph.checkpoint.sqlite import SqliteSaver
-
-checkpointer = SqliteSaver.from_conn_string("deerflow.db")
-```
-
-```json
-// langgraph.json
-{
-  "graphs": {
-    "lead_agent": "deerflow.agents:lead_agent"
-  },
-  "checkpointer": "checkpointer:checkpointer"
-}
-```
+Title 随 Thread 状态写入统一 PostgreSQL checkpointer。设置 `DATABASE_URL` 并运行
+`make setup-db` 或 `make migrate-db`；不要添加独立 checkpointer 配置。
 
 ### 客户端使用
 

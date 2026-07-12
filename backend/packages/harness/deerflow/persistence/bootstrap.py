@@ -254,6 +254,14 @@ def _run_baseline_create_all_sync(sync_conn: Any) -> None:
     Base.metadata.create_all(sync_conn, tables=baseline_tables, checkfirst=True)
 
 
+def _reset_failed_empty_bootstrap_sync(sync_conn: Any) -> None:
+    """Restore the DeerFlow-owned portion of a database that started empty."""
+    from deerflow.persistence.base import Base
+
+    Base.metadata.drop_all(sync_conn, checkfirst=True)
+    sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+
+
 def _stamp(cfg: AlembicConfig, revision: str) -> None:
     """Synchronous alembic stamp; callers must wrap in ``asyncio.to_thread``."""
     alembic_command.stamp(cfg, revision)
@@ -371,7 +379,17 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
             logger.info("bootstrap: branch=empty -> create_all + stamp head (%s)", head)
             async with engine.begin() as conn:
                 await conn.run_sync(_run_create_all_sync)
-            await _run_alembic_offload(_stamp, cfg, head)
+            try:
+                await _run_alembic_offload(_stamp, cfg, head)
+            except BaseException:
+                # This invocation proved the DeerFlow-owned schema was empty
+                # before create_all. Restore that state so a failed stamp never
+                # turns the next retry into a false legacy migration that
+                # collides with post-baseline tables created from current
+                # metadata.
+                async with engine.begin() as conn:
+                    await conn.run_sync(_reset_failed_empty_bootstrap_sync)
+                raise
 
         elif decision == "legacy":
             logger.info(

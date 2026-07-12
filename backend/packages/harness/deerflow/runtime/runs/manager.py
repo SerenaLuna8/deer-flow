@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sqlite3
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -19,25 +18,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_RETRYABLE_SQLITE_MESSAGES = (
-    "database is locked",
-    "database table is locked",
-    "database is busy",
-)
-
-_RETRYABLE_SQLITE_ERROR_CODES = {
-    sqlite3.SQLITE_BUSY,
-    sqlite3.SQLITE_LOCKED,
-}
+_RETRYABLE_POSTGRES_SQLSTATES = frozenset({"40001", "40P01", "55P03"})
 
 
 def _is_retryable_persistence_error(exc: BaseException) -> bool:
     """Return True for recognized transient persistence failures.
 
-    Historical lock contention can surface through DBAPI exceptions or
-    SQLAlchemy wrappers. The short bounded retry here protects run status
-    finalization from transient writer pressure without hiding permanent
-    failures forever.
+    PostgreSQL serialization failures, deadlocks, and explicit lock failures
+    can surface directly or through SQLAlchemy wrappers. The short bounded
+    retry protects run finalization without hiding permanent failures.
     """
 
     pending: list[BaseException] = [exc]
@@ -48,13 +37,8 @@ def _is_retryable_persistence_error(exc: BaseException) -> bool:
             continue
         seen.add(id(current))
 
-        message = str(current).lower()
-        if any(fragment in message for fragment in _RETRYABLE_SQLITE_MESSAGES):
+        if getattr(current, "sqlstate", None) in _RETRYABLE_POSTGRES_SQLSTATES:
             return True
-        if isinstance(current, (sqlite3.OperationalError, sqlite3.DatabaseError)):
-            error_code = getattr(current, "sqlite_errorcode", None)
-            if error_code in _RETRYABLE_SQLITE_ERROR_CODES:
-                return True
         for chained in (getattr(current, "orig", None), current.__cause__, current.__context__):
             if isinstance(chained, BaseException):
                 pending.append(chained)

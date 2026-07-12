@@ -394,47 +394,7 @@ class TestThreadMetaRepository:
 
 
 class TestJsonMatchCompilation:
-    """Verify compiled SQL for both SQLite and PostgreSQL dialects."""
-
-    def test_json_match_compiles_sqlite(self):
-        from sqlalchemy import Column, MetaData, String, Table, create_engine
-        from sqlalchemy.types import JSON
-
-        from deerflow.persistence.json_compat import json_match
-
-        metadata = MetaData()
-        t = Table("t", metadata, Column("data", JSON), Column("id", String))
-        engine = create_engine("sqlite://")
-
-        cases = [
-            (None, "json_type(t.data, '$.\"k\"') = 'null'"),
-            (True, "json_type(t.data, '$.\"k\"') = 'true'"),
-            (False, "json_type(t.data, '$.\"k\"') = 'false'"),
-        ]
-        for value, expected_fragment in cases:
-            expr = json_match(t.c.data, "k", value)
-            sql = expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})
-            assert str(sql) == expected_fragment, f"value={value!r}: {sql}"
-
-        # int: uses INTEGER cast for precision, type-check narrows to 'integer' only
-        int_expr = json_match(t.c.data, "k", 42)
-        sql = str(int_expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
-        assert "json_type" in sql
-        assert "= 'integer'" in sql
-        assert "INTEGER" in sql
-        assert "CAST" in sql
-
-        # float: uses REAL cast, type-check spans 'integer' and 'real'
-        float_expr = json_match(t.c.data, "k", 3.14)
-        sql = str(float_expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
-        assert "json_type" in sql
-        assert "IN ('integer', 'real')" in sql
-        assert "REAL" in sql
-
-        str_expr = json_match(t.c.data, "k", "hello")
-        sql = str(str_expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
-        assert "json_type" in sql
-        assert "'text'" in sql
+    """Verify PostgreSQL-only JSON predicate compilation."""
 
     def test_json_match_compiles_pg(self):
         from sqlalchemy import Column, MetaData, String, Table
@@ -543,7 +503,7 @@ class TestJsonMatchCompilation:
 
     def test_compiler_raises_on_escaped_key(self):
         """Compiler raises ValueError even when __init__ validation is bypassed."""
-        from sqlalchemy import Column, MetaData, String, Table, create_engine
+        from sqlalchemy import Column, MetaData, String, Table
         from sqlalchemy.dialects import postgresql
         from sqlalchemy.types import JSON
 
@@ -551,13 +511,8 @@ class TestJsonMatchCompilation:
 
         metadata = MetaData()
         t = Table("t", metadata, Column("data", JSON), Column("id", String))
-        engine = create_engine("sqlite://")
-
         elem = json_match(t.c.data, "k", "v")
         elem.key = "bad.key"  # bypass __init__ to simulate -O stripping assert
-
-        with pytest.raises(ValueError, match="Key escaped validation"):
-            str(elem.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
 
         with pytest.raises(ValueError, match="Key escaped validation"):
             str(elem.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))

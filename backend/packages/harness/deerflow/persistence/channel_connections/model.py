@@ -49,15 +49,14 @@ class ChannelConnectionRow(Base):
         # Enforce the single-active-owner invariant at the database layer: at most
         # one non-revoked row may exist per external identity. This makes ownership
         # transfer race-safe (concurrent connects from different owners can no
-        # longer both commit a connected row). Partial unique indexes are
-        # supported by both SQLite (>= 3.8.0) and PostgreSQL.
+        # longer both commit a connected row). PostgreSQL enforces the partial
+        # unique predicate used by the runtime schema.
         Index(
             "uq_channel_connection_active_identity",
             "provider",
             "external_account_id",
             "workspace_id",
             unique=True,
-            sqlite_where=text("status != 'revoked'"),
             postgresql_where=text("status != 'revoked'"),
         ),
     )

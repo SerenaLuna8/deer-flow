@@ -10,7 +10,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import deerflow.persistence.models  # noqa: F401
 from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.base import Base
-from deerflow.persistence.bootstrap import _BASELINE_TABLE_NAMES, _get_head_revision, bootstrap_schema
+from deerflow.persistence.bootstrap import (
+    _BASELINE_TABLE_NAMES,
+    _get_head_revision,
+    _run_baseline_create_all_sync,
+    bootstrap_schema,
+)
 
 
 def test_bootstrap_schema_no_longer_accepts_backend_keyword() -> None:
@@ -51,7 +56,7 @@ async def test_bootstrap_legacy_database_backfills_baseline_and_upgrades(postgre
     engine = create_async_engine(postgres_database_url)
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(_run_baseline_create_all_sync)
             await connection.execute(text("DROP TABLE channel_conversations CASCADE"))
 
         await bootstrap_schema(engine)
@@ -90,6 +95,9 @@ async def test_bootstrap_failure_releases_lock_and_retry_converges(postgres_data
     try:
         with pytest.raises(RuntimeError, match="stamp failed"):
             await bootstrap_schema(engine)
+        async with engine.connect() as connection:
+            tables = await connection.run_sync(lambda sync_connection: set(sa_inspect(sync_connection).get_table_names()))
+            assert not (tables & set(Base.metadata.tables))
         monkeypatch.setattr(bootstrap_module, "_stamp", original_stamp)
         await bootstrap_schema(engine)
         async with engine.connect() as connection:

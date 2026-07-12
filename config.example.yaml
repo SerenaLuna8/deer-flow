@@ -1491,10 +1491,10 @@ run_events:
 # Background scheduler for one-time and recurring (cron) agent runs.
 # All fields are restart-required (captured at Gateway lifespan startup).
 #
-# Multi-worker note: the scheduler runs once per uvicorn worker. SQLite silently
-# ignores row-level locks, so multiple workers can double-fire the same task.
-# For multi-worker deployments (GATEWAY_WORKERS > 1), use the Postgres database
-# backend, where FOR UPDATE SKIP LOCKED serializes claims correctly.
+# Multi-worker note: the scheduler runs once per uvicorn worker. PostgreSQL
+# FOR UPDATE SKIP LOCKED plus the task lease serializes claims across workers.
+# This database lease is independent of the optional in-process run-events
+# memory buffer; production scheduling remains PostgreSQL-backed.
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
