@@ -94,7 +94,7 @@ export function useEnteredProjectBySlug(
     const attempts = attemptsRef.current;
     attempts.activate(identity);
     resetEnter();
-    if (!identity || !projectQuery.data) return;
+    if (!identity) return;
     startEnter(identity);
     return () => {
       const active = activeAttemptRef.current;
@@ -102,7 +102,7 @@ export function useEnteredProjectBySlug(
       attempts.dispose(active);
       activeAttemptRef.current = null;
     };
-  }, [identity, projectQuery.data, resetEnter, startEnter]);
+  }, [identity, resetEnter, startEnter]);
 
   const enterError =
     enterFailure?.identity === identity ? enterFailure.error : null;

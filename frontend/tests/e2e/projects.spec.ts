@@ -37,6 +37,9 @@ type ProjectMock = {
   listRequests: () => URL[];
   enterPaths: () => string[];
   failNextList: () => void;
+  holdEnters: () => void;
+  releaseEnters: () => void;
+  refreshLookup: (requestId: string) => void;
 };
 
 function projectResponse(project: Project, requestId: string): Project {
@@ -59,6 +62,8 @@ async function mockProjectsAPI(
   let listFailuresRemaining = 0;
   const listRequests: URL[] = [];
   const enterPaths: string[] = [];
+  let enterGate: Promise<void> | null = null;
+  let releaseEnterGate: (() => void) | null = null;
 
   await page.route(/\/api\/projects(?:\/.*)?(?:\?.*)?$/, async (route) => {
     const request = route.request();
@@ -153,6 +158,7 @@ async function mockProjectsAPI(
     if (enterMatch && method === "POST") {
       const id = decodeURIComponent(enterMatch[1]!);
       enterPaths.push(path);
+      await enterGate;
       const project = projects.find((item) => item.id === id)!;
       const entered = projectResponse(
         { ...project, last_entered_at: "2026-07-12T08:00:00+00:00" },
@@ -195,7 +201,27 @@ async function mockProjectsAPI(
       // initial request plus those retries so the visible retry state is real.
       listFailuresRemaining = 4;
     },
+    holdEnters: () => {
+      enterGate = new Promise((resolve) => {
+        releaseEnterGate = resolve;
+      });
+    },
+    releaseEnters: () => {
+      releaseEnterGate?.();
+      enterGate = null;
+      releaseEnterGate = null;
+    },
+    refreshLookup: (requestId) => {
+      projects = projects.map((project) => projectResponse(project, requestId));
+    },
   };
+}
+
+async function reconnect(page: Page) {
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("offline"));
+    window.dispatchEvent(new Event("online"));
+  });
 }
 
 test("workspace shows project cards without project navigation", async ({
@@ -362,6 +388,41 @@ test("project home retries a failed slug lookup without stale data", async ({
   });
   await page.getByRole("button", { name: "重试" }).click();
   await expect(page.getByTestId("project-home")).toBeVisible();
+  expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
+});
+
+test("project context enters a stable identity once across lookup refreshes", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const api = await mockProjectsAPI(page);
+  api.holdEnters();
+
+  await page.goto("/projects/research-lab");
+  await expect
+    .poll(() => api.enterPaths())
+    .toEqual([`/api/projects/${PROJECT_ID}/enter`]);
+
+  api.refreshLookup("request-pending-refresh");
+  const pendingListCount = api.listRequests().length;
+  await reconnect(page);
+  await expect
+    .poll(() => api.listRequests().length)
+    .toBeGreaterThan(pendingListCount);
+  await page.waitForTimeout(200);
+  expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
+
+  api.releaseEnters();
+  await expect(page.getByTestId("project-home")).toBeVisible();
+  expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
+
+  api.refreshLookup("request-completed-refresh");
+  const completedListCount = api.listRequests().length;
+  await reconnect(page);
+  await expect
+    .poll(() => api.listRequests().length)
+    .toBeGreaterThan(completedListCount);
+  await page.waitForTimeout(200);
   expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
 });
 

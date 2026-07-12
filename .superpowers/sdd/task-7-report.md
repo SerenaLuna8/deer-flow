@@ -75,3 +75,38 @@
 提交前只读代码审查结论为 **Ready: Yes**；Critical、Important、Minor 均无发现。审查确认
 context 单一 owner、stale identity 拒绝、capability 导航、Task 8 范围边界、响应式布局和 M1
 private CTA 边界均符合 brief。
+
+## Important Timing Fix — stable identity lookup refresh
+
+### Status
+
+已修复 review 指出的 Important 时序问题。`ProjectContextProvider` 的 enter effect 现在只随
+account + slug + project UUID 组成的稳定 identity 和必要 mutation callbacks 变化；同一 identity
+的 lookup 响应即使返回新对象或改变 `request_id`，也不会 cleanup 慢速 attempt 或重复 POST
+`/enter`。真实 account、slug、project UUID 变化仍由 coordinator 启动新 attempt，旧 token 和旧
+project result 均不能提交为当前项目。
+
+### RED
+
+- 新增真实页面行为 E2E：hold 首次 `/enter`，通过 reconnect 触发 active slug lookup refetch，
+  并将 lookup `request_id` 改为 `request-pending-refresh`。修复前断言失败：预期 1 次 `/enter`，
+  实际收到 2 次相同 UUID 的 POST。
+- 测试同时在首次 enter 完成后再次刷新 lookup 为 `request-completed-refresh`，覆盖 completed
+  attempt 不重启。
+- 删除 `project-context.test.tsx` 中读取源码并匹配 hook 名称的字符串测试；回归不依赖实现源码文本。
+
+### GREEN / Final Gates
+
+- `pnpm test run project-context project-home-state project-shell`：3 files，8/8 通过；新增 account、
+  slug、project UUID 逐项切换时产生 fresh token 且旧 token/result 被拒绝的行为覆盖。
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://localhost:3107 pnpm exec playwright test tests/e2e/projects.spec.ts --grep "stable identity once" --workers=1`：1/1 通过。
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://localhost:3107 pnpm exec playwright test tests/e2e/projects.spec.ts --workers=1`：8/8 通过。
+- `pnpm check`：通过；`pnpm format`：通过。
+- 按要求未运行全量 E2E；3107 dev server 在验证后已停止。
+
+### Concerns
+
+- Playwright 自带的 production webServer 冷构建超过 120 秒超时，因此最终 E2E 使用独立
+  `pnpm dev --port 3107` 和 `PLAYWRIGHT_SKIP_WEB_SERVER=1`；真实 Chromium 行为断言均通过。
+- 首次以 `127.0.0.1` 访问 dev server 被 Next.js dev-origin 保护阻止 hydration；正式 RED/GREEN
+  与完整 projects E2E 均改用同源 `http://localhost:3107`。

@@ -57,6 +57,36 @@ describe("project home identity state", () => {
     ).toBe(oldProject);
   });
 
+  test("starts fresh attempts for real account, slug, and UUID changes while rejecting stale results", () => {
+    const attempts = createProjectHomeAttemptCoordinator();
+    const identities = [
+      projectHomeIdentityKey("u1", "alpha", oldProject.id)!,
+      projectHomeIdentityKey("u2", "alpha", oldProject.id)!,
+      projectHomeIdentityKey("u2", "beta", oldProject.id)!,
+      projectHomeIdentityKey(
+        "u2",
+        "beta",
+        "22222222-2222-4222-8222-222222222222",
+      )!,
+    ];
+
+    const tokens = identities.map((identity) => {
+      attempts.activate(identity);
+      return attempts.start(identity)!;
+    });
+
+    for (const staleToken of tokens.slice(0, -1)) {
+      expect(attempts.complete(staleToken)).toBe(false);
+    }
+    expect(attempts.complete(tokens.at(-1)!)).toBe(true);
+    expect(
+      projectResultForIdentity(identities.at(-1)!, {
+        identity: identities[0]!,
+        project: oldProject,
+      }),
+    ).toBeNull();
+  });
+
   test("restarts an enter attempt after Strict Effects cleanup", () => {
     const identity = projectHomeIdentityKey("u1", "alpha", oldProject.id)!;
     const attempts = createProjectHomeAttemptCoordinator();
