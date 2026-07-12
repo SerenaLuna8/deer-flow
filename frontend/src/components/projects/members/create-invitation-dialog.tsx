@@ -15,10 +15,9 @@ import { Input } from "@/components/ui/input";
 import type {
   CreateProjectInvitationInput,
   CreatedProjectInvitation,
-  ProjectRole,
+  InvitableProjectRole,
 } from "@/core/projects/types";
-
-const INVITABLE_ROLES: ProjectRole[] = ["admin", "editor", "runner", "viewer"];
+import { INVITABLE_PROJECT_ROLES } from "@/core/projects/types";
 
 export function CreateInvitationDialog({
   open,
@@ -36,7 +35,7 @@ export function CreateInvitationDialog({
   onSubmit: (input: CreateProjectInvitationInput) => void;
 }) {
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<ProjectRole>("viewer");
+  const [role, setRole] = useState<InvitableProjectRole>("viewer");
 
   useEffect(() => {
     if (!open) {
@@ -86,7 +85,7 @@ export function CreateInvitationDialog({
             <fieldset className="space-y-2">
               <legend className="text-sm font-medium">项目角色</legend>
               <div className="grid grid-cols-2 gap-2">
-                {INVITABLE_ROLES.map((item) => (
+                {INVITABLE_PROJECT_ROLES.map((item) => (
                   <label
                     key={item}
                     className="border-border flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"

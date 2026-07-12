@@ -40,6 +40,10 @@ type ProjectMock = {
   holdEnters: () => void;
   releaseEnters: () => void;
   refreshLookup: (requestId: string) => void;
+  refreshMembership: (
+    membershipVersion: number,
+    capabilities: Project["capabilities"],
+  ) => void;
 };
 
 function projectResponse(project: Project, requestId: string): Project {
@@ -158,13 +162,12 @@ async function mockProjectsAPI(
     if (enterMatch && method === "POST") {
       const id = decodeURIComponent(enterMatch[1]!);
       enterPaths.push(path);
+      const project = structuredClone(projects.find((item) => item.id === id)!);
       await enterGate;
-      const project = projects.find((item) => item.id === id)!;
       const entered = projectResponse(
         { ...project, last_entered_at: "2026-07-12T08:00:00+00:00" },
         "request-enter",
       );
-      projects = projects.map((item) => (item.id === id ? entered : item));
       await fulfillProject(route, entered);
       return;
     }
@@ -211,6 +214,14 @@ async function mockProjectsAPI(
     },
     refreshLookup: (requestId) => {
       projects = projects.map((project) => projectResponse(project, requestId));
+    },
+    refreshMembership: (membershipVersion, capabilities) => {
+      projects = projects.map((project) => ({
+        ...project,
+        membership_version: membershipVersion,
+        capabilities,
+        request_id: `request-membership-${membershipVersion}`,
+      }));
     },
   };
 }
@@ -424,6 +435,27 @@ test("project context enters a stable identity once across lookup refreshes", as
     .toBeGreaterThan(completedListCount);
   await page.waitForTimeout(200);
   expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
+});
+
+test("project context re-enters on membership version changes and rejects the old enter result", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const api = await mockProjectsAPI(page);
+  api.holdEnters();
+
+  await page.goto("/projects/research-lab");
+  await expect.poll(() => api.enterPaths()).toHaveLength(1);
+
+  api.refreshMembership(2, ["project.read", "project.enter"]);
+  const listCount = api.listRequests().length;
+  await reconnect(page);
+  await expect.poll(() => api.listRequests().length).toBeGreaterThan(listCount);
+  await expect.poll(() => api.enterPaths()).toHaveLength(2);
+
+  api.releaseEnters();
+  await expect(page.getByTestId("project-home")).toBeVisible();
+  await expect(page.getByRole("link", { name: "项目设置" })).toHaveCount(0);
 });
 
 test("project home stays private-work disabled in dark mobile layout", async ({

@@ -42,7 +42,12 @@ export function useEnteredProjectBySlug(
   const projectId = projectQuery.data?.id;
   const enter = useEnterProject(userId, projectId);
   const { mutate: enterProject, reset: resetEnter } = enter;
-  const identity = projectHomeIdentityKey(userId, slug, projectId);
+  const identity = projectHomeIdentityKey(
+    userId,
+    slug,
+    projectId,
+    projectQuery.data?.membership_version,
+  );
   const identityRef = useRef(identity);
   const attemptsRef = useRef(createProjectHomeAttemptCoordinator());
   const activeAttemptRef = useRef<ProjectHomeAttemptToken | null>(null);

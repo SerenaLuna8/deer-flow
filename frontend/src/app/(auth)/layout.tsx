@@ -1,4 +1,3 @@
-import { redirect } from "next/navigation";
 import { type ReactNode } from "react";
 
 import { QueryClientProvider } from "@/components/query-client-provider";
@@ -18,7 +17,14 @@ export default async function AuthLayout({
 
   switch (result.tag) {
     case "authenticated":
-      redirect("/workspace");
+      // The callback page must run even though the SSO provider has already
+      // set an authenticated cookie. Login and setup own their safe client
+      // redirects once AuthProvider has hydrated.
+      return (
+        <QueryClientProvider>
+          <AuthProvider initialUser={result.user}>{children}</AuthProvider>
+        </QueryClientProvider>
+      );
     case "needs_setup":
       // Allow access to setup page
       return (

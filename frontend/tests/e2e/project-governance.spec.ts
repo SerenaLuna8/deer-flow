@@ -90,6 +90,7 @@ async function json(route: Route, body: unknown, status = 200) {
 type GovernanceMock = {
   claimBodies: unknown[];
   redeemBodies: Array<string | null>;
+  failNextRevocation: () => void;
 };
 
 async function mockProjectGovernance(
@@ -102,6 +103,7 @@ async function mockProjectGovernance(
   let recoverableVisible = true;
   const claimBodies: unknown[] = [];
   const redeemBodies: Array<string | null> = [];
+  let revocationFailure = false;
 
   await page.route(
     /\/api\/(?:projects|project-invitations)(?:\/.*)?(?:\?.*)?$/,
@@ -230,6 +232,20 @@ async function mockProjectGovernance(
         `/api/projects/${PROJECT_ID}/invitations/([^/]+)$`,
       ).exec(path);
       if (invitationMatch && method === "DELETE") {
+        if (revocationFailure) {
+          revocationFailure = false;
+          await json(
+            route,
+            {
+              detail: {
+                code: "PROJECT_INVITATION_CONFLICT",
+                message: "unsafe backend detail",
+              },
+            },
+            409,
+          );
+          return;
+        }
         const revoked = projectInvitations.find(
           (item) => item.id === invitationMatch[1],
         )!;
@@ -277,7 +293,13 @@ async function mockProjectGovernance(
     },
   );
 
-  return { claimBodies, redeemBodies };
+  return {
+    claimBodies,
+    redeemBodies,
+    failNextRevocation: () => {
+      revocationFailure = true;
+    },
+  };
 }
 
 test("claims a fragment secret once, clears the URL, and redeems without a body", async ({
@@ -301,6 +323,30 @@ test("claims a fragment secret once, clears the URL, and redeems without a body"
     "/projects/research-lab",
   );
   expect(api.claimBodies).toEqual([{ token: "plain-secret-token" }]);
+  expect(api.redeemBodies).toEqual([null]);
+});
+
+test("authenticated SSO callback executes before returning to invite redemption", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const api = await mockProjectGovernance(page);
+  let authChecks = 0;
+  await page.route("**/api/v1/auth/me", async (route) => {
+    authChecks += 1;
+    await json(route, {
+      id: "default",
+      email: "default@test.local",
+      system_role: "system_admin",
+      needs_setup: false,
+    });
+  });
+
+  await page.goto("/auth/callback?next=%2Finvite");
+
+  await expect.poll(() => authChecks).toBe(1);
+  await expect(page).toHaveURL(/\/invite$/);
+  await expect(page.getByRole("heading", { name: "邀请已接受" })).toBeVisible();
   expect(api.redeemBodies).toEqual([null]);
 });
 
@@ -358,6 +404,22 @@ test("server capabilities expose governance actions even when the role label is 
   ).toBeVisible();
 });
 
+test("revoke invitation failures show stable Chinese guidance", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const api = await mockProjectGovernance(page);
+  api.failNextRevocation();
+
+  await page.goto("/projects/research-lab/members");
+  await page.getByRole("button", { name: "撤销邀请" }).click();
+  await expect(
+    page.getByText("该邀请已存在或刚刚被处理，请刷新后重试。", {
+      exact: true,
+    }),
+  ).toBeVisible();
+});
+
 test("role labels never grant actions without server capabilities", async ({
   page,
 }) => {
@@ -388,4 +450,17 @@ test("leaving or requesting deletion replaces the current project with workspace
   const dialog = page.getByRole("dialog", { name: "确认删除项目" });
   await dialog.getByRole("button", { name: "确认请求删除" }).click();
   await expect(page).toHaveURL(/\/workspace$/);
+});
+
+test("leaving the current project replaces history with workspace", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectGovernance(page);
+
+  await page.goto("/projects/research-lab/members");
+  await page.getByRole("button", { name: "退出项目" }).click();
+  await expect(page).toHaveURL(/\/workspace$/);
+  await page.goBack();
+  await expect(page).not.toHaveURL(/\/projects\/research-lab\/members$/);
 });

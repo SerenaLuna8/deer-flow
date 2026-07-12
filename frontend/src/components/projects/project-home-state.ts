@@ -84,9 +84,10 @@ export function projectHomeIdentityKey(
   userId: string | null | undefined,
   slug: string,
   projectId: string | null | undefined,
+  membershipVersion: number | null | undefined,
 ): string | null {
-  if (!userId || !slug || !projectId) return null;
-  return JSON.stringify([userId, slug, projectId]);
+  if (!userId || !slug || !projectId || !membershipVersion) return null;
+  return JSON.stringify([userId, slug, projectId, membershipVersion]);
 }
 
 export function projectResultForIdentity(

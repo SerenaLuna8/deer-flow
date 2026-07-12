@@ -105,4 +105,16 @@ describe("project workbench view model", () => {
       ),
     ).toContain("项目状态已变化");
   });
+
+  test("keeps revoke invitation failures in stable Chinese", () => {
+    expect(
+      projectErrorMessage(
+        new ProjectApiError(
+          409,
+          "PROJECT_INVITATION_CONFLICT",
+          "unsafe revoke backend detail",
+        ),
+      ),
+    ).toBe("该邀请已存在或刚刚被处理，请刷新后重试。");
+  });
 });

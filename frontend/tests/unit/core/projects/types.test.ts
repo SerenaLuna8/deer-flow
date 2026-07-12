@@ -2,6 +2,8 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   CAPABILITIES,
+  createProjectInvitationSchema,
+  INVITABLE_PROJECT_ROLES,
   PROJECT_ROLES,
   projectPageSchema,
   projectSchema,
@@ -47,6 +49,22 @@ describe("project contracts", () => {
       "project.usage.read",
       "project.lifecycle.manage",
     ]);
+  });
+
+  test("allows Admin for memberships but never for invitations", () => {
+    expect(INVITABLE_PROJECT_ROLES).toEqual(["editor", "runner", "viewer"]);
+    expect(
+      createProjectInvitationSchema.safeParse({
+        email: "new@example.com",
+        role: "admin",
+      }).success,
+    ).toBe(false);
+    expect(
+      createProjectInvitationSchema.safeParse({
+        email: "new@example.com",
+        role: "editor",
+      }).success,
+    ).toBe(true);
   });
 
   test("accepts the exact public response and rejects private or drifted fields", () => {

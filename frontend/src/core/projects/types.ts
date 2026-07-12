@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const PROJECT_ROLES = ["admin", "editor", "runner", "viewer"] as const;
+export const INVITABLE_PROJECT_ROLES = ["editor", "runner", "viewer"] as const;
 
 export const CAPABILITIES = [
   "project.read",
@@ -40,6 +41,7 @@ export const PROJECT_ERROR_CODES = [
 ] as const;
 
 export const projectRoleSchema = z.enum(PROJECT_ROLES);
+export const invitableProjectRoleSchema = z.enum(INVITABLE_PROJECT_ROLES);
 export const capabilitySchema = z.enum(CAPABILITIES);
 export const projectErrorCodeSchema = z.enum(PROJECT_ERROR_CODES);
 export const projectIdSchema = z.string().uuid();
@@ -163,7 +165,7 @@ export const projectInvitationListSchema = z.array(projectInvitationSchema);
 export const createProjectInvitationSchema = z
   .object({
     email: z.string().trim().email(),
-    role: projectRoleSchema,
+    role: invitableProjectRoleSchema,
   })
   .strict();
 
@@ -190,6 +192,7 @@ export const redeemedProjectInvitationSchema = z
   .strict();
 
 export type ProjectRole = z.infer<typeof projectRoleSchema>;
+export type InvitableProjectRole = z.infer<typeof invitableProjectRoleSchema>;
 export type Capability = z.infer<typeof capabilitySchema>;
 export type ProjectErrorCode = z.infer<typeof projectErrorCodeSchema>;
 export type Project = z.infer<typeof projectSchema>;

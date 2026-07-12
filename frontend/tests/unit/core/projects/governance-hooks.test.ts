@@ -3,6 +3,7 @@ import { QueryClient } from "@tanstack/react-query";
 
 import {
   createProjectMutationScope,
+  currentScopedGovernanceData,
   invalidateProjectGovernanceQueries,
 } from "@/core/projects/hooks";
 import {
@@ -93,5 +94,24 @@ describe("project governance query scope", () => {
     ).resolves.toBe(false);
     expect(cancel).not.toHaveBeenCalled();
     expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  test("hides late mutation data after the rendered account or project changes", () => {
+    const scope = createProjectMutationScope("u1", "p1");
+    const token = scope.begin();
+    const result = {
+      data: { invite_url_fragment: "/invite#token=secret" },
+      token,
+    };
+
+    expect(currentScopedGovernanceData(scope, result, "u1", "p1")).toEqual(
+      result.data,
+    );
+    expect(
+      currentScopedGovernanceData(scope, result, "u2", "p1"),
+    ).toBeUndefined();
+    expect(
+      currentScopedGovernanceData(scope, result, "u1", "p2"),
+    ).toBeUndefined();
   });
 });

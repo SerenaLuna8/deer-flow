@@ -48,6 +48,10 @@ export function ProjectMembersPage() {
     if (changeRole.isSuccess) setEditingMember(null);
   }, [changeRole.isSuccess]);
 
+  useEffect(() => {
+    if (leave.data) router.replace("/workspace");
+  }, [leave.data, router]);
+
   const selfMembership = members.data?.find(
     (membership) => membership.user_id === user?.id,
   );
@@ -142,11 +146,7 @@ export function ProjectMembersPage() {
             variant="outline"
             className="mt-4"
             disabled={leave.isPending}
-            onClick={() =>
-              leave.mutate(selfMembership.version, {
-                onSuccess: () => router.replace("/workspace"),
-              })
-            }
+            onClick={() => leave.mutate(selfMembership.version)}
           >
             退出项目
           </Button>
@@ -200,6 +200,12 @@ export function ProjectMembersPage() {
           <p className="text-muted-foreground text-sm">暂无项目邀请。</p>
         )}
       </section>
+
+      {revokeInvitation.error && (
+        <p role="alert" className="text-destructive mt-3 text-sm">
+          {projectErrorMessage(revokeInvitation.error)}
+        </p>
+      )}
 
       <MemberRoleDialog
         member={editingMember}

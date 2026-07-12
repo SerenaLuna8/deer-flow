@@ -26,16 +26,23 @@ describe("project home identity state", () => {
   });
 
   test("binds enter results to account, slug, and UUID", () => {
-    const oldIdentity = projectHomeIdentityKey("u1", "alpha", oldProject.id)!;
+    const oldIdentity = projectHomeIdentityKey(
+      "u1",
+      "alpha",
+      oldProject.id,
+      1,
+    )!;
     const newAccountIdentity = projectHomeIdentityKey(
       "u2",
       "alpha",
       oldProject.id,
+      1,
     )!;
     const newSlugIdentity = projectHomeIdentityKey(
       "u1",
       "beta",
       oldProject.id,
+      1,
     )!;
     expect(
       projectResultForIdentity(newAccountIdentity, {
@@ -60,13 +67,20 @@ describe("project home identity state", () => {
   test("starts fresh attempts for real account, slug, and UUID changes while rejecting stale results", () => {
     const attempts = createProjectHomeAttemptCoordinator();
     const identities = [
-      projectHomeIdentityKey("u1", "alpha", oldProject.id)!,
-      projectHomeIdentityKey("u2", "alpha", oldProject.id)!,
-      projectHomeIdentityKey("u2", "beta", oldProject.id)!,
+      projectHomeIdentityKey("u1", "alpha", oldProject.id, 1)!,
+      projectHomeIdentityKey("u2", "alpha", oldProject.id, 1)!,
+      projectHomeIdentityKey("u2", "beta", oldProject.id, 1)!,
       projectHomeIdentityKey(
         "u2",
         "beta",
         "22222222-2222-4222-8222-222222222222",
+        1,
+      )!,
+      projectHomeIdentityKey(
+        "u2",
+        "beta",
+        "22222222-2222-4222-8222-222222222222",
+        2,
       )!,
     ];
 
@@ -87,8 +101,22 @@ describe("project home identity state", () => {
     ).toBeNull();
   });
 
+  test("treats membership version as identity but ignores response request IDs", () => {
+    const versionOne = projectHomeIdentityKey("u1", "alpha", oldProject.id, 1);
+    const sameVersionAfterRefetch = projectHomeIdentityKey(
+      "u1",
+      "alpha",
+      oldProject.id,
+      1,
+    );
+    const versionTwo = projectHomeIdentityKey("u1", "alpha", oldProject.id, 2);
+
+    expect(sameVersionAfterRefetch).toBe(versionOne);
+    expect(versionTwo).not.toBe(versionOne);
+  });
+
   test("restarts an enter attempt after Strict Effects cleanup", () => {
-    const identity = projectHomeIdentityKey("u1", "alpha", oldProject.id)!;
+    const identity = projectHomeIdentityKey("u1", "alpha", oldProject.id, 1)!;
     const attempts = createProjectHomeAttemptCoordinator();
 
     const first = attempts.start(identity);
@@ -107,7 +135,7 @@ describe("project home identity state", () => {
   });
 
   test("commits the fresh project returned by enter instead of the lookup snapshot", () => {
-    const identity = projectHomeIdentityKey("u1", "alpha", oldProject.id)!;
+    const identity = projectHomeIdentityKey("u1", "alpha", oldProject.id, 1)!;
     const attempts = createProjectHomeAttemptCoordinator();
     const token = attempts.start(identity)!;
     const enteredProject = {

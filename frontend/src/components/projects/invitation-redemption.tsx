@@ -13,6 +13,11 @@ import {
 } from "@/core/projects/hooks";
 import type { RedeemedProjectInvitation } from "@/core/projects/types";
 
+import {
+  createInvitationRedemptionCoordinator,
+  type InvitationRedemptionAttempt,
+} from "./invitation-redemption-state";
+
 type RedemptionState =
   | { status: "preparing" }
   | { status: "sign_in" }
@@ -26,28 +31,58 @@ export function InvitationRedemption() {
   const claim = useClaimProjectInvitation();
   const redeem = useRedeemProjectInvitation(user?.id);
   const { mutate: claimInvitation } = claim;
+  const { reset: resetClaim } = claim;
   const { mutate: redeemInvitation } = redeem;
+  const { reset: resetRedeem } = redeem;
   const handledRef = useRef(false);
-  const effectGenerationRef = useRef(0);
+  const handledUserRef = useRef<string | null>(user?.id ?? null);
+  const currentUserRef = useRef<string | null>(user?.id ?? null);
+  const coordinatorRef = useRef(createInvitationRedemptionCoordinator());
   const fragmentTokenRef = useRef<string | null | undefined>(undefined);
   const [state, setState] = useState<RedemptionState>({ status: "preparing" });
+  currentUserRef.current = user?.id ?? null;
 
-  const redeemClaim = useCallback(() => {
-    if (!user) {
-      setState({ status: "sign_in" });
-      router.replace("/login?next=%2Finvite");
-      return;
-    }
-    setState({ status: "redeeming" });
-    redeemInvitation(undefined, {
-      onSuccess: ({ data: result }) => setState({ status: "success", result }),
-      onError: () => setState({ status: "error" }),
-    });
-  }, [redeemInvitation, router, user]);
+  const redeemClaim = useCallback(
+    (attempt: InvitationRedemptionAttempt) => {
+      if (!coordinatorRef.current.isCurrent(attempt, currentUserRef.current)) {
+        return;
+      }
+      if (!user) {
+        setState({ status: "sign_in" });
+        router.replace("/login?next=%2Finvite");
+        return;
+      }
+      setState({ status: "redeeming" });
+      redeemInvitation(undefined, {
+        onSuccess: ({ data: result }) => {
+          if (
+            coordinatorRef.current.isCurrent(attempt, currentUserRef.current)
+          ) {
+            setState({ status: "success", result });
+          }
+          queueMicrotask(resetRedeem);
+        },
+        onError: () => {
+          if (
+            coordinatorRef.current.isCurrent(attempt, currentUserRef.current)
+          ) {
+            setState({ status: "error" });
+          }
+          queueMicrotask(resetRedeem);
+        },
+      });
+    },
+    [redeemInvitation, resetRedeem, router, user],
+  );
 
   useEffect(() => {
-    const generation = effectGenerationRef.current + 1;
-    effectGenerationRef.current = generation;
+    const userId = user?.id ?? null;
+    const coordinator = coordinatorRef.current;
+    const attempt = coordinator.begin(userId);
+    if (handledUserRef.current !== userId) {
+      handledUserRef.current = userId;
+      handledRef.current = false;
+    }
     if (fragmentTokenRef.current === undefined) {
       const fragment = window.location.hash.slice(1);
       fragmentTokenRef.current = new URLSearchParams(fragment).get("token");
@@ -55,32 +90,44 @@ export function InvitationRedemption() {
     }
 
     queueMicrotask(() => {
-      if (effectGenerationRef.current !== generation || handledRef.current)
+      if (
+        !coordinatorRef.current.isCurrent(attempt, currentUserRef.current) ||
+        handledRef.current
+      ) {
         return;
+      }
       handledRef.current = true;
       const token = fragmentTokenRef.current;
+      fragmentTokenRef.current = null;
       if (!token) {
-        if (user) redeemClaim();
+        if (user) redeemClaim(attempt);
         else setState({ status: "error" });
         return;
       }
       claimInvitation(
         { token },
         {
-          onSuccess: () =>
-            effectGenerationRef.current === generation && redeemClaim(),
-          onError: () =>
-            effectGenerationRef.current === generation &&
-            setState({ status: "error" }),
+          onSuccess: () => {
+            if (
+              coordinatorRef.current.isCurrent(attempt, currentUserRef.current)
+            ) {
+              redeemClaim(attempt);
+            }
+            queueMicrotask(resetClaim);
+          },
+          onError: () => {
+            if (
+              coordinatorRef.current.isCurrent(attempt, currentUserRef.current)
+            ) {
+              setState({ status: "error" });
+            }
+            queueMicrotask(resetClaim);
+          },
         },
       );
     });
-    return () => {
-      if (effectGenerationRef.current === generation) {
-        effectGenerationRef.current += 1;
-      }
-    };
-  }, [claimInvitation, redeemClaim, user]);
+    return () => coordinator.dispose(attempt);
+  }, [claimInvitation, redeemClaim, resetClaim, user]);
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-lg items-center px-6 py-12">

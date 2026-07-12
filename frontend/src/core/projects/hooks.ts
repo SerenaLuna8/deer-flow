@@ -209,6 +209,18 @@ interface ScopedGovernanceResult<T> {
   token: ProjectMutationToken;
 }
 
+export function currentScopedGovernanceData<T>(
+  scope: ProjectMutationScope,
+  result: ScopedGovernanceResult<T> | undefined,
+  currentUserId: string | null | undefined,
+  currentProjectId: string | null | undefined,
+): T | undefined {
+  if (!result) return undefined;
+  if (result.token.userId !== (currentUserId ?? null)) return undefined;
+  if (result.token.projectId !== (currentProjectId ?? null)) return undefined;
+  return scope.isCurrent(result.token) ? result.data : undefined;
+}
+
 async function runScopedMutation(
   scope: ProjectMutationScope,
   operation: (signal: AbortSignal) => Promise<Project>,
@@ -429,7 +441,10 @@ export function useChangeProjectMemberRole(
     onSuccess: ({ token }) =>
       invalidateProjectGovernanceQueries(queryClient, scope, token),
   });
-  return { ...mutation, data: mutation.data?.data };
+  return {
+    ...mutation,
+    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
+  };
 }
 
 export function useRemoveProjectMember(
@@ -456,7 +471,10 @@ export function useRemoveProjectMember(
     onSuccess: ({ token }) =>
       invalidateProjectGovernanceQueries(queryClient, scope, token),
   });
-  return { ...mutation, data: mutation.data?.data };
+  return {
+    ...mutation,
+    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
+  };
 }
 
 export function useLeaveProject(
@@ -478,7 +496,10 @@ export function useLeaveProject(
     onSuccess: ({ token }) =>
       invalidateProjectGovernanceQueries(queryClient, scope, token),
   });
-  return { ...mutation, data: mutation.data?.data };
+  return {
+    ...mutation,
+    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
+  };
 }
 
 export function useCreateProjectInvitation(
@@ -500,7 +521,10 @@ export function useCreateProjectInvitation(
     onSuccess: ({ token }) =>
       invalidateProjectGovernanceQueries(queryClient, scope, token),
   });
-  return { ...mutation, data: mutation.data?.data };
+  return {
+    ...mutation,
+    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
+  };
 }
 
 export function useRevokeProjectInvitation(
@@ -527,7 +551,10 @@ export function useRevokeProjectInvitation(
     onSuccess: ({ token }) =>
       invalidateProjectGovernanceQueries(queryClient, scope, token),
   });
-  return { ...mutation, data: mutation.data?.data };
+  return {
+    ...mutation,
+    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
+  };
 }
 
 export function useClaimProjectInvitation() {
@@ -557,7 +584,10 @@ export function useRedeemProjectInvitation(userId: string | null | undefined) {
         data.project_id,
       ),
   });
-  return { ...mutation, data: mutation.data?.data };
+  return {
+    ...mutation,
+    data: currentScopedGovernanceData(scope, mutation.data, userId, null),
+  };
 }
 
 export function useRequestProjectDeletion(
@@ -579,7 +609,10 @@ export function useRequestProjectDeletion(
     onSuccess: ({ token }) =>
       invalidateProjectGovernanceQueries(queryClient, scope, token),
   });
-  return { ...mutation, data: mutation.data?.data };
+  return {
+    ...mutation,
+    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
+  };
 }
 
 export function useRestoreProject(
@@ -601,5 +634,8 @@ export function useRestoreProject(
     onSuccess: ({ token }) =>
       invalidateProjectGovernanceQueries(queryClient, scope, token),
   });
-  return { ...mutation, data: mutation.data?.data };
+  return {
+    ...mutation,
+    data: currentScopedGovernanceData(scope, mutation.data, userId, projectId),
+  };
 }

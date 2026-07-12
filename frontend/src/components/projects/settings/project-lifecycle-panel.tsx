@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -25,6 +25,10 @@ export function ProjectLifecyclePanel() {
   const deletion = useRequestProjectDeletion(user?.id, project.id);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const canManage = project.capabilities.includes("project.lifecycle.manage");
+
+  useEffect(() => {
+    if (deletion.data) router.replace("/workspace");
+  }, [deletion.data, router]);
 
   if (!canManage) return null;
 
@@ -66,11 +70,7 @@ export function ProjectLifecyclePanel() {
               type="button"
               variant="destructive"
               disabled={deletion.isPending}
-              onClick={() =>
-                deletion.mutate(undefined, {
-                  onSuccess: () => router.replace("/workspace"),
-                })
-              }
+              onClick={() => deletion.mutate()}
             >
               确认请求删除
             </Button>
