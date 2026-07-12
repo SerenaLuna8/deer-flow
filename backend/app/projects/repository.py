@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import and_, exists, func, or_, select, update
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.capabilities import capabilities_for
@@ -83,7 +83,7 @@ class ProjectRepository:
             if _constraint_name(exc) == "uq_projects_slug":
                 raise ProjectSlugConflict() from None
             raise ProjectDatabaseUnavailable() from None
-        except SQLAlchemyError:
+        except DBAPIError:
             raise ProjectDatabaseUnavailable() from None
         return ProjectContext(user_id, project.id, membership.id, ProjectRole.ADMIN, capabilities_for(ProjectRole.ADMIN), membership.version, request_id)
 
@@ -100,12 +100,16 @@ class ProjectRepository:
         )
 
     async def get(self, context: ProjectContext) -> ProjectView:
+        try:
+            async with self.session.begin():
+                return await self._get_in_transaction(context)
+        except DBAPIError:
+            raise ProjectDatabaseUnavailable() from None
+
+    async def _get_in_transaction(self, context: ProjectContext) -> ProjectView:
         member_count = select(func.count()).where(ProjectMembershipRow.project_id == ProjectRow.id, ProjectMembershipRow.status == "active").correlate(ProjectRow).scalar_subquery()
         statement = select(ProjectRow, ProjectMembershipRow, member_count.label("member_count")).join(ProjectMembershipRow, ProjectMembershipRow.project_id == ProjectRow.id).where(self._scope(context))
-        try:
-            rows = (await self.session.execute(statement)).all()
-        except SQLAlchemyError:
-            raise ProjectDatabaseUnavailable() from None
+        rows = (await self.session.execute(statement)).all()
         if len(rows) != 1:
             raise ProjectNotFound()
         row = rows[0]
@@ -148,52 +152,50 @@ class ProjectRepository:
             )
         )
         try:
-            result = await self.session.execute(update(ProjectRow).where(ProjectRow.id == context.project_id, ProjectRow.status == "active", ProjectRow.is_suspended.is_(False), membership_scope).values(**values))
-            if result.rowcount != 1:
-                await self.session.rollback()
-                raise ProjectNotFound()
-            await self.session.commit()
-        except ProjectNotFound:
-            raise
-        except SQLAlchemyError:
-            await self.session.rollback()
+            async with self.session.begin():
+                result = await self.session.execute(update(ProjectRow).where(ProjectRow.id == context.project_id, ProjectRow.status == "active", ProjectRow.is_suspended.is_(False), membership_scope).values(**values))
+                if result.rowcount != 1:
+                    raise ProjectNotFound()
+                return await self._get_in_transaction(context)
+        except DBAPIError:
             raise ProjectDatabaseUnavailable() from None
-        return await self.get(context)
 
     async def enter(self, context: ProjectContext, entered_at: datetime) -> ProjectView:
-        await self._update_membership(context, {"last_entered_at": entered_at})
-        return await self.get(context)
+        return await self._mutate_membership(context, {"last_entered_at": entered_at})
 
     async def pin(self, context: ProjectContext, pinned: bool) -> ProjectView:
-        await self._update_membership(context, {"is_pinned": pinned})
-        return await self.get(context)
+        return await self._mutate_membership(context, {"is_pinned": pinned})
 
-    async def _update_membership(self, context: ProjectContext, values: dict) -> None:
+    async def _mutate_membership(self, context: ProjectContext, values: dict) -> ProjectView:
         project_exists = exists(select(1).where(ProjectRow.id == context.project_id, ProjectRow.status == "active", ProjectRow.is_suspended.is_(False)))
         try:
-            result = await self.session.execute(
-                update(ProjectMembershipRow)
-                .where(
-                    ProjectMembershipRow.id == context.membership_id,
-                    ProjectMembershipRow.project_id == context.project_id,
-                    ProjectMembershipRow.user_id == str(context.user_id),
-                    ProjectMembershipRow.status == "active",
-                    ProjectMembershipRow.version == context.membership_version,
-                    project_exists,
+            async with self.session.begin():
+                result = await self.session.execute(
+                    update(ProjectMembershipRow)
+                    .where(
+                        ProjectMembershipRow.id == context.membership_id,
+                        ProjectMembershipRow.project_id == context.project_id,
+                        ProjectMembershipRow.user_id == str(context.user_id),
+                        ProjectMembershipRow.status == "active",
+                        ProjectMembershipRow.version == context.membership_version,
+                        project_exists,
+                    )
+                    .values(**values)
                 )
-                .values(**values)
-            )
-            if result.rowcount != 1:
-                await self.session.rollback()
-                raise ProjectNotFound()
-            await self.session.commit()
-        except ProjectNotFound:
-            raise
-        except SQLAlchemyError:
-            await self.session.rollback()
+                if result.rowcount != 1:
+                    raise ProjectNotFound()
+                return await self._get_in_transaction(context)
+        except DBAPIError:
             raise ProjectDatabaseUnavailable() from None
 
     async def list_for_user(self, user_id: uuid.UUID, query: str | None, pinned: bool | None, cursor: str | None, limit: int, request_id: str) -> ProjectPage:
+        try:
+            async with self.session.begin():
+                return await self._list_in_transaction(user_id, query, pinned, cursor, limit, request_id)
+        except DBAPIError:
+            raise ProjectDatabaseUnavailable() from None
+
+    async def _list_in_transaction(self, user_id: uuid.UUID, query: str | None, pinned: bool | None, cursor: str | None, limit: int, request_id: str) -> ProjectPage:
         member_count = select(func.count()).where(ProjectMembershipRow.project_id == ProjectRow.id, ProjectMembershipRow.status == "active").correlate(ProjectRow).scalar_subquery()
         statement = (
             select(ProjectRow, ProjectMembershipRow, member_count.label("member_count"))
@@ -217,10 +219,7 @@ class ProjectRepository:
             pinned_after = ProjectMembershipRow.is_pinned.is_(False) if cp else False
             statement = statement.where(or_(pinned_after, and_(ProjectMembershipRow.is_pinned.is_(cp), last_tail)))
         statement = statement.order_by(ProjectMembershipRow.is_pinned.desc(), ProjectMembershipRow.last_entered_at.desc().nulls_last(), ProjectRow.created_at.desc(), ProjectRow.id.desc()).limit(limit + 1)
-        try:
-            rows = (await self.session.execute(statement)).all()
-        except SQLAlchemyError:
-            raise ProjectDatabaseUnavailable() from None
+        rows = (await self.session.execute(statement)).all()
         items = tuple(self._view(row.ProjectRow, row.ProjectMembershipRow, row.member_count, request_id) for row in rows[:limit])
         next_cursor = _encode_cursor(SimpleCursor(rows[limit - 1])) if len(rows) > limit else None
         return ProjectPage(items, next_cursor)

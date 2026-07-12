@@ -5,7 +5,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
@@ -84,6 +85,32 @@ async def test_concurrent_slug_pagination_query_and_stale_scope(migrated_postgre
         results = await asyncio.gather(create_same(), create_same(), return_exceptions=True)
         assert sum(not isinstance(result, Exception) for result in results) == 1
         assert sum(isinstance(result, ProjectSlugConflict) for result in results) == 1
+        context = next(result for result in results if not isinstance(result, Exception))
+        async with engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE projects DROP CONSTRAINT ck_projects_status"))
+            await connection.execute(text("ALTER TABLE project_memberships DROP CONSTRAINT ck_project_memberships_status"))
+            await connection.execute(
+                text("""INSERT INTO project_memberships
+                (id,project_id,user_id,role,status) VALUES (:id,:project,:user,'viewer','disabled')"""),
+                {"id": uuid.uuid4(), "project": context.project_id, "user": str(second)},
+            )
+            for slug, status, suspended in (("hidden-status", "archived", False), ("hidden-suspended", "active", True)):
+                hidden_id = uuid.uuid4()
+                await connection.execute(
+                    text("""INSERT INTO projects
+                    (id,slug,display_name,status,is_suspended,created_by_user_id)
+                    VALUES (:id,:slug,'Hidden',:status,:suspended,:user)"""),
+                    {"id": hidden_id, "slug": slug, "status": status, "suspended": suspended, "user": str(owner)},
+                )
+                await connection.execute(
+                    text("""INSERT INTO project_memberships
+                    (id,project_id,user_id,role) VALUES (:id,:project,:user,'admin')"""),
+                    {"id": uuid.uuid4(), "project": hidden_id, "user": str(owner)},
+                )
+        async with factory() as session:
+            assert (await ProjectRepository(session).get(context)).member_count == 1
+        async with factory() as session:
+            assert (await ProjectRepository(session).list_for_user(second, None, None, None, 20, "req")).items == ()
 
         async with engine.begin() as connection:
             for index, (pinned, entered, label) in enumerate(((True, now, "percent%"), (True, now, "uuid-tie"), (True, None, "under_score"), (False, now, "back\\slash"), (False, None, "plain"))):
@@ -125,12 +152,30 @@ async def test_concurrent_slug_pagination_query_and_stale_scope(migrated_postgre
                 break
         assert seen == expected
         assert len(seen) == len(set(seen))
+        statement_count = 0
+
+        def count_statement(*_args):
+            nonlocal statement_count
+            statement_count += 1
+
+        event.listen(engine.sync_engine, "before_cursor_execute", count_statement)
+        async with factory() as session:
+            await ProjectRepository(session).list_for_user(owner, None, None, None, 20, "req")
+        event.remove(engine.sync_engine, "before_cursor_execute", count_statement)
+        assert statement_count == 1
+        filtered_ids: dict[bool, set[uuid.UUID]] = {}
+        for pinned_value in (True, False):
+            async with factory() as session:
+                filtered = await ProjectRepository(session).list_for_user(owner, None, pinned_value, None, 20, "req")
+            assert filtered.items and all(item.is_pinned is pinned_value for item in filtered.items)
+            filtered_ids[pinned_value] = {item.id for item in filtered.items}
+        assert filtered_ids[True].isdisjoint(filtered_ids[False])
+        assert filtered_ids[True] | filtered_ids[False] == set(expected)
         for literal, expected_name in (("%", "percent%"), ("_", "under_score"), ("\\", "back\\slash")):
             async with factory() as session:
                 page = await ProjectRepository(session).list_for_user(owner, literal, None, None, 20, "req")
             assert [item.display_name for item in page.items] == [expected_name]
 
-        context = next(result for result in results if not isinstance(result, Exception))
         second_membership = uuid.uuid4()
         async with engine.begin() as connection:
             await connection.execute(
@@ -166,5 +211,90 @@ async def test_concurrent_slug_pagination_query_and_stale_scope(migrated_postgre
                     else:
                         await repository.pin(context, True)
                 await session.execute(text("SELECT 1"))
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["update", "pin", "enter"])
+async def test_readback_dbapi_failure_rolls_back_scoped_mutation(migrated_postgres_database_url: str, operation: str) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    user_id = uuid.uuid4()
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("""INSERT INTO users (id,email,system_role,created_at,needs_setup,token_version)
+                VALUES (:id,'atomic@example.com','user',:now,false,0)"""),
+                {"id": str(user_id), "now": datetime.now(UTC)},
+            )
+        async with factory() as session:
+            context = await ProjectRepository(session).create_with_admin(user_id, CreateProject("atomic", "Original"), "req")
+        async with factory() as session:
+            original_execute = session.execute
+            calls = 0
+
+            async def fail_readback(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise DBAPIError("SELECT secret", {"url": "postgresql://secret"}, Exception("read failed"), False)
+                return await original_execute(*args, **kwargs)
+
+            session.execute = fail_readback  # type: ignore[method-assign]
+            repository = ProjectRepository(session)
+            with pytest.raises(ProjectDatabaseUnavailable):
+                if operation == "update":
+                    await repository.update(context, ProjectChanges(display_name="Changed"))
+                elif operation == "pin":
+                    await repository.pin(context, True)
+                else:
+                    await repository.enter(context, datetime.now(UTC))
+            session.execute = original_execute  # type: ignore[method-assign]
+            assert (await session.execute(text("SELECT 1"))).scalar_one() == 1
+        async with engine.connect() as connection:
+            state = (
+                await connection.execute(
+                    text("""SELECT p.display_name,m.is_pinned,m.last_entered_at
+                FROM projects p JOIN project_memberships m ON m.project_id=p.id
+                WHERE p.id=:id"""),
+                    {"id": context.project_id},
+                )
+            ).one()
+        assert state == ("Original", False, None)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["get", "list"])
+async def test_public_read_dbapi_failure_rolls_back_and_session_is_reusable(migrated_postgres_database_url: str, operation: str) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    user_id = uuid.uuid4()
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("""INSERT INTO users (id,email,system_role,created_at,needs_setup,token_version)
+                VALUES (:id,'read-failure@example.com','user',:now,false,0)"""),
+                {"id": str(user_id), "now": datetime.now(UTC)},
+            )
+        async with factory() as session:
+            context = await ProjectRepository(session).create_with_admin(user_id, CreateProject("read-failure", "Read"), "req")
+        async with factory() as session:
+            original_execute = session.execute
+
+            async def fail_statement(*_args, **_kwargs):
+                return await original_execute(text("SELECT 1 / 0"))
+
+            session.execute = fail_statement  # type: ignore[method-assign]
+            repository = ProjectRepository(session)
+            with pytest.raises(ProjectDatabaseUnavailable):
+                if operation == "get":
+                    await repository.get(context)
+                else:
+                    await repository.list_for_user(user_id, None, None, None, 20, "req")
+            session.execute = original_execute  # type: ignore[method-assign]
+            assert (await session.execute(text("SELECT 1"))).scalar_one() == 1
     finally:
         await engine.dispose()

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, InvalidRequestError
 
 from app.projects.capabilities import Capability, capabilities_for
 from app.projects.context import ProjectContext
@@ -58,13 +58,28 @@ def test_privileged_capabilities_remain_admin_only() -> None:
 
 @pytest.mark.asyncio
 async def test_database_error_is_stable_and_does_not_leak_sql_or_url() -> None:
-    session = AsyncMock()
-    session.execute.side_effect = SQLAlchemyError("SELECT secret FROM projects postgresql://owner:password@db/deerflow")
+    session = MagicMock()
+    session.execute = AsyncMock(
+        side_effect=DBAPIError(
+            "SELECT secret FROM projects",
+            {"url": "postgresql://owner:password@db/deerflow"},
+            Exception("driver failed"),
+            False,
+        )
+    )
     with pytest.raises(ProjectDatabaseUnavailable) as exc_info:
         await ProjectRepository(session).get(_context(ProjectRole.ADMIN))
     assert str(exc_info.value) == "Project storage unavailable"
     assert "SELECT" not in str(exc_info.value)
     assert "postgresql" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_programming_transaction_error_is_not_disguised() -> None:
+    session = MagicMock()
+    session.begin.side_effect = InvalidRequestError("transaction already begun")
+    with pytest.raises(InvalidRequestError, match="already begun"):
+        await ProjectRepository(session).get(_context(ProjectRole.ADMIN))
 
 
 @pytest.mark.parametrize("cursor", ["", "%%%", "e30", "not-a-cursor", "YWJj$"])
