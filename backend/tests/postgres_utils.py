@@ -50,8 +50,13 @@ async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
         except Exception:
             raise RuntimeError("unable to create isolated PostgreSQL test database") from None
 
+        body_error: BaseException | None = None
         try:
-            yield replace_database(admin_url, database)
+            try:
+                yield replace_database(admin_url, database)
+            except BaseException as exc:
+                body_error = exc
+                raise
         finally:
             try:
                 async with admin_engine.connect() as connection:
@@ -61,6 +66,9 @@ async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
                     )
                     await connection.execute(text(f'DROP DATABASE IF EXISTS "{database}"'))
             except Exception:
-                raise RuntimeError("unable to clean up isolated PostgreSQL test database") from None
+                if body_error is not None:
+                    body_error.add_note("cleanup of isolated PostgreSQL test database also failed")
+                else:
+                    raise RuntimeError("unable to clean up isolated PostgreSQL test database") from None
     finally:
         await admin_engine.dispose()

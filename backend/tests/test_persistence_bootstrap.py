@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
+import threading
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import inspect as sa_inspect
@@ -52,8 +55,13 @@ async def test_bootstrap_empty_database_creates_schema_and_stamps_head(postgres_
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_bootstrap_legacy_database_backfills_baseline_and_upgrades(postgres_database_url: str) -> None:
+async def test_bootstrap_legacy_database_backfills_baseline_and_upgrades(
+    postgres_database_url: str,
+    monkeypatch,
+) -> None:
     engine = create_async_engine(postgres_database_url)
+    reset = MagicMock()
+    monkeypatch.setattr(bootstrap_module, "_reset_failed_empty_bootstrap_sync", reset)
     try:
         async with engine.begin() as connection:
             await connection.run_sync(_run_baseline_create_all_sync)
@@ -65,19 +73,26 @@ async def test_bootstrap_legacy_database_backfills_baseline_and_upgrades(postgre
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == _get_head_revision()
             tables = await connection.run_sync(lambda sync_connection: set(sa_inspect(sync_connection).get_table_names()))
             assert "channel_conversations" in tables
+        reset.assert_not_called()
     finally:
         await engine.dispose()
 
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_bootstrap_versioned_database_is_idempotent(postgres_database_url: str) -> None:
+async def test_bootstrap_versioned_database_is_idempotent(
+    postgres_database_url: str,
+    monkeypatch,
+) -> None:
     engine = create_async_engine(postgres_database_url)
+    reset = MagicMock()
+    monkeypatch.setattr(bootstrap_module, "_reset_failed_empty_bootstrap_sync", reset)
     try:
         await bootstrap_schema(engine)
         await bootstrap_schema(engine)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == _get_head_revision()
+        reset.assert_not_called()
     finally:
         await engine.dispose()
 
@@ -103,4 +118,60 @@ async def test_bootstrap_failure_releases_lock_and_retry_converges(postgres_data
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == _get_head_revision()
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_empty_bootstrap_cleanup_failure_preserves_stamp_error(
+    postgres_database_url: str,
+    monkeypatch,
+    caplog,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+
+    def fail_stamp(*_args, **_kwargs):
+        raise RuntimeError("stamp failed")
+
+    def fail_cleanup(_connection):
+        raise RuntimeError("sensitive cleanup detail")
+
+    monkeypatch.setattr(bootstrap_module, "_stamp", fail_stamp)
+    monkeypatch.setattr(bootstrap_module, "_reset_failed_empty_bootstrap_sync", fail_cleanup)
+    try:
+        with pytest.raises(RuntimeError, match="stamp failed"):
+            await bootstrap_schema(engine)
+        assert "sensitive cleanup detail" not in caplog.text
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_empty_bootstrap_cleanup_failure_preserves_cancellation(
+    postgres_database_url: str,
+    monkeypatch,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_stamp(*_args, **_kwargs):
+        started.set()
+        release.wait(timeout=2)
+
+    def fail_cleanup(_connection):
+        raise RuntimeError("sensitive cleanup detail")
+
+    monkeypatch.setattr(bootstrap_module, "_stamp", slow_stamp)
+    monkeypatch.setattr(bootstrap_module, "_reset_failed_empty_bootstrap_sync", fail_cleanup)
+    task = asyncio.create_task(bootstrap_schema(engine))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
         await engine.dispose()

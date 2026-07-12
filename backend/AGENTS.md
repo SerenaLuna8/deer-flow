@@ -708,7 +708,10 @@ inventory、backup、0004→SQLite migration→head、完整 runtime schema、�
 `ProjectContext` 和 repository scope。两者只复用 `POSTGRES_TEST_URL` 创建随机
 `deerflow_test_*` 数据库，缺变量才 skip，连接或清理失败必须 fail。CI 入口为
 `.github/workflows/project-foundation-postgres-tests.yml`；本地命令：
-`POSTGRES_TEST_URL="$DATABASE_URL" uv run pytest -m "postgres and integration" tests/integration -q`。
+`POSTGRES_TEST_URL="$POSTGRES_TEST_ADMIN_URL" uv run pytest -m "postgres and integration" tests/integration -q`。
+`POSTGRES_TEST_ADMIN_URL` 必须是仅供测试的 maintenance/admin URL，具备 `CREATEDB`、
+terminate connection 和 drop 随机测试库的权限，并且只能指向可丢弃的隔离测试实例；绝不
+允许使用 production URL，也不能把普通应用 `DATABASE_URL` 直接复用为该值。
 
 用户引用禁止按列名或未声明的 SQLAlchemy FK 猜测。固定 allowlist 仅为
 `threads_meta.user_id`、`runs.user_id`、`run_events.user_id`、`feedback.user_id`、

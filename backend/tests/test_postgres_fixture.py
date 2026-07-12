@@ -91,6 +91,35 @@ async def test_cleanup_failure_is_sanitized_and_disposes_admin_engine() -> None:
     engine.dispose.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_body_failure_is_preserved_when_cleanup_also_fails() -> None:
+    sensitive_url = "postgresql://user:secret@localhost/postgres"
+    create_connection = MagicMock()
+    create_connection.execute = AsyncMock()
+    create_context = AsyncMock()
+    create_context.__aenter__.return_value = create_connection
+    cleanup_connection = MagicMock()
+    cleanup_connection.execute = AsyncMock(side_effect=RuntimeError(sensitive_url))
+    cleanup_context = AsyncMock()
+    cleanup_context.__aenter__.return_value = cleanup_connection
+    engine = MagicMock()
+    engine.connect.side_effect = [create_context, cleanup_context]
+    engine.dispose = AsyncMock()
+    sentinel = ValueError("body sentinel")
+
+    with patch("postgres_utils.create_async_engine", return_value=engine):
+        with pytest.raises(ValueError, match="body sentinel") as exc_info:
+            async with temporary_postgres_database(sensitive_url):
+                raise sentinel
+
+    assert exc_info.value is sentinel
+    formatted = "".join(traceback.format_exception(exc_info.value))
+    assert "secret" not in formatted
+    assert "postgresql://user" not in formatted
+    assert "cleanup of isolated PostgreSQL test database also failed" in formatted
+    engine.dispose.assert_awaited_once()
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_temporary_database_is_generated_and_dropped(postgres_admin_url: str) -> None:

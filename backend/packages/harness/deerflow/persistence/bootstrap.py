@@ -90,6 +90,7 @@ _BASELINE_REVISION = "0001_baseline"
 # change without coordinating a one-time migration (a key change effectively
 # releases the prior lock).
 _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
+_EMPTY_BOOTSTRAP_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 # Tables created by ``0001_baseline.upgrade()``. The legacy branch restricts
@@ -262,6 +263,33 @@ def _reset_failed_empty_bootstrap_sync(sync_conn: Any) -> None:
     sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
 
 
+async def _attempt_failed_empty_bootstrap_cleanup(engine: AsyncEngine) -> None:
+    """Best-effort bounded cleanup that never replaces the primary failure."""
+
+    async def cleanup() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(_reset_failed_empty_bootstrap_sync)
+
+    task = asyncio.create_task(cleanup())
+
+    def consume_result(done: asyncio.Task[None]) -> None:
+        try:
+            done.exception()
+        except BaseException:
+            pass
+
+    task.add_done_callback(consume_result)
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=_EMPTY_BOOTSTRAP_CLEANUP_TIMEOUT_SECONDS,
+        )
+    except BaseException:
+        if not task.done():
+            task.cancel()
+        logger.error("bootstrap: empty-schema cleanup did not complete; original failure preserved")
+
+
 def _stamp(cfg: AlembicConfig, revision: str) -> None:
     """Synchronous alembic stamp; callers must wrap in ``asyncio.to_thread``."""
     alembic_command.stamp(cfg, revision)
@@ -387,8 +415,7 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
                 # turns the next retry into a false legacy migration that
                 # collides with post-baseline tables created from current
                 # metadata.
-                async with engine.begin() as conn:
-                    await conn.run_sync(_reset_failed_empty_bootstrap_sync)
+                await _attempt_failed_empty_bootstrap_cleanup(engine)
                 raise
 
         elif decision == "legacy":
