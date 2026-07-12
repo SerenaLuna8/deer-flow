@@ -414,7 +414,14 @@ test("server capabilities expose governance actions even when the role label is 
 
   await expect(page.getByRole("heading", { name: "成员与邀请" })).toBeVisible();
   await expect(page.getByRole("button", { name: "邀请成员" })).toBeVisible();
+  const selfRow = page.getByRole("row", { name: /default@test\.local/ });
   const editorRow = page.getByRole("row", { name: /editor@example\.com/ });
+  await expect(selfRow.getByRole("button", { name: "移除成员" })).toHaveCount(
+    0,
+  );
+  await expect(
+    editorRow.getByRole("button", { name: "移除成员" }),
+  ).toBeVisible();
   await editorRow.getByRole("button", { name: "修改角色" }).click();
   await page.getByRole("radio", { name: "Admin" }).click();
   await page.getByRole("button", { name: "保存角色" }).click();

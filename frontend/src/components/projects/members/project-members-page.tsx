@@ -105,7 +105,8 @@ export function ProjectMembersPage() {
                           >
                             修改角色
                           </Button>
-                          {member.user_id !== user?.id && (
+                          {member.membership_id !==
+                            selfMembership?.membership_id && (
                             <Button
                               type="button"
                               size="sm"

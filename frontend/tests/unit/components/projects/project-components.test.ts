@@ -137,4 +137,18 @@ describe("project presentation contracts", () => {
     expect(source).toMatch(/M2\s+不执行物理清除/u);
     expect(source).not.toContain("永久删除");
   });
+
+  test("member actions use the resolved self membership identity", () => {
+    const source = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/projects/members/project-members-page.tsx",
+      ),
+      "utf8",
+    );
+    expect(source).toMatch(
+      /member\.membership_id\s*!==\s*selfMembership\?\.membership_id/u,
+    );
+    expect(source).not.toContain("member.user_id !== user?.id");
+  });
 });
