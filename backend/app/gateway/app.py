@@ -26,6 +26,9 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    project_invitations,
+    project_lifecycle,
+    project_members,
     projects,
     runs,
     scheduled_tasks,
@@ -420,6 +423,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Project-scoped SaaS API is mounted at /api/projects.
     app.include_router(projects.router)
+    app.include_router(project_members.router)
+    app.include_router(project_invitations.router)
+    app.include_router(project_lifecycle.router)
 
     # Features API is mounted at /api/features
     app.include_router(features.router)

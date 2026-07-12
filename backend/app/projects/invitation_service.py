@@ -68,6 +68,21 @@ class InvitationService:
         )
         return CreatedInvitation(invitation=invitation, token=token)
 
+    async def list_for_project(
+        self,
+        context: ProjectContext,
+    ) -> tuple[InvitationView, ...]:
+        context.require(Capability.PROJECT_MEMBERS_MANAGE)
+        return await self.repository.list_for_project(context)
+
+    async def list_mine(
+        self,
+        user_email: str,
+        now: datetime,
+    ) -> tuple[InvitationView, ...]:
+        invited_email = normalize_email(user_email)
+        return await self.repository.list_mine(invited_email, now)
+
     async def revoke(
         self,
         context: ProjectContext,

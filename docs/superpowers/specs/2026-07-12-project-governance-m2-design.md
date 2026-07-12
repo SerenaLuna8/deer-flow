@@ -154,7 +154,11 @@ M2 不提前显示尚未实现的 Agent、Skill、MCP、私有工作或自动化
 8. 标记 invitation 为 redeemed，递增 project `membership_version` 并清除 claim cookie；
 9. 事务提交后返回项目 slug，前端进入项目。
 
-claim cookie 只保存签名后的 invitation ID、token hash 和过期时间，不保存明文 token；签名失败、过期或 invitation 不匹配时统一拒绝并清除 cookie。claim API 使用通用响应和限流，不能用来枚举 token 是否有效。
+claim cookie 名为 `project_invitation_claim`。服务端使用带固定 domain-separation label 的 SHA-256 从现有 Auth JWT secret 派生 32-byte AES-GCM key；每个 cookie 使用随机 12-byte nonce，并以 cookie 名和格式版本作为固定 AAD，对严格只含 invitation UUID、token hash、`iat` 和 `exp` 的 JSON payload 做认证加密。cookie 输出仅为 base64url(nonce + ciphertext + tag)，客户端不可读且任何篡改都会验证失败。cookie 固定十分钟有效，使用 `HttpOnly`、`SameSite=Lax`、path `/api/project-invitations`，`Secure` 跟随现有 `is_secure_request`。认证失败、过期或 invitation 不匹配时统一拒绝，redeem 无论成功或失败都用相同 path 清除 cookie。
+
+claim API 对有效、无效和已受限 token 返回完全相同的 status、body 和同形状 opaque cookie。无效或受限路径签发带随机 invitation UUID 和输入 token hash 的不可用 claim；认证加密使客户端不能读取或对比 invitation UUID。claim 不返回 invitation 状态、邮箱、项目或任何 token 存在性信息。
+
+邀请 claim/redeem 失败限流使用独立 PostgreSQL 表 `project_invitation_rate_limits`，固定窗口阈值沿用登录规则：5 次、5 分钟。表只保存 SHA-256 key、失败次数、窗口起止时间和更新时间；claim key 对 action + 可信客户端 IP 整体 hash，redeem key 再加入当前账户规范化 email 后整体 hash，不保存原始 IP 或 email。失败通过 `INSERT ... ON CONFLICT DO UPDATE` 原子累加，检查在事务中锁定单行；成功清除对应计数。claim 受限时仍返回上述通用响应和不可用同形状 cookie，redeem 受限时统一安全失败为 `PROJECT_INVITATION_INVALID`，不新增可用于枚举的公共错误语义。
 
 并发兑换只有一个事务成功，其他请求返回稳定 `409`，不能创建重复 membership。
 
@@ -197,6 +201,8 @@ M2 不执行物理删除。跨业务域清除必须等相关数据完成项目�
 - `POST /api/project-invitations/claim`，未认证，body：`token`，成功时设置短期 claim cookie
 - `POST /api/project-invitations/redeem`，已认证，从 claim cookie 读取兑换凭据
 
+邀请创建响应额外返回一次性 `invite_url_fragment`（`/invite#token=...`）；普通 invitation response、项目邀请列表和 `mine` 均不返回明文 token 或 token hash。`mine` 只按当前认证账户的规范化 email 返回仍可兑换邀请元数据。
+
 ### 7.3 生命周期
 
 - `POST /api/projects/{project_id}/deletion`
@@ -225,6 +231,7 @@ M2 不执行物理删除。跨业务域清除必须等相关数据完成项目�
 - 角色变更、移除、退出和重新激活使用同一事务锁定 project 和目标 membership；
 - 最后一名 Admin 计数在锁内执行；
 - 邀请创建依赖 partial unique index 作为最终并发防线；
+- 邀请失败限流依赖 PostgreSQL 主键冲突上的原子 upsert；并发写不能丢失计数，检查必须在数据库事务中执行，不使用进程内 dict 或 Redis；
 - invitation mutation 统一遵循 `project -> invitation -> membership` 锁序；create/revoke 到 invitation 为止，redeem 才继续锁定或创建 membership，禁止 create 与 redeem 使用反向锁序；
 - redeem 可先按 claim 中的 invitation ID + token hash 做不加锁定位以取得 `project_id`，随后必须锁 project，再按 `project_id + invitation_id + token_hash` 锁定并重验 invitation；
 - 删除和恢复锁定 project；

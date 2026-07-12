@@ -24,6 +24,9 @@ from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.migration_ledger.model import MigrationLedgerRow
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.projects.invitation_model import ProjectInvitationRow
+from deerflow.persistence.projects.invitation_rate_limit_model import (
+    ProjectInvitationRateLimitRow,
+)
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
@@ -39,6 +42,7 @@ __all__ = [
     "FeedbackRow",
     "MigrationLedgerRow",
     "ProjectInvitationRow",
+    "ProjectInvitationRateLimitRow",
     "ProjectMembershipRow",
     "ProjectRow",
     "RunEventRow",

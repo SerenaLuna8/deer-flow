@@ -117,9 +117,27 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("status = 'pending'"),
     )
+    op.create_table(
+        "project_invitation_rate_limits",
+        sa.Column("key_hash", sa.CHAR(64), nullable=False),
+        sa.Column("failure_count", sa.Integer(), nullable=False),
+        sa.Column("window_started_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "key_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_project_invitation_rate_limits_key_hash",
+        ),
+        sa.CheckConstraint(
+            "failure_count >= 1",
+            name="ck_project_invitation_rate_limits_failure_count",
+        ),
+        sa.PrimaryKeyConstraint("key_hash"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("project_invitation_rate_limits")
     op.drop_index(
         "uq_project_invitations_pending_email",
         table_name="project_invitations",

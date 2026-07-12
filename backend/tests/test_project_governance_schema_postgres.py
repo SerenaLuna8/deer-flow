@@ -40,6 +40,13 @@ INVITATION_COLUMNS = {
     "revoked_at",
     "created_at",
 }
+RATE_LIMIT_COLUMNS = {
+    "key_hash",
+    "failure_count",
+    "window_started_at",
+    "expires_at",
+    "updated_at",
+}
 
 
 def _foreign_key_targets(foreign_keys: list[dict]) -> set[tuple[str, str, str]]:
@@ -68,6 +75,7 @@ async def test_m2_schema_has_governance_constraints(
         async with engine.connect() as conn:
             tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
             assert "project_invitations" in tables
+            assert "project_invitation_rate_limits" in tables
             project_columns = await conn.run_sync(lambda sync: inspect(sync).get_columns("projects"))
             membership_columns = await conn.run_sync(lambda sync: inspect(sync).get_columns("project_memberships"))
             invitation_columns = await conn.run_sync(lambda sync: inspect(sync).get_columns("project_invitations"))
@@ -78,11 +86,14 @@ async def test_m2_schema_has_governance_constraints(
             membership_fks = await conn.run_sync(lambda sync: inspect(sync).get_foreign_keys("project_memberships"))
             invitation_fks = await conn.run_sync(lambda sync: inspect(sync).get_foreign_keys("project_invitations"))
             invitation_indexes = await conn.run_sync(lambda sync: inspect(sync).get_indexes("project_invitations"))
+            rate_limit_columns = await conn.run_sync(lambda sync: inspect(sync).get_columns("project_invitation_rate_limits"))
+            rate_limit_checks = await conn.run_sync(lambda sync: inspect(sync).get_check_constraints("project_invitation_rate_limits"))
             version = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
 
         assert PROJECT_COLUMNS <= {column["name"] for column in project_columns}
         assert MEMBERSHIP_COLUMNS <= {column["name"] for column in membership_columns}
         assert INVITATION_COLUMNS == {column["name"] for column in invitation_columns}
+        assert RATE_LIMIT_COLUMNS == {column["name"] for column in rate_limit_columns}
         assert {
             "ck_projects_status",
             "ck_projects_membership_version",
@@ -98,6 +109,10 @@ async def test_m2_schema_has_governance_constraints(
             "ck_project_invitations_token_hash",
             "ck_project_invitations_version",
         } <= {constraint["name"] for constraint in invitation_checks}
+        assert {
+            "ck_project_invitation_rate_limits_key_hash",
+            "ck_project_invitation_rate_limits_failure_count",
+        } <= {constraint["name"] for constraint in rate_limit_checks}
         _assert_token_hash_is_char_64(invitation_columns)
         assert (
             "deletion_requested_by_user_id",
@@ -115,6 +130,7 @@ async def test_m2_schema_has_governance_constraints(
         assert version == "0006_project_governance"
         assert "project_invitations" in Base.metadata.tables
         assert persistence_models.ProjectInvitationRow.__tablename__ == ("project_invitations")
+        assert persistence_models.ProjectInvitationRateLimitRow.__tablename__ == ("project_invitation_rate_limits")
     finally:
         await engine.dispose()
 

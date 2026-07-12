@@ -74,6 +74,7 @@ class ProjectResponse(BaseModel):
     is_suspended: bool
     membership_version: int
     request_id: str
+    deletion_effective_at: datetime | None = None
 
 
 class ProjectPageResponse(BaseModel):
@@ -118,11 +119,25 @@ async def create_project(body: CreateProjectRequest, identity: tuple[uuid.UUID, 
 
 @router.get("", response_model=ProjectPageResponse)
 async def list_projects(
-    query: str | None = None, pinned: bool | None = None, cursor: str | None = None, limit: int = Query(20), identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity), session: AsyncSession = Depends(project_session)
+    query: str | None = None,
+    pinned: bool | None = None,
+    cursor: str | None = None,
+    limit: int = Query(20),
+    include_recoverable: bool = False,
+    identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
+    session: AsyncSession = Depends(project_session),
 ):
     user_id, request_id = identity
     try:
-        page: ProjectPage = await ProjectService(ProjectRepository(session)).list(user_id, query=query, pinned=pinned, cursor=cursor, limit=limit, request_id=request_id)
+        page: ProjectPage = await ProjectService(ProjectRepository(session)).list(
+            user_id,
+            query=query,
+            pinned=pinned,
+            cursor=cursor,
+            limit=limit,
+            include_recoverable=include_recoverable,
+            request_id=request_id,
+        )
         return ProjectPageResponse(items=[_response(item) for item in page.items], next_cursor=page.next_cursor)
     except DOMAIN_ERRORS as exc:
         _raise_domain(exc)

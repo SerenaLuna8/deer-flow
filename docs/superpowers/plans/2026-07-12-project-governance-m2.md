@@ -377,20 +377,36 @@ git commit -m "feat(projects): add deletion recovery lifecycle"
 
 **文件：**
 
+- 新建：`backend/packages/harness/deerflow/persistence/projects/invitation_rate_limit_model.py`
+- 修改：`backend/packages/harness/deerflow/persistence/models/__init__.py`
+- 修改：`backend/packages/harness/deerflow/persistence/projects/__init__.py`
+- 修改：`backend/packages/harness/deerflow/persistence/migrations/versions/0006_project_governance.py`
+- 新建：`backend/app/gateway/auth/invitation_rate_limit.py`
 - 新建：`backend/app/gateway/routers/project_members.py`
 - 新建：`backend/app/gateway/routers/project_invitations.py`
 - 新建：`backend/app/gateway/routers/project_lifecycle.py`
+- 新建：`backend/app/gateway/routers/project_governance.py`
 - 新建：`backend/app/gateway/auth/invitation_claim.py`
+- 修改：`backend/app/gateway/auth_middleware.py`
+- 修改：`backend/app/gateway/csrf_middleware.py`
 - 修改：`backend/app/gateway/routers/__init__.py`
 - 修改：`backend/app/gateway/app.py`
 - 修改：`backend/app/gateway/routers/projects.py`
+- 修改：`backend/app/projects/invitation_repository.py`
+- 修改：`backend/app/projects/invitation_service.py`
+- 修改：`backend/tests/test_project_governance_schema_postgres.py`
 - 新建：`backend/tests/test_project_members_router.py`
 - 新建：`backend/tests/test_project_invitations_router.py`
 - 新建：`backend/tests/test_project_lifecycle_router.py`
 - 新建：`backend/tests/test_project_invitation_claim.py`
+- 新建：`backend/tests/test_project_invitation_rate_limit_postgres.py`
+- 修改：`backend/AGENTS.md`
+- 修改：`docs/superpowers/specs/2026-07-12-project-governance-m2-design.md`
 
 **接口：** 实现专项规格第 7 节全部 endpoint 和第 8 节稳定错误码。
 - 产生：`InvitationClaimSigner.issue(claim, now) -> str` 和 `InvitationClaimSigner.verify(cookie, now) -> InvitationClaim`。
+- 产生：`InvitationRateLimitRepository.is_limited/record_failure/clear`，使用 PostgreSQL 固定窗口共享失败计数；5 次失败后限制 5 分钟。
+- claim cookie 名为 `project_invitation_claim`，使用带固定 domain-separation label 的 SHA-256 从 Auth JWT secret 派生 AES-GCM key，对只含 invitation UUID、token hash、`iat`、`exp` 的 payload 做认证加密；每个 cookie 使用随机 12-byte nonce 和绑定 cookie 名/版本的固定 AAD。opaque cookie 固定十分钟，`HttpOnly`、`SameSite=Lax`、path `/api/project-invitations`，`Secure` 跟随 `is_secure_request`。
 
 - [ ] **步骤 1：编写 API 授权和错误映射测试**
 
@@ -413,7 +429,7 @@ def test_cross_project_member_patch_is_404(admin_client, project_id, other_membe
 
 - [ ] **步骤 2：运行路由测试确认失败**
 
-运行：`cd backend && uv run pytest tests/test_project_members_router.py tests/test_project_invitations_router.py tests/test_project_lifecycle_router.py tests/test_project_invitation_claim.py -q`
+运行：`cd backend && uv run pytest tests/test_project_members_router.py tests/test_project_invitations_router.py tests/test_project_lifecycle_router.py tests/test_project_invitation_claim.py tests/test_project_invitation_rate_limit_postgres.py tests/test_project_governance_schema_postgres.py -q`
 
 预期：404 或测试收集失败，因为新路由尚未挂载。
 
@@ -432,16 +448,18 @@ async def patch_member(project_id, membership_id, body, identity=Depends(authent
 邀请创建响应包含 `invite_url_fragment` 所需 token，但日志对象和普通 invitation response 不包含 token。
 `POST /api/project-invitations/claim` 不要求登录，使用通用响应并设置十分钟有效的签名 `HttpOnly` claim cookie；`redeem` 要求登录、验证 cookie、完成兑换后清除 cookie。`GET /api/project-invitations/mine` 只按当前账户规范化 email 返回 invitation 元数据，不返回 token hash。
 
+claim 对有效、无效和已受限 token 返回相同 status、body 与同形状 opaque cookie；无效路径签发随机 invitation UUID 的不可用 claim，客户端不能读取 payload 或判断 token 是否有效。redeem 无论成功或失败都使用相同 cookie path 清除 claim cookie。claim 失败限流 key 是 action + 可信客户端 IP 的 SHA-256；redeem 失败限流 key 再包含当前账户规范化 email 后整体 SHA-256，表内不保存原始 IP 或 email。计数使用 PostgreSQL `INSERT ... ON CONFLICT DO UPDATE` 原子累加，检查在事务内读取并锁定单行；claim 受限仍返回通用响应，redeem 受限统一返回 `PROJECT_INVITATION_INVALID`。
+
 - [ ] **步骤 4：运行 API 和隔离测试**
 
-运行：`cd backend && uv run pytest tests/test_project_members_router.py tests/test_project_invitations_router.py tests/test_project_lifecycle_router.py tests/test_project_invitation_claim.py tests/integration/test_project_isolation_postgres.py -q`
+运行：`cd backend && uv run pytest tests/test_project_members_router.py tests/test_project_invitations_router.py tests/test_project_lifecycle_router.py tests/test_project_invitation_claim.py tests/test_project_invitation_rate_limit_postgres.py tests/test_project_governance_schema_postgres.py tests/integration/test_project_isolation_postgres.py -q`
 
 预期：全部通过。
 
 - [ ] **步骤 5：提交**
 
 ```bash
-git add backend/app/gateway backend/tests/test_project_members_router.py backend/tests/test_project_invitations_router.py backend/tests/test_project_lifecycle_router.py backend/tests/test_project_invitation_claim.py backend/tests/integration/test_project_isolation_postgres.py
+git add backend/app/gateway backend/app/projects/invitation_repository.py backend/app/projects/invitation_service.py backend/packages/harness/deerflow/persistence backend/tests/test_project_members_router.py backend/tests/test_project_invitations_router.py backend/tests/test_project_lifecycle_router.py backend/tests/test_project_invitation_claim.py backend/tests/test_project_invitation_rate_limit_postgres.py backend/tests/test_project_governance_schema_postgres.py backend/tests/integration/test_project_isolation_postgres.py backend/AGENTS.md docs/superpowers/specs/2026-07-12-project-governance-m2-design.md docs/superpowers/plans/2026-07-12-project-governance-m2.md
 git commit -m "feat(api): expose project governance endpoints"
 ```
 

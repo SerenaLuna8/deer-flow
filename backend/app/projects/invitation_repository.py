@@ -107,6 +107,65 @@ class InvitationRepository:
         async with self.transaction():
             return (await self.session.execute(select(ProjectInvitationRow).where(ProjectInvitationRow.token_hash == token_hash))).scalar_one_or_none()
 
+    async def list_for_project(
+        self,
+        context: ProjectContext,
+    ) -> tuple[InvitationView, ...]:
+        try:
+            async with self.session.begin():
+                await self._require_actor(context)
+                project_exists = exists(
+                    select(1).where(
+                        ProjectRow.id == context.project_id,
+                        ProjectRow.status == "active",
+                        ProjectRow.is_suspended.is_(False),
+                    )
+                )
+                rows = (
+                    await self.session.execute(
+                        select(ProjectInvitationRow)
+                        .where(
+                            ProjectInvitationRow.project_id == context.project_id,
+                            project_exists,
+                        )
+                        .order_by(
+                            ProjectInvitationRow.created_at.desc(),
+                            ProjectInvitationRow.id.desc(),
+                        )
+                    )
+                ).scalars()
+                return tuple(self._view(row) for row in rows)
+        except DBAPIError:
+            raise ProjectDatabaseUnavailable() from None
+
+    async def list_mine(
+        self,
+        invited_email: str,
+        now: datetime,
+    ) -> tuple[InvitationView, ...]:
+        try:
+            async with self.session.begin():
+                rows = (
+                    await self.session.execute(
+                        select(ProjectInvitationRow)
+                        .join(ProjectRow, ProjectRow.id == ProjectInvitationRow.project_id)
+                        .where(
+                            ProjectInvitationRow.invited_email == invited_email,
+                            ProjectInvitationRow.status == "pending",
+                            ProjectInvitationRow.expires_at > now,
+                            ProjectRow.status == "active",
+                            ProjectRow.is_suspended.is_(False),
+                        )
+                        .order_by(
+                            ProjectInvitationRow.created_at.desc(),
+                            ProjectInvitationRow.id.desc(),
+                        )
+                    )
+                ).scalars()
+                return tuple(self._view(row) for row in rows)
+        except DBAPIError:
+            raise ProjectDatabaseUnavailable() from None
+
     async def revoke(
         self,
         context: ProjectContext,
