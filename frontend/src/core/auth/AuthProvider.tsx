@@ -16,6 +16,10 @@ import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { isStaticWebsiteOnly } from "../static-mode";
 
 import { transitionAccountQueries } from "./account-query-client";
+import {
+  createAuthIdentityCoordinator,
+  type AuthIdentityCoordinator,
+} from "./identity-coordinator";
 import { type User, buildLoginUrl, userSchema } from "./types";
 
 // Re-export for consumers
@@ -55,6 +59,12 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const router = useRouter();
   const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
+  const identityCoordinatorRef = React.useRef<AuthIdentityCoordinator | null>(
+    null,
+  );
+  identityCoordinatorRef.current ??=
+    createAuthIdentityCoordinator(setIsLoading);
+  const identityCoordinator = identityCoordinatorRef.current;
 
   const isAuthenticated = user !== null;
 
@@ -64,18 +74,27 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * so consumers don't reach into React internals.
    */
   const userRef = React.useRef<User | null>(initialUser);
-  const applyEpochRef = React.useRef(0);
-  const applyUser = useCallback(
-    async (next: User | null) => {
-      const epoch = ++applyEpochRef.current;
+  const applyAtGeneration = useCallback(
+    async (generation: number, next: User | null) => {
       const previousId = userRef.current?.id ?? null;
       const nextId = next?.id ?? null;
-      await transitionAccountQueries(queryClient, previousId, nextId);
-      if (epoch !== applyEpochRef.current) return;
-      userRef.current = next;
-      setUser(next);
+      return identityCoordinator.commitAtGeneration(
+        generation,
+        () => transitionAccountQueries(queryClient, previousId, nextId),
+        () => {
+          userRef.current = next;
+          setUser(next);
+        },
+      );
     },
-    [queryClient],
+    [identityCoordinator, queryClient],
+  );
+  const applyUser = useCallback(
+    async (next: User | null) => {
+      const generation = identityCoordinator.beginIdentityChange();
+      await applyAtGeneration(generation, next);
+    },
+    [applyAtGeneration, identityCoordinator],
   );
 
   /**
@@ -85,30 +104,36 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const refreshUser = useCallback(async () => {
     if (staticMode) return;
 
+    const attempt = identityCoordinator.startRefresh();
     try {
-      setIsLoading(true);
       const res = await fetch("/api/v1/auth/me", {
         credentials: "include",
+        signal: attempt.signal,
       });
+      if (!identityCoordinator.isCurrent(attempt)) return;
 
       if (res.ok) {
         const parsed = userSchema.safeParse(await res.json());
-        await applyUser(parsed.success ? parsed.data : null);
+        if (!identityCoordinator.isCurrent(attempt)) return;
+        await applyAtGeneration(
+          attempt.generation,
+          parsed.success ? parsed.data : null,
+        );
       } else if (res.status === 401) {
-        // Session expired or invalid
-        await applyUser(null);
+        const applied = await applyAtGeneration(attempt.generation, null);
         // Redirect to login if on a protected route
-        if (pathname?.startsWith("/workspace")) {
+        if (applied && pathname?.startsWith("/workspace")) {
           router.push(buildLoginUrl(pathname));
         }
       }
     } catch (err) {
-      console.error("Failed to refresh user:", err);
-      await applyUser(null);
+      if (!identityCoordinator.isCurrent(attempt)) return;
+      const applied = await applyAtGeneration(attempt.generation, null);
+      if (applied) console.error("Failed to refresh user:", err);
     } finally {
-      setIsLoading(false);
+      identityCoordinator.finishRefresh(attempt);
     }
-  }, [staticMode, pathname, router, applyUser]);
+  }, [staticMode, pathname, router, applyAtGeneration, identityCoordinator]);
 
   /**
    * Logout - call FastAPI logout endpoint and clear local state
@@ -122,7 +147,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * logout used to.
    */
   const logout = useCallback(async () => {
-    applyEpochRef.current += 1;
+    identityCoordinator.beginIdentityChange();
     const previousId = userRef.current?.id ?? null;
     userRef.current = null;
     void transitionAccountQueries(queryClient, previousId, null, {
@@ -156,7 +181,11 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
     // Redirect to home page
     router.push("/");
-  }, [staticMode, router, queryClient]);
+  }, [staticMode, router, queryClient, identityCoordinator]);
+
+  useEffect(() => {
+    return () => identityCoordinator.dispose();
+  }, [identityCoordinator]);
 
   /**
    * Handle visibility change - refresh user when tab becomes visible again.

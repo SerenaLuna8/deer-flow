@@ -66,6 +66,9 @@ Account changes and logout cancel in-flight TanStack queries before clearing the
 owned QueryClient, so data or late responses from one account cannot enter another account's
 cache. `AuthProvider` therefore must always render inside `QueryClientProvider`; do not add a
 module-level QueryClient singleton or mount a new AuthProvider without that outer provider.
+Auth refreshes use a generation plus one AbortController per request: newer refreshes,
+external identity application, logout, and unmount invalidate older generations, and both
+query-cache transition and identity commit must recheck the same generation.
 The M1 `PROJECT_PRIVATE_WORKSPACE` feature constant is hard-disabled and must not be made
 environment- or user-configurable before the later private-work milestone.
 
