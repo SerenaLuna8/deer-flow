@@ -7,6 +7,7 @@ import asyncio
 import os
 import re
 import sys
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import _get_head_revision, bootstrap_schema
@@ -163,23 +165,48 @@ async def _bootstrap_langgraph_schemas(database_url: str) -> None:
         raise PostgresSetupError("LangGraph PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和数据库状态") from None
 
 
+def _create_bootstrap_lock_engine(database_url: str) -> AsyncEngine:
+    """Create a dedicated non-pooled engine for setup coordination only."""
+    config = DatabaseConfig(url=database_url)
+    return create_async_engine(config.sqlalchemy_url, poolclass=NullPool)
+
+
+@asynccontextmanager
+async def _complete_bootstrap_lock(database_url: str):
+    """Serialize ORM and LangGraph setup without application query timeouts."""
+    lock_engine = _create_bootstrap_lock_engine(database_url)
+    try:
+        async with lock_engine.connect() as connection:
+            async with connection.begin():
+                await connection.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
+                await connection.execute(text("SET LOCAL statement_timeout = 0"))
+                await connection.execute(
+                    text("SELECT pg_advisory_lock(:lock_key)"),
+                    {"lock_key": _BOOTSTRAP_LOCK_KEY},
+                )
+                try:
+                    yield
+                finally:
+                    try:
+                        await connection.scalar(
+                            text("SELECT pg_advisory_unlock(:lock_key)"),
+                            {"lock_key": _BOOTSTRAP_LOCK_KEY},
+                        )
+                    except Exception:
+                        # Closing the dedicated session releases a session lock.
+                        pass
+    finally:
+        await lock_engine.dispose()
+
+
 async def _bootstrap_existing(database_url: str) -> str:
     engine = _create_setup_engine(DatabaseConfig(url=database_url))
     try:
-        async with engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
-            await connection.execute(
-                text("SELECT pg_advisory_lock(:lock_key)"),
-                {"lock_key": _BOOTSTRAP_LOCK_KEY},
-            )
-            try:
-                await bootstrap_schema(engine)
-                await _bootstrap_langgraph_schemas(database_url)
-            finally:
-                await connection.execute(
-                    text("SELECT pg_advisory_unlock(:lock_key)"),
-                    {"lock_key": _BOOTSTRAP_LOCK_KEY},
-                )
+        async with _complete_bootstrap_lock(database_url):
+            async with engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+            await bootstrap_schema(engine)
+            await _bootstrap_langgraph_schemas(database_url)
         return _get_head_revision()
     except Exception:
         raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None

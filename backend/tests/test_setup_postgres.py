@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -181,6 +182,16 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     engine.dispose = AsyncMock(side_effect=lambda: calls.append("dispose"))
     monkeypatch.setattr(setup_postgres, "_create_setup_engine", lambda _config: engine)
 
+    @asynccontextmanager
+    async def coordination_lock(_database_url):
+        calls.append("lock:enter")
+        try:
+            yield
+        finally:
+            calls.append("lock:exit")
+
+    monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
+
     async def bootstrap(_engine):
         calls.append("orm")
 
@@ -193,13 +204,55 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
 
     assert await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc") == "head"
     assert calls == [
+        "lock:enter",
         "SELECT 1",
-        "SELECT pg_advisory_lock(:lock_key)",
         "orm",
         "langgraph",
+        "lock:exit",
+        "dispose",
+    ]
+    connection_context.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_complete_bootstrap_lock_uses_dedicated_timeout_free_transaction_and_cleanup(monkeypatch) -> None:
+    calls = []
+    connection = MagicMock()
+
+    async def execute(statement, *_args):
+        calls.append(str(statement))
+
+    async def scalar(statement, *_args):
+        calls.append(str(statement))
+        return True
+
+    connection.execute = AsyncMock(side_effect=execute)
+    connection.scalar = AsyncMock(side_effect=scalar)
+    transaction = MagicMock()
+    transaction.__aenter__ = AsyncMock(return_value=None)
+    transaction.__aexit__ = AsyncMock(return_value=None)
+    connection.begin.return_value = transaction
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=connection)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    lock_engine = MagicMock()
+    lock_engine.connect.return_value = connection_context
+    lock_engine.dispose = AsyncMock(side_effect=lambda: calls.append("dispose"))
+    monkeypatch.setattr(setup_postgres, "_create_bootstrap_lock_engine", lambda _url: lock_engine)
+
+    async with setup_postgres._complete_bootstrap_lock("postgresql://owner:private-password@localhost/deerflow_test_1_abc"):
+        calls.append("bootstrap")
+
+    assert calls == [
+        "SET LOCAL idle_in_transaction_session_timeout = 0",
+        "SET LOCAL statement_timeout = 0",
+        "SELECT pg_advisory_lock(:lock_key)",
+        "bootstrap",
         "SELECT pg_advisory_unlock(:lock_key)",
         "dispose",
     ]
+    transaction.__aexit__.assert_awaited_once()
+    connection_context.__aexit__.assert_awaited_once()
 
 
 @pytest.mark.asyncio

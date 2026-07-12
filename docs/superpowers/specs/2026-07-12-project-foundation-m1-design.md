@@ -201,6 +201,10 @@ schema。`setup-db` 和 migrate-only 路径必须使用同一个显式目标 URL
 advisory lock 内依次执行 ORM/Alembic、`AsyncPostgresSaver.setup()`、
 `AsyncPostgresStore.setup()`；健康检查必须把 checkpoint/store migration 与数据表纳入
 必需表集合。
+该 advisory-lock 使用独立 `NullPool` coordination engine，不占用 setup/application
+pool。协调事务局部禁用 `statement_timeout` 与
+`idle_in_transaction_session_timeout`，事务/专用 session 退出即恢复并释放 session
+lock；运行期连接池的超时配置保持不变。
 
 ### 6.1 配置
 

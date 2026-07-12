@@ -645,6 +645,11 @@ head，并用同一个显式 `DATABASE_URL` 幂等执行 LangGraph
 `checkpoint_migrations`、`checkpoints`、`checkpoint_blobs`、`checkpoint_writes`、
 `store_migrations`、`store`。三个命令均不输出 username、password 或完整 URL。Gateway
 runtime 仍只验证目标库，绝不自动创建数据库。
+完整 bootstrap 使用独立 `NullPool` coordination engine，不占用 setup/application pool；
+协调事务在取锁前执行 `SET LOCAL statement_timeout = 0` 和
+`SET LOCAL idle_in_transaction_session_timeout = 0`，避免合法并发锁等待或长 DDL 期间的
+idle transaction 被托管 PostgreSQL 误杀。事务/专用 session 关闭自动恢复并作为 unlock
+兜底，禁止放宽运行期连接超时。
 
 **一次性 SQLite 数据迁移**：`make migrate-sqlite ARGS="..."` 调用
 `scripts/migrate_sqlite_to_postgres.py`。脚本只通过 Task 1 的 `mode=ro` /
