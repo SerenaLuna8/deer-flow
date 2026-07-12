@@ -23,6 +23,7 @@ from scripts.migrate_sqlite_to_postgres import (
     TableMigrationReport,
     UnionPlan,
     _business_unique_keys,
+    _decode_store_rows,
     _json_canonical,
     _migrate_checkpoints,
     _migrate_writes_rows,
@@ -33,6 +34,7 @@ from scripts.migrate_sqlite_to_postgres import (
     _run_cli,
     _strict_insert_checkpoint,
     _verify_store_rows_with_api,
+    _verify_writes_with_saver,
     backup_source,
     decode_checkpoint_rows,
     inspect_source,
@@ -107,6 +109,140 @@ def test_safe_error_context_enriches_without_overwriting_and_hashes_key() -> Non
     assert "source=aaaaaaaaaaaa" in rendered
     assert "key=" in rendered
     assert "private-business-key" not in rendered
+
+
+def test_real_normalize_error_reaches_cli_as_safe_fields(tmp_path: Path, monkeypatch, capsys) -> None:
+    source = tmp_path / "private-path.db"
+    _user_source(source, [("private-user-id", "private@example.invalid", 2)])
+    monkeypatch.setenv("SAFE_DATABASE_URL", "postgresql://owner:private-password@localhost/db")
+
+    async def run_real_normalize(args, _target):
+        normalize_business_rows(args.source[0], "users")
+
+    monkeypatch.setattr("scripts.migrate_sqlite_to_postgres._run_cli", run_real_normalize)
+    result = main(
+        [
+            "--source",
+            str(source),
+            "--target-url-env",
+            "SAFE_DATABASE_URL",
+            "--backup-dir",
+            str(tmp_path / "backup"),
+            "--dry-run",
+        ]
+    )
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert result == 1
+    assert "code=decode" in rendered
+    assert "table=users" in rendered
+    assert "source=" in rendered and "key=" in rendered
+    for secret in ("private-user-id", "private@example.invalid", "private-path.db", "private-password", "postgresql://"):
+        assert secret not in rendered
+
+
+def _production_cli_failure(tmp_path: Path, monkeypatch, capsys, run_real_path) -> str:
+    monkeypatch.setenv("SAFE_DATABASE_URL", "postgresql://owner:private-password@localhost/db")
+    monkeypatch.setattr("scripts.migrate_sqlite_to_postgres._run_cli", run_real_path)
+    result = main(
+        [
+            "--source",
+            str(tmp_path / "private-path.db"),
+            "--target-url-env",
+            "SAFE_DATABASE_URL",
+            "--backup-dir",
+            str(tmp_path / "backup"),
+            "--dry-run",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 1
+    return captured.out + captured.err
+
+
+def test_checkpoint_saver_provider_error_reaches_cli_as_safe_row_fields(tmp_path: Path, monkeypatch, capsys) -> None:
+    row = DecodedCheckpoint(
+        "private-thread",
+        "",
+        "private-checkpoint",
+        None,
+        {"id": "private-checkpoint", "channel_values": {}, "channel_versions": {}},
+        {},
+    )
+
+    class Connection:
+        async def fetchrow(self, *_args):
+            return None
+
+    class Saver:
+        async def aget_tuple(self, *_args):
+            raise RuntimeError("private-provider-detail")
+
+    async def run_real_checkpoint(_args, _target):
+        await _migrate_checkpoints(Connection(), Saver(), "a" * 64, [row], dry_run=True)
+
+    rendered = _production_cli_failure(tmp_path, monkeypatch, capsys, run_real_checkpoint)
+    assert "code=migration" in rendered
+    assert "table=checkpoints" in rendered
+    assert "source=aaaaaaaaaaaa" in rendered and "key=" in rendered
+    for secret in ("private-thread", "private-checkpoint", "private-provider-detail", "private-password", "postgresql://"):
+        assert secret not in rendered
+
+
+def test_write_saver_provider_error_reaches_cli_as_safe_row_fields(tmp_path: Path, monkeypatch, capsys) -> None:
+    row = DecodedWrite("private-thread", "", "private-checkpoint", "private-task", 0, "private-channel", {"secret": True})
+
+    class SaverContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def aget_tuple(self, *_args):
+            raise RuntimeError("private-provider-detail")
+
+    class SaverProvider:
+        @classmethod
+        def from_conn_string(cls, _target):
+            return SaverContext()
+
+    monkeypatch.setattr("langgraph.checkpoint.postgres.aio.AsyncPostgresSaver", SaverProvider)
+
+    async def run_real_write(_args, target):
+        await _verify_writes_with_saver(target, [row], "b" * 64)
+
+    rendered = _production_cli_failure(tmp_path, monkeypatch, capsys, run_real_write)
+    assert "code=conflict" in rendered
+    assert "table=writes" in rendered
+    assert "source=bbbbbbbbbbbb" in rendered and "key=" in rendered
+    for secret in ("private-thread", "private-checkpoint", "private-task", "private-channel", "private-provider-detail", "private-password", "postgresql://"):
+        assert secret not in rendered
+
+
+def test_store_ttl_error_reaches_cli_as_safe_row_fields(tmp_path: Path, monkeypatch, capsys) -> None:
+    source = tmp_path / "private-path.db"
+    _sqlite(
+        source,
+        """CREATE TABLE store (
+        prefix TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
+        expires_at TIMESTAMP, ttl_minutes REAL,
+        PRIMARY KEY (prefix, key));
+        INSERT INTO store VALUES (
+        'private.namespace','private-key','{\"secret\":true}',
+        '2026-07-12T00:00:00+00:00','2026-07-12T00:00:00+00:00',NULL,1.5);""",
+    )
+
+    async def run_real_store(args, _target):
+        _decode_store_rows(args.source[0])
+
+    rendered = _production_cli_failure(tmp_path, monkeypatch, capsys, run_real_store)
+    assert "code=decode" in rendered
+    assert "table=store" in rendered
+    assert "source=" in rendered and "key=" in rendered
+    for secret in ("private.namespace", "private-key", "secret", "private-password", "postgresql://"):
+        assert secret not in rendered
 
 
 def _sqlite(path: Path, statements: str) -> None:

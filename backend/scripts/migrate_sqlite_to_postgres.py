@@ -13,6 +13,7 @@ import sys
 import tempfile
 import uuid
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -211,6 +212,35 @@ class MigrationError(RuntimeError):
         if self.key_hash is None and source_key:
             self.key_hash = hashlib.sha256(source_key.encode()).hexdigest()[:12]
         return self
+
+
+@contextmanager
+def _row_error_boundary(
+    *,
+    table: str,
+    source_sha256: str,
+    source_key: str,
+    code: MigrationErrorCode = MigrationErrorCode.MIGRATION,
+):
+    try:
+        yield
+    except MigrationError as exc:
+        raise exc.enrich(code=code, table=table, source_sha256=source_sha256, source_key=source_key) from None
+    except Exception:
+        raise MigrationError(
+            "safe row processing failure",
+            code=code,
+            table=table,
+            source_sha256=source_sha256,
+            source_key=source_key,
+        ) from None
+
+
+def _raw_row_key(row: Any) -> str:
+    try:
+        return _json_canonical(list(row))
+    except Exception:
+        return hashlib.sha256(type(row).__name__.encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -536,17 +566,24 @@ def normalize_business_rows(source: Path, table: str) -> list[NormalizedRow]:
     normalized: list[NormalizedRow] = []
     seen: set[str] = set()
     for row in _read_rows(source, table):
-        values = {name: _normalize_value(row[name], target.c[name], table=table) for name in row.keys()}
-        source_key = _json_canonical([values[name] for name in source_pk])
-        if source_key in seen:
-            raise MigrationError(f"duplicate source key in {table}")
-        seen.add(source_key)
-        missing_target_key = [name for name in target_pk if name not in values]
-        if missing_target_key:
-            raise MigrationError(f"{table} is missing target primary key columns")
-        target_key = _json_canonical([values[name] for name in target_pk])
-        digest = hashlib.sha256(_json_canonical(values).encode()).hexdigest()
-        normalized.append(NormalizedRow(source_key, target_key, values, digest))
+        boundary_key = _raw_row_key(row)
+        with _row_error_boundary(
+            table=table,
+            source_sha256=inspection.inventory.sha256,
+            source_key=boundary_key,
+            code=MigrationErrorCode.DECODE,
+        ):
+            values = {name: _normalize_value(row[name], target.c[name], table=table) for name in row.keys()}
+            source_key = _json_canonical([values[name] for name in source_pk])
+            if source_key in seen:
+                raise MigrationError(f"duplicate source key in {table}")
+            seen.add(source_key)
+            missing_target_key = [name for name in target_pk if name not in values]
+            if missing_target_key:
+                raise MigrationError(f"{table} is missing target primary key columns")
+            target_key = _json_canonical([values[name] for name in target_pk])
+            digest = hashlib.sha256(_json_canonical(values).encode()).hexdigest()
+            normalized.append(NormalizedRow(source_key, target_key, values, digest))
     return sorted(normalized, key=lambda item: item.source_key.encode())
 
 
@@ -594,14 +631,14 @@ def decode_checkpoint_rows(source: Path) -> tuple[list[DecodedCheckpoint], list[
                 )
     except MigrationError:
         raise
-    except Exception as exc:
+    except Exception:
         raise MigrationError(
             "unable to decode LangGraph checkpoint source",
             code=MigrationErrorCode.DECODE,
             table=current_table,
             source_sha256=inspection.inventory.sha256,
             source_key=current_key,
-        ) from exc
+        ) from None
     checkpoints = _order_checkpoints(checkpoints)
     writes.sort(key=lambda row: (row.thread_id, row.checkpoint_ns, row.checkpoint_id, row.task_id, row.idx))
     return checkpoints, writes
@@ -873,11 +910,21 @@ async def _migrate_checkpoints(
             if (row.thread_id, row.checkpoint_ns, row.parent_checkpoint_id) in planned_checkpoint_keys:
                 parent = True
             else:
-                parent = await saver.aget_tuple({"configurable": {"thread_id": row.thread_id, "checkpoint_ns": row.checkpoint_ns, "checkpoint_id": row.parent_checkpoint_id}})
+                with _row_error_boundary(table="checkpoints", source_sha256=source_sha256, source_key=source_key):
+                    parent = await saver.aget_tuple(
+                        {
+                            "configurable": {
+                                "thread_id": row.thread_id,
+                                "checkpoint_ns": row.checkpoint_ns,
+                                "checkpoint_id": row.parent_checkpoint_id,
+                            }
+                        }
+                    )
             if parent is None:
                 raise MigrationError("checkpoint parent missing from source and target").enrich(table="checkpoints", source_sha256=source_sha256, source_key=source_key)
         digest = _checkpoint_digest(row)
-        ledger = await _ledger_row(connection, source_sha256, "checkpoints", source_key)
+        with _row_error_boundary(table="checkpoints", source_sha256=source_sha256, source_key=source_key):
+            ledger = await _ledger_row(connection, source_sha256, "checkpoints", source_key)
         config = {
             "configurable": {
                 "thread_id": row.thread_id,
@@ -885,20 +932,23 @@ async def _migrate_checkpoints(
                 "checkpoint_id": row.checkpoint_id,
             }
         }
-        target_tuple = await saver.aget_tuple(config)
+        with _row_error_boundary(table="checkpoints", source_sha256=source_sha256, source_key=source_key):
+            target_tuple = await saver.aget_tuple(config)
         if target_tuple is not None:
-            target_row = DecodedCheckpoint(
-                row.thread_id,
-                row.checkpoint_ns,
-                row.checkpoint_id,
-                target_tuple.parent_config["configurable"]["checkpoint_id"] if target_tuple.parent_config else None,
-                target_tuple.checkpoint,
-                target_tuple.metadata,
-            )
-            if _checkpoint_digest(target_row) != digest:
-                raise MigrationError("target checkpoint conflict").enrich(table="checkpoints", source_sha256=source_sha256, source_key=source_key)
+            with _row_error_boundary(table="checkpoints", source_sha256=source_sha256, source_key=source_key, code=MigrationErrorCode.CONFLICT):
+                target_row = DecodedCheckpoint(
+                    row.thread_id,
+                    row.checkpoint_ns,
+                    row.checkpoint_id,
+                    target_tuple.parent_config["configurable"]["checkpoint_id"] if target_tuple.parent_config else None,
+                    target_tuple.checkpoint,
+                    target_tuple.metadata,
+                )
+                if _checkpoint_digest(target_row) != digest:
+                    raise MigrationError("target checkpoint conflict")
             if ledger is not None:
-                _validate_ledger(ledger, target_table="checkpoints", target_key=source_key, digest=digest)
+                with _row_error_boundary(table="checkpoints", source_sha256=source_sha256, source_key=source_key, code=MigrationErrorCode.CONFLICT):
+                    _validate_ledger(ledger, target_table="checkpoints", target_key=source_key, digest=digest)
                 already += 1
                 continue
             if dry_run:
@@ -908,40 +958,48 @@ async def _migrate_checkpoints(
             status = "adopted"
         else:
             if ledger is not None:
-                raise MigrationError("checkpoint ledger points to missing target")
+                raise MigrationError("checkpoint ledger points to missing target").enrich(
+                    code=MigrationErrorCode.CONFLICT,
+                    table="checkpoints",
+                    source_sha256=source_sha256,
+                    source_key=source_key,
+                )
             if dry_run:
                 planned += 1
                 continue
-            created = await _strict_insert_checkpoint(connection, row)
-            read_back = await saver.aget_tuple(config)
-            if read_back is None:
-                raise MigrationError("checkpoint semantic verification failed")
-            verified_row = DecodedCheckpoint(
-                row.thread_id,
-                row.checkpoint_ns,
-                row.checkpoint_id,
-                read_back.parent_config["configurable"]["checkpoint_id"] if read_back.parent_config else None,
-                read_back.checkpoint,
-                read_back.metadata,
-            )
-            if _checkpoint_digest(verified_row) != digest:
-                raise MigrationError("checkpoint semantic verification failed")
+            with _row_error_boundary(table="checkpoints", source_sha256=source_sha256, source_key=source_key):
+                created = await _strict_insert_checkpoint(connection, row)
+                read_back = await saver.aget_tuple(config)
+            with _row_error_boundary(table="checkpoints", source_sha256=source_sha256, source_key=source_key, code=MigrationErrorCode.CONFLICT):
+                if read_back is None:
+                    raise MigrationError("checkpoint semantic verification failed")
+                verified_row = DecodedCheckpoint(
+                    row.thread_id,
+                    row.checkpoint_ns,
+                    row.checkpoint_id,
+                    read_back.parent_config["configurable"]["checkpoint_id"] if read_back.parent_config else None,
+                    read_back.checkpoint,
+                    read_back.metadata,
+                )
+                if _checkpoint_digest(verified_row) != digest:
+                    raise MigrationError("checkpoint semantic verification failed")
             if created:
                 inserted += 1
                 status = "migrated"
             else:
                 adopted += 1
                 status = "adopted"
-        await _write_ledger(
-            connection,
-            source_sha256=source_sha256,
-            source_table="checkpoints",
-            source_key=source_key,
-            target_table="checkpoints",
-            target_key=source_key,
-            row_digest=digest,
-            status=status,
-        )
+        with _row_error_boundary(table="checkpoints", source_sha256=source_sha256, source_key=source_key):
+            await _write_ledger(
+                connection,
+                source_sha256=source_sha256,
+                source_table="checkpoints",
+                source_key=source_key,
+                target_table="checkpoints",
+                target_key=source_key,
+                row_digest=digest,
+                status=status,
+            )
     return TableMigrationReport(len(checkpoints), inserted, adopted, already, planned, True)
 
 
@@ -1044,35 +1102,48 @@ async def _migrate_writes_rows(
 ) -> TableMigrationReport:
     serde = JsonPlusSerializer()
     inserted = adopted = already = planned = 0
-    identities = [_write_identity(row) for row in writes]
-    if len(identities) != len(set(identities)):
-        raise MigrationError("duplicate checkpoint write source identity")
+    seen_identities: set[str] = set()
     for row in writes:
         source_key = _write_identity(row)
-        if (row.thread_id, row.checkpoint_ns, row.checkpoint_id) not in planned_checkpoint_keys and not await connection.fetchval(
-            "SELECT 1 FROM checkpoints WHERE thread_id=$1 AND checkpoint_ns=$2 AND checkpoint_id=$3",
-            row.thread_id,
-            row.checkpoint_ns,
-            row.checkpoint_id,
-        ):
+        if source_key in seen_identities:
+            raise MigrationError("duplicate checkpoint write source identity").enrich(
+                code=MigrationErrorCode.CONFLICT,
+                table="writes",
+                source_sha256=source_sha256,
+                source_key=source_key,
+            )
+        seen_identities.add(source_key)
+    for row in writes:
+        source_key = _write_identity(row)
+        with _row_error_boundary(table="writes", source_sha256=source_sha256, source_key=source_key):
+            checkpoint_exists = (row.thread_id, row.checkpoint_ns, row.checkpoint_id) in planned_checkpoint_keys or await connection.fetchval(
+                "SELECT 1 FROM checkpoints WHERE thread_id=$1 AND checkpoint_ns=$2 AND checkpoint_id=$3",
+                row.thread_id,
+                row.checkpoint_ns,
+                row.checkpoint_id,
+            )
+        if not checkpoint_exists:
             raise MigrationError("checkpoint write references missing checkpoint").enrich(table="writes", source_sha256=source_sha256, source_key=source_key)
         digest = _write_digest(row.channel, row.value)
-        ledger = await _ledger_row(connection, source_sha256, "writes", source_key)
-        target = await connection.fetchrow(
-            "SELECT task_path,channel,type,blob FROM checkpoint_writes WHERE thread_id=$1 AND checkpoint_ns=$2 AND checkpoint_id=$3 AND task_id=$4 AND idx=$5",
-            row.thread_id,
-            row.checkpoint_ns,
-            row.checkpoint_id,
-            row.task_id,
-            row.idx,
-        )
+        with _row_error_boundary(table="writes", source_sha256=source_sha256, source_key=source_key):
+            ledger = await _ledger_row(connection, source_sha256, "writes", source_key)
+            target = await connection.fetchrow(
+                "SELECT task_path,channel,type,blob FROM checkpoint_writes WHERE thread_id=$1 AND checkpoint_ns=$2 AND checkpoint_id=$3 AND task_id=$4 AND idx=$5",
+                row.thread_id,
+                row.checkpoint_ns,
+                row.checkpoint_id,
+                row.task_id,
+                row.idx,
+            )
         if target is not None:
-            target_value = serde.loads_typed((target["type"], bytes(target["blob"])))
-            target_digest = _write_digest(target["channel"], target_value, target["task_path"])
+            with _row_error_boundary(table="writes", source_sha256=source_sha256, source_key=source_key, code=MigrationErrorCode.DECODE):
+                target_value = serde.loads_typed((target["type"], bytes(target["blob"])))
+                target_digest = _write_digest(target["channel"], target_value, target["task_path"])
             if target_digest != digest:
                 raise MigrationError("target checkpoint write conflict").enrich(table="writes", source_sha256=source_sha256, source_key=source_key)
             if ledger is not None:
-                _validate_ledger(ledger, target_table="checkpoint_writes", target_key=source_key, digest=digest)
+                with _row_error_boundary(table="writes", source_sha256=source_sha256, source_key=source_key, code=MigrationErrorCode.CONFLICT):
+                    _validate_ledger(ledger, target_table="checkpoint_writes", target_key=source_key, digest=digest)
                 already += 1
                 continue
             adopted += 1
@@ -1081,47 +1152,65 @@ async def _migrate_writes_rows(
             status = "adopted"
         else:
             if ledger is not None:
-                raise MigrationError("checkpoint write ledger points to missing target")
+                raise MigrationError("checkpoint write ledger points to missing target").enrich(
+                    code=MigrationErrorCode.CONFLICT,
+                    table="writes",
+                    source_sha256=source_sha256,
+                    source_key=source_key,
+                )
             if dry_run:
                 planned += 1
                 continue
-            type_, blob = serde.dumps_typed(row.value)
-            await connection.execute(
-                "INSERT INTO checkpoint_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, task_path, idx, channel, type, blob) VALUES ($1,$2,$3,$4,'',$5,$6,$7,$8)",
-                row.thread_id,
-                row.checkpoint_ns,
-                row.checkpoint_id,
-                row.task_id,
-                row.idx,
-                row.channel,
-                type_,
-                blob,
-            )
-            inserted_row = await connection.fetchrow(
-                "SELECT task_path,channel,type,blob FROM checkpoint_writes WHERE thread_id=$1 AND checkpoint_ns=$2 AND checkpoint_id=$3 AND task_id=$4 AND idx=$5",
-                row.thread_id,
-                row.checkpoint_ns,
-                row.checkpoint_id,
-                row.task_id,
-                row.idx,
-            )
+            with _row_error_boundary(table="writes", source_sha256=source_sha256, source_key=source_key):
+                type_, blob = serde.dumps_typed(row.value)
+                await connection.execute(
+                    "INSERT INTO checkpoint_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, task_path, idx, channel, type, blob) VALUES ($1,$2,$3,$4,'',$5,$6,$7,$8)",
+                    row.thread_id,
+                    row.checkpoint_ns,
+                    row.checkpoint_id,
+                    row.task_id,
+                    row.idx,
+                    row.channel,
+                    type_,
+                    blob,
+                )
+                inserted_row = await connection.fetchrow(
+                    "SELECT task_path,channel,type,blob FROM checkpoint_writes WHERE thread_id=$1 AND checkpoint_ns=$2 AND checkpoint_id=$3 AND task_id=$4 AND idx=$5",
+                    row.thread_id,
+                    row.checkpoint_ns,
+                    row.checkpoint_id,
+                    row.task_id,
+                    row.idx,
+                )
             if inserted_row is None:
-                raise MigrationError("checkpoint write semantic read-back failed")
-            inserted_value = serde.loads_typed((inserted_row["type"], bytes(inserted_row["blob"])))
+                raise MigrationError("checkpoint write semantic read-back failed").enrich(
+                    code=MigrationErrorCode.CONFLICT,
+                    table="writes",
+                    source_sha256=source_sha256,
+                    source_key=source_key,
+                )
+            with _row_error_boundary(table="writes", source_sha256=source_sha256, source_key=source_key, code=MigrationErrorCode.DECODE):
+                inserted_value = serde.loads_typed((inserted_row["type"], bytes(inserted_row["blob"])))
             if _write_digest(inserted_row["channel"], inserted_value, inserted_row["task_path"]) != digest:
-                raise MigrationError("checkpoint write semantic read-back failed")
+                raise MigrationError("checkpoint write semantic read-back failed").enrich(
+                    code=MigrationErrorCode.CONFLICT,
+                    table="writes",
+                    source_sha256=source_sha256,
+                    source_key=source_key,
+                )
             inserted += 1
             status = "migrated"
-        await _write_ledger(
-            connection,
-            source_sha256=source_sha256,
-            source_table="writes",
-            source_key=source_key,
-            target_table="checkpoint_writes",
-            target_key=source_key,
-            row_digest=digest,
-            status=status,
-        )
+        with _row_error_boundary(table="writes", source_sha256=source_sha256, source_key=source_key):
+            await _write_ledger(
+                connection,
+                source_sha256=source_sha256,
+                source_table="writes",
+                source_key=source_key,
+                target_table="checkpoint_writes",
+                target_key=source_key,
+                row_digest=digest,
+                status=status,
+            )
     return TableMigrationReport(len(writes), inserted, adopted, already, planned, True)
 
 
@@ -1143,7 +1232,7 @@ async def _migrate_writes(
         )
 
 
-async def _verify_writes_with_saver(target_url: str, writes: list[DecodedWrite]) -> None:
+async def _verify_writes_with_saver(target_url: str, writes: list[DecodedWrite], source_sha256: str) -> None:
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
     try:
@@ -1155,10 +1244,17 @@ async def _verify_writes_with_saver(target_url: str, writes: list[DecodedWrite])
         grouped.setdefault((row.thread_id, row.checkpoint_ns, row.checkpoint_id), []).append(row)
     async with AsyncPostgresSaver.from_conn_string(_asyncpg_url(target_url)) as saver:
         for (thread_id, namespace, checkpoint_id), rows in grouped.items():
-            checkpoint = await saver.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace, "checkpoint_id": checkpoint_id}})
-            expected = [(row.task_id, row.channel, row.value) for row in sorted(rows, key=lambda item: (item.task_id, item.idx))]
-            if checkpoint is None or not _pending_writes_contains(checkpoint.pending_writes, expected):
-                raise MigrationError("checkpoint write Saver semantic read-back failed")
+            source_key = _write_identity(sorted(rows, key=lambda item: (item.task_id, item.idx))[0])
+            with _row_error_boundary(
+                table="writes",
+                source_sha256=source_sha256,
+                source_key=source_key,
+                code=MigrationErrorCode.CONFLICT,
+            ):
+                checkpoint = await saver.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace, "checkpoint_id": checkpoint_id}})
+                expected = [(row.task_id, row.channel, row.value) for row in sorted(rows, key=lambda item: (item.task_id, item.idx))]
+                if checkpoint is None or not _pending_writes_contains(checkpoint.pending_writes, expected):
+                    raise MigrationError("checkpoint write Saver semantic read-back failed")
 
 
 def _pending_writes_contains(actual: list[tuple[Any, Any, Any]], expected: list[tuple[Any, Any, Any]]) -> bool:
@@ -1174,32 +1270,29 @@ def _decode_store_rows(source: Path) -> list[NormalizedRow]:
     rows = []
     for row in _read_rows(source, "store"):
         key = _json_canonical([str(row["prefix"]), str(row["key"])])
-        try:
+        with _row_error_boundary(
+            table="store",
+            source_sha256=inspection.inventory.sha256,
+            source_key=key,
+            code=MigrationErrorCode.DECODE,
+        ):
             value = json.loads(row["value"])
-        except Exception as exc:
-            raise MigrationError(
-                "invalid JSON in LangGraph store",
-                code=MigrationErrorCode.DECODE,
-                table="store",
-                source_sha256=inspection.inventory.sha256,
-                source_key=key,
-            ) from exc
-        ttl_minutes = row["ttl_minutes"] if "ttl_minutes" in row.keys() else None
-        if ttl_minutes is not None:
-            numeric_ttl = float(ttl_minutes)
-            if not numeric_ttl.is_integer():
-                raise MigrationError("non-integral store TTL cannot be represented by PostgreSQL provider")
-            ttl_minutes = int(numeric_ttl)
-        values = {
-            "prefix": str(row["prefix"]),
-            "key": str(row["key"]),
-            "value": value,
-            "created_at": _parse_datetime(row["created_at"], table="store", column="created_at"),
-            "updated_at": _parse_datetime(row["updated_at"], table="store", column="updated_at"),
-            "expires_at": _parse_datetime(row["expires_at"], table="store", column="expires_at") if "expires_at" in row.keys() else None,
-            "ttl_minutes": ttl_minutes,
-        }
-        rows.append(NormalizedRow(key, key, values, hashlib.sha256(_json_canonical(values).encode()).hexdigest()))
+            ttl_minutes = row["ttl_minutes"] if "ttl_minutes" in row.keys() else None
+            if ttl_minutes is not None:
+                numeric_ttl = float(ttl_minutes)
+                if not numeric_ttl.is_integer():
+                    raise MigrationError("non-integral store TTL cannot be represented by PostgreSQL provider")
+                ttl_minutes = int(numeric_ttl)
+            values = {
+                "prefix": str(row["prefix"]),
+                "key": str(row["key"]),
+                "value": value,
+                "created_at": _parse_datetime(row["created_at"], table="store", column="created_at"),
+                "updated_at": _parse_datetime(row["updated_at"], table="store", column="updated_at"),
+                "expires_at": _parse_datetime(row["expires_at"], table="store", column="expires_at") if "expires_at" in row.keys() else None,
+                "ttl_minutes": ttl_minutes,
+            }
+            rows.append(NormalizedRow(key, key, values, hashlib.sha256(_json_canonical(values).encode()).hexdigest()))
     return sorted(rows, key=lambda item: item.source_key.encode())
 
 
@@ -1213,21 +1306,29 @@ async def _migrate_store_rows(
     rows = _decode_store_rows(source)
     inserted = adopted = already = planned = 0
     for row in rows:
-        ledger = await _ledger_row(connection, source_sha256, "store", row.source_key)
-        target = await connection.fetchrow(
-            "SELECT prefix, key, value, created_at, updated_at, expires_at, ttl_minutes FROM store WHERE prefix=$1 AND key=$2",
-            row.values["prefix"],
-            row.values["key"],
-        )
+        with _row_error_boundary(table="store", source_sha256=source_sha256, source_key=row.source_key):
+            ledger = await _ledger_row(connection, source_sha256, "store", row.source_key)
+            target = await connection.fetchrow(
+                "SELECT prefix, key, value, created_at, updated_at, expires_at, ttl_minutes FROM store WHERE prefix=$1 AND key=$2",
+                row.values["prefix"],
+                row.values["key"],
+            )
         if target is not None:
-            values = dict(target)
-            if isinstance(values["value"], str):
-                values["value"] = json.loads(values["value"])
-            target_digest = hashlib.sha256(_json_canonical(values).encode()).hexdigest()
+            with _row_error_boundary(table="store", source_sha256=source_sha256, source_key=row.source_key, code=MigrationErrorCode.DECODE):
+                values = dict(target)
+                if isinstance(values["value"], str):
+                    values["value"] = json.loads(values["value"])
+                target_digest = hashlib.sha256(_json_canonical(values).encode()).hexdigest()
             if target_digest != row.digest:
-                raise MigrationError("target store conflict")
+                raise MigrationError("target store conflict").enrich(
+                    code=MigrationErrorCode.CONFLICT,
+                    table="store",
+                    source_sha256=source_sha256,
+                    source_key=row.source_key,
+                )
             if ledger is not None:
-                _validate_ledger(ledger, target_table="store", target_key=row.target_key, digest=row.digest)
+                with _row_error_boundary(table="store", source_sha256=source_sha256, source_key=row.source_key, code=MigrationErrorCode.CONFLICT):
+                    _validate_ledger(ledger, target_table="store", target_key=row.target_key, digest=row.digest)
                 already += 1
                 continue
             adopted += 1
@@ -1236,44 +1337,57 @@ async def _migrate_store_rows(
             status = "adopted"
         else:
             if ledger is not None:
-                raise MigrationError("store ledger points to missing target")
+                raise MigrationError("store ledger points to missing target").enrich(
+                    code=MigrationErrorCode.CONFLICT,
+                    table="store",
+                    source_sha256=source_sha256,
+                    source_key=row.source_key,
+                )
             if dry_run:
                 planned += 1
                 continue
-            await connection.execute(
-                "INSERT INTO store (prefix,key,value,created_at,updated_at,expires_at,ttl_minutes) VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7)",
-                row.values["prefix"],
-                row.values["key"],
-                _json_canonical(row.values["value"]),
-                row.values["created_at"],
-                row.values["updated_at"],
-                row.values["expires_at"],
-                row.values["ttl_minutes"],
-            )
-            read_back = await connection.fetchrow(
-                "SELECT prefix,key,value,created_at,updated_at,expires_at,ttl_minutes FROM store WHERE prefix=$1 AND key=$2",
-                row.values["prefix"],
-                row.values["key"],
-            )
+            with _row_error_boundary(table="store", source_sha256=source_sha256, source_key=row.source_key):
+                await connection.execute(
+                    "INSERT INTO store (prefix,key,value,created_at,updated_at,expires_at,ttl_minutes) VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7)",
+                    row.values["prefix"],
+                    row.values["key"],
+                    _json_canonical(row.values["value"]),
+                    row.values["created_at"],
+                    row.values["updated_at"],
+                    row.values["expires_at"],
+                    row.values["ttl_minutes"],
+                )
+                read_back = await connection.fetchrow(
+                    "SELECT prefix,key,value,created_at,updated_at,expires_at,ttl_minutes FROM store WHERE prefix=$1 AND key=$2",
+                    row.values["prefix"],
+                    row.values["key"],
+                )
             if read_back is None:
-                raise MigrationError("store semantic read-back failed")
-            read_values = dict(read_back)
-            if isinstance(read_values["value"], str):
-                read_values["value"] = json.loads(read_values["value"])
-            if hashlib.sha256(_json_canonical(read_values).encode()).hexdigest() != row.digest:
-                raise MigrationError("store semantic read-back failed")
+                raise MigrationError("store semantic read-back failed").enrich(
+                    code=MigrationErrorCode.CONFLICT,
+                    table="store",
+                    source_sha256=source_sha256,
+                    source_key=row.source_key,
+                )
+            with _row_error_boundary(table="store", source_sha256=source_sha256, source_key=row.source_key, code=MigrationErrorCode.DECODE):
+                read_values = dict(read_back)
+                if isinstance(read_values["value"], str):
+                    read_values["value"] = json.loads(read_values["value"])
+                if hashlib.sha256(_json_canonical(read_values).encode()).hexdigest() != row.digest:
+                    raise MigrationError("store semantic read-back failed")
             inserted += 1
             status = "migrated"
-        await _write_ledger(
-            connection,
-            source_sha256=source_sha256,
-            source_table="store",
-            source_key=row.source_key,
-            target_table="store",
-            target_key=row.target_key,
-            row_digest=row.digest,
-            status=status,
-        )
+        with _row_error_boundary(table="store", source_sha256=source_sha256, source_key=row.source_key):
+            await _write_ledger(
+                connection,
+                source_sha256=source_sha256,
+                source_table="store",
+                source_key=row.source_key,
+                target_table="store",
+                target_key=row.target_key,
+                row_digest=row.digest,
+                status=status,
+            )
     return TableMigrationReport(len(rows), inserted, adopted, already, planned, True)
 
 
@@ -1295,17 +1409,16 @@ async def _migrate_store(
 
 async def _verify_store_rows_with_api(store: Any, rows: list[NormalizedRow], source_sha256: str) -> None:
     for row in rows:
-        try:
+        with _row_error_boundary(
+            table="store",
+            source_sha256=source_sha256,
+            source_key=row.source_key,
+            code=MigrationErrorCode.CONFLICT,
+        ):
             namespace = tuple(row.values["prefix"].split("."))
             item = await store.aget(namespace, row.values["key"], refresh_ttl=False)
             if item is None or _json_canonical(item.value) != _json_canonical(row.values["value"]):
                 raise MigrationError("store public API semantic read-back failed")
-        except MigrationError as exc:
-            raise exc.enrich(
-                table="store",
-                source_sha256=source_sha256,
-                source_key=row.source_key,
-            )
 
 
 async def _verify_store_with_api(target_url: str, source: Path, source_sha256: str) -> None:
@@ -1386,7 +1499,7 @@ async def migrate_source(
                 planned_checkpoint_keys=planned_checkpoint_keys | frozenset((row.thread_id, row.checkpoint_ns, row.checkpoint_id) for row in checkpoints),
             )
             if not dry_run:
-                await _verify_writes_with_saver(target_url, writes)
+                await _verify_writes_with_saver(target_url, writes, inspection.inventory.sha256)
         if "store" in tables:
             reports["store"] = await _migrate_store(
                 connection,
