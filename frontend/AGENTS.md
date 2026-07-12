@@ -54,6 +54,10 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `landing/` — Landing page sections
   - `docs/` — Docs / MDX rendering components
 - **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+
+Platform authorization uses `system_role: "system_admin" | "user"`. The project-level
+role name `admin` is a separate membership concept and must not be accepted as a
+platform role in frontend schemas or admin-only UI gates.
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
 - **`content/`** — MDX content (blog posts, docs) rendered by the app

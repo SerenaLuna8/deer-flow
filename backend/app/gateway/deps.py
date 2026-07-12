@@ -471,7 +471,7 @@ async def require_admin_user(request: Request, *, detail: str) -> None:
     if user is None:
         user = await get_current_user_from_request(request)
 
-    if getattr(user, "system_role", None) != "admin":
+    if getattr(user, "system_role", None) != "system_admin":
         raise HTTPException(status_code=403, detail=detail)
 
 

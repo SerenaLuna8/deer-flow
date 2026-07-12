@@ -244,12 +244,12 @@ def test_auth_config_token_expiry_used_in_login_response():
 
 
 def test_user_response_system_role_literal():
-    """UserResponse.system_role should only accept 'admin' or 'user'."""
+    """UserResponse.system_role should only accept 'system_admin' or 'user'."""
     from app.gateway.auth.models import UserResponse
 
     # Valid roles
-    resp = UserResponse(id="1", email="a@b.com", system_role="admin")
-    assert resp.system_role == "admin"
+    resp = UserResponse(id="1", email="a@b.com", system_role="system_admin")
+    assert resp.system_role == "system_admin"
 
     resp = UserResponse(id="1", email="a@b.com", system_role="user")
     assert resp.system_role == "user"

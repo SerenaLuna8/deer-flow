@@ -511,7 +511,12 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
         )
 
     try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
+        user = await get_local_provider().create_user(
+            email=body.email,
+            password=body.password,
+            system_role="system_admin",
+            needs_setup=False,
+        )
     except ValueError:
         admin_count = await get_local_provider().count_admin_users()
         if admin_count == 0:

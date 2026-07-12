@@ -2563,7 +2563,7 @@ class TestSubagentGuardrailAttribution:
         executor = self._make_executor(
             classes,
             user_id="alice",
-            user_role="admin",
+            user_role="system_admin",
             oauth_provider="keycloak",
             oauth_id="subj-123",
             run_id="run-42",
@@ -2577,7 +2577,7 @@ class TestSubagentGuardrailAttribution:
         context = fake_agent.captured_context
         assert context is not None, "subagent context must be passed to astream"
         assert context.get("user_id") == "alice"
-        assert context.get("user_role") == "admin"
+        assert context.get("user_role") == "system_admin"
         assert context.get("oauth_provider") == "keycloak"
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"

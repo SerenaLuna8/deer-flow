@@ -20,7 +20,7 @@ export const MOCK_RUN_ID = "00000000-0000-0000-0000-000000000099";
 const MOCK_AUTH_USER = {
   id: "default",
   email: "default@test.local",
-  system_role: "admin",
+  system_role: "system_admin",
   needs_setup: false,
 };
 

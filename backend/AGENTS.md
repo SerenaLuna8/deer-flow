@@ -718,8 +718,16 @@ This invokes `alembic revision --autogenerate` against the live ORM models. Revi
 - `migrations/versions/0001_baseline.py` — chain root, matches the schema `create_all` produces from `Base.metadata`
 - `migrations/versions/0002_runs_token_usage.py` — fixes issue #3682
 - `migrations/versions/0004_migration_ledger.py` — per-source-row SQLite migration ledger
+- `migrations/versions/0005_project_foundation.py` — PostgreSQL project/membership tables and platform-role rename
 - `persistence/bootstrap.py` — `bootstrap_schema(engine)`, the three-branch decision + PostgreSQL advisory locking
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor)
+
+**Platform and project roles**: `users.system_role` is restricted to
+`system_admin|user`; the legacy platform value `admin` is converted by revision 0005.
+Project authorization is independent and lives in `project_memberships.role` as
+`admin|editor|runner|viewer`. Project IDs are native PostgreSQL UUIDs, while foreign
+keys to the pre-existing `users.id` deliberately remain `VARCHAR(36)` UUID strings.
+Do not grant project membership implicitly from a platform role.
 
 ### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
 

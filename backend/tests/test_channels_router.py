@@ -18,7 +18,7 @@ def _admin_user() -> User:
         id=UUID("11111111-2222-3333-4444-555555555555"),
         email="admin@example.com",
         password_hash="x",
-        system_role="admin",
+        system_role="system_admin",
     )
 
 

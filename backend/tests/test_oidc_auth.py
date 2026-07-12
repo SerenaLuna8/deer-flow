@@ -81,7 +81,7 @@ async def test_oidc_auto_create_assigns_admin_role_from_configured_email():
     created_user = User(
         email="admin@example.com",
         password_hash=None,
-        system_role="admin",
+        system_role="system_admin",
         oauth_provider="keycloak",
         oauth_id="admin-subject",
     )
@@ -99,7 +99,7 @@ async def test_oidc_auto_create_assigns_admin_role_from_configured_email():
         email="admin@example.com",
         oauth_provider="keycloak",
         oauth_id="admin-subject",
-        system_role="admin",
+        system_role="system_admin",
     )
 
 

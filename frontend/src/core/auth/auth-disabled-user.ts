@@ -3,7 +3,7 @@ import type { User } from "./types";
 export const AUTH_DISABLED_USER: User = {
   id: "default",
   email: "default@test.local",
-  system_role: "admin",
+  system_role: "system_admin",
   needs_setup: false,
   oauth_provider: null,
 };

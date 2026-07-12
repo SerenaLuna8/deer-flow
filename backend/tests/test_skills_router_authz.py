@@ -145,7 +145,7 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
             )
         ]
 
-    app = _make_app(system_role="admin")
+    app = _make_app(system_role="system_admin")
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
     monkeypatch.setattr(skills_router, "get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
     monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)

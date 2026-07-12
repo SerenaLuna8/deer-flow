@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import deerflow.persistence.models  # noqa: F401 -- registers ORM models
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.base import Base
+from deerflow.persistence.bootstrap import _BASELINE_TABLE_NAMES
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 from deerflow.persistence.run import RunRepository
 
@@ -21,7 +22,8 @@ async def _seed_legacy_schema(database_url: str, *, drop_token_usage: bool) -> N
     engine = create_async_engine(database_url)
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            baseline_tables = [Base.metadata.tables[name] for name in _BASELINE_TABLE_NAMES]
+            await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=baseline_tables))
             if drop_token_usage:
                 await connection.execute(text("ALTER TABLE runs DROP COLUMN token_usage_by_model"))
     finally:
@@ -53,7 +55,7 @@ async def test_legacy_database_recovers_token_usage_column(postgres_database_url
     await init_engine(DatabaseConfig(url=postgres_database_url))
     try:
         assert "token_usage_by_model" in await _column_names(postgres_database_url)
-        assert await _version(postgres_database_url) == "0004_migration_ledger"
+        assert await _version(postgres_database_url) == "0005_project_foundation"
 
         repo = RunRepository(get_session_factory())
         result = await repo.aggregate_tokens_by_thread(thread_id=str(uuid4()))
@@ -70,6 +72,6 @@ async def test_legacy_database_with_manual_alter_still_bootstraps(postgres_datab
     try:
         columns = await _column_names(postgres_database_url)
         assert columns.count("token_usage_by_model") == 1
-        assert await _version(postgres_database_url) == "0004_migration_ledger"
+        assert await _version(postgres_database_url) == "0005_project_foundation"
     finally:
         await close_engine()

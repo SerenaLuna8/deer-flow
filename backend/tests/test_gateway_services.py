@@ -804,7 +804,7 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
         {
             "context": {
                 "user_id": "channel-user-7",
-                "user_role": "admin",
+                "user_role": "system_admin",
                 "oauth_provider": "spoofed-provider",
                 "oauth_id": "spoofed-subject",
             }
@@ -1029,7 +1029,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
             metadata={},
             config={
                 "context": {
-                    "user_role": "admin",
+                    "user_role": "system_admin",
                     "oauth_provider": "spoofed-provider",
                     "oauth_id": "spoofed-subject",
                 }

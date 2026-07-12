@@ -127,6 +127,11 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    LangGraph 表仍会判定为不健康。命令输出不会显示 username、password 或完整 URL。
    Gateway 启动只验证和升级已配置的目标数据库，不会自动建库。
 
+   当前 PostgreSQL schema 会创建项目与项目成员关系基础表。平台角色仅为
+   `system_admin` 和 `user`；项目内的 `admin`、`editor`、`runner`、`viewer` 是独立权限，
+   平台管理员不会因此自动成为任何项目的成员。旧数据库中的平台 `admin` 会在升级时
+   自动映射为 `system_admin`。
+
    从旧版 SQLite 安装迁移时，先设置 `DATABASE_URL`，并把只读来源和 repo 外备份目录
    作为参数传入。先执行 dry-run；只有所有来源都通过 schema、冲突和语义预检后才移除
    `--dry-run`。写迁移会先为每个来源创建并校验原子备份，来源文件不会被修改或删除：

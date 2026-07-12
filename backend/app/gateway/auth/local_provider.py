@@ -68,7 +68,7 @@ class LocalAuthProvider(AuthProvider):
         Args:
             email: User email address
             password: Plain text password (will be hashed)
-            system_role: Role to assign ("admin" or "user")
+            system_role: Role to assign ("system_admin" or "user")
             needs_setup: If True, user must complete setup on first login
 
         Returns:
@@ -116,7 +116,7 @@ class LocalAuthProvider(AuthProvider):
             email: Verified email from the OIDC provider
             oauth_provider: Provider ID (e.g. 'keycloak', 'google')
             oauth_id: User's subject claim from the ID token
-            system_role: Role to assign ("admin" or "user")
+            system_role: Role to assign ("system_admin" or "user")
 
         Returns:
             Created User instance

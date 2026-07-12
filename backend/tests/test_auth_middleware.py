@@ -238,7 +238,7 @@ def test_auth_disabled_stamps_default_admin_user_without_cookie(monkeypatch):
     assert res.json() == {
         "id": "default",
         "email": "default@test.local",
-        "system_role": "admin",
+        "system_role": "system_admin",
         "context_user_id": "default",
     }
 
@@ -253,7 +253,7 @@ def test_auth_disabled_auth_me_reuses_middleware_user_without_cookie(monkeypatch
     assert res.json() == {
         "id": "default",
         "email": "default@test.local",
-        "system_role": "admin",
+        "system_role": "system_admin",
         "needs_setup": False,
     }
 

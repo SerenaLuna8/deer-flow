@@ -390,7 +390,7 @@ async def test_postgres_round_trip_new_fields(migrated_postgres_database_url):
         user = User(
             email="setup@test.com",
             password_hash="fakehash",
-            system_role="admin",
+            system_role="system_admin",
             needs_setup=True,
             token_version=3,
         )

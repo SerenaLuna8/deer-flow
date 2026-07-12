@@ -23,7 +23,7 @@ from deerflow.skills.types import Skill
 def _make_admin_user() -> User:
     from uuid import uuid4
 
-    return User(email="admin-test@example.com", password_hash="x", system_role="admin", id=uuid4())
+    return User(email="admin-test@example.com", password_hash="x", system_role="system_admin", id=uuid4())
 
 
 def _skill_content(name: str, description: str = "Demo skill") -> str:

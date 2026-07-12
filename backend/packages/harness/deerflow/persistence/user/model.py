@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Index, String, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -22,13 +22,13 @@ from deerflow.persistence.base import Base
 class UserRow(Base):
     __tablename__ = "users"
 
-    # UUIDs are stored as 36-char strings for cross-backend portability.
+    # Preserve the existing UUID-string storage used by persisted data and APIs.
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
 
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
     password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    # "admin" | "user" — kept as plain string to avoid ALTER TABLE pain
+    # "system_admin" | "user" — kept as plain string to avoid enum migrations
     # when new roles are introduced.
     system_role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")
 
@@ -49,11 +49,12 @@ class UserRow(Base):
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
 
     __table_args__ = (
+        CheckConstraint("system_role IN ('system_admin', 'user')", name="ck_users_system_role"),
         Index(
             "idx_users_oauth_identity",
             "oauth_provider",
             "oauth_id",
             unique=True,
-            sqlite_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
+            postgresql_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
         ),
     )

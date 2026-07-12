@@ -145,7 +145,7 @@ M1 实际行为：
 | `status` | VARCHAR(32) | 非空，M1 仅允许 `active` |
 | `is_suspended` | BOOLEAN | 非空，默认 false |
 | `membership_version` | BIGINT | 非空，默认 1 |
-| `created_by_user_id` | UUID | 外键至 `users.id` |
+| `created_by_user_id` | VARCHAR(36) | 外键至既有的 UUID-string `users.id` |
 | `created_at` | TIMESTAMPTZ | 非空 |
 | `updated_at` | TIMESTAMPTZ | 非空 |
 
@@ -166,7 +166,7 @@ M1 实际行为：
 | --- | --- | --- |
 | `id` | UUID | 主键 |
 | `project_id` | UUID | 非空，外键至 `projects.id` |
-| `user_id` | UUID | 非空，外键至 `users.id` |
+| `user_id` | VARCHAR(36) | 非空，外键至既有的 UUID-string `users.id` |
 | `role` | VARCHAR(16) | `admin|editor|runner|viewer` |
 | `status` | VARCHAR(16) | M1 仅允许 `active` |
 | `version` | BIGINT | 非空，默认 1 |

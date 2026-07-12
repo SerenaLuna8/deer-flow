@@ -76,7 +76,7 @@ export function ArtifactFileDetail({
 }) {
   const { t } = useI18n();
   const { user } = useAuth();
-  const isAdmin = user?.system_role === "admin";
+  const isAdmin = user?.system_role === "system_admin";
   const { artifacts, setOpen, select } = useArtifacts();
   const { thread, isMock } = useThread();
   const isWriteFile = useMemo(() => {

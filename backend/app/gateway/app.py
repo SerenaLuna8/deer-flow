@@ -108,7 +108,7 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     # Admin already exists — run orphan thread migration for any
     # LangGraph thread metadata that pre-dates the auth module.
     async with sf() as session:
-        stmt = select(UserRow).where(UserRow.system_role == "admin").limit(1)
+        stmt = select(UserRow).where(UserRow.system_role == "system_admin").limit(1)
         row = (await session.execute(stmt)).scalar_one_or_none()
 
     if row is None:

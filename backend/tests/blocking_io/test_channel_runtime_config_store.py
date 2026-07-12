@@ -64,7 +64,7 @@ def _make_request(tmp_path) -> Request:
     # is offloaded off the event loop, so the DB repo is intentionally absent.
     store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
     app.state.channel_runtime_config_store = store
-    user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"), system_role="admin")
+    user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"), system_role="system_admin")
     return Request({"type": "http", "app": app, "headers": [], "state": {"user": user}})
 
 

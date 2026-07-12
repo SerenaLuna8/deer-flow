@@ -68,7 +68,7 @@ function SkillSettingsList({
   const { t } = useI18n();
   const router = useRouter();
   const { user } = useAuth();
-  const isAdmin = user?.system_role === "admin";
+  const isAdmin = user?.system_role === "system_admin";
   const [filter, setFilter] = useState<string>("public");
   const [selectedSkillName, setSelectedSkillName] = useState<string | null>(
     null,

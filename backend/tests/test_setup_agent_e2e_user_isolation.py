@@ -140,13 +140,13 @@ class TestConfigAssembly:
             body_config={"recursion_limit": 1000},
             body_context=None,
             request_user_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            request_user_role="admin",
+            request_user_role="system_admin",
             request_oauth_provider="github",
             request_oauth_id="gh_123",
         )
         runtime_ctx = _build_runtime_context("thread-e2e", "run-1", config.get("context"), None)
         assert runtime_ctx["user_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        assert runtime_ctx["user_role"] == "admin"
+        assert runtime_ctx["user_role"] == "system_admin"
         assert runtime_ctx["oauth_provider"] == "github"
         assert runtime_ctx["oauth_id"] == "gh_123"
 
@@ -208,7 +208,7 @@ class TestConfigAssembly:
             body_config={
                 "context": {
                     "user_id": "spoofed-id",
-                    "user_role": "admin",
+                    "user_role": "system_admin",
                     "oauth_provider": "spoofed-provider",
                     "oauth_id": "spoofed-subject",
                 },

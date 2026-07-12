@@ -55,7 +55,7 @@ graph TB
 | `id` | 用户主键，JWT `sub` 使用该值 |
 | `email` | 唯一登录名 |
 | `password_hash` | bcrypt hash，OAuth 用户可为空 |
-| `system_role` | `admin` 或 `user` |
+| `system_role` | `system_admin` 或 `user` |
 | `needs_setup` | reset 后要求用户完成邮箱 / 密码设置 |
 | `token_version` | 改密码或 reset 时递增，用于废弃旧 JWT |
 
@@ -82,7 +82,7 @@ enum UserScope:
 
 - `AUTO`：从 `ContextVar` 解析当前用户；没有上下文则抛错。
 - `str`：显式指定用户，主要用于测试或管理脚本。
-- `None`：跳过用户过滤，只允许迁移脚本或 admin CLI 使用。
+- `None`：跳过用户过滤，只允许迁移脚本或 system-admin CLI 使用。
 
 ## 登录与初始化流程
 
@@ -96,7 +96,7 @@ enum UserScope:
 2. 前端调用 `GET /api/v1/auth/setup-status`。
 3. 如果返回 `{"needs_setup": true}`，前端展示创建 admin 表单。
 4. 表单提交 `POST /api/v1/auth/initialize`。
-5. 服务端确认当前没有 admin，创建 `system_role="admin"`、`needs_setup=false` 的用户。
+5. 服务端确认当前没有平台管理员，创建 `system_role="system_admin"`、`needs_setup=false` 的用户。
 6. 服务端设置 `access_token` HttpOnly cookie，用户进入 workspace。
 
 `/api/v1/auth/initialize` 只在没有 admin 时可用。并发初始化由数据库唯一约束兜底，失败方返回 409。

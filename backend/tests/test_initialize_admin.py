@@ -84,7 +84,7 @@ def test_initialize_creates_admin_and_sets_cookie(client):
     assert resp.status_code == 201
     data = resp.json()
     assert data["email"] == "admin@example.com"
-    assert data["system_role"] == "admin"
+    assert data["system_role"] == "system_admin"
     assert "access_token" in resp.cookies
 
 
@@ -118,7 +118,7 @@ def test_initialize_register_does_not_block_initialization(client):
     # /initialize should still succeed (checks admin_count, not total user_count)
     resp = client.post("/api/v1/auth/initialize", json=_init_payload())
     assert resp.status_code == 201
-    assert resp.json()["system_role"] == "admin"
+    assert resp.json()["system_role"] == "system_admin"
 
 
 def test_initialize_existing_regular_user_email_reports_email_conflict(client):

@@ -93,7 +93,7 @@ curl -s -X POST $BASE/api/v1/auth/initialize \
 
 **预期：**
 - 状态码 201
-- Body: `{"id": "...", "email": "admin@example.com", "system_role": "admin", "needs_setup": false}`
+- Body: `{"id": "...", "email": "admin@example.com", "system_role": "system_admin", "needs_setup": false}`
 - `cookies.txt` 包含 `access_token`（HttpOnly）和 `csrf_token`（非 HttpOnly）
 
 #### TC-API-03: 获取当前用户
@@ -102,7 +102,7 @@ curl -s -X POST $BASE/api/v1/auth/initialize \
 curl -s $BASE/api/v1/auth/me -b cookies.txt | jq .
 ```
 
-**预期：** `{"id": "...", "email": "admin@example.com", "system_role": "admin", "needs_setup": false}`
+**预期：** `{"id": "...", "email": "admin@example.com", "system_role": "system_admin", "needs_setup": false}`
 
 #### TC-API-04: 改密码流程
 
@@ -944,7 +944,7 @@ done
 
 # 检查 admin 数量
 sqlite3 backend/.deer-flow/data/deerflow.db \
-  "SELECT COUNT(*) FROM users WHERE system_role='admin';"
+  "SELECT COUNT(*) FROM users WHERE system_role='system_admin';"
 ```
 
 **预期：** 始终为 1。不会因重启创建多个 admin。
@@ -1557,7 +1557,7 @@ curl -s --cookie "access_token=$RANDOM_JWT" $BASE/api/v1/auth/me | jq .detail
 
 **预期：** `{"code": "token_invalid", "message": "Token error: invalid_signature"}`
 
-#### TC-EDGE-02: 注册时传 system_role=admin
+#### TC-EDGE-02: 注册时伪造旧平台角色 system_role=admin
 
 ```bash
 curl -s -X POST $BASE/api/v1/auth/register \

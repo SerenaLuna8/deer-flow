@@ -84,7 +84,7 @@ class UserRepository(ABC):
 
     @abstractmethod
     async def count_admin_users(self) -> int:
-        """Return number of users with system_role == 'admin'."""
+        """Return number of users with system_role == 'system_admin'."""
         raise NotImplementedError
 
     @abstractmethod

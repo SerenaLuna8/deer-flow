@@ -549,7 +549,7 @@ class TestGuardrailRequestAttribution:
         runtime = self._make_runtime_mock(
             context={
                 "user_id": "user_abc",
-                "user_role": "admin",
+                "user_role": "system_admin",
                 "oauth_provider": "github",
                 "oauth_id": "gh_123",
             }
@@ -559,7 +559,7 @@ class TestGuardrailRequestAttribution:
         guardrail_request = self._capture_guardrail_request(req)
 
         assert guardrail_request.user_id == "user_abc"
-        assert guardrail_request.user_role == "admin"
+        assert guardrail_request.user_role == "system_admin"
         assert guardrail_request.oauth_provider == "github"
         assert guardrail_request.oauth_id == "gh_123"
 

@@ -107,6 +107,6 @@ async def get_or_provision_oidc_user(
 
 
 def _resolve_role(email: str, admin_emails: list[str]) -> str:
-    """Return ``admin`` if the email is in the admin list, otherwise ``user``."""
+    """Return ``system_admin`` if the email is in the admin list, otherwise ``user``."""
     email_lower = email.lower()
-    return "admin" if any(e.lower() == email_lower for e in admin_emails) else "user"
+    return "system_admin" if any(e.lower() == email_lower for e in admin_emails) else "user"
