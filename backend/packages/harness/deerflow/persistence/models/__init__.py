@@ -23,6 +23,7 @@ from deerflow.persistence.channel_connections.model import (
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.migration_ledger.model import MigrationLedgerRow
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.projects.invitation_model import ProjectInvitationRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
@@ -37,6 +38,7 @@ __all__ = [
     "ChannelOAuthStateRow",
     "FeedbackRow",
     "MigrationLedgerRow",
+    "ProjectInvitationRow",
     "ProjectMembershipRow",
     "ProjectRow",
     "RunEventRow",

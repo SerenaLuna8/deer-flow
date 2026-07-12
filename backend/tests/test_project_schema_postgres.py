@@ -70,7 +70,8 @@ async def test_empty_database_head_has_project_constraints(migrated_postgres_dat
             "ck_project_memberships_version",
         } <= {item["name"] for item in membership_checks}
         assert "uq_project_memberships_project_user" in {item["name"] for item in membership_uniques}
-        assert {item["options"].get("ondelete") for item in membership_fks} == {"CASCADE"}
+        cascading_fks = {item["constrained_columns"][0] for item in membership_fks if item["options"].get("ondelete") == "CASCADE"}
+        assert cascading_fks == {"project_id", "user_id"}
         assert "ix_project_memberships_user_id" in {item["name"] for item in membership_indexes}
     finally:
         await engine.dispose()
@@ -269,7 +270,7 @@ async def test_downgrade_with_project_data_fails_without_mutation(
             assert (await conn.execute(text("SELECT count(*) FROM projects"))).scalar_one() == 1
             assert (await conn.execute(text("SELECT count(*) FROM project_memberships"))).scalar_one() == int(include_membership)
             assert (await conn.execute(text("SELECT system_role FROM users WHERE id=:id"), {"id": user_id})).scalar_one() == "system_admin"
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0005_project_foundation"
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0006_project_governance"
     finally:
         await engine.dispose()
 
@@ -366,7 +367,7 @@ async def test_upgrade_validates_matching_not_valid_users_role_constraint(
             roles = (await conn.execute(text("SELECT system_role FROM users ORDER BY email"))).scalars().all()
             assert validated is True
             assert roles == ["system_admin", "user"]
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0005_project_foundation"
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0006_project_governance"
     finally:
         await engine.dispose()
 

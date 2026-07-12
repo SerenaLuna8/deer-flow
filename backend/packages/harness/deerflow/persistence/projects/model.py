@@ -22,6 +22,13 @@ class ProjectRow(Base):
     description: Mapped[str] = mapped_column(String(500), nullable=False, default="", server_default="")
     icon: Mapped[str] = mapped_column(String(32), nullable=False, default="folder", server_default="folder")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", server_default="active")
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deletion_effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deletion_requested_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", name="fk_projects_deletion_requested_by_user_id_users"),
+        nullable=True,
+    )
     is_suspended: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     membership_version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
     # users.id is intentionally VARCHAR(36); project-owned identifiers are native UUID.
@@ -33,7 +40,7 @@ class ProjectRow(Base):
         CheckConstraint("char_length(slug) BETWEEN 3 AND 63", name="ck_projects_slug_length"),
         CheckConstraint("slug = lower(slug)", name="ck_projects_slug_lowercase"),
         CheckConstraint("slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'", name="ck_projects_slug_format"),
-        CheckConstraint("status = 'active'", name="ck_projects_status"),
+        CheckConstraint("status IN ('active', 'pending_deletion')", name="ck_projects_status"),
         CheckConstraint("membership_version >= 1", name="ck_projects_membership_version"),
         UniqueConstraint("slug", name="uq_projects_slug"),
     )
@@ -47,6 +54,14 @@ class ProjectMembershipRow(Base):
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retention_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", name="fk_project_memberships_ended_by_user_id_users"),
+        nullable=True,
+    )
+    end_reason: Mapped[str | None] = mapped_column(String(16), nullable=True)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
     is_pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     last_entered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -55,7 +70,8 @@ class ProjectMembershipRow(Base):
 
     __table_args__ = (
         CheckConstraint("role IN ('admin', 'editor', 'runner', 'viewer')", name="ck_project_memberships_role"),
-        CheckConstraint("status = 'active'", name="ck_project_memberships_status"),
+        CheckConstraint("status IN ('active', 'left', 'removed')", name="ck_project_memberships_status"),
+        CheckConstraint("end_reason IS NULL OR end_reason IN ('left', 'removed')", name="ck_project_memberships_end_reason"),
         CheckConstraint("version >= 1", name="ck_project_memberships_version"),
         UniqueConstraint("project_id", "user_id", name="uq_project_memberships_project_user"),
         Index("ix_project_memberships_user_id", "user_id"),
