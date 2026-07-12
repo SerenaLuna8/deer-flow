@@ -245,6 +245,82 @@ def test_store_ttl_error_reaches_cli_as_safe_row_fields(tmp_path: Path, monkeypa
         assert secret not in rendered
 
 
+def test_invalid_checkpoint_semantic_reaches_cli_as_safe_row_fields(tmp_path: Path, monkeypatch, capsys) -> None:
+    source = tmp_path / "private-path.db"
+    serde = JsonPlusSerializer()
+    type_, blob = serde.dumps_typed(["private-business-value"])
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            """CREATE TABLE checkpoints (
+            thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL, parent_checkpoint_id TEXT,
+            type TEXT, checkpoint BLOB, metadata BLOB,
+            PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id))"""
+        )
+        connection.execute(
+            "INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?)",
+            ("private-thread", "", "private-checkpoint", None, type_, blob, b"{}"),
+        )
+
+    async def run_real_decode(args, _target):
+        decode_checkpoint_rows(args.source[0])
+
+    rendered = _production_cli_failure(tmp_path, monkeypatch, capsys, run_real_decode)
+    assert "code=decode" in rendered
+    assert "table=checkpoints" in rendered
+    assert "source=" in rendered and "key=" in rendered
+    for secret in (
+        "private-business-value",
+        "private-thread",
+        "private-checkpoint",
+        "private-path.db",
+        "invalid checkpoint semantic value",
+        "private-password",
+        "postgresql://",
+    ):
+        assert secret not in rendered
+
+
+def test_checkpoint_parent_cycle_reaches_cli_as_safe_identity_set_fields(tmp_path: Path, monkeypatch, capsys) -> None:
+    source = tmp_path / "private-path.db"
+    serde = JsonPlusSerializer()
+    first_type, first_blob = serde.dumps_typed({"id": "private-first", "channel_values": {}, "channel_versions": {}})
+    second_type, second_blob = serde.dumps_typed({"id": "private-second", "channel_values": {}, "channel_versions": {}})
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            """CREATE TABLE checkpoints (
+            thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL, parent_checkpoint_id TEXT,
+            type TEXT, checkpoint BLOB, metadata BLOB,
+            PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id))"""
+        )
+        connection.executemany(
+            "INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?)",
+            [
+                ("private-thread", "", "private-first", "private-second", first_type, first_blob, b"{}"),
+                ("private-thread", "", "private-second", "private-first", second_type, second_blob, b"{}"),
+            ],
+        )
+
+    async def run_real_decode(args, _target):
+        decode_checkpoint_rows(args.source[0])
+
+    rendered = _production_cli_failure(tmp_path, monkeypatch, capsys, run_real_decode)
+    assert "code=decode" in rendered
+    assert "table=checkpoints" in rendered
+    assert "source=" in rendered and "key=" in rendered
+    for secret in (
+        "private-thread",
+        "private-first",
+        "private-second",
+        "private-path.db",
+        "checkpoint parent cycle detected",
+        "private-password",
+        "postgresql://",
+    ):
+        assert secret not in rendered
+
+
 def _sqlite(path: Path, statements: str) -> None:
     with sqlite3.connect(path) as connection:
         connection.executescript(statements)

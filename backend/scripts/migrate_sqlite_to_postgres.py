@@ -593,13 +593,15 @@ def decode_checkpoint_rows(source: Path) -> tuple[list[DecodedCheckpoint], list[
     serde = JsonPlusSerializer()
     checkpoints: list[DecodedCheckpoint] = []
     writes: list[DecodedWrite] = []
-    current_table = None
-    current_key = None
-    try:
-        if "checkpoints" in tables:
-            for row in _read_rows(source, "checkpoints"):
-                current_table = "checkpoints"
-                current_key = _json_canonical([row["thread_id"], row["checkpoint_ns"], row["checkpoint_id"]])
+    if "checkpoints" in tables:
+        for row in _read_rows(source, "checkpoints"):
+            source_key = _json_canonical([row["thread_id"], row["checkpoint_ns"], row["checkpoint_id"]])
+            with _row_error_boundary(
+                table="checkpoints",
+                source_sha256=inspection.inventory.sha256,
+                source_key=source_key,
+                code=MigrationErrorCode.DECODE,
+            ):
                 checkpoint = serde.loads_typed((row["type"], bytes(row["checkpoint"])))
                 metadata = json.loads(bytes(row["metadata"]) if row["metadata"] is not None else b"{}")
                 if not isinstance(checkpoint, dict) or not isinstance(metadata, dict):
@@ -614,10 +616,15 @@ def decode_checkpoint_rows(source: Path) -> tuple[list[DecodedCheckpoint], list[
                         metadata,
                     )
                 )
-        if "writes" in tables:
-            for row in _read_rows(source, "writes"):
-                current_table = "writes"
-                current_key = _json_canonical([row["thread_id"], row["checkpoint_ns"], row["checkpoint_id"], row["task_id"], row["idx"]])
+    if "writes" in tables:
+        for row in _read_rows(source, "writes"):
+            source_key = _json_canonical([row["thread_id"], row["checkpoint_ns"], row["checkpoint_id"], row["task_id"], row["idx"]])
+            with _row_error_boundary(
+                table="writes",
+                source_sha256=inspection.inventory.sha256,
+                source_key=source_key,
+                code=MigrationErrorCode.DECODE,
+            ):
                 writes.append(
                     DecodedWrite(
                         str(row["thread_id"]),
@@ -629,43 +636,52 @@ def decode_checkpoint_rows(source: Path) -> tuple[list[DecodedCheckpoint], list[
                         serde.loads_typed((row["type"], bytes(row["value"]))),
                     )
                 )
-    except MigrationError:
-        raise
-    except Exception:
-        raise MigrationError(
-            "unable to decode LangGraph checkpoint source",
-            code=MigrationErrorCode.DECODE,
-            table=current_table,
-            source_sha256=inspection.inventory.sha256,
-            source_key=current_key,
-        ) from None
-    checkpoints = _order_checkpoints(checkpoints)
+    checkpoints = _order_checkpoints(checkpoints, source_sha256=inspection.inventory.sha256)
     writes.sort(key=lambda row: (row.thread_id, row.checkpoint_ns, row.checkpoint_id, row.task_id, row.idx))
     return checkpoints, writes
 
 
-def _order_checkpoints(checkpoints: list[DecodedCheckpoint]) -> list[DecodedCheckpoint]:
+def _checkpoint_identity_set_key(checkpoints: list[DecodedCheckpoint]) -> str:
+    identities = {_json_canonical([row.thread_id, row.checkpoint_ns, row.checkpoint_id]) for row in checkpoints}
+    return _json_canonical(sorted(identities, key=lambda value: value.encode()))
+
+
+def _order_checkpoints(
+    checkpoints: list[DecodedCheckpoint],
+    *,
+    source_sha256: str = "",
+) -> list[DecodedCheckpoint]:
     ordered: list[DecodedCheckpoint] = []
     groups: dict[tuple[str, str], dict[str, DecodedCheckpoint]] = {}
-    for row in checkpoints:
-        key = (row.thread_id, row.checkpoint_ns)
-        if row.checkpoint_id in groups.setdefault(key, {}):
-            raise MigrationError("duplicate checkpoint source key")
-        groups[key][row.checkpoint_id] = row
-    for group_key in sorted(groups, key=lambda key: (key[0].encode(), key[1].encode())):
-        remaining = dict(groups[group_key])
-        emitted: set[str] = set()
-        while remaining:
-            ready = sorted(
-                (row for row in remaining.values() if row.parent_checkpoint_id not in remaining or row.parent_checkpoint_id in emitted),
-                key=lambda row: row.checkpoint_id.encode(),
-            )
-            if not ready:
-                raise MigrationError("checkpoint parent cycle detected")
-            for row in ready:
-                ordered.append(row)
-                emitted.add(row.checkpoint_id)
-                del remaining[row.checkpoint_id]
+    related_key = _checkpoint_identity_set_key(checkpoints)
+    try:
+        for row in checkpoints:
+            key = (row.thread_id, row.checkpoint_ns)
+            if row.checkpoint_id in groups.setdefault(key, {}):
+                raise MigrationError("duplicate checkpoint source key")
+            groups[key][row.checkpoint_id] = row
+        for group_key in sorted(groups, key=lambda key: (key[0].encode(), key[1].encode())):
+            remaining = dict(groups[group_key])
+            related_key = _checkpoint_identity_set_key(list(remaining.values()))
+            emitted: set[str] = set()
+            while remaining:
+                ready = sorted(
+                    (row for row in remaining.values() if row.parent_checkpoint_id not in remaining or row.parent_checkpoint_id in emitted),
+                    key=lambda row: row.checkpoint_id.encode(),
+                )
+                if not ready:
+                    raise MigrationError("checkpoint parent cycle detected")
+                for row in ready:
+                    ordered.append(row)
+                    emitted.add(row.checkpoint_id)
+                    del remaining[row.checkpoint_id]
+    except MigrationError as exc:
+        raise exc.enrich(
+            code=MigrationErrorCode.DECODE,
+            table="checkpoints",
+            source_sha256=source_sha256,
+            source_key=related_key,
+        ) from None
     return ordered
 
 
