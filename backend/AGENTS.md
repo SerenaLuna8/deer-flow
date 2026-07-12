@@ -660,6 +660,12 @@ stdlib `sqlite3` 和 `JsonPlusSerializer`，真实 PostgreSQL 测试只创建随
 必须使用相同 fingerprint，并在结束时复验；非空 `-wal`/`-shm` 直接拒绝。checkpoint 与
 blob 使用 `INSERT ... ON CONFLICT DO NOTHING` 后 semantic compare，绝不通过 Saver UPSERT
 覆盖目标；Saver 仅用于完整 read-back 验证。
+多来源计划严格遵循用户顺序：当前来源只能引用 target、当前来源或更早来源；dry-run 用
+累计 planned checkpoint/FK keys 模拟此前来源已落库。正式迁移只读取已经校验的 backup
+snapshot，不再重新读取可能变化的原 source。checkpoint+blob 在一个 asyncpg transaction
+内直接重建并核对 semantic digest，writes 在同事务核对完整 PK、task_path/channel/value
+后才写 ledger，提交后再用 Saver pending_writes 二次验证。channel active identity 的 partial
+unique 显式使用 `status != 'revoked'`，revoked 行不参与冲突集合。
 
 **Authoring a new revision**:
 ```bash

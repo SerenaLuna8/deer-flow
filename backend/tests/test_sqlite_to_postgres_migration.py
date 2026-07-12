@@ -20,6 +20,7 @@ from scripts.migrate_sqlite_to_postgres import (
     MigrationReport,
     TableMigrationReport,
     UnionPlan,
+    _business_unique_keys,
     _json_canonical,
     _preflight_cross_source,
     _run_cli,
@@ -390,6 +391,12 @@ async def test_strict_checkpoint_blob_collision_compares_and_never_updates() -> 
 
         async def fetchrow(self, sql, *_args):
             self.sql.append(sql)
+            if "parent_checkpoint_id" in sql:
+                return {
+                    "parent_checkpoint_id": None,
+                    "checkpoint": {"id": "cp-1", "channel_values": {}, "channel_versions": {"messages": "1"}},
+                    "metadata": {},
+                }
             return {"type": type_, "blob": blob}
 
     connection = Connection()
@@ -457,7 +464,11 @@ async def test_multi_source_cli_preflights_every_source_before_backup_or_write(t
     backups: list[str] = []
     monkeypatch.setattr(
         "scripts.migrate_sqlite_to_postgres._preflight_cross_source",
-        lambda _sources: UnionPlan(frozenset()),
+        lambda _sources: UnionPlan(
+            frozenset(),
+            (frozenset(), frozenset()),
+            (frozenset(), frozenset()),
+        ),
     )
     monkeypatch.setattr("scripts.migrate_sqlite_to_postgres.migrate_source", fake_migrate)
     monkeypatch.setattr(
@@ -470,7 +481,7 @@ async def test_multi_source_cli_preflights_every_source_before_backup_or_write(t
         "postgresql://credential-must-not-render@localhost/deerflow_test_1_abc",
     )
 
-    assert calls == [("one.db", True), ("two.db", True), ("one.db", False), ("two.db", False)]
+    assert calls == [("one.db", True), ("two.db", True), ("one.bak", False), ("two.bak", False)]
     assert backups == ["one.db", "two.db"]
 
 
@@ -481,6 +492,20 @@ def test_cross_source_preflight_stops_conflicting_target_primary_key(tmp_path: P
     _user_source(second, [("u-shared", "two@example.invalid", 0)])
     with pytest.raises(MigrationError, match="cross-source target conflict in users"):
         _preflight_cross_source([first, second])
+
+
+def test_channel_active_identity_partial_unique_ignores_revoked_only() -> None:
+    base = {
+        "id": "c",
+        "owner_user_id": "u",
+        "provider": "slack",
+        "external_account_id": "a",
+        "workspace_id": "w",
+    }
+    revoked = dict(base, status="revoked")
+    connected = dict(base, status="connected")
+    assert "uq_channel_connection_active_identity" not in {name for name, _key in _business_unique_keys("channel_connections", revoked)}
+    assert "uq_channel_connection_active_identity" in {name for name, _key in _business_unique_keys("channel_connections", connected)}
 
 
 @pytest.mark.asyncio
