@@ -295,10 +295,8 @@ M2 不执行物理删除。跨业务域清除必须等相关数据完成项目�
   `POSTGRES_TEST_URL` 时硬失败；
 - 独立预门禁审查在补齐双 worker ready barrier 后结论为 Ready，无 Critical、Important
   或 Minor；
-- 最终证据：backend lint 通过；真实 PostgreSQL 三文件门禁 `4 passed`；backend 全量
-  `7114 passed, 18 skipped`，3 个 M1 固定 `0005` 的陈旧 head 断言失败，改为动态
-  Alembic head 后 targeted `3 passed`；frontend check 通过，原全量 unit `702 passed`，新增
-  user ID contract focused `5 passed`；完整 Playwright `142 passed`，其中 1 个 user ID
-  contract 问题经 RED/GREEN 修复后 targeted `1 passed`，3 个 Nextra dev overlay 环境失败
-  在 production build/server 下 targeted `3 passed`。未重复运行 backend 全量或完整 146 项
-  Playwright。
+- 最终 HEAD `d7fd3959` 的门禁证据：backend lint 通过；真实 PostgreSQL 三文件门禁
+  `4 passed`；backend 全量 `7120 passed, 18 skipped`；frontend check 通过；frontend
+  全量 unit `707 passed`；独立 `3113` 端口的 production build/server 下完整 Playwright
+  `146 passed`。整分支审查发现的限流过期行无界增长和 SDD 临时产物污染均已修复并分别
+  复审通过；最终工作树干净。

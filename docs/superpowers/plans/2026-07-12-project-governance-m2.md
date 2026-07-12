@@ -1,5 +1,7 @@
 # M2 工作空间与项目治理实施计划
 
+**状态：** 已完成（2026-07-12）
+
 > **面向执行代理：** REQUIRED SUB-SKILL: 使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，逐项执行本计划。所有步骤使用复选框跟踪。
 
 **目标：** 交付无项目级侧栏的多项目工作空间、绑定 `ProjectContext` 的项目壳层，以及成员、邀请、角色、退出、移除、删除和恢复治理闭环。
@@ -79,7 +81,7 @@
 - 扩展：`ProjectMembershipRow.status` 为 `active|left|removed`。
 - 后续依赖：任务 2 至任务 5 只通过这些 ORM 写入治理状态。
 
-- [ ] **步骤 1：编写 schema 失败测试**
+- [x] **步骤 1：编写 schema 失败测试**
 
 ```python
 async def test_m2_schema_has_governance_constraints(migrated_postgres_url):
@@ -94,13 +96,13 @@ async def test_m2_schema_has_governance_constraints(migrated_postgres_url):
     }
 ```
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`cd backend && uv run pytest tests/test_project_governance_schema_postgres.py -q`
 
 预期：失败，提示 `project_invitations` 不存在。
 
-- [ ] **步骤 3：扩展 ORM 并新增邀请模型**
+- [x] **步骤 3：扩展 ORM 并新增邀请模型**
 
 ```python
 class ProjectInvitationRow(Base):
@@ -134,13 +136,13 @@ op.create_index(
 )
 ```
 
-- [ ] **步骤 4：验证空库与 M1 数据库升级**
+- [x] **步骤 4：验证空库与 M1 数据库升级**
 
 运行：`cd backend && uv run pytest tests/test_project_schema_postgres.py tests/test_project_governance_schema_postgres.py -q`
 
 预期：全部通过；Alembic head 为 `0006_project_governance`。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add backend/packages/harness/deerflow/persistence/projects backend/packages/harness/deerflow/persistence/models/__init__.py backend/packages/harness/deerflow/persistence/migrations/versions/0006_project_governance.py backend/tests/test_project_schema_postgres.py backend/tests/test_project_governance_schema_postgres.py
@@ -167,7 +169,7 @@ git commit -m "feat(projects): add M2 governance schema"
 - 产生：`MembershipService.remove(context, membership_id, expected_version)`。
 - 产生：`MembershipService.leave(context, expected_version)`。
 
-- [ ] **步骤 1：编写最后一名 Admin 和跨项目失败测试**
+- [x] **步骤 1：编写最后一名 Admin 和跨项目失败测试**
 
 ```python
 async def test_last_admin_cannot_leave(member_service, admin_context):
@@ -181,13 +183,13 @@ async def test_cross_project_membership_is_not_found(member_service, admin_conte
         )
 ```
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`cd backend && uv run pytest tests/test_project_membership_service.py tests/test_project_membership_repository_postgres.py -q`
 
 预期：测试收集失败，membership 模块不存在。
 
-- [ ] **步骤 3：实现作用域锁与服务规则**
+- [x] **步骤 3：实现作用域锁与服务规则**
 
 ```python
 class MembershipService:
@@ -212,13 +214,13 @@ class MembershipService:
 
 `remove` 和 `leave` 在同一锁内写入 `ended_at`、`retention_until`、`ended_by_user_id` 和 `end_reason`，并递增两个 version。
 
-- [ ] **步骤 4：运行成员测试**
+- [x] **步骤 4：运行成员测试**
 
 运行：`cd backend && uv run pytest tests/test_project_membership_service.py tests/test_project_membership_repository_postgres.py tests/test_project_context.py -q`
 
 预期：全部通过；left/removed membership 无法解析 `ProjectContext`。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add backend/app/projects backend/tests/test_project_membership_service.py backend/tests/test_project_membership_repository_postgres.py backend/tests/test_project_context.py
@@ -242,7 +244,7 @@ git commit -m "feat(projects): enforce membership lifecycle invariants"
 - 产生：`InvitationService.claim(token, now) -> InvitationClaim`。
 - 产生：`InvitationService.redeem(user_id, user_email, claim, now) -> RedeemedInvitation`。
 
-- [ ] **步骤 1：编写 token、过期和并发测试**
+- [x] **步骤 1：编写 token、过期和并发测试**
 
 ```python
 async def test_create_returns_plaintext_once_and_persists_only_hash(invitation_service, admin_context):
@@ -260,13 +262,13 @@ async def test_expired_invitation_cannot_be_redeemed(invitation_service, invite)
         await invitation_service.redeem(USER_ID, invite.email, claim, invite.expires_at)
 ```
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`cd backend && uv run pytest tests/test_project_invitation_service.py tests/test_project_invitation_repository_postgres.py -q`
 
 预期：失败，邀请 service/repository 不存在。
 
-- [ ] **步骤 3：实现 hash 和锁定兑换**
+- [x] **步骤 3：实现 hash 和锁定兑换**
 
 ```python
 def hash_invitation_token(token: str) -> str:
@@ -287,13 +289,13 @@ class InvitationService:
 `redeem` 先按 claim 中的 invitation ID + token hash 做不加锁定位，只取得 `project_id`；随后统一按 `project -> invitation -> membership` 锁序，先用 `SELECT ... FOR UPDATE` 锁 project，再按 `project_id + invitation_id + token_hash` 锁定并重验 invitation，校验 email、状态和 `expires_at > now`，最后锁定或创建 membership，并在同一事务标记 redeemed。create/revoke 同样先锁 project、再锁 invitation，禁止与 redeem 形成反向锁序。
 创建同项目同邮箱邀请时先锁定 project，把已经到期的 pending 邀请标记为 expired，再依赖 partial unique index 创建新邀请。
 
-- [ ] **步骤 4：运行邀请测试**
+- [x] **步骤 4：运行邀请测试**
 
 运行：`cd backend && uv run pytest tests/test_project_invitation_service.py tests/test_project_invitation_repository_postgres.py -q`
 
 预期：全部通过；并发兑换仅一项成功，数据库只有一条 membership。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add backend/app/projects/invitation_models.py backend/app/projects/invitation_repository.py backend/app/projects/invitation_service.py backend/tests/test_project_invitation_service.py backend/tests/test_project_invitation_repository_postgres.py
@@ -317,7 +319,7 @@ git commit -m "feat(projects): add secure project invitations"
 - 产生：`ProjectLifecycleService.restore(user_id, project_id, request_id, now)`。
 - 扩展：`ProjectService.list(..., include_recoverable: bool)`。
 
-- [ ] **步骤 1：编写删除窗口失败测试**
+- [x] **步骤 1：编写删除窗口失败测试**
 
 ```python
 async def test_pending_project_cannot_resolve_context(lifecycle_service, admin_context, session):
@@ -335,13 +337,13 @@ async def test_restore_after_deadline_is_rejected(lifecycle_service, pending_pro
         )
 ```
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`cd backend && uv run pytest tests/test_project_lifecycle_service.py tests/test_project_lifecycle_repository_postgres.py -q`
 
 预期：失败，lifecycle 模块不存在。
 
-- [ ] **步骤 3：实现状态转换和恢复解析器**
+- [x] **步骤 3：实现状态转换和恢复解析器**
 
 ```python
 class ProjectLifecycleService:
@@ -360,13 +362,13 @@ class ProjectLifecycleService:
         return await self.repository.restore(project, request_id)
 ```
 
-- [ ] **步骤 4：运行生命周期测试**
+- [x] **步骤 4：运行生命周期测试**
 
 运行：`cd backend && uv run pytest tests/test_project_lifecycle_service.py tests/test_project_lifecycle_repository_postgres.py tests/test_project_repository_postgres.py -q`
 
 预期：全部通过；pending 项目只对可恢复 Admin 出现在 recoverable 列表。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add backend/app/projects backend/tests/test_project_lifecycle_service.py backend/tests/test_project_lifecycle_repository_postgres.py backend/tests/test_project_repository_postgres.py
@@ -408,7 +410,7 @@ git commit -m "feat(projects): add deletion recovery lifecycle"
 - 产生：`InvitationRateLimitRepository.is_limited/record_failure/clear`，使用 PostgreSQL 固定窗口共享失败计数；5 次失败后限制 5 分钟。
 - claim cookie 名为 `project_invitation_claim`，使用带固定 domain-separation label 的 SHA-256 从 Auth JWT secret 派生 AES-GCM key，对只含 invitation UUID、token hash、`iat`、`exp` 的 payload 做认证加密；每个 cookie 使用随机 12-byte nonce 和绑定 cookie 名/版本的固定 AAD。opaque cookie 固定十分钟，`HttpOnly`、`SameSite=Lax`、path `/api/project-invitations`，`Secure` 跟随 `is_secure_request`。
 
-- [ ] **步骤 1：编写 API 授权和错误映射测试**
+- [x] **步骤 1：编写 API 授权和错误映射测试**
 
 ```python
 def test_editor_cannot_create_invitation(editor_client, project_id):
@@ -427,13 +429,13 @@ def test_cross_project_member_patch_is_404(admin_client, project_id, other_membe
     assert response.status_code == 404
 ```
 
-- [ ] **步骤 2：运行路由测试确认失败**
+- [x] **步骤 2：运行路由测试确认失败**
 
 运行：`cd backend && uv run pytest tests/test_project_members_router.py tests/test_project_invitations_router.py tests/test_project_lifecycle_router.py tests/test_project_invitation_claim.py tests/test_project_invitation_rate_limit_postgres.py tests/test_project_governance_schema_postgres.py -q`
 
 预期：404 或测试收集失败，因为新路由尚未挂载。
 
-- [ ] **步骤 3：实现薄路由和统一错误映射**
+- [x] **步骤 3：实现薄路由和统一错误映射**
 
 ```python
 @router.patch("/{project_id}/members/{membership_id}", response_model=MembershipResponse)
@@ -450,13 +452,13 @@ async def patch_member(project_id, membership_id, body, identity=Depends(authent
 
 claim 对有效、无效和已受限 token 返回相同 status、body 与同形状 opaque cookie；无效路径签发随机 invitation UUID 的不可用 claim，客户端不能读取 payload 或判断 token 是否有效。redeem 无论成功或失败都使用相同 cookie path 清除 claim cookie。claim 失败限流 key 是 action + 可信客户端 IP 的 SHA-256；redeem 失败限流 key 再包含当前账户规范化 email 后整体 SHA-256，表内不保存原始 IP 或 email。计数使用 PostgreSQL `INSERT ... ON CONFLICT DO UPDATE` 原子累加，检查在事务内读取并锁定单行；claim 受限仍返回通用响应，redeem 受限统一返回 `PROJECT_INVITATION_INVALID`。
 
-- [ ] **步骤 4：运行 API 和隔离测试**
+- [x] **步骤 4：运行 API 和隔离测试**
 
 运行：`cd backend && uv run pytest tests/test_project_members_router.py tests/test_project_invitations_router.py tests/test_project_lifecycle_router.py tests/test_project_invitation_claim.py tests/test_project_invitation_rate_limit_postgres.py tests/test_project_governance_schema_postgres.py tests/integration/test_project_isolation_postgres.py -q`
 
 预期：全部通过。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add backend/app/gateway backend/app/projects/invitation_repository.py backend/app/projects/invitation_service.py backend/packages/harness/deerflow/persistence backend/tests/test_project_members_router.py backend/tests/test_project_invitations_router.py backend/tests/test_project_lifecycle_router.py backend/tests/test_project_invitation_claim.py backend/tests/test_project_invitation_rate_limit_postgres.py backend/tests/test_project_governance_schema_postgres.py backend/tests/integration/test_project_isolation_postgres.py backend/AGENTS.md docs/superpowers/specs/2026-07-12-project-governance-m2-design.md docs/superpowers/plans/2026-07-12-project-governance-m2.md
@@ -484,7 +486,7 @@ git commit -m "feat(api): expose project governance endpoints"
 - `/workspace/projects`：重定向 `/workspace`。
 - `WorkspaceRouteFrame`：只对旧版兼容路径包装 `WorkspaceContent`。
 
-- [ ] **步骤 1：编写无侧栏工作空间失败测试**
+- [x] **步骤 1：编写无侧栏工作空间失败测试**
 
 ```ts
 test("workspace shows project cards without project navigation", async ({ page }) => {
@@ -495,13 +497,13 @@ test("workspace shows project cards without project navigation", async ({ page }
 });
 ```
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`cd frontend && pnpm exec playwright test tests/e2e/projects.spec.ts --grep "without project navigation"`
 
 预期：失败，当前 `/workspace` 重定向且工作台仍处于旧侧栏壳层。
 
-- [ ] **步骤 3：实现路由级壳层分流**
+- [x] **步骤 3：实现路由级壳层分流**
 
 ```tsx
 export function WorkspaceRouteFrame({ children }: PropsWithChildren) {
@@ -515,13 +517,13 @@ export function WorkspaceRouteFrame({ children }: PropsWithChildren) {
 
 非静态 `workspace/page.tsx` 返回 `<ProjectWorkbenchPage />`；静态模式保留 demo 路由。兼容页使用 `redirect("/workspace")`。
 
-- [ ] **步骤 4：运行工作空间测试**
+- [x] **步骤 4：运行工作空间测试**
 
 运行：`cd frontend && pnpm test -- --run && pnpm exec playwright test tests/e2e/projects.spec.ts tests/e2e/sidebar.spec.ts --workers=1`
 
 预期：全部通过；静态 demo 不请求 `/api/projects`。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add frontend/src/app/workspace frontend/src/components/projects frontend/src/core/projects/features.ts frontend/tests/unit/components/workspace frontend/tests/e2e/projects.spec.ts frontend/tests/e2e/sidebar.spec.ts
@@ -550,7 +552,7 @@ git commit -m "feat(frontend): make workspace the project entry"
 - 项目菜单：概览、成员与邀请、项目设置、返回工作空间。
 - 页面不重复调用 slug 解析和 enter mutation。
 
-- [ ] **步骤 1：编写项目菜单和 stale identity 失败测试**
+- [x] **步骤 1：编写项目菜单和 stale identity 失败测试**
 
 ```tsx
 it("renders only M2 project navigation from server capabilities", () => {
@@ -561,13 +563,13 @@ it("renders only M2 project navigation from server capabilities", () => {
 });
 ```
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`cd frontend && pnpm test -- --run project-shell project-context`
 
 预期：失败，新组件不存在。
 
-- [ ] **步骤 3：实现单一项目上下文所有者**
+- [x] **步骤 3：实现单一项目上下文所有者**
 
 ```tsx
 const CurrentProjectContext = createContext<Project | null>(null);
@@ -589,13 +591,13 @@ export function ProjectContextProvider({ slug, children }: Props) {
 }
 ```
 
-- [ ] **步骤 4：运行项目壳层测试**
+- [x] **步骤 4：运行项目壳层测试**
 
 运行：`cd frontend && pnpm test -- --run project-shell project-context project-home-state && pnpm exec playwright test tests/e2e/projects.spec.ts --workers=1`
 
 预期：全部通过；切换 slug 时旧项目不会短暂渲染。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add frontend/src/app/projects frontend/src/components/projects frontend/tests/unit/components/projects frontend/tests/e2e/projects.spec.ts
@@ -628,7 +630,7 @@ git commit -m "feat(frontend): add project-scoped navigation shell"
 **接口：** 实现专项规格第 7、8、10 节前端 contract 和交互；工作空间显示当前账户邮箱匹配的邀请，以及当前账户作为 Admin 可恢复的 pending_deletion 项目。
 - `invite/layout.tsx` 对未登录结果不重定向，挂载可表示匿名身份的 AuthProvider；setup-required 和 gateway-unavailable 继续使用现有统一处理。
 
-- [ ] **步骤 1：编写 fragment 安全和治理流程失败测试**
+- [x] **步骤 1：编写 fragment 安全和治理流程失败测试**
 
 ```ts
 test("claims fragment token without persisting or retaining it in URL", async ({ page }) => {
@@ -646,13 +648,13 @@ test("workspace separates invitations and recoverable projects from active proje
 });
 ```
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`cd frontend && pnpm exec playwright test tests/e2e/project-governance.spec.ts --workers=1`
 
 预期：失败，邀请页和治理页面不存在。
 
-- [ ] **步骤 3：实现 contract、hooks 和页面**
+- [x] **步骤 3：实现 contract、hooks 和页面**
 
 ```tsx
 useEffect(() => {
@@ -664,13 +666,13 @@ useEffect(() => {
 
 claim 成功且未登录时跳转 `/login?next=/invite`；已登录或登录返回后调用无 body 的 redeem API。mutation 成功后统一取消并失效：`projectKeys.workspace(userId)`、`projectKeys.detail(userId, projectId)`、`projectKeys.members(userId, projectId)` 和 `projectKeys.invitations(userId, projectId)`。退出或请求删除当前项目后使用 `router.replace("/workspace")`。
 
-- [ ] **步骤 4：运行前端治理测试**
+- [x] **步骤 4：运行前端治理测试**
 
 运行：`cd frontend && pnpm test -- --run && pnpm exec playwright test tests/e2e/project-governance.spec.ts tests/e2e/projects.spec.ts --workers=1 && pnpm check`
 
 预期：全部通过；页面不从 role 推导能力，token 不出现在 storage 或 URL。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add frontend/src/core/projects frontend/src/app/projects frontend/src/app/invite frontend/src/components/projects frontend/tests/unit/core/projects frontend/tests/e2e/project-governance.spec.ts frontend/tests/e2e/projects.spec.ts
@@ -693,7 +695,7 @@ git commit -m "feat(frontend): add project governance workflows"
 
 **接口：** CI 在真实 PostgreSQL 上硬失败；M2 完成前总体设计状态保持“未开始”或“进行中”。
 
-- [ ] **步骤 1：新增两项目并发隔离矩阵**
+- [x] **步骤 1：新增两项目并发隔离矩阵**
 
 ```python
 @pytest.mark.anyio
@@ -705,7 +707,7 @@ async def test_m2_cross_project_and_last_admin_matrix(m2_postgres_fixture):
     assert result.last_admin_violations == 0
 ```
 
-- [ ] **步骤 2：把 M2 测试加入 PostgreSQL workflow**
+- [x] **步骤 2：把 M2 测试加入 PostgreSQL workflow**
 
 workflow 命令固定为：
 
@@ -719,11 +721,11 @@ workflow 命令固定为：
     -q
 ```
 
-- [ ] **步骤 3：更新架构与用户文档**
+- [x] **步骤 3：更新架构与用户文档**
 
 文档必须明确：登录后 `/workspace` 无项目级侧栏；进入 `/projects/{slug}` 后才有项目菜单；邀请无邮件；M2 不执行私有数据或项目数据物理清除；M2 仍不可作为完整 SaaS 发布。
 
-- [ ] **步骤 4：执行最终门禁**
+- [x] **步骤 4：执行最终门禁**
 
 运行：
 
@@ -737,7 +739,7 @@ cd frontend && pnpm exec playwright test --workers=1
 
 预期：后端 0 failure；前端 unit 0 failure；Playwright 0 failure；Ruff、TypeScript、ESLint 和 Prettier 均无错误。
 
-- [ ] **步骤 5：更新里程碑状态并提交**
+- [x] **步骤 5：更新里程碑状态并提交**
 
 只有步骤 4 全部通过且审查结论无阻塞项时，才把总体设计和专项规格的 M2 状态改为“已完成”。
 
