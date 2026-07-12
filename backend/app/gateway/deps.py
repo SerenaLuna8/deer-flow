@@ -33,6 +33,7 @@ from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
+from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +205,11 @@ async def project_session() -> AsyncIterator[AsyncSession]:
     except RuntimeError:
         raise HTTPException(
             status_code=503,
-            detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"},
+            detail={
+                "code": "DATABASE_UNAVAILABLE",
+                "message": "Project storage unavailable",
+                "request_id": get_current_trace_id() or generate_trace_id(),
+            },
         ) from None
     async with factory() as session:
         yield session

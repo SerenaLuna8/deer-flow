@@ -187,7 +187,9 @@ class InvitationRepository:
                     .with_for_update()
                 )
             ).scalar_one_or_none()
-            if invitation is None or invitation.status != "pending" or invitation.expires_at <= now:
+            if invitation is None:
+                raise ProjectNotFound()
+            if invitation.status != "pending" or invitation.expires_at <= now:
                 raise ProjectInvitationInvalid()
             if invitation.version != expected_version:
                 raise ProjectInvitationConflict()

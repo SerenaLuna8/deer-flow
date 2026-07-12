@@ -280,14 +280,15 @@ async def claim_invitation(
         return JSONResponse(status_code=status_code, content={"detail": detail})
     rate_limit = InvitationRateLimitRepository(session)
     key_hash = _claim_key(request)
+    now = datetime.now(UTC)
     try:
-        limited = await rate_limit.is_limited(key_hash, datetime.now(UTC))
+        admitted = await rate_limit.admit_attempt(key_hash, now)
         invitation_claim: InvitationClaim | None = None
-        if not limited:
+        if admitted:
             try:
-                invitation_claim = await InvitationService(InvitationRepository(session)).claim(body.token, datetime.now(UTC))
+                invitation_claim = await InvitationService(InvitationRepository(session)).claim(body.token, now)
             except (ProjectInvitationInvalid, ProjectValidationFailed):
-                await rate_limit.record_failure(key_hash, datetime.now(UTC))
+                pass
             else:
                 await rate_limit.clear(key_hash)
         if invitation_claim is None:
@@ -316,7 +317,7 @@ async def redeem_invitation(
     key_hash = _redeem_key(request, user_email)
     now = datetime.now(UTC)
     try:
-        if await rate_limit.is_limited(key_hash, now):
+        if not await rate_limit.admit_attempt(key_hash, now):
             return _redeem_error_response(
                 ProjectInvitationInvalid(),
                 request_id,
@@ -328,10 +329,6 @@ async def redeem_invitation(
         invitation_claim = claim_signer().verify(signed, now)
         redeemed: RedeemedInvitation = await InvitationService(InvitationRepository(session)).redeem(user_id, user_email, invitation_claim, now)
     except (ProjectInvitationInvalid, ProjectInvitationConflict, ProjectValidationFailed) as exc:
-        try:
-            await rate_limit.record_failure(key_hash, now)
-        except ProjectDatabaseUnavailable as db_exc:
-            return _redeem_error_response(db_exc, request_id, request)
         return _redeem_error_response(exc, request_id, request)
     except GOVERNANCE_DOMAIN_ERRORS as exc:
         return _redeem_error_response(exc, request_id, request)

@@ -115,10 +115,10 @@ async def test_project_session_maps_uninitialized_engine_to_stable_503(monkeypat
     with pytest.raises(HTTPException) as exc_info:
         await anext(dependency)
     assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == {
-        "code": "DATABASE_UNAVAILABLE",
-        "message": "Project storage unavailable",
-    }
+    assert exc_info.value.detail["code"] == "DATABASE_UNAVAILABLE"
+    assert exc_info.value.detail["message"] == "Project storage unavailable"
+    assert isinstance(exc_info.value.detail["request_id"], str)
+    assert exc_info.value.detail["request_id"]
 
 
 def test_project_database_failure_is_503_without_driver_details(monkeypatch) -> None:

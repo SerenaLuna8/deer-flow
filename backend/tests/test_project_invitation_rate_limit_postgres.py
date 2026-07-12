@@ -29,27 +29,48 @@ def test_rate_limit_key_is_irreversible_sha256() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failure_writes_are_atomic_across_sessions(
+async def test_attempt_writes_are_atomic_across_sessions(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     key_hash = hash_rate_limit_key("claim\x00192.0.2.10")
 
-    async def record() -> None:
+    async def admit() -> None:
         async with factory() as session:
-            await InvitationRateLimitRepository(session).record_failure(key_hash, NOW)
+            await InvitationRateLimitRepository(session).admit_attempt(key_hash, NOW)
 
     try:
-        await asyncio.gather(*(record() for _ in range(12)))
+        await asyncio.gather(*(admit() for _ in range(12)))
         async with factory() as session:
             row = await session.scalar(select(ProjectInvitationRateLimitRow).where(ProjectInvitationRateLimitRow.key_hash == key_hash))
             assert row is not None
             assert row.failure_count == 12
             assert row.window_started_at == NOW
             assert row.expires_at == NOW + timedelta(minutes=5)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_admission_allows_only_first_five_attempts(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    key_hash = hash_rate_limit_key("claim\x00192.0.2.11")
+
+    async def admit() -> bool:
         async with factory() as session:
-            assert await InvitationRateLimitRepository(session).is_limited(key_hash, NOW)
+            return await InvitationRateLimitRepository(session).admit_attempt(key_hash, NOW)
+
+    try:
+        admissions = await asyncio.gather(*(admit() for _ in range(12)))
+        assert sum(admissions) == 5
+        async with factory() as session:
+            row = await session.get(ProjectInvitationRateLimitRow, key_hash)
+            assert row is not None
+            assert row.failure_count == 12
     finally:
         await engine.dispose()
 
@@ -65,10 +86,9 @@ async def test_expired_window_restarts_and_success_clears_counter(
         async with factory() as session:
             repository = InvitationRateLimitRepository(session)
             for _ in range(5):
-                await repository.record_failure(key_hash, NOW)
-            assert await repository.is_limited(key_hash, NOW + timedelta(minutes=4))
-            assert not await repository.is_limited(key_hash, NOW + timedelta(minutes=5))
-            await repository.record_failure(key_hash, NOW + timedelta(minutes=6))
+                assert await repository.admit_attempt(key_hash, NOW)
+            assert not await repository.admit_attempt(key_hash, NOW + timedelta(minutes=4))
+            assert await repository.admit_attempt(key_hash, NOW + timedelta(minutes=5))
 
         async with factory() as session:
             row = await session.get(ProjectInvitationRateLimitRow, key_hash)

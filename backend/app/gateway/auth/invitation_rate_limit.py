@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timedelta
 
-from sqlalchemy import case, delete, select
+from sqlalchemy import case, delete
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +13,7 @@ from deerflow.persistence.projects.invitation_rate_limit_model import (
     ProjectInvitationRateLimitRow,
 )
 
-MAX_INVITATION_FAILURES = 5
+MAX_INVITATION_ATTEMPTS = 5
 INVITATION_RATE_LIMIT_WINDOW = timedelta(minutes=5)
 
 
@@ -22,29 +22,18 @@ def hash_rate_limit_key(value: str) -> str:
 
 
 class InvitationRateLimitRepository:
-    """PostgreSQL-shared fixed-window invitation failure limiter."""
+    """PostgreSQL-shared fixed-window invitation attempt limiter."""
 
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def is_limited(self, key_hash: str, now: datetime) -> bool:
-        try:
-            async with self.session.begin():
-                row = (
-                    await self.session.execute(
-                        select(
-                            ProjectInvitationRateLimitRow.failure_count,
-                            ProjectInvitationRateLimitRow.expires_at,
-                        )
-                        .where(ProjectInvitationRateLimitRow.key_hash == key_hash)
-                        .with_for_update()
-                    )
-                ).one_or_none()
-                return bool(row is not None and row.failure_count >= MAX_INVITATION_FAILURES and row.expires_at > now)
-        except DBAPIError:
-            raise ProjectDatabaseUnavailable() from None
+    async def admit_attempt(self, key_hash: str, now: datetime) -> bool:
+        """Atomically count an attempt and admit only the first five in a window.
 
-    async def record_failure(self, key_hash: str, now: datetime) -> bool:
+        The row is cleared after successful validation. Failed or rejected attempts
+        retain the increment, so concurrent bursts cannot pass through a separate
+        read-before-write decision.
+        """
         expires_at = now + INVITATION_RATE_LIMIT_WINDOW
         statement = insert(ProjectInvitationRateLimitRow).values(
             key_hash=key_hash,
@@ -73,12 +62,11 @@ class InvitationRateLimitRepository:
             },
         ).returning(
             ProjectInvitationRateLimitRow.failure_count,
-            ProjectInvitationRateLimitRow.expires_at,
         )
         try:
             async with self.session.begin():
                 row = (await self.session.execute(statement)).one()
-                return row.failure_count >= MAX_INVITATION_FAILURES and row.expires_at > now
+                return row.failure_count <= MAX_INVITATION_ATTEMPTS
         except DBAPIError:
             raise ProjectDatabaseUnavailable() from None
 

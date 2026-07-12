@@ -10,6 +10,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.projects.context import resolve_project_context
+from app.projects.errors import ProjectNotFound
 from app.projects.invitation_models import ProjectInvitationConflict, ProjectInvitationInvalid
 from app.projects.invitation_repository import InvitationRepository
 from app.projects.invitation_service import InvitationService
@@ -196,13 +197,100 @@ async def test_revoke_requires_expected_version_and_never_returns_secret_fields(
             async with factory() as session:
                 await InvitationService(InvitationRepository(session)).revoke(
                     context,
-                    uuid.uuid4(),
-                    expected_version=1,
+                    created.invitation.id,
+                    expected_version=2,
                     now=NOW,
                 )
         assert exc_info.value.__dict__ == {}
         assert "member@example.com" not in str(exc_info.value)
         assert created.token not in str(exc_info.value)
+    finally:
+        await engine.dispose()
+
+
+async def test_cross_project_revoke_is_not_found_while_same_project_invalid_is_conflict(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        first_admin_id, first_project_id = await _setup_project(engine, "invitation-cross-project-a")
+        async with engine.begin() as connection:
+            second_project_id = await _insert_project(connection, first_admin_id, "invitation-cross-project-b")
+            await _insert_membership(connection, second_project_id, first_admin_id, ProjectRole.ADMIN)
+        async with factory() as session:
+            first_context = await resolve_project_context(session, first_admin_id, first_project_id, "req-first")
+        async with factory() as session:
+            second_context = await resolve_project_context(session, first_admin_id, second_project_id, "req-second")
+        async with factory() as session:
+            created = await InvitationService(InvitationRepository(session)).create(
+                first_context,
+                "member@example.com",
+                ProjectRole.VIEWER,
+                NOW,
+            )
+
+        with pytest.raises(ProjectNotFound):
+            async with factory() as session:
+                await InvitationService(InvitationRepository(session)).revoke(
+                    second_context,
+                    created.invitation.id,
+                    expected_version=1,
+                    now=NOW,
+                )
+
+        async with factory() as session:
+            await InvitationService(InvitationRepository(session)).revoke(
+                first_context,
+                created.invitation.id,
+                expected_version=1,
+                now=NOW,
+            )
+        with pytest.raises(ProjectInvitationInvalid):
+            async with factory() as session:
+                await InvitationService(InvitationRepository(session)).revoke(
+                    first_context,
+                    created.invitation.id,
+                    expected_version=2,
+                    now=NOW,
+                )
+
+        async with factory() as session:
+            expired = await InvitationService(InvitationRepository(session)).create(
+                first_context,
+                "expired@example.com",
+                ProjectRole.VIEWER,
+                NOW - timedelta(days=8),
+            )
+        with pytest.raises(ProjectInvitationInvalid):
+            async with factory() as session:
+                await InvitationService(InvitationRepository(session)).revoke(
+                    first_context,
+                    expired.invitation.id,
+                    expected_version=1,
+                    now=NOW,
+                )
+
+        async with factory() as session:
+            redeemed = await InvitationService(InvitationRepository(session)).create(
+                first_context,
+                "redeemed@example.com",
+                ProjectRole.VIEWER,
+                NOW,
+            )
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE project_invitations SET status='redeemed', version=2 WHERE id=:id"),
+                {"id": redeemed.invitation.id},
+            )
+        with pytest.raises(ProjectInvitationInvalid):
+            async with factory() as session:
+                await InvitationService(InvitationRepository(session)).revoke(
+                    first_context,
+                    redeemed.invitation.id,
+                    expected_version=2,
+                    now=NOW,
+                )
     finally:
         await engine.dispose()
 

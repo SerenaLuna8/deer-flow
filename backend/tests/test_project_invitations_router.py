@@ -15,7 +15,7 @@ from app.gateway.auth_middleware import _is_public
 from app.gateway.deps import project_session
 from app.gateway.routers import project_invitations
 from app.projects.capabilities import Capability
-from app.projects.errors import ProjectForbidden
+from app.projects.errors import ProjectForbidden, ProjectNotFound
 from app.projects.invitation_models import (
     CreatedInvitation,
     InvitationClaim,
@@ -113,6 +113,46 @@ def test_create_returns_fragment_once_while_ordinary_responses_hide_token(monkey
     assert "hash" not in listed.text
 
 
+def test_cross_project_invitation_revoke_is_404(monkeypatch) -> None:
+    monkeypatch.setattr(project_invitations, "resolve_project_context", AsyncMock(return_value=object()))
+    monkeypatch.setattr(
+        project_invitations.InvitationService,
+        "revoke",
+        AsyncMock(side_effect=ProjectNotFound()),
+    )
+
+    response = TestClient(_app()).request(
+        "DELETE",
+        f"/api/projects/{PROJECT_ID}/invitations/{INVITATION_ID}",
+        json={"version": 1},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == {
+        "code": "PROJECT_OR_MEMBER_NOT_FOUND",
+        "message": "Project or member not found",
+        "request_id": "req-invitations",
+    }
+
+
+def test_same_project_non_pending_invitation_revoke_is_409(monkeypatch) -> None:
+    monkeypatch.setattr(project_invitations, "resolve_project_context", AsyncMock(return_value=object()))
+    monkeypatch.setattr(
+        project_invitations.InvitationService,
+        "revoke",
+        AsyncMock(side_effect=ProjectInvitationInvalid()),
+    )
+
+    response = TestClient(_app()).request(
+        "DELETE",
+        f"/api/projects/{PROJECT_ID}/invitations/{INVITATION_ID}",
+        json={"version": 2},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "PROJECT_INVITATION_INVALID"
+
+
 def test_mine_is_scoped_to_authenticated_email_and_hides_secrets(monkeypatch) -> None:
     list_mine = AsyncMock(return_value=(_invitation(),))
     monkeypatch.setattr(project_invitations.InvitationService, "list_mine", list_mine)
@@ -132,13 +172,8 @@ def test_claim_valid_and_invalid_tokens_are_indistinguishable(monkeypatch) -> No
     monkeypatch.setattr(project_invitations.InvitationService, "claim", claim)
     monkeypatch.setattr(
         project_invitations.InvitationRateLimitRepository,
-        "is_limited",
-        AsyncMock(return_value=False),
-    )
-    monkeypatch.setattr(
-        project_invitations.InvitationRateLimitRepository,
-        "record_failure",
-        AsyncMock(return_value=False),
+        "admit_attempt",
+        AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
         project_invitations.InvitationRateLimitRepository,
@@ -180,8 +215,8 @@ def test_claim_valid_and_invalid_tokens_are_indistinguishable(monkeypatch) -> No
 def test_claim_rate_limit_is_not_observable_from_status_body_or_cookie_shape(monkeypatch) -> None:
     monkeypatch.setattr(
         project_invitations.InvitationRateLimitRepository,
-        "is_limited",
-        AsyncMock(return_value=True),
+        "admit_attempt",
+        AsyncMock(return_value=False),
     )
     claim = AsyncMock()
     monkeypatch.setattr(project_invitations.InvitationService, "claim", claim)
@@ -200,8 +235,8 @@ def test_claim_rate_limit_is_not_observable_from_status_body_or_cookie_shape(mon
 def test_claim_is_public_and_secure_cookie_follows_request_scheme(monkeypatch) -> None:
     monkeypatch.setattr(
         project_invitations.InvitationRateLimitRepository,
-        "is_limited",
-        AsyncMock(return_value=True),
+        "admit_attempt",
+        AsyncMock(return_value=False),
     )
     response = TestClient(_app(), base_url="https://testserver").post(
         "/api/project-invitations/claim",
@@ -227,6 +262,30 @@ def test_cross_site_claim_rejection_uses_stable_error_shape() -> None:
     assert isinstance(detail["request_id"], str) and detail["request_id"]
 
 
+def test_uninitialized_project_session_503_has_request_id(monkeypatch) -> None:
+    from deerflow.persistence import engine as persistence_engine
+
+    def unavailable_factory():
+        raise RuntimeError("Persistence engine is not initialized")
+
+    monkeypatch.setattr(persistence_engine, "get_session_factory", unavailable_factory)
+    app = FastAPI()
+    app.include_router(project_invitations.router)
+    app.dependency_overrides[project_invitations.authenticated_invitation_identity] = lambda: (
+        USER_ID,
+        "member@example.com",
+        "req-invitations",
+    )
+
+    response = TestClient(app).get("/api/project-invitations/mine")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "DATABASE_UNAVAILABLE"
+    assert response.json()["detail"]["message"] == "Project storage unavailable"
+    assert isinstance(response.json()["detail"]["request_id"], str)
+    assert response.json()["detail"]["request_id"]
+
+
 def test_redeem_validates_authenticated_email_and_always_clears_cookie(monkeypatch) -> None:
     signer = Mock()
     claim = InvitationClaim(INVITATION_ID, "c" * 64)
@@ -234,18 +293,13 @@ def test_redeem_validates_authenticated_email_and_always_clears_cookie(monkeypat
     monkeypatch.setattr(project_invitations, "claim_signer", lambda: signer)
     monkeypatch.setattr(
         project_invitations.InvitationRateLimitRepository,
-        "is_limited",
-        AsyncMock(return_value=False),
+        "admit_attempt",
+        AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
         project_invitations.InvitationRateLimitRepository,
         "clear",
         AsyncMock(),
-    )
-    monkeypatch.setattr(
-        project_invitations.InvitationRateLimitRepository,
-        "record_failure",
-        AsyncMock(return_value=False),
     )
     redeem = AsyncMock(
         side_effect=[

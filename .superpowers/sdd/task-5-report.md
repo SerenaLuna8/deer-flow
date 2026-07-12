@@ -82,3 +82,27 @@ DONE
 
 - 仅有现存 TestClient/httpx 与 per-request cookies deprecation warning；本任务没有新增功能性失败。
 - 失败限流表按 hash key 保留未再次命中的过期行；当前最小实现会在该 key 再次失败时原子重置窗口。若未来遭遇高基数来源导致表增长，应增加独立的过期行维护任务，不应在请求热路径做全表清理。
+
+## 审查阻塞项修复（2026-07-12）
+
+### 修复摘要
+
+- 将 claim/redeem 的 `is_limited` 后置 `record_failure` 两事务流程替换为校验前的 `admit_attempt`：PostgreSQL `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` 在单 SQL、单事务内创建/递增窗口并决定 admission；一个窗口只有前 5 次 attempt 获准进入实际 claim/redeem 校验，成功后清除，失败或被拒绝的 attempt 保留。
+- revoke 继续使用 `invitation_id + context.project_id` 的 scoped lock query：查询不到（不存在/跨项目）抛 `ProjectNotFound` 并映射 404；只有本项目查到的已撤销、已兑换或过期行抛 invitation invalid 并映射 409，避免跨租户读取或锁行。
+- `project_session` 在 session factory 未初始化时生成或复用 trace request ID，并把稳定的 `request_id` 字段放入 503 `DATABASE_UNAVAILABLE` detail；依赖直测与 endpoint 测试均覆盖。
+
+### RED
+
+1. `test_concurrent_admission_allows_only_first_five_attempts` 首次运行因 `InvitationRateLimitRepository` 缺少 `admit_attempt` 失败；证明旧 limiter 没有原子 admission API。
+2. `test_cross_project_revoke_is_not_found_while_same_project_invalid_is_conflict` 首次有效运行得到 `ProjectInvitationInvalid` 而非 `ProjectNotFound`；证明 repository 合并了跨项目与状态冲突。
+3. project session 依赖直测和 invitation endpoint 测试均以 `KeyError: request_id` 失败；证明未初始化 factory 的 503 缺少稳定字段。
+
+### GREEN 与验证
+
+- limiter repository + 真实路由并发测试：`5 passed`；12 个并发 invalid claim 仍返回相同 200/body/cookie 形状，只有 5 个进入 `InvitationService.claim`。
+- revoke repository + route 专项：`2 passed`；跨项目为 404，本项目已撤销为 409。
+- project session dependency + endpoint 专项：`2 passed`；503 detail 均含非空 `request_id`。
+- 用户点名 focused suite：`32 passed`。
+- 完整 Task 5 project-governance regression：`80 passed`（JUnit：0 failures、0 errors、0 skipped），真实 PostgreSQL 使用 `DEER_FLOW_TEST_POSTGRES_ADMIN_URL` 映射到隔离测试库。
+- Ruff format check：`9 files already formatted`；Ruff check：`All checks passed`；`git diff --check`：通过。
+- 提交前独立只读审查无 Critical；其唯一 Important 意见是保持 revoke 的 project-scoped predicate，已修复并重新通过 revoke 专项与 80 项 Task 5 回归。
