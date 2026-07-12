@@ -4,6 +4,17 @@ import ipaddress
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from deerflow.community import url_safety
+
+
+@pytest.fixture()
+def public_example_dns(monkeypatch):
+    """Keep public-fetch tests independent of the host machine's DNS policy."""
+    addresses = [ipaddress.ip_address("93.184.216.34")]
+    monkeypatch.setattr(url_safety, "resolve_host_addresses", lambda _hostname: addresses)
+
 
 class TestWebSearchTool:
     @patch.dict("os.environ", {}, clear=True)
@@ -69,7 +80,7 @@ class TestWebFetchTool:
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
     @patch("deerflow.community.fastcrw.tools.get_app_config")
-    def test_fetch_uses_web_fetch_config(self, mock_get_app_config, mock_fastcrw_cls):
+    def test_fetch_uses_web_fetch_config(self, mock_get_app_config, mock_fastcrw_cls, public_example_dns):
         fetch_config = MagicMock()
         fetch_config.model_extra = {"api_key": "fastcrw-fetch-key", "base_url": "http://localhost:3000"}
 
@@ -100,7 +111,7 @@ class TestWebFetchTool:
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
     @patch("deerflow.community.fastcrw.tools.get_app_config")
-    def test_fetch_returns_error_when_no_content(self, mock_get_app_config, mock_fastcrw_cls):
+    def test_fetch_returns_error_when_no_content(self, mock_get_app_config, mock_fastcrw_cls, public_example_dns):
         mock_get_app_config.return_value.get_tool_config.return_value = None
 
         mock_scrape_result = MagicMock()
@@ -115,7 +126,7 @@ class TestWebFetchTool:
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
     @patch("deerflow.community.fastcrw.tools.get_app_config")
-    def test_fetch_returns_error_string_on_exception(self, mock_get_app_config, mock_fastcrw_cls):
+    def test_fetch_returns_error_string_on_exception(self, mock_get_app_config, mock_fastcrw_cls, public_example_dns):
         mock_get_app_config.return_value.get_tool_config.return_value = None
         mock_fastcrw_cls.return_value.scrape.side_effect = RuntimeError("scrape failed")
 

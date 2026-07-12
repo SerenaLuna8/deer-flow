@@ -88,6 +88,7 @@ export type MockAPIOptions = {
     max_file_size: number;
     max_total_size: number;
   };
+  runStreamHandler?: (route: Route) => unknown;
 };
 
 const DEFAULT_SKILLS: MockSkill[] = [
@@ -982,6 +983,9 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Run stream — returns a minimal SSE response with an AI message
   const handleMockRunStream = (route: Route) => {
+    if (options?.runStreamHandler) {
+      return options.runStreamHandler(route);
+    }
     const threadId = runStreamThreadId(route);
     const existingThread = threads.find(
       (thread) => thread.thread_id === threadId,

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from deerflow.community import url_safety
 from deerflow.community.browserless import tools
 from deerflow.community.browserless.browserless_client import BrowserlessClient, BrowserlessScreenshotResult
 
@@ -15,6 +16,15 @@ class AsyncMock(MagicMock):
 
     async def __call__(self, *args, **kwargs):
         return super().__call__(*args, **kwargs)
+
+
+@pytest.fixture()
+def public_example_dns(monkeypatch):
+    """Keep public-fetch tests independent of the host machine's DNS policy."""
+    addresses = [ipaddress.ip_address("93.184.216.34")]
+    monkeypatch.setattr(url_safety, "resolve_host_addresses", lambda _hostname: addresses)
+    # Browserless intentionally passes its import-time resolver alias explicitly.
+    monkeypatch.setattr(tools, "_resolve_host_addresses", lambda _hostname: addresses)
 
 
 @pytest.mark.asyncio
@@ -250,7 +260,7 @@ class TestBrowserlessTools:
         assert client.token == "env-token"
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
-    async def test_web_fetch_tool_success(self, mock_get_client):
+    async def test_web_fetch_tool_success(self, mock_get_client, public_example_dns):
         """web_fetch_tool successfully fetches and extracts content."""
         mock_client = MagicMock()
         mock_client.fetch_html = AsyncMock(return_value="<html><body><article><h1>Title</h1><p>Content</p></article></body></html>")

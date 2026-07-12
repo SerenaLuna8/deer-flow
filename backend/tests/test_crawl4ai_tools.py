@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from deerflow.community import url_safety
 from deerflow.community.crawl4ai.crawl4ai_client import Crawl4AiClient
 
 
@@ -14,6 +15,13 @@ class AsyncMock(MagicMock):
 
     async def __call__(self, *args, **kwargs):
         return super().__call__(*args, **kwargs)
+
+
+@pytest.fixture()
+def public_example_dns(monkeypatch):
+    """Keep public-fetch tests independent of the host machine's DNS policy."""
+    addresses = [ipaddress.ip_address("93.184.216.34")]
+    monkeypatch.setattr(url_safety, "resolve_host_addresses", lambda _hostname: addresses)
 
 
 @pytest.mark.asyncio
@@ -164,7 +172,7 @@ class TestCrawl4AiTools:
     """Tests for the Crawl4AI tool functions."""
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
-    async def test_web_fetch_tool_success(self, mock_build):
+    async def test_web_fetch_tool_success(self, mock_build, public_example_dns):
         from deerflow.community.crawl4ai import tools
 
         mock_client = MagicMock()
@@ -178,7 +186,7 @@ class TestCrawl4AiTools:
         assert "Error:" not in result
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
-    async def test_web_fetch_tool_truncates_to_4096(self, mock_build):
+    async def test_web_fetch_tool_truncates_to_4096(self, mock_build, public_example_dns):
         from deerflow.community.crawl4ai import tools
 
         mock_client = MagicMock()
@@ -269,7 +277,7 @@ class TestCrawl4AiTools:
         mock_cfg.assert_called_once_with("web_fetch")
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
-    async def test_web_fetch_tool_passes_configured_filter(self, mock_build):
+    async def test_web_fetch_tool_passes_configured_filter(self, mock_build, public_example_dns):
         from deerflow.community.crawl4ai import tools
 
         mock_client = MagicMock()
@@ -283,7 +291,7 @@ class TestCrawl4AiTools:
         assert mock_client.fetch_markdown.call_args.kwargs.get("filter_mode") == "raw"
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
-    async def test_web_fetch_tool_invalid_filter_falls_back_to_fit(self, mock_build):
+    async def test_web_fetch_tool_invalid_filter_falls_back_to_fit(self, mock_build, public_example_dns):
         from deerflow.community.crawl4ai import tools
 
         mock_client = MagicMock()

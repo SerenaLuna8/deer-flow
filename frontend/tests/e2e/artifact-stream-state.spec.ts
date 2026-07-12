@@ -66,10 +66,7 @@ test("keeps artifact trigger after stream values omit artifacts", async ({
         messages: THREAD_MESSAGES,
       },
     ],
-  });
-
-  await page.route("**/api/langgraph/threads/*/runs/stream", (route) => {
-    return streamWithoutArtifacts(route);
+    runStreamHandler: streamWithoutArtifacts,
   });
 
   await page.goto(`/workspace/chats/${THREAD_ID}`);

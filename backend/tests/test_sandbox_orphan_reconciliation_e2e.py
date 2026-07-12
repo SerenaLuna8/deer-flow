@@ -47,6 +47,21 @@ E2E_TEST_IMAGE = "busybox:latest"
 E2E_PREFIX = "deer-flow-sandbox-e2e-test"
 
 
+def _docker_backend(monkeypatch):
+    """Build the backend for containers this E2E module starts with Docker."""
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
+
+    backend = LocalContainerBackend(
+        image=E2E_TEST_IMAGE,
+        base_port=9990,
+        container_prefix=E2E_PREFIX,
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.setattr(backend, "_runtime", "docker")
+    return backend
+
+
 @pytest.fixture(autouse=True)
 def cleanup_test_containers():
     """Ensure all test containers are cleaned up after the test."""
@@ -68,7 +83,7 @@ def cleanup_test_containers():
 class TestOrphanReconciliationE2E:
     """E2E tests for orphan container reconciliation."""
 
-    def test_orphan_container_destroyed_on_startup(self):
+    def test_orphan_container_destroyed_on_startup(self, monkeypatch):
         """Core issue scenario: container from a previous process is destroyed on new process init.
 
         Steps:
@@ -92,15 +107,7 @@ class TestOrphanReconciliationE2E:
             assert _container_running(container_name), "Test container should be running"
 
             # Step 2: Create backend and list running containers
-            from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
-
-            backend = LocalContainerBackend(
-                image=E2E_TEST_IMAGE,
-                base_port=9990,
-                container_prefix=E2E_PREFIX,
-                config_mounts=[],
-                environment={},
-            )
+            backend = _docker_backend(monkeypatch)
 
             # Step 3: list_running should find our container
             running = backend.list_running()
@@ -125,7 +132,7 @@ class TestOrphanReconciliationE2E:
             # Safety cleanup
             _stop_container(container_name)
 
-    def test_multiple_orphans_all_cleaned(self):
+    def test_multiple_orphans_all_cleaned(self, monkeypatch):
         """Multiple orphaned containers are all found and can be cleaned up."""
         containers = []
         try:
@@ -141,15 +148,7 @@ class TestOrphanReconciliationE2E:
                 assert result.returncode == 0, f"Failed to start {name}: {result.stderr}"
                 containers.append(name)
 
-            from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
-
-            backend = LocalContainerBackend(
-                image=E2E_TEST_IMAGE,
-                base_port=9990,
-                container_prefix=E2E_PREFIX,
-                config_mounts=[],
-                environment={},
-            )
+            backend = _docker_backend(monkeypatch)
 
             running = backend.list_running()
             found_ids = {info.sandbox_id for info in running}
@@ -172,7 +171,7 @@ class TestOrphanReconciliationE2E:
             for name in containers:
                 _stop_container(name)
 
-    def test_list_running_ignores_unrelated_containers(self):
+    def test_list_running_ignores_unrelated_containers(self, monkeypatch):
         """Containers with different prefixes should not be listed."""
         unrelated_name = "unrelated-test-container"
         our_name = f"{E2E_PREFIX}-ours001"
@@ -191,15 +190,7 @@ class TestOrphanReconciliationE2E:
                 timeout=30,
             )
 
-            from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
-
-            backend = LocalContainerBackend(
-                image=E2E_TEST_IMAGE,
-                base_port=9990,
-                container_prefix=E2E_PREFIX,
-                config_mounts=[],
-                environment={},
-            )
+            backend = _docker_backend(monkeypatch)
 
             running = backend.list_running()
             found_ids = {info.sandbox_id for info in running}
