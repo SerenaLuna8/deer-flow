@@ -60,12 +60,12 @@ describe("project presentation contracts", () => {
     ).not.toContain("编辑项目");
   });
 
-  test("home has privacy boundary, placeholders, and only a workspace return", () => {
+  test("home keeps privacy boundary and leaves navigation to the project shell", () => {
     const html = renderToStaticMarkup(createElement(ProjectHome, { project }));
     expect(html).toContain("对话和记忆私有");
     expect(html).toContain("Agent、Skill 和 MCP 共享");
-    expect(html).toContain("返回工作空间");
-    expect(html).toContain('href="/workspace"');
+    expect(html).not.toContain("返回工作空间");
+    expect(html).not.toContain('href="/workspace"');
     expect(html).not.toContain("/workspace/projects");
     expect(html).not.toContain("项目工作台");
     expect(html).toContain("后续里程碑");
@@ -106,15 +106,22 @@ describe("project presentation contracts", () => {
     expect(workbench).toContain("update.mutate(input)");
   });
 
-  test("home error state offers retry without rendering stale enter data", () => {
-    const source = readFileSync(
+  test("project context owns retry and stale enter protection", () => {
+    const contextSource = readFileSync(
+      resolve(process.cwd(), "src/components/projects/project-context.tsx"),
+      "utf8",
+    );
+    const loaderSource = readFileSync(
       resolve(process.cwd(), "src/components/projects/project-home-loader.tsx"),
       "utf8",
     );
-    expect(source).toContain("重试");
-    expect(source).toContain('<Link href="/workspace">返回工作空间</Link>');
-    expect(source).not.toContain("/workspace/projects");
-    expect(source).not.toContain("项目工作台");
-    expect(source).not.toContain("enter.data ?? projectQuery.data");
+    expect(contextSource).toContain("重试");
+    expect(contextSource).toContain(
+      '<Link href="/workspace">返回工作空间</Link>',
+    );
+    expect(contextSource).not.toContain("/workspace/projects");
+    expect(contextSource).not.toContain("enter.data ?? projectQuery.data");
+    expect(loaderSource).toContain("useCurrentProject");
+    expect(loaderSource).not.toMatch(/useProjectBySlug|useEnterProject/u);
   });
 });

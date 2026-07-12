@@ -276,6 +276,13 @@ test("project workbench supports create, search, pin, edit, enter, and return", 
   await researchCard.getByRole("link", { name: "进入项目" }).click();
   await expect(page).toHaveURL(/\/projects\/research-lab$/);
   await expect(page.getByTestId("project-home")).toBeVisible();
+  await expect(page.getByRole("link", { name: "项目概览" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "成员与邀请" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "项目设置" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "账户" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Agent" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Skill" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "MCP" })).toHaveCount(0);
   await expect(
     page.getByText("对话和记忆私有，Agent、Skill 和 MCP 共享。"),
   ).toBeVisible();
@@ -283,6 +290,20 @@ test("project workbench supports create, search, pin, edit, enter, and return", 
   expect(api.listRequests().at(-1)?.searchParams.get("query")).toBe(
     "research-lab",
   );
+
+  await page.getByRole("link", { name: "成员与邀请" }).click();
+  await expect(page).toHaveURL(/\/projects\/research-lab\/members$/);
+  await expect(
+    page.getByRole("heading", { name: "成员与邀请", level: 1 }),
+  ).toBeVisible();
+  expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
+
+  await page.getByRole("link", { name: "项目设置" }).click();
+  await expect(page).toHaveURL(/\/projects\/research-lab\/settings$/);
+  await expect(
+    page.getByRole("heading", { name: "项目设置", level: 1 }),
+  ).toBeVisible();
+  expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
 
   await page.getByRole("link", { name: "返回工作空间" }).click();
   await expect(page).toHaveURL(/\/workspace$/);
@@ -360,6 +381,14 @@ test("project home stays private-work disabled in dark mobile layout", async ({
 
   await page.goto("/projects/research-lab");
   await expect(page.getByTestId("project-home")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "打开项目导航" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "打开项目导航" }).click();
+  await expect(page.getByRole("link", { name: "成员与邀请" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "项目设置" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回工作空间" })).toBeVisible();
+  await page.keyboard.press("Escape");
   await expect(page.getByText("共享 Agent")).toBeVisible();
   await expect(page.getByText("共享 Skill")).toBeVisible();
   await expect(page.getByText("共享 MCP")).toBeVisible();

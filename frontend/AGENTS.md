@@ -82,8 +82,12 @@ entry that can call the project API. Project slug URLs are resolved only by
 paging the member-scoped list endpoint and exact-matching the returned slug; UUID-only detail,
 enter, pin, and update endpoints must never receive a slug. `/projects/[project_slug]` has its
 own server-side auth, QueryClient, and AuthProvider layout and must not be nested in
-`WorkspaceContent`. Its private-work CTA remains visibly disabled and has no thread or router
-integration until the private-work milestone.
+`WorkspaceContent`. Its nested route layout is the sole owner of slug resolution and the enter
+mutation through `ProjectContextProvider`; project pages consume `useCurrentProject()` and must
+not repeat either request. The project shell shows only implemented M2 destinations, exposes
+settings from server-returned `project.lifecycle.manage` or `project.update` capabilities, and
+never derives visibility from role. Its private-work CTA remains visibly disabled and has no
+thread or router integration until the private-work milestone.
 
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
