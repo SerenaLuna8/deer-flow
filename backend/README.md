@@ -412,34 +412,34 @@ make gateway    # Run Gateway API without reload (port 8001)
 make lint       # Run linter (ruff)
 make format     # Format code (ruff)
 make detect-blocking-io  # Inventory blocking IO that may block the backend event loop
-make migrate-rev MSG="..."  # Autogenerate a new alembic revision against the live ORM models
+make migrate-rev MSG="..."  # 基于当前 ORM models 自动生成 Alembic revision
 ```
 
 ### Schema Migrations
 
-DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`,
-`run_events`, and the `channel_*` tables) are owned by alembic. The Gateway
-runs `alembic upgrade head` automatically on startup via
-`bootstrap_schema(engine, backend=...)`, so operators do not run `alembic`
-manually in production. Bootstrap is concurrency-safe (Postgres advisory lock
-across processes; per-engine `asyncio.Lock` inside one SQLite process) and
-idempotent against pre-existing schemas (empty / legacy / versioned).
+DeerFlow 的业务表由 Alembic 管理。Gateway 启动时会通过
+`bootstrap_schema(engine)` 自动执行 `alembic upgrade head`，生产环境无需手工运行
+Alembic。Bootstrap 只面向 PostgreSQL，使用 advisory lock 保证多进程并发安全，并能幂等
+处理 empty、legacy 和 versioned schema。
 
-When you add or change an ORM model, ship the change as a new revision under
-`packages/harness/deerflow/persistence/migrations/versions/`:
+新增或修改 ORM model 时，必须在
+`packages/harness/deerflow/persistence/migrations/versions/` 提交对应 revision：
 
 ```bash
-make migrate-rev MSG="add foo column to runs"
+POSTGRES_ADMIN_URL="postgresql://.../postgres" make migrate-rev MSG="add foo column to runs"
 ```
 
-The target invokes `scripts/_autogen_revision.py`, which builds a fresh temp
-SQLite at `head` and diffs the live models against it — so a clean checkout
-does not need a pre-existing `./data/deerflow.db`. Review the generated file
-and switch raw `op.add_column` / `op.drop_column` calls to the idempotent
-helpers in `migrations/_helpers.py` before committing. There is no
-`make migrate` / `make migrate-stamp` target on purpose — Gateway startup is
-the only execution path, which keeps operational mistakes off the table. See
-`backend/CLAUDE.md` (Schema Migrations) for the full design.
+`POSTGRES_ADMIN_URL` 必须显式指向 `postgres` maintenance database。脚本会创建随机
+`deerflow_autogen_*` database，从 migration history 升级到 `head` 后再与当前 ORM
+models 比较，并在成功或异常时都终止连接、删除随机 database；不会读取或回退到
+`DATABASE_URL`。用户仍通过 `MSG="..."` 传入说明，但 Make 只把它导出为
+`MIGRATION_MESSAGE` 环境变量，recipe 不会把内容拼进 shell command；Python 会拒绝空值、
+超长值和控制字符，也不会打印 message、database URL 或凭据。
+
+提交前需要审查生成文件，并把原始 `op.add_column` / `op.drop_column` 改为
+`migrations/_helpers.py` 中的幂等 helpers。项目有意不提供 `make migrate` /
+`make migrate-stamp`，生产 migration 统一由 Gateway bootstrap 执行。完整设计见
+`backend/CLAUDE.md` 的 Schema Migrations 章节。
 
 ### Code Style
 

@@ -23,7 +23,8 @@ Review the generated revision and switch raw ``op.add_column`` /
 before committing.
 
 Run from the ``backend/`` directory:
-    PYTHONPATH=. uv run python scripts/_autogen_revision.py "MESSAGE"
+    MIGRATION_MESSAGE="MESSAGE" POSTGRES_ADMIN_URL="postgresql://.../postgres" \
+      PYTHONPATH=. uv run python scripts/_autogen_revision.py
 or via Makefile:
     make migrate-rev MSG="..."
 """
@@ -124,10 +125,23 @@ def _temporary_postgres_database(admin_url: str) -> Iterator[str]:
     database = f"deerflow_autogen_{os.getpid()}_{uuid.uuid4().hex}"
     if _AUTOGEN_DATABASE_PATTERN.fullmatch(database) is None:
         raise RuntimeError("autogen generated an unsafe PostgreSQL database name")
-    asyncio.run(_create_database(admin_url, database))
+    try:
+        asyncio.run(_create_database(admin_url, database))
+    except BaseException:
+        try:
+            asyncio.run(_drop_database(admin_url, database))
+        except BaseException:
+            pass
+        raise
     try:
         yield _postgres_url_with_database(admin_url, database)
-    finally:
+    except BaseException:
+        try:
+            asyncio.run(_drop_database(admin_url, database))
+        except BaseException:
+            pass
+        raise
+    else:
         asyncio.run(_drop_database(admin_url, database))
 
 
@@ -137,16 +151,30 @@ def _build_temp_db_at_head(database_url: str) -> str:
     return database_url
 
 
+def _validate_migration_message(raw_message: str) -> str:
+    message = raw_message.strip()
+    if not message or len(message) > 200:
+        raise ValueError("invalid migration message")
+    if any(ord(character) < 32 or ord(character) == 127 for character in message):
+        raise ValueError("invalid migration message")
+    return message
+
+
+def _migration_message_from_env() -> str:
+    return _validate_migration_message(os.getenv("MIGRATION_MESSAGE", ""))
+
+
 def main() -> None:
-    if len(sys.argv) < 2 or not sys.argv[1].strip():
-        print('usage: python scripts/_autogen_revision.py "describe the change"', file=sys.stderr)
-        sys.exit(2)
-    message = sys.argv[1]
+    try:
+        message = _migration_message_from_env()
+    except ValueError:
+        print("autogen: MIGRATION_MESSAGE must be 1-200 characters without control characters", file=sys.stderr)
+        raise SystemExit(2) from None
 
     admin_url = os.getenv("POSTGRES_ADMIN_URL")
     if not admin_url:
         print("autogen: POSTGRES_ADMIN_URL is required", file=sys.stderr)
-        sys.exit(2)
+        raise SystemExit(2)
 
     with _temporary_postgres_database(admin_url) as url:
         _build_temp_db_at_head(url)

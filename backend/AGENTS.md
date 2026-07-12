@@ -713,7 +713,9 @@ This creates a random `deerflow_autogen_*` PostgreSQL database from the explicit
 maintenance URL, upgrades it from migration history, invokes `alembic revision
 --autogenerate` against the live ORM models, and drops the random database in a
 `finally` block. It never falls back to `DATABASE_URL`, and it rejects non-disposable
-database names. Review the generated file under `migrations/versions/` and switch raw
+database names. Make exports `MSG` as `MIGRATION_MESSAGE`; recipe lines never interpolate
+the message into shell syntax, and Python rejects empty, overlong, or control-character
+messages without printing them. Review the generated file under `migrations/versions/` and switch raw
 `op.add_column` / `op.drop_column` calls to the idempotent helpers from `_helpers.py`
 before committing. Production migration execution goes through the same bootstrap API
 used by Gateway startup: `make migrate-db` exposes that path explicitly for an existing

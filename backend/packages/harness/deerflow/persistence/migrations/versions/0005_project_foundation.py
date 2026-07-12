@@ -27,10 +27,11 @@ def upgrade() -> None:
         DECLARE
           users_oid oid := to_regclass(format('%I.users', current_schema()));
           existing_type "char";
+          existing_validated boolean;
           actual_expression text;
           expected_expression text;
         BEGIN
-          SELECT contype INTO existing_type
+          SELECT contype, convalidated INTO existing_type, existing_validated
           FROM pg_constraint
           WHERE conrelid = users_oid
             AND conname = 'ck_users_system_role';
@@ -61,6 +62,9 @@ def upgrade() -> None:
                 'Cannot upgrade 0005_project_foundation: users role constraint definition drift';
             END IF;
             ALTER TABLE users DROP CONSTRAINT ck_users_system_role_contract_probe;
+            IF NOT existing_validated THEN
+              ALTER TABLE users VALIDATE CONSTRAINT ck_users_system_role;
+            END IF;
           END IF;
         END $$
         """

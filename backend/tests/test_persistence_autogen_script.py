@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import sys
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -51,6 +51,39 @@ def test_autogen_builder_requires_explicit_postgres_url(autogen_module, monkeypa
         autogen_module._build_temp_db_at_head("postgresql+asyncpg://user:password@localhost/deerflow")
 
 
+def test_make_recipe_never_interpolates_migration_message_into_shell() -> None:
+    backend_dir = Path(__file__).resolve().parents[1]
+    marker = "AUTOGEN_COMMAND_INJECTION_MARKER"
+    malicious = f'x"; printf {marker}; #'
+    result = subprocess.run(
+        ["make", "-n", "migrate-rev", f"MSG={malicious}"],
+        cwd=backend_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    makefile = (backend_dir / "Makefile").read_text(encoding="utf-8")
+    target_body = makefile.rsplit("migrate-rev:", 1)[1]
+    recipe_lines = [line for line in target_body.splitlines() if line.startswith("\t")]
+
+    assert all("$(MSG)" not in line for line in recipe_lines)
+    assert marker not in result.stdout
+    assert marker not in result.stderr
+
+
+def test_migration_message_validation_rejects_empty_long_and_control_characters(autogen_module, monkeypatch) -> None:
+    for value in ("", " ", "x" * 201, "hello\nworld", "hello\tworld", "hello\x7fworld"):
+        monkeypatch.setenv("MIGRATION_MESSAGE", value)
+        with pytest.raises(ValueError, match="migration message"):
+            autogen_module._migration_message_from_env()
+
+    with pytest.raises(ValueError, match="migration message"):
+        autogen_module._validate_migration_message("hello\x00world")
+
+    monkeypatch.setenv("MIGRATION_MESSAGE", "增加项目字段")
+    assert autogen_module._migration_message_from_env() == "增加项目字段"
+
+
 def test_autogen_main_never_prints_credentials(autogen_module, monkeypatch, capsys) -> None:
     secret = "do-not-print-this-password"
     disposable_url = f"postgresql+asyncpg://user:{secret}@localhost/deerflow_autogen_1_{'b' * 32}"
@@ -60,7 +93,7 @@ def test_autogen_main_never_prints_credentials(autogen_module, monkeypatch, caps
         yield disposable_url
 
     monkeypatch.setenv("POSTGRES_ADMIN_URL", f"postgresql+asyncpg://user:{secret}@localhost/postgres")
-    monkeypatch.setattr(sys, "argv", ["_autogen_revision.py", "test revision"])
+    monkeypatch.setenv("MIGRATION_MESSAGE", "test revision")
     monkeypatch.setattr(autogen_module, "_temporary_postgres_database", fake_temporary_database)
     monkeypatch.setattr(autogen_module, "_build_temp_db_at_head", lambda url: url)
     monkeypatch.setattr(autogen_module.command, "revision", lambda *_args, **_kwargs: None)
@@ -97,6 +130,60 @@ def test_temporary_postgres_database_always_drops_generated_database(autogen_mod
 
     assert [event for event, _database in events] == ["create", "yield", "drop"]
     assert len({database for _event, database in events}) == 1
+
+
+def test_create_side_effect_error_still_attempts_cleanup_and_preserves_create_error(autogen_module, monkeypatch) -> None:
+    events: list[str] = []
+    create_error = RuntimeError("safe create failure")
+
+    async def fake_create(_admin_url: str, _database: str) -> None:
+        events.append("create-side-effect")
+        raise create_error
+
+    async def fake_drop(_admin_url: str, _database: str) -> None:
+        events.append("drop")
+
+    monkeypatch.setattr(autogen_module, "_create_database", fake_create)
+    monkeypatch.setattr(autogen_module, "_drop_database", fake_drop)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        with autogen_module._temporary_postgres_database("postgresql+asyncpg://admin:secret@localhost/postgres"):
+            pytest.fail("body must not run")
+    assert exc_info.value is create_error
+    assert events == ["create-side-effect", "drop"]
+
+
+def test_body_error_remains_primary_when_cleanup_also_fails(autogen_module, monkeypatch) -> None:
+    body_error = RuntimeError("body failed")
+
+    async def fake_create(_admin_url: str, _database: str) -> None:
+        return None
+
+    async def fake_drop(_admin_url: str, _database: str) -> None:
+        raise RuntimeError("safe cleanup failure")
+
+    monkeypatch.setattr(autogen_module, "_create_database", fake_create)
+    monkeypatch.setattr(autogen_module, "_drop_database", fake_drop)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        with autogen_module._temporary_postgres_database("postgresql+asyncpg://admin:secret@localhost/postgres"):
+            raise body_error
+    assert exc_info.value is body_error
+
+
+def test_successful_body_reports_cleanup_failure(autogen_module, monkeypatch) -> None:
+    async def fake_create(_admin_url: str, _database: str) -> None:
+        return None
+
+    async def fake_drop(_admin_url: str, _database: str) -> None:
+        raise RuntimeError("autogen could not clean up its isolated PostgreSQL database")
+
+    monkeypatch.setattr(autogen_module, "_create_database", fake_create)
+    monkeypatch.setattr(autogen_module, "_drop_database", fake_drop)
+
+    with pytest.raises(RuntimeError, match="could not clean up"):
+        with autogen_module._temporary_postgres_database("postgresql+asyncpg://admin:secret@localhost/postgres"):
+            pass
 
 
 @pytest.mark.asyncio
