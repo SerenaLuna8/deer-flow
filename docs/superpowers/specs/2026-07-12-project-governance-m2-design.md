@@ -148,10 +148,10 @@ M2 不提前显示尚未实现的 Agent、Skill、MCP、私有工作或自动化
 2. 页面调用未认证的 claim API，把 token 放入 POST body；
 3. 服务端 hash token、校验邀请仍可尝试兑换，并签发十分钟有效的 `HttpOnly`、`SameSite=Lax` claim cookie；
 4. 未登录用户进入登录流程，`next` 只包含 `/invite`，不包含 token；
-5. 登录完成后页面调用 redeem API，服务端验证 claim cookie 并用 `SELECT ... FOR UPDATE` 锁定邀请；
-6. 校验 pending、未过期、未撤销和当前账户 email 精确匹配规范值；
-7. 创建新 membership 或重新激活原 membership；
-8. 标记邀请 redeemed，递增 project `membership_version` 并清除 claim cookie；
+5. 登录完成后页面调用 redeem API，服务端验证 claim cookie，并按 claim 中的 invitation ID 和 token hash 做一次不加锁定位，只取得 `project_id`；
+6. 服务端先用 `SELECT ... FOR UPDATE` 锁定 project，再按 `project_id + invitation_id + token_hash` 锁定并重验 invitation，校验 pending、未过期、未撤销和当前账户 email 精确匹配规范值；
+7. 在同一 project 锁下锁定或创建 membership，创建新 membership 或重新激活原 membership；
+8. 标记 invitation 为 redeemed，递增 project `membership_version` 并清除 claim cookie；
 9. 事务提交后返回项目 slug，前端进入项目。
 
 claim cookie 只保存签名后的 invitation ID、token hash 和过期时间，不保存明文 token；签名失败、过期或 invitation 不匹配时统一拒绝并清除 cookie。claim API 使用通用响应和限流，不能用来枚举 token 是否有效。
@@ -225,7 +225,8 @@ M2 不执行物理删除。跨业务域清除必须等相关数据完成项目�
 - 角色变更、移除、退出和重新激活使用同一事务锁定 project 和目标 membership；
 - 最后一名 Admin 计数在锁内执行；
 - 邀请创建依赖 partial unique index 作为最终并发防线；
-- 邀请兑换锁定 invitation，再锁定或创建 membership；
+- invitation mutation 统一遵循 `project -> invitation -> membership` 锁序；create/revoke 到 invitation 为止，redeem 才继续锁定或创建 membership，禁止 create 与 redeem 使用反向锁序；
+- redeem 可先按 claim 中的 invitation ID + token hash 做不加锁定位以取得 `project_id`，随后必须锁 project，再按 `project_id + invitation_id + token_hash` 锁定并重验 invitation；
 - 删除和恢复锁定 project；
 - 所有成员变更同时递增 project `membership_version`；
 - `ProjectContext` 只解析 active membership 和 active project；

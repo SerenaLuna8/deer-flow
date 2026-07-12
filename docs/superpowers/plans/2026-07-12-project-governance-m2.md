@@ -284,7 +284,7 @@ class InvitationService:
         return CreatedInvitation(invitation=row, token=token)
 ```
 
-`redeem` 使用 `SELECT ... FOR UPDATE`，校验 email、状态和 `expires_at > now`，然后创建或重新激活 membership，并在同一事务标记 redeemed。
+`redeem` 先按 claim 中的 invitation ID + token hash 做不加锁定位，只取得 `project_id`；随后统一按 `project -> invitation -> membership` 锁序，先用 `SELECT ... FOR UPDATE` 锁 project，再按 `project_id + invitation_id + token_hash` 锁定并重验 invitation，校验 email、状态和 `expires_at > now`，最后锁定或创建 membership，并在同一事务标记 redeemed。create/revoke 同样先锁 project、再锁 invitation，禁止与 redeem 形成反向锁序。
 创建同项目同邮箱邀请时先锁定 project，把已经到期的 pending 邀请标记为 expired，再依赖 partial unique index 创建新邀请。
 
 - [ ] **步骤 4：运行邀请测试**
