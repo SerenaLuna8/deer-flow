@@ -15,16 +15,21 @@ from sqlalchemy import DateTime, UniqueConstraint
 from deerflow.persistence.base import Base
 from deerflow.persistence.migration_ledger import MigrationLedgerRow
 from scripts.migrate_sqlite_to_postgres import (
+    USER_REFERENCE_ALLOWLIST,
     DecodedCheckpoint,
     DecodedWrite,
     MigrationError,
     MigrationErrorCode,
     MigrationReport,
+    NormalizedRow,
     TableMigrationReport,
     UnionPlan,
+    UserReconciliationRequest,
+    _apply_user_reconciliation,
     _business_unique_keys,
     _decode_store_rows,
     _json_canonical,
+    _migrate_business_table,
     _migrate_checkpoints,
     _migrate_writes_rows,
     _order_checkpoints,
@@ -339,6 +344,304 @@ def _user_source(path: Path, rows: list[tuple[str, str, int]]) -> None:
             "INSERT INTO users VALUES (?,?,NULL,'user','2026-07-12T00:00:00+00:00',NULL,NULL,?,0)",
             rows,
         )
+
+
+def _user_source_with_role(path: Path, user_id: str, email: str, role: str) -> None:
+    _user_source(path, [(user_id, email, 0)])
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE users SET system_role=?", (role,))
+
+
+def _add_scheduled_task(path: Path, task_id: str, user_id: str) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """CREATE TABLE scheduled_tasks (
+            id TEXT PRIMARY KEY, user_id TEXT NOT NULL, thread_id TEXT,
+            context_mode TEXT NOT NULL, assistant_id TEXT, title TEXT NOT NULL,
+            prompt TEXT NOT NULL, schedule_type TEXT NOT NULL, schedule_spec JSON NOT NULL,
+            timezone TEXT NOT NULL, status TEXT NOT NULL, overlap_policy TEXT NOT NULL,
+            next_run_at TIMESTAMP, last_run_at TIMESTAMP, last_run_id TEXT,
+            last_thread_id TEXT, last_error TEXT, lease_owner TEXT,
+            lease_expires_at TIMESTAMP, run_count INTEGER NOT NULL,
+            created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)"""
+        )
+        connection.execute(
+            "INSERT INTO scheduled_tasks VALUES (?,?,NULL,'fresh_thread_per_run',NULL,?,?,?,?,'Asia/Shanghai','enabled','skip',NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,?,?)",
+            (
+                task_id,
+                user_id,
+                "synthetic task",
+                "synthetic prompt",
+                "cron",
+                '{"cron":"0 9 * * *"}',
+                "2026-07-12T00:00:00+00:00",
+                "2026-07-12T00:00:00+00:00",
+            ),
+        )
+
+
+def _reconciliation_request(sources: list[Path], expected: int = 1) -> UserReconciliationRequest:
+    return UserReconciliationRequest(
+        source_sha256=tuple(hashlib.sha256(source.read_bytes()).hexdigest() for source in sources),
+        expected_conflicts=expected,
+    )
+
+
+def test_explicit_user_reconciliation_builds_one_ordered_absorption(tmp_path: Path) -> None:
+    first = tmp_path / "first.db"
+    second = tmp_path / "second.db"
+    _user_source_with_role(first, "canonical-user", "same@example.invalid", "system_admin")
+    _user_source_with_role(second, "legacy-admin", "same@example.invalid", "admin")
+    _add_scheduled_task(first, "task-first", "canonical-user")
+    _add_scheduled_task(second, "task-second", "legacy-admin")
+
+    plan = _preflight_cross_source([first, second], _reconciliation_request([first, second]))
+
+    assert plan.per_source_reconciliations[0].user_id_remap == ()
+    assert plan.per_source_reconciliations[1].user_id_remap == (("legacy-admin", "canonical-user"),)
+    assert len(plan.per_source_reconciliations[1].absorbed_users) == 1
+
+
+@pytest.mark.parametrize("failure", ["fingerprint", "count", "canonical-role", "later-role"])
+def test_user_reconciliation_gates_fail_closed(tmp_path: Path, failure: str) -> None:
+    first = tmp_path / "first.db"
+    second = tmp_path / "second.db"
+    _user_source_with_role(
+        first,
+        "canonical-user",
+        "same@example.invalid",
+        "user" if failure == "canonical-role" else "system_admin",
+    )
+    _user_source_with_role(
+        second,
+        "legacy-admin",
+        "same@example.invalid",
+        "user" if failure == "later-role" else "admin",
+    )
+    request = _reconciliation_request([first, second], expected=2 if failure == "count" else 1)
+    if failure == "fingerprint":
+        request = UserReconciliationRequest(("0" * 64, request.source_sha256[1]), 1)
+
+    with pytest.raises(MigrationError):
+        _preflight_cross_source([first, second], request)
+
+
+def test_user_reconciliation_rejects_ambiguous_later_email(tmp_path: Path) -> None:
+    sources = [tmp_path / f"source-{index}.db" for index in range(3)]
+    _user_source_with_role(sources[0], "canonical-user", "same@example.invalid", "system_admin")
+    _user_source_with_role(sources[1], "legacy-one", "same@example.invalid", "admin")
+    _user_source_with_role(sources[2], "legacy-two", "same@example.invalid", "admin")
+
+    with pytest.raises(MigrationError):
+        _preflight_cross_source(sources, _reconciliation_request(sources, expected=2))
+
+
+def test_reconciliation_cli_dry_run_requires_bound_flags_and_never_backs_up(tmp_path: Path, monkeypatch, capsys) -> None:
+    sources = [tmp_path / "private-first.db", tmp_path / "private-second.db"]
+    _user_source_with_role(sources[0], "canonical-user", "same@example.invalid", "system_admin")
+    _user_source_with_role(sources[1], "legacy-admin", "same@example.invalid", "admin")
+    request = _reconciliation_request(sources)
+    observed = []
+
+    async def fake_migrate(source, _target, dry_run, *, source_reconciliation, **_kwargs):
+        observed.append((source, dry_run, source_reconciliation))
+        inventory = inspect_source(source).inventory
+        return MigrationReport(inventory.sha256, True, {}, (), True, inventory.size_bytes)
+
+    monkeypatch.setattr("scripts.migrate_sqlite_to_postgres.migrate_source", fake_migrate)
+    monkeypatch.setattr("scripts.migrate_sqlite_to_postgres.backup_source", lambda *_args: pytest.fail("dry-run backup"))
+    monkeypatch.setenv("SAFE_DATABASE_URL", "postgresql://owner:private-password@localhost/deerflow")
+    argv = [
+        "--source",
+        str(sources[0]),
+        "--source",
+        str(sources[1]),
+        "--target-url-env",
+        "SAFE_DATABASE_URL",
+        "--backup-dir",
+        str(tmp_path / "private-backups"),
+        "--dry-run",
+        "--reconcile-users-by-email",
+        "--reconcile-expected-conflicts",
+        "1",
+    ]
+    for fingerprint in request.source_sha256:
+        argv.extend(["--reconcile-source-sha256", fingerprint])
+
+    assert main(argv) == 0
+    rendered = capsys.readouterr().out
+    assert len(observed) == 2
+    assert observed[1][2].user_id_remap == (("legacy-admin", "canonical-user"),)
+    for secret in (
+        "same@example.invalid",
+        "canonical-user",
+        "legacy-admin",
+        "private-first.db",
+        "private-second.db",
+        "private-password",
+        "postgresql://",
+    ):
+        assert secret not in rendered
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--reconcile-users-by-email", "--reconcile-expected-conflicts", "1"],
+        ["--reconcile-expected-conflicts", "1", "--reconcile-source-sha256", "0" * 64],
+    ],
+)
+def test_incomplete_or_non_opted_reconciliation_stops_before_target_connect(tmp_path: Path, monkeypatch, capsys, extra) -> None:
+    async def forbidden_connect(*_args, **_kwargs):
+        pytest.fail("target connect")
+
+    monkeypatch.setattr("scripts.migrate_sqlite_to_postgres.asyncpg.connect", forbidden_connect)
+    monkeypatch.setenv("SAFE_DATABASE_URL", "postgresql://owner:private-password@localhost/deerflow")
+    result = main(
+        [
+            "--source",
+            str(tmp_path / "private-source.db"),
+            "--target-url-env",
+            "SAFE_DATABASE_URL",
+            "--backup-dir",
+            str(tmp_path / "private-backup"),
+            "--dry-run",
+            *extra,
+        ]
+    )
+    rendered = capsys.readouterr().err
+    assert result == 1
+    assert "code=conflict" in rendered
+    for secret in ("private-source.db", "private-backup", "private-password", "postgresql://"):
+        assert secret not in rendered
+
+
+def test_fixed_user_reference_allowlist_remaps_owner_but_never_external_bot() -> None:
+    assert ("channel_connections", "owner_user_id") in USER_REFERENCE_ALLOWLIST
+    assert ("channel_connections", "bot_user_id") not in USER_REFERENCE_ALLOWLIST
+    row = NormalizedRow(
+        source_key='["connection"]',
+        target_key='["connection"]',
+        values={"id": "connection", "owner_user_id": "legacy-admin", "bot_user_id": "external-bot"},
+        digest="unused",
+    )
+    decision = SimpleNamespace(user_id_remap=(("legacy-admin", "canonical-user"),), absorbed_users=())
+
+    transformed = _apply_user_reconciliation("channel_connections", [row], decision)
+
+    assert transformed[0].values["owner_user_id"] == "canonical-user"
+    assert transformed[0].values["bot_user_id"] == "external-bot"
+    assert transformed[0].source_key == row.source_key
+
+
+@pytest.mark.parametrize("table,column", sorted(USER_REFERENCE_ALLOWLIST))
+def test_every_fixed_internal_user_reference_is_remapped(table: str, column: str) -> None:
+    primary_key = {
+        "threads_meta": "thread_id",
+        "runs": "run_id",
+        "run_events": "id",
+        "feedback": "feedback_id",
+        "scheduled_tasks": "id",
+        "channel_connections": "id",
+        "channel_oauth_states": "state_hash",
+        "channel_conversations": "id",
+    }[table]
+    row = NormalizedRow(
+        source_key='["source-row"]',
+        target_key='["target-row"]',
+        values={primary_key: "target-row", column: "legacy-admin"},
+        digest="unused",
+    )
+    decision = SimpleNamespace(user_id_remap=(("legacy-admin", "canonical-user"),), absorbed_users=())
+
+    transformed = _apply_user_reconciliation(table, [row], decision)
+
+    assert transformed[0].values[column] == "canonical-user"
+    assert transformed[0].source_key == row.source_key
+
+
+def test_reconciliation_preserves_two_scheduled_tasks_with_canonical_user() -> None:
+    rows = [
+        NormalizedRow('["task-first"]', '["task-first"]', {"id": "task-first", "user_id": "canonical-user"}, "unused"),
+        NormalizedRow('["task-second"]', '["task-second"]', {"id": "task-second", "user_id": "legacy-admin"}, "unused"),
+    ]
+    decision = SimpleNamespace(user_id_remap=(("legacy-admin", "canonical-user"),), absorbed_users=())
+
+    transformed = _apply_user_reconciliation("scheduled_tasks", rows, decision)
+
+    assert [row.values["id"] for row in transformed] == ["task-first", "task-second"]
+    assert [row.values["user_id"] for row in transformed] == ["canonical-user", "canonical-user"]
+
+
+@pytest.mark.asyncio
+async def test_absorbed_user_ledger_is_auditable_and_idempotent(tmp_path: Path) -> None:
+    first = tmp_path / "first.db"
+    second = tmp_path / "second.db"
+    _user_source_with_role(first, "canonical-user", "same@example.invalid", "system_admin")
+    _user_source_with_role(second, "legacy-admin", "same@example.invalid", "admin")
+    plan = _preflight_cross_source([first, second], _reconciliation_request([first, second]))
+    decision = plan.per_source_reconciliations[1]
+    canonical = decision.absorbed_users[0]
+
+    class Transaction:
+        async def start(self):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def rollback(self):
+            return None
+
+    class Connection:
+        def __init__(self):
+            self.ledger = None
+
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, sql, *_args):
+            if "FROM migration_ledger" in sql:
+                return self.ledger
+            if 'FROM "users"' in sql:
+                return dict(canonical.canonical_values)
+            raise AssertionError(sql)
+
+        async def execute(self, sql, *args):
+            assert "INSERT INTO migration_ledger" in sql
+            self.ledger = {
+                "target_table": args[4],
+                "target_key": args[5],
+                "row_digest": args[6],
+                "status": args[7],
+            }
+
+    connection = Connection()
+    source_sha = hashlib.sha256(second.read_bytes()).hexdigest()
+    first_report = await _migrate_business_table(
+        connection,
+        second,
+        source_sha,
+        "users",
+        dry_run=False,
+        union_reference_keys=plan.per_source_reference_keys[1],
+        reconciliation=decision,
+    )
+    second_report = await _migrate_business_table(
+        connection,
+        second,
+        source_sha,
+        "users",
+        dry_run=False,
+        union_reference_keys=plan.per_source_reference_keys[1],
+        reconciliation=decision,
+    )
+
+    assert connection.ledger["status"] == "reconciled"
+    assert connection.ledger["target_key"] == canonical.target_key
+    assert connection.ledger["row_digest"] == canonical.audit_digest
+    assert first_report.adopted == 1
+    assert second_report.already_migrated == 1
 
 
 def test_migration_ledger_is_registered_with_unique_source_identity() -> None:
@@ -823,6 +1126,67 @@ def test_saver_pending_writes_verifier_allows_extra_and_requires_multiplicity() 
     assert _pending_writes_contains(actual, expected) is True
     assert _pending_writes_contains(actual[:-1], expected) is False
     assert _pending_writes_contains([("task-a", "result", {"ok": False}), *actual[:1]], expected) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
+    tmp_path: Path,
+    migrated_postgres_database_url: str,
+) -> None:
+    from scripts.setup_postgres import _asyncpg_url
+
+    sources = [tmp_path / "first.db", tmp_path / "second.db"]
+    _user_source_with_role(sources[0], "canonical-user", "same@example.invalid", "system_admin")
+    _add_scheduled_task(sources[0], "task-first", "canonical-user")
+    _user_source_with_role(sources[1], "legacy-admin", "same@example.invalid", "admin")
+    _add_scheduled_task(sources[1], "task-second", "legacy-admin")
+    request = _reconciliation_request(sources)
+    plan = _preflight_cross_source(sources, request)
+
+    for index, source in enumerate(sources):
+        await migrate_source(
+            source,
+            migrated_postgres_database_url,
+            dry_run=True,
+            union_reference_keys=plan.per_source_reference_keys[index],
+            source_reconciliation=plan.per_source_reconciliations[index],
+        )
+    for _replay in range(2):
+        for index, source in enumerate(sources):
+            await migrate_source(
+                source,
+                migrated_postgres_database_url,
+                dry_run=False,
+                union_reference_keys=plan.per_source_reference_keys[index],
+                source_reconciliation=plan.per_source_reconciliations[index],
+            )
+
+    connection = await asyncpg.connect(_asyncpg_url(migrated_postgres_database_url))
+    try:
+        assert await connection.fetchval("SELECT COUNT(*) FROM users") == 1
+        assert await connection.fetchval("SELECT system_role FROM users") == "system_admin"
+        assert await connection.fetchval("SELECT COUNT(*) FROM scheduled_tasks") == 2
+        assert await connection.fetchval("SELECT COUNT(DISTINCT user_id) FROM scheduled_tasks") == 1
+        second_sha = hashlib.sha256(sources[1].read_bytes()).hexdigest()
+        absorbed_key = plan.per_source_reconciliations[1].absorbed_users[0].source_key
+        ledger = await connection.fetchrow(
+            "SELECT target_table,target_key,row_digest,status FROM migration_ledger WHERE source_sha256=$1 AND source_table='users' AND source_key=$2",
+            second_sha,
+            absorbed_key,
+        )
+        assert ledger is not None
+        assert ledger["status"] == "reconciled"
+        assert ledger["target_key"] == plan.per_source_reconciliations[1].absorbed_users[0].target_key
+        assert (
+            await connection.fetchval(
+                "SELECT COUNT(*) FROM migration_ledger WHERE source_sha256=$1 AND source_table='scheduled_tasks'",
+                second_sha,
+            )
+            == 1
+        )
+    finally:
+        await connection.close()
 
 
 @pytest.mark.asyncio

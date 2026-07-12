@@ -142,6 +142,18 @@ SOURCE_PRIMARY_KEYS = {
     "channel_oauth_states": ("state_hash",),
     "channel_conversations": ("id",),
 }
+USER_REFERENCE_ALLOWLIST = frozenset(
+    {
+        ("threads_meta", "user_id"),
+        ("runs", "user_id"),
+        ("run_events", "user_id"),
+        ("feedback", "user_id"),
+        ("scheduled_tasks", "user_id"),
+        ("channel_connections", "owner_user_id"),
+        ("channel_oauth_states", "owner_user_id"),
+        ("channel_conversations", "owner_user_id"),
+    }
+)
 
 
 class MigrationErrorCode(StrEnum):
@@ -266,6 +278,27 @@ class NormalizedRow:
 
 
 @dataclass(frozen=True)
+class UserReconciliationRequest:
+    source_sha256: tuple[str, ...]
+    expected_conflicts: int
+
+
+@dataclass(frozen=True)
+class AbsorbedUser:
+    source_key: str
+    target_key: str
+    audit_digest: str
+    canonical_digest: str
+    canonical_values: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SourceReconciliation:
+    user_id_remap: tuple[tuple[str, str], ...] = ()
+    absorbed_users: tuple[AbsorbedUser, ...] = ()
+
+
+@dataclass(frozen=True)
 class DecodedCheckpoint:
     thread_id: str
     checkpoint_ns: str
@@ -317,6 +350,7 @@ class UnionPlan:
     per_source_reference_keys: tuple[frozenset[tuple[str, tuple[str, ...], str]], ...] = ()
     per_source_checkpoint_keys: tuple[frozenset[tuple[str, str, str]], ...] = ()
     source_fingerprints: tuple[tuple[str, int], ...] = ()
+    per_source_reconciliations: tuple[SourceReconciliation, ...] = ()
 
 
 def _known_orm_columns() -> dict[str, frozenset[str]]:
@@ -723,8 +757,15 @@ async def _write_ledger(
     )
 
 
-def _validate_ledger(ledger: Any, *, target_table: str, target_key: str, digest: str) -> None:
-    if ledger["target_table"] != target_table or ledger["target_key"] != target_key or ledger["row_digest"] != digest or ledger["status"] not in {"migrated", "adopted"}:
+def _validate_ledger(
+    ledger: Any,
+    *,
+    target_table: str,
+    target_key: str,
+    digest: str,
+    statuses: frozenset[str] = frozenset({"migrated", "adopted"}),
+) -> None:
+    if ledger["target_table"] != target_table or ledger["target_key"] != target_key or ledger["row_digest"] != digest or ledger["status"] not in statuses:
         raise MigrationError("migration ledger semantic conflict")
 
 
@@ -811,12 +852,14 @@ async def _migrate_business_table(
     *,
     dry_run: bool,
     union_reference_keys: frozenset[tuple[str, tuple[str, ...], str]],
+    reconciliation: SourceReconciliation = SourceReconciliation(),
 ) -> TableMigrationReport:
     import deerflow.persistence.models  # noqa: F401
     from deerflow.persistence.base import Base
 
     target = Base.metadata.tables[table]
-    rows = normalize_business_rows(source, table)
+    source_rows = normalize_business_rows(source, table)
+    rows = _apply_user_reconciliation(table, source_rows, reconciliation)
     inserted = adopted = already = planned = 0
     transaction = connection.transaction()
     await transaction.start()
@@ -863,6 +906,46 @@ async def _migrate_business_table(
                     row_digest=row.digest,
                     status=status,
                 )
+        if table == "users":
+            for absorbed_user in reconciliation.absorbed_users:
+                current_source_key = absorbed_user.source_key
+                canonical_row = NormalizedRow(
+                    absorbed_user.source_key,
+                    absorbed_user.target_key,
+                    absorbed_user.canonical_values,
+                    absorbed_user.canonical_digest,
+                )
+                ledger = await _ledger_row(connection, source_sha256, "users", absorbed_user.source_key)
+                if ledger is not None:
+                    _validate_ledger(
+                        ledger,
+                        target_table="users",
+                        target_key=absorbed_user.target_key,
+                        digest=absorbed_user.audit_digest,
+                        statuses=frozenset({"reconciled"}),
+                    )
+                    target_row = await _fetch_business_target(connection, target, canonical_row)
+                    if target_row is None or hashlib.sha256(_json_canonical(target_row).encode()).hexdigest() != absorbed_user.canonical_digest:
+                        raise MigrationError("reconciled canonical user verification conflict")
+                    already += 1
+                    continue
+                if dry_run:
+                    adopted += 1
+                    continue
+                target_row = await _fetch_business_target(connection, target, canonical_row)
+                if target_row is None or hashlib.sha256(_json_canonical(target_row).encode()).hexdigest() != absorbed_user.canonical_digest:
+                    raise MigrationError("reconciled canonical user verification conflict")
+                await _write_ledger(
+                    connection,
+                    source_sha256=source_sha256,
+                    source_table="users",
+                    source_key=absorbed_user.source_key,
+                    target_table="users",
+                    target_key=absorbed_user.target_key,
+                    row_digest=absorbed_user.audit_digest,
+                    status="reconciled",
+                )
+                adopted += 1
         if dry_run:
             await transaction.rollback()
         else:
@@ -876,7 +959,7 @@ async def _migrate_business_table(
             raise exc.enrich(table=table, source_sha256=source_sha256, source_key=current_source_key)
         raise
     return TableMigrationReport(
-        source_rows=len(rows),
+        source_rows=len(source_rows),
         inserted=inserted,
         adopted=adopted,
         already_migrated=already,
@@ -1467,6 +1550,7 @@ async def migrate_source(
     expected_fingerprint: tuple[str, int] | None = None,
     union_reference_keys: frozenset[tuple[str, tuple[str, ...], str]] | None = None,
     planned_checkpoint_keys: frozenset[tuple[str, str, str]] | None = None,
+    source_reconciliation: SourceReconciliation = SourceReconciliation(),
 ) -> MigrationReport:
     inspection = inspect_source(source)
     _require_fingerprint(inspection.inventory, expected_fingerprint)
@@ -1493,6 +1577,7 @@ async def migrate_source(
                     table,
                     dry_run=dry_run,
                     union_reference_keys=union_reference_keys,
+                    reconciliation=source_reconciliation,
                 )
         checkpoints, writes = decode_checkpoint_rows(source)
         if checkpoints:
@@ -1552,19 +1637,50 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-url-env", default="DATABASE_URL", help="保存目标 PostgreSQL URL 的环境变量名")
     parser.add_argument("--backup-dir", required=True, type=Path, help="写迁移前的只读备份目录")
     parser.add_argument("--dry-run", action="store_true", help="完整预检，不写目标或 ledger，也不创建备份")
+    parser.add_argument("--reconcile-users-by-email", action="store_true", help="显式启用受限的跨来源重复用户归并")
+    parser.add_argument("--reconcile-expected-conflicts", type=int, help="预期且必须精确匹配的用户归并数量")
+    parser.add_argument("--reconcile-source-sha256", action="append", default=[], help="按 --source 顺序重复提供完整来源 SHA256")
     return parser
 
 
-def _print_report(source: Path, report: MigrationReport) -> None:
-    print(f"来源: {source.name} / SHA256 {report.source_sha256[:12]}")
+def _print_report(_source: Path, report: MigrationReport) -> None:
+    print(f"来源 SHA256 {report.source_sha256[:12]}")
     for table, summary in report.tables.items():
         print(f"  {table}: rows={summary.source_rows} inserted={summary.inserted} adopted={summary.adopted} already-migrated={summary.already_migrated} planned={summary.planned_insert} verified={'是' if summary.verified else '否'}")
     for table in report.deferred_empty:
         print(f"  {table}: deferred-empty")
 
 
+def _reconciliation_request_from_args(args: argparse.Namespace) -> UserReconciliationRequest | None:
+    enabled = bool(getattr(args, "reconcile_users_by_email", False))
+    expected = getattr(args, "reconcile_expected_conflicts", None)
+    fingerprints = tuple(getattr(args, "reconcile_source_sha256", ()) or ())
+    if not enabled:
+        if expected is not None or fingerprints:
+            raise _reconciliation_failure("reconciliation options require explicit opt-in")
+        return None
+    if expected is None or len(fingerprints) != len(args.source):
+        raise _reconciliation_failure("reconciliation options are incomplete")
+    if any(len(value) != 64 or any(character not in "0123456789abcdef" for character in value.lower()) for value in fingerprints):
+        raise _reconciliation_failure("reconciliation source fingerprint is invalid")
+    return UserReconciliationRequest(tuple(value.lower() for value in fingerprints), expected)
+
+
+def _source_reconciliation(plan: UnionPlan, index: int) -> SourceReconciliation:
+    if not plan.per_source_reconciliations:
+        return SourceReconciliation()
+    return plan.per_source_reconciliations[index]
+
+
+def _build_union_plan(sources: list[Path], request: UserReconciliationRequest | None) -> UnionPlan:
+    if request is None:
+        return _preflight_cross_source(sources)
+    return _preflight_cross_source(sources, request)
+
+
 async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
-    union_plan = _preflight_cross_source(args.source)
+    reconciliation_request = _reconciliation_request_from_args(args)
+    union_plan = _build_union_plan(args.source, reconciliation_request)
     preflights = []
     for index, source in enumerate(args.source):
         preflight = await migrate_source(
@@ -1573,6 +1689,7 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
             dry_run=True,
             union_reference_keys=union_plan.per_source_reference_keys[index],
             planned_checkpoint_keys=union_plan.per_source_checkpoint_keys[index],
+            source_reconciliation=_source_reconciliation(union_plan, index),
         )
         if not preflight.verified:
             raise MigrationError("dry-run verification failed")
@@ -1593,11 +1710,13 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
             (_report.source_sha256, _report.source_size_bytes),
         )
         frozen_sources.append((source, _report, backup))
-        print(f"备份: {backup.path.name} / SHA256 {backup.sha256[:12]}")
+        print(f"备份已验证 / SHA256 {backup.sha256[:12]}")
     snapshot_paths = [item[2].path for item in frozen_sources]
-    snapshot_plan = _preflight_cross_source(snapshot_paths)
+    snapshot_plan = _build_union_plan(snapshot_paths, reconciliation_request)
     if snapshot_plan.source_fingerprints != union_plan.source_fingerprints:
         raise MigrationError("backup snapshot plan fingerprint mismatch")
+    if snapshot_plan.per_source_reconciliations != union_plan.per_source_reconciliations:
+        raise MigrationError("backup snapshot reconciliation decision mismatch")
     for index, snapshot in enumerate(snapshot_paths):
         await migrate_source(
             snapshot,
@@ -1606,6 +1725,7 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
             expected_fingerprint=snapshot_plan.source_fingerprints[index],
             union_reference_keys=snapshot_plan.per_source_reference_keys[index],
             planned_checkpoint_keys=snapshot_plan.per_source_checkpoint_keys[index],
+            source_reconciliation=_source_reconciliation(snapshot_plan, index),
         )
     for index, (source, _report, backup) in enumerate(frozen_sources):
         report = await migrate_source(
@@ -1615,13 +1735,124 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
             expected_fingerprint=(_report.source_sha256, _report.source_size_bytes),
             union_reference_keys=snapshot_plan.per_source_reference_keys[index],
             planned_checkpoint_keys=snapshot_plan.per_source_checkpoint_keys[index],
+            source_reconciliation=_source_reconciliation(snapshot_plan, index),
         )
         if not report.verified:
             raise MigrationError("migration verification failed")
         _print_report(source, report)
 
 
-def _preflight_cross_source(sources: list[Path]) -> UnionPlan:
+def _apply_user_reconciliation(
+    table: str,
+    rows: list[NormalizedRow],
+    decision: SourceReconciliation,
+) -> list[NormalizedRow]:
+    absorbed = {item.source_key for item in decision.absorbed_users}
+    remap = dict(decision.user_id_remap)
+    transformed = []
+    for row in rows:
+        if table == "users" and row.source_key in absorbed:
+            continue
+        values = dict(row.values)
+        for allowed_table, column in USER_REFERENCE_ALLOWLIST:
+            if table == allowed_table and values.get(column) in remap:
+                values[column] = remap[values[column]]
+        target_key = _json_canonical([values[column] for column in SOURCE_PRIMARY_KEYS[table]])
+        digest = hashlib.sha256(_json_canonical(values).encode()).hexdigest()
+        transformed.append(NormalizedRow(row.source_key, target_key, values, digest))
+    return transformed
+
+
+def _reconciliation_failure(message: str, source_sha256: str = "", source_key: str = "") -> MigrationError:
+    return MigrationError(
+        message,
+        code=MigrationErrorCode.CONFLICT,
+        table="users",
+        source_sha256=source_sha256,
+        source_key=source_key,
+    )
+
+
+def _build_user_reconciliations(
+    fingerprints: list[tuple[str, int]],
+    business_by_source: list[dict[str, list[NormalizedRow]]],
+    request: UserReconciliationRequest | None,
+) -> tuple[SourceReconciliation, ...]:
+    empty = tuple(SourceReconciliation() for _ in fingerprints)
+    if request is None:
+        return empty
+    actual_sha = tuple(item[0] for item in fingerprints)
+    if request.source_sha256 != actual_sha or len(request.source_sha256) != len(fingerprints):
+        raise _reconciliation_failure("reconciliation source fingerprint order mismatch", actual_sha[-1] if actual_sha else "")
+    if request.expected_conflicts < 1:
+        raise _reconciliation_failure("reconciliation expected conflict count must be positive", actual_sha[-1] if actual_sha else "")
+    first_users = business_by_source[0].get("users", []) if business_by_source else []
+    canonical_by_email: dict[str, NormalizedRow] = {}
+    for row in first_users:
+        email_key = _json_canonical([row.values["email"]])
+        if email_key in canonical_by_email:
+            raise _reconciliation_failure("ambiguous canonical reconciliation user", actual_sha[0], email_key)
+        canonical_by_email[email_key] = row
+
+    matches: dict[str, list[tuple[int, NormalizedRow, NormalizedRow]]] = {}
+    for source_index, tables in enumerate(business_by_source[1:], 1):
+        for row in tables.get("users", []):
+            email_key = _json_canonical([row.values["email"]])
+            canonical = canonical_by_email.get(email_key)
+            if canonical is None or canonical.values["id"] == row.values["id"]:
+                continue
+            matches.setdefault(email_key, []).append((source_index, row, canonical))
+    if any(len(items) != 1 for items in matches.values()):
+        key = next(key for key, items in sorted(matches.items()) if len(items) != 1)
+        raise _reconciliation_failure("ambiguous later reconciliation user", actual_sha[-1], key)
+    flattened = [items[0] for _key, items in sorted(matches.items())]
+    if len(flattened) != request.expected_conflicts:
+        raise _reconciliation_failure("reconciliation conflict count mismatch", actual_sha[-1] if actual_sha else "")
+
+    remaps: list[list[tuple[str, str]]] = [[] for _ in fingerprints]
+    absorbed: list[list[AbsorbedUser]] = [[] for _ in fingerprints]
+    all_users = [row for tables in business_by_source for row in tables.get("users", [])]
+    primary_key_counts = Counter(row.target_key for row in all_users)
+    non_email_unique_counts = Counter((name, key) for user in all_users for name, key in _business_unique_keys("users", user.values) if name != "ix_users_email")
+    for source_index, row, canonical in flattened:
+        email_key = _json_canonical([row.values["email"]])
+        if canonical.values["system_role"] != "system_admin":
+            raise _reconciliation_failure("canonical reconciliation role mismatch", actual_sha[0], email_key)
+        if row.values["system_role"] != "admin":
+            raise _reconciliation_failure("later reconciliation role mismatch", actual_sha[source_index], email_key)
+        if primary_key_counts[row.target_key] != 1:
+            raise _reconciliation_failure("reconciliation includes a non-email primary-key conflict", actual_sha[source_index], row.target_key)
+        for unique_name, unique_key in _business_unique_keys("users", row.values):
+            if unique_name != "ix_users_email" and non_email_unique_counts[(unique_name, unique_key)] != 1:
+                raise _reconciliation_failure("reconciliation includes a non-email unique conflict", actual_sha[source_index], unique_key)
+        canonical_target_key = canonical.target_key
+        audit_digest = hashlib.sha256(
+            _json_canonical(
+                {
+                    "decision": "users-email-system-admin",
+                    "source_digest": row.digest,
+                    "canonical_digest": canonical.digest,
+                    "canonical_target_key": canonical_target_key,
+                }
+            ).encode()
+        ).hexdigest()
+        remaps[source_index].append((str(row.values["id"]), str(canonical.values["id"])))
+        absorbed[source_index].append(
+            AbsorbedUser(
+                row.source_key,
+                canonical_target_key,
+                audit_digest,
+                canonical.digest,
+                dict(canonical.values),
+            )
+        )
+    return tuple(SourceReconciliation(tuple(sorted(source_remaps)), tuple(sorted(source_absorbed, key=lambda item: item.source_key.encode()))) for source_remaps, source_absorbed in zip(remaps, absorbed, strict=True))
+
+
+def _preflight_cross_source(
+    sources: list[Path],
+    reconciliation_request: UserReconciliationRequest | None = None,
+) -> UnionPlan:
     seen: dict[tuple[str, str], str] = {}
 
     def register(
@@ -1645,14 +1876,32 @@ def _preflight_cross_source(sources: list[Path]) -> UnionPlan:
         seen[identity] = digest
 
     business_rows: list[tuple[str, NormalizedRow]] = []
-    source_fingerprints = []
+    source_fingerprints: list[tuple[str, int]] = []
+    inspections = []
+    business_by_source: list[dict[str, list[NormalizedRow]]] = []
     for source in sources:
         inspection = inspect_source(source)
+        inspections.append(inspection)
         source_fingerprints.append((inspection.inventory.sha256, inspection.inventory.size_bytes))
+        table_names = {table.name for table in inspection.inventory.tables}
+        source_tables = {table: normalize_business_rows(source, table) for table in ORM_TABLE_ORDER if table in table_names}
+        business_by_source.append(source_tables)
+    reconciliations = _build_user_reconciliations(
+        source_fingerprints,
+        business_by_source,
+        reconciliation_request,
+    )
+    for source, inspection, source_tables, reconciliation in zip(
+        sources,
+        inspections,
+        business_by_source,
+        reconciliations,
+        strict=True,
+    ):
         table_names = {table.name for table in inspection.inventory.tables}
         for table in ORM_TABLE_ORDER:
             if table in table_names:
-                for row in normalize_business_rows(source, table):
+                for row in _apply_user_reconciliation(table, source_tables[table], reconciliation):
                     business_rows.append((table, row))
                     register(
                         table,
@@ -1729,13 +1978,13 @@ def _preflight_cross_source(sources: list[Path]) -> UnionPlan:
     accumulated_checkpoints: set[tuple[str, str, str]] = set()
     per_source_refs = []
     per_source_checkpoints = []
-    for source in sources:
+    for source, reconciliation in zip(sources, reconciliations, strict=True):
         inspection = inspect_source(source)
         table_names = {table.name for table in inspection.inventory.tables}
         for table in ORM_TABLE_ORDER:
             if table not in table_names:
                 continue
-            for row in normalize_business_rows(source, table):
+            for row in _apply_user_reconciliation(table, normalize_business_rows(source, table), reconciliation):
                 for referenced_table, columns in referenced_specs:
                     if table == referenced_table:
                         accumulated_refs.add((table, columns, _json_canonical([row.values[column] for column in columns])))
@@ -1748,6 +1997,7 @@ def _preflight_cross_source(sources: list[Path]) -> UnionPlan:
         tuple(per_source_refs),
         tuple(per_source_checkpoints),
         tuple(source_fingerprints),
+        reconciliations,
     )
 
 

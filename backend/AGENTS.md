@@ -671,6 +671,22 @@ Store 在 raw SQL transaction 内验证 timestamp/TTL/value 并提交 ledger 后
 输出结构化安全字段（code、table、source SHA 前缀、stable key hash），不得渲染原始异常、
 业务值、路径或连接 URL。
 
+跨来源重复用户归并默认关闭，只允许显式方案 A：同时提供
+`--reconcile-users-by-email`、精确的 `--reconcile-expected-conflicts`，并按每个
+`--source` 的顺序重复提供完整 `--reconcile-source-sha256`。只有首来源中唯一的
+`system_admin` 可以按唯一 email 吸收后续来源中同 email、不同 id、角色为 `admin` 的
+用户；顺序、fingerprint、数量、角色或唯一性任一不符都必须在 target connect 前失败。
+被吸收 users 行不写第二个用户，而以 `status=reconciled`、canonical target key 和决策
+digest 写 migration ledger；引用行保留原 source key，并以归一化后的 target key/digest
+写 ledger。原 source、dry-run 和 backup 规则不变，snapshot 必须重建出完全相同的决策。
+
+用户引用禁止按列名或未声明的 SQLAlchemy FK 猜测。固定 allowlist 仅为
+`threads_meta.user_id`、`runs.user_id`、`run_events.user_id`、`feedback.user_id`、
+`scheduled_tasks.user_id`、`channel_connections.owner_user_id`、
+`channel_oauth_states.owner_user_id`、`channel_conversations.owner_user_id`。
+`channel_connections.bot_user_id` 是外部平台 bot 标识，绝不改写。schema 新增潜在内部
+用户引用时，exact schema 校验应先 fail closed，再通过代码、测试和本节文档显式扩展。
+
 **Authoring a new revision**:
 ```bash
 cd backend && make migrate-rev MSG="add foo column to runs"

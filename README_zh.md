@@ -136,6 +136,20 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    可重复 `--source` 迁移多个来源。遇到未知表、非空 deferred 项目表、跨来源主键冲突、
    解码或 read-back 校验失败时命令会停止；输出仅包含 fingerprint、计数和脱敏错误。
 
+   默认不会自动合并跨来源用户。若已经人工确认“首来源 `system_admin` 按唯一 email
+   吸收后续来源 legacy `admin`”方案，必须显式绑定来源顺序、完整 fingerprint 和精确
+   冲突数量，例如：
+
+   ```bash
+   make migrate-sqlite ARGS="--source /path/first.db --source /path/second.db --backup-dir /path/backups --dry-run --reconcile-users-by-email --reconcile-expected-conflicts 1 --reconcile-source-sha256 FIRST_SHA256 --reconcile-source-sha256 SECOND_SHA256"
+   ```
+
+   任一 fingerprint、顺序、数量、角色或唯一性条件不符都会在连接目标库前停止。归并只
+   改写明确登记的 DeerFlow 用户引用并保留所有业务行；外部平台的
+   `channel_connections.bot_user_id` 不会改写。被吸收用户和引用改写都会写入 migration
+   ledger 以支持审计和幂等重跑。正式迁移仍会先创建只读 snapshot，并要求 snapshot
+   复检得到完全相同的归并决策。
+
    如果你要提交本地安装、配置或运行问题，可以执行 `make support-bundle`。
    命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成
    `*-issue-summary.md`、面向 AI 辅助提 issue 的 `*-issue-draft.md`，以及可选证据
