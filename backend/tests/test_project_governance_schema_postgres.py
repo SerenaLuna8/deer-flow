@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from alembic import command
-from sqlalchemy import inspect, text
+from sqlalchemy import CHAR, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -53,6 +53,12 @@ def _foreign_key_targets(foreign_keys: list[dict]) -> set[tuple[str, str, str]]:
     }
 
 
+def _assert_token_hash_is_char_64(columns: list[dict]) -> None:
+    token_hash = next(column for column in columns if column["name"] == "token_hash")
+    assert isinstance(token_hash["type"], CHAR)
+    assert token_hash["type"].length == 64
+
+
 @pytest.mark.asyncio
 async def test_m2_schema_has_governance_constraints(
     migrated_postgres_database_url: str,
@@ -89,8 +95,10 @@ async def test_m2_schema_has_governance_constraints(
         assert {
             "ck_project_invitations_role",
             "ck_project_invitations_status",
+            "ck_project_invitations_token_hash",
             "ck_project_invitations_version",
         } <= {constraint["name"] for constraint in invitation_checks}
+        _assert_token_hash_is_char_64(invitation_columns)
         assert (
             "deletion_requested_by_user_id",
             "users",
@@ -178,10 +186,12 @@ async def test_m1_database_upgrades_to_m2_without_losing_project_data(
             ).one()
             version = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
             tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
+            invitation_columns = await conn.run_sync(lambda sync: inspect(sync).get_columns("project_invitations"))
 
         assert project == ("active", None, None, None)
         assert membership == ("active", None, None, None, None)
         assert "project_invitations" in tables
+        _assert_token_hash_is_char_64(invitation_columns)
         assert version == "0006_project_governance"
     finally:
         await engine.dispose()
@@ -312,6 +322,14 @@ async def test_governance_defaults_enums_and_partial_unique_index(
             (
                 "UPDATE project_invitations SET version=0 WHERE id=:id",
                 {"id": invitation_id},
+            ),
+            (
+                "UPDATE project_invitations SET token_hash=:token_hash WHERE id=:id",
+                {"id": invitation_id, "token_hash": "a" * 63},
+            ),
+            (
+                "UPDATE project_invitations SET token_hash=:token_hash WHERE id=:id",
+                {"id": invitation_id, "token_hash": "g" * 64},
             ),
         )
         for statement, parameters in invalid_statements:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, String, UniqueConstraint, Uuid, text
+from sqlalchemy import CHAR, BigInteger, CheckConstraint, DateTime, ForeignKey, Index, String, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -20,7 +20,7 @@ class ProjectInvitationRow(Base):
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     invited_email: Mapped[str] = mapped_column(String(320), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)
-    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
@@ -33,6 +33,7 @@ class ProjectInvitationRow(Base):
     __table_args__ = (
         CheckConstraint("role IN ('editor', 'runner', 'viewer')", name="ck_project_invitations_role"),
         CheckConstraint("status IN ('pending', 'redeemed', 'revoked', 'expired')", name="ck_project_invitations_status"),
+        CheckConstraint("token_hash ~ '^[0-9a-f]{64}$'", name="ck_project_invitations_token_hash"),
         CheckConstraint("version >= 1", name="ck_project_invitations_version"),
         UniqueConstraint("token_hash", name="uq_project_invitations_token_hash"),
         Index(
