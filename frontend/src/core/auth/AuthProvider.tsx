@@ -184,6 +184,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   }, [staticMode, router, queryClient, identityCoordinator]);
 
   useEffect(() => {
+    identityCoordinator.activate();
     return () => identityCoordinator.dispose();
   }, [identityCoordinator]);
 

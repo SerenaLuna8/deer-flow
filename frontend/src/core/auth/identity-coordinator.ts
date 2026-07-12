@@ -5,6 +5,7 @@ export interface AuthRefreshAttempt {
 }
 
 export interface AuthIdentityCoordinator {
+  activate: () => void;
   startRefresh: () => AuthRefreshAttempt;
   beginIdentityChange: () => number;
   isCurrent: (attempt: AuthRefreshAttempt) => boolean;
@@ -23,7 +24,7 @@ export function createAuthIdentityCoordinator(
 ): AuthIdentityCoordinator {
   let generation = 0;
   let activeRefresh: AuthRefreshAttempt | null = null;
-  let disposed = false;
+  let active = true;
 
   const abortRefresh = () => {
     activeRefresh?.controller.abort();
@@ -31,11 +32,21 @@ export function createAuthIdentityCoordinator(
   };
 
   return {
+    activate() {
+      if (active) return;
+      active = true;
+      generation += 1;
+      onLoadingChange(false);
+    },
     startRefresh() {
       abortRefresh();
       generation += 1;
       const controller = new AbortController();
       const attempt = { generation, controller, signal: controller.signal };
+      if (!active) {
+        controller.abort();
+        return attempt;
+      }
       activeRefresh = attempt;
       onLoadingChange(true);
       return attempt;
@@ -43,30 +54,31 @@ export function createAuthIdentityCoordinator(
     beginIdentityChange() {
       abortRefresh();
       generation += 1;
+      if (!active) return generation;
       onLoadingChange(false);
       return generation;
     },
     isCurrent(attempt) {
       return (
-        !disposed &&
+        active &&
         activeRefresh === attempt &&
         generation === attempt.generation &&
         !attempt.signal.aborted
       );
     },
     isGenerationCurrent(candidate) {
-      return !disposed && generation === candidate;
+      return active && generation === candidate;
     },
     async commitAtGeneration(candidate, transition, commit) {
-      if (disposed || generation !== candidate) return false;
+      if (!active || generation !== candidate) return false;
       await transition();
-      if (disposed || generation !== candidate) return false;
+      if (!active || generation !== candidate) return false;
       commit();
       return true;
     },
     finishRefresh(attempt) {
       if (
-        disposed ||
+        !active ||
         activeRefresh !== attempt ||
         generation !== attempt.generation
       ) {
@@ -77,8 +89,8 @@ export function createAuthIdentityCoordinator(
       return true;
     },
     dispose() {
-      if (disposed) return;
-      disposed = true;
+      if (!active) return;
+      active = false;
       generation += 1;
       abortRefresh();
     },

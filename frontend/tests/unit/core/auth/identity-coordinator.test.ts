@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, test, rs } from "@rstest/core";
 
 import { createAuthIdentityCoordinator } from "@/core/auth/identity-coordinator";
@@ -90,5 +93,73 @@ describe("auth identity coordinator", () => {
     expect(refresh.signal.aborted).toBe(true);
     expect(coordinator.finishRefresh(refresh)).toBe(false);
     expect(loading).toEqual([true]);
+  });
+
+  test("reactivates after Strict Effects replay without reviving the old attempt", async () => {
+    const loading: boolean[] = [];
+    const coordinator = createAuthIdentityCoordinator((value) =>
+      loading.push(value),
+    );
+    const oldRefresh = coordinator.startRefresh();
+    coordinator.dispose();
+    coordinator.activate();
+    const newRefresh = coordinator.startRefresh();
+    const commit = rs.fn();
+
+    expect(oldRefresh.signal.aborted).toBe(true);
+    expect(coordinator.isCurrent(oldRefresh)).toBe(false);
+    expect(coordinator.isCurrent(newRefresh)).toBe(true);
+    await expect(
+      coordinator.commitAtGeneration(
+        oldRefresh.generation,
+        async () => undefined,
+        commit,
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      coordinator.commitAtGeneration(
+        newRefresh.generation,
+        async () => undefined,
+        commit,
+      ),
+    ).resolves.toBe(true);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(coordinator.finishRefresh(newRefresh)).toBe(true);
+    expect(loading.at(-1)).toBe(false);
+  });
+
+  test("inactive stale callbacks cannot set loading or commit identity", async () => {
+    const loading: boolean[] = [];
+    const coordinator = createAuthIdentityCoordinator((value) =>
+      loading.push(value),
+    );
+    coordinator.dispose();
+    const refresh = coordinator.startRefresh();
+    const generation = coordinator.beginIdentityChange();
+    const commit = rs.fn();
+
+    expect(refresh.signal.aborted).toBe(true);
+    expect(coordinator.isCurrent(refresh)).toBe(false);
+    await expect(
+      coordinator.commitAtGeneration(generation, async () => undefined, commit),
+    ).resolves.toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    expect(loading).toEqual([]);
+
+    coordinator.activate();
+    await expect(
+      coordinator.commitAtGeneration(generation, async () => undefined, commit),
+    ).resolves.toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    expect(loading).toEqual([false]);
+  });
+
+  test("AuthProvider effect activates before registering dispose cleanup", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/core/auth/AuthProvider.tsx"),
+      "utf8",
+    );
+    expect(source).toContain("identityCoordinator.activate();");
+    expect(source).toContain("return () => identityCoordinator.dispose();");
   });
 });
