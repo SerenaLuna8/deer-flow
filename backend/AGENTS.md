@@ -653,6 +653,10 @@ setup/application pool，也绝不能持有 transaction/virtualxid（LangGraph �
 `idle_session_timeout` 先通过 `current_setting(..., true)` 探测，旧版 PostgreSQL 不支持时
 跳过该项，不能因 unknown parameter 阻断 setup。
 专用 session 关闭自动恢复设置并作为 unlock 兜底，禁止放宽运行期连接超时。
+取锁必须使用 `pg_try_advisory_lock` + client-side 短轮询，禁止阻塞式
+`pg_advisory_lock`：后者等待时自身持有 virtualxid，会与 LangGraph
+`CREATE INDEX CONCURRENTLY` 形成 wait-cycle。未取得锁时取消只关闭专用 session；取得锁
+后才在 finally 显式 unlock。
 
 **一次性 SQLite 数据迁移**：`make migrate-sqlite ARGS="..."` 调用
 `scripts/migrate_sqlite_to_postgres.py`。脚本只通过 Task 1 的 `mode=ro` /

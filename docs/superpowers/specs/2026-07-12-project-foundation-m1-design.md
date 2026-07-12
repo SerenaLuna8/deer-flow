@@ -208,6 +208,9 @@ setup/application pool、不开 transaction，也不持有会阻塞 `CREATE INDE
 释放 session lock，运行期连接池的超时配置保持不变。
 其中 `idle_session_timeout` 需先用 missing-ok `current_setting` 探测，以兼容未提供该参数
 的 PostgreSQL 版本。
+锁竞争使用非阻塞 `pg_try_advisory_lock` 与 client-side 短轮询，使每次失败 SQL 立即完成
+并释放 virtualxid；禁止使用会在等待期间阻塞 concurrent-index DDL 的
+`pg_advisory_lock`。
 
 ### 6.1 配置
 

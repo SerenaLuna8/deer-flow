@@ -217,6 +217,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
 @pytest.mark.asyncio
 async def test_complete_bootstrap_lock_uses_dedicated_autocommit_session_and_cleanup(monkeypatch) -> None:
     calls = []
+    lock_results = iter([False, False, True])
     connection = MagicMock()
 
     async def execute(statement, *_args):
@@ -226,6 +227,8 @@ async def test_complete_bootstrap_lock_uses_dedicated_autocommit_session_and_cle
         calls.append(str(statement))
         if "current_setting" in str(statement):
             return "0"
+        if "pg_try_advisory_lock" in str(statement):
+            return next(lock_results)
         return True
 
     connection.execute = AsyncMock(side_effect=execute)
@@ -238,6 +241,11 @@ async def test_complete_bootstrap_lock_uses_dedicated_autocommit_session_and_cle
     lock_engine.dispose = AsyncMock(side_effect=lambda: calls.append("dispose"))
     monkeypatch.setattr(setup_postgres, "_create_bootstrap_lock_engine", lambda _url: lock_engine)
 
+    async def sleep(_seconds):
+        calls.append("sleep")
+
+    monkeypatch.setattr(setup_postgres.asyncio, "sleep", sleep)
+
     async with setup_postgres._complete_bootstrap_lock("postgresql://owner:private-password@localhost/deerflow_test_1_abc"):
         calls.append("bootstrap")
 
@@ -246,12 +254,17 @@ async def test_complete_bootstrap_lock_uses_dedicated_autocommit_session_and_cle
         "SET idle_in_transaction_session_timeout = 0",
         "SELECT current_setting('idle_session_timeout', true)",
         "SET idle_session_timeout = 0",
-        "SELECT pg_advisory_lock(:lock_key)",
+        "SELECT pg_try_advisory_lock(:lock_key)",
+        "sleep",
+        "SELECT pg_try_advisory_lock(:lock_key)",
+        "sleep",
+        "SELECT pg_try_advisory_lock(:lock_key)",
         "bootstrap",
         "SELECT pg_advisory_unlock(:lock_key)",
         "dispose",
     ]
     connection.begin.assert_not_called()
+    assert all("SELECT pg_advisory_lock" not in call for call in calls)
     connection_context.__aexit__.assert_awaited_once()
 
 
@@ -279,6 +292,8 @@ async def test_complete_bootstrap_lock_skips_idle_session_timeout_when_server_la
         statements.append(str(statement))
         if "current_setting" in str(statement):
             return None
+        if "pg_try_advisory_lock" in str(statement):
+            return True
         return True
 
     connection.execute = AsyncMock(side_effect=execute)
@@ -296,6 +311,38 @@ async def test_complete_bootstrap_lock_skips_idle_session_timeout_when_server_la
 
     assert "SELECT current_setting('idle_session_timeout', true)" in statements
     assert "SET idle_session_timeout = 0" not in statements
+
+
+@pytest.mark.asyncio
+async def test_complete_bootstrap_lock_cancellation_while_polling_closes_without_unlock(monkeypatch) -> None:
+    statements = []
+    connection = MagicMock()
+    connection.execute = AsyncMock()
+
+    async def scalar(statement, *_args):
+        statements.append(str(statement))
+        if "current_setting" in str(statement):
+            return None
+        return False
+
+    connection.scalar = AsyncMock(side_effect=scalar)
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=connection)
+    context.__aexit__ = AsyncMock(return_value=None)
+    lock_engine = MagicMock()
+    lock_engine.connect.return_value = context
+    lock_engine.dispose = AsyncMock()
+    monkeypatch.setattr(setup_postgres, "_create_bootstrap_lock_engine", lambda _url: lock_engine)
+    monkeypatch.setattr(setup_postgres.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError))
+
+    with pytest.raises(asyncio.CancelledError):
+        async with setup_postgres._complete_bootstrap_lock("postgresql://owner:private-password@localhost/deerflow_test_1_abc"):
+            pytest.fail("lock acquired")
+
+    assert any("pg_try_advisory_lock" in statement for statement in statements)
+    assert all("pg_advisory_unlock" not in statement for statement in statements)
+    context.__aexit__.assert_awaited_once()
+    lock_engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -535,7 +582,7 @@ async def test_real_postgres_concurrent_setup_owner_bootstrap_and_check(
         inspector = await setup_postgres.asyncpg.connect(setup_postgres._asyncpg_url(admin_url))
         try:
             coordination_state = await inspector.fetchval(
-                "SELECT state FROM pg_stat_activity WHERE datname=$1 AND query LIKE '%pg_advisory_lock%' ORDER BY backend_start DESC LIMIT 1",
+                "SELECT state FROM pg_stat_activity WHERE datname=$1 AND query LIKE '%advisory_lock%' ORDER BY backend_start DESC LIMIT 1",
                 database,
             )
         finally:

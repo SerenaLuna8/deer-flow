@@ -29,6 +29,7 @@ _POSTGRESQL_DRIVERS = frozenset({"postgresql", "postgresql+asyncpg"})
 _DUPLICATE_DATABASE_SQLSTATE = "42P04"
 _SETUP_LOCK_KEY = 0x0DEE_12F1_5E7D_0004
 _BOOTSTRAP_LOCK_KEY = 0x0DEE_12F1_5E7D_0005
+_BOOTSTRAP_LOCK_POLL_SECONDS = 0.1
 
 
 class PostgresSetupError(RuntimeError):
@@ -186,10 +187,11 @@ async def _complete_bootstrap_lock(database_url: str):
             idle_session_timeout = await connection.scalar(text("SELECT current_setting('idle_session_timeout', true)"))
             if idle_session_timeout is not None:
                 await connection.execute(text("SET idle_session_timeout = 0"))
-            await connection.execute(
-                text("SELECT pg_advisory_lock(:lock_key)"),
+            while not await connection.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_key)"),
                 {"lock_key": _BOOTSTRAP_LOCK_KEY},
-            )
+            ):
+                await asyncio.sleep(_BOOTSTRAP_LOCK_POLL_SECONDS)
             try:
                 yield
             finally:
