@@ -391,7 +391,7 @@ async def test_concurrent_initialize_creates_exactly_one_admin_and_default_proje
                 ) == 0
 
             loser_login = await second.post(
-                "/api/v1/auth/login",
+                "/api/v1/auth/login/local",
                 data={
                     "username": payloads[loser_index]["email"],
                     "password": payloads[loser_index]["password"],
@@ -451,7 +451,7 @@ async def test_failed_initialize_can_recover_through_real_setup_bootstrap(migrat
             await _bootstrap_default_project_schema(engine)
 
             login = await client.post(
-                "/api/v1/auth/login",
+                "/api/v1/auth/login/local",
                 data={"username": payload["email"], "password": payload["password"]},
             )
             assert login.status_code == 200
