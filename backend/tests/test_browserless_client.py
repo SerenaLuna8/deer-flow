@@ -272,7 +272,7 @@ class TestBrowserlessTools:
         assert "Error:" not in result
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
-    async def test_web_fetch_tool_error(self, mock_get_client):
+    async def test_web_fetch_tool_error(self, mock_get_client, public_example_dns):
         """web_fetch_tool returns error when fetch fails."""
         mock_client = MagicMock()
         mock_client.fetch_html = AsyncMock(return_value="Error: Browserless returned empty response")
@@ -281,10 +281,11 @@ class TestBrowserlessTools:
         with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
-        assert result.startswith("Error:")
+        assert result == "Error: Browserless returned empty response"
+        mock_client.fetch_html.assert_called_once()
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
-    async def test_web_fetch_tool_exception(self, mock_get_client):
+    async def test_web_fetch_tool_exception(self, mock_get_client, public_example_dns):
         """web_fetch_tool returns error when client raises exception."""
         mock_client = MagicMock()
         mock_client.fetch_html = AsyncMock(side_effect=Exception("Unexpected error"))
@@ -293,7 +294,8 @@ class TestBrowserlessTools:
         with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
-        assert result.startswith("Error:")
+        assert result == "Error: Unexpected error"
+        mock_client.fetch_html.assert_called_once()
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_tool_rejects_metadata_ip(self, mock_get_client):
