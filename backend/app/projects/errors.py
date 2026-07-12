@@ -41,3 +41,9 @@ class ProjectDatabaseUnavailable(Exception):
 
     def __init__(self) -> None:
         super().__init__("Project storage unavailable")
+
+
+class ProjectBootstrapFailed(Exception):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__("Project bootstrap failed")

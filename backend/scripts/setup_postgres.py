@@ -19,6 +19,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.projects.errors import ProjectBootstrapFailed
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import _get_head_revision, bootstrap_schema
 
@@ -215,7 +216,10 @@ async def _bootstrap_existing(database_url: str) -> str:
                 await connection.execute(text("SELECT 1"))
             await bootstrap_schema(engine)
             await _bootstrap_langgraph_schemas(database_url)
+            await _bootstrap_default_project_schema(engine)
         return _get_head_revision()
+    except ProjectBootstrapFailed as exc:
+        raise PostgresSetupError(exc.code) from None
     except Exception:
         raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None
     finally:
@@ -223,6 +227,15 @@ async def _bootstrap_existing(database_url: str) -> str:
             await engine.dispose()
         except Exception:
             raise PostgresSetupError("PostgreSQL engine 清理失败；请确认没有其他初始化任务仍在运行") from None
+
+
+async def _bootstrap_default_project_schema(engine: AsyncEngine) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.projects.bootstrap import bootstrap_default_project
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        await bootstrap_default_project(session)
 
 
 async def setup_postgres(

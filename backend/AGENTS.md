@@ -760,6 +760,12 @@ resolver 的单条 joined SELECT 退出后先结束只读 transaction，mutation
 中复查完整 scope/version，并把写入与 read-back 放在同一 transaction，只有 read-back 成功
 才 commit。调用方不得预先开启 transaction；该误用的 `InvalidRequestError` 不得伪装成
 数据库不可用。
+项目 HTTP API 统一挂载 `/api/projects`，使用 request-scoped session 与认证 dependency；
+项目 path 只接受 UUID，项目专属的 path/query/body 校验统一返回
+`PROJECT_VALIDATION_FAILED`，不改变其他 router。默认项目 bootstrap 使用 transaction-level
+advisory lock 和固定 `default-project` slug；只在唯一 `system_admin` 可确定且现有结构完整
+时 create/existing，歧义、slug collision 或 partial state 均 fail closed。普通 register
+不加入默认项目；首次 initialize 后 bootstrap 失败时由 `setup-db` 安全重试恢复。
 
 ### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
 

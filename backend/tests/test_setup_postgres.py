@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from postgres_utils import RedactedURL, replace_database
 
+from app.projects.errors import ProjectBootstrapFailed
 from scripts import check_postgres, setup_postgres
 
 
@@ -198,8 +199,12 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     async def langgraph(_database_url):
         calls.append("langgraph")
 
+    async def projects(_engine):
+        calls.append("projects")
+
     monkeypatch.setattr(setup_postgres, "bootstrap_schema", bootstrap)
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", langgraph)
+    monkeypatch.setattr(setup_postgres, "_bootstrap_default_project_schema", projects)
     monkeypatch.setattr(setup_postgres, "_get_head_revision", lambda: "head")
 
     assert await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc") == "head"
@@ -208,10 +213,42 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
         "SELECT 1",
         "orm",
         "langgraph",
+        "projects",
         "lock:exit",
         "dispose",
     ]
     connection_context.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_existing_preserves_ambiguous_admin_code(monkeypatch) -> None:
+    connection = AsyncMock()
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=connection)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine = MagicMock()
+    engine.connect.return_value = connection_context
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr(setup_postgres, "_create_setup_engine", lambda _config: engine)
+
+    @asynccontextmanager
+    async def coordination_lock(_database_url):
+        yield
+
+    monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
+    monkeypatch.setattr(setup_postgres, "bootstrap_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", AsyncMock())
+    monkeypatch.setattr(
+        setup_postgres,
+        "_bootstrap_default_project_schema",
+        AsyncMock(side_effect=ProjectBootstrapFailed("AMBIGUOUS_BOOTSTRAP_ADMIN")),
+    )
+
+    with pytest.raises(setup_postgres.PostgresSetupError) as exc_info:
+        await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc")
+    assert str(exc_info.value) == "AMBIGUOUS_BOOTSTRAP_ADMIN"
+    assert "private-password" not in str(exc_info.value)
+    engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.asyncio

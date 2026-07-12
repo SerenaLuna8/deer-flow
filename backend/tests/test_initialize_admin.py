@@ -8,6 +8,7 @@ and public accessibility (no auth cookie required).
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -94,6 +95,56 @@ def test_initialize_needs_setup_false(client):
     me = client.get("/api/v1/auth/me")
     assert me.status_code == 200
     assert me.json()["needs_setup"] is False
+
+
+def test_initialize_bootstraps_default_project_and_real_csrf_flow(client):
+    initialized = client.post("/api/v1/auth/initialize", json=_init_payload())
+    assert initialized.status_code == 201
+
+    projects = client.get("/api/projects")
+    assert projects.status_code == 200
+    assert [item["slug"] for item in projects.json()["items"]] == ["default-project"]
+    assert projects.json()["items"][0]["role"] == "admin"
+
+    missing_csrf = client.post("/api/projects", json={"slug": "csrf-project", "display_name": "CSRF"})
+    assert missing_csrf.status_code == 403
+    csrf_token = client.cookies.get("csrf_token")
+    created = client.post(
+        "/api/projects",
+        json={"slug": "csrf-project", "display_name": "CSRF"},
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert created.status_code == 201
+    assert created.json()["slug"] == "csrf-project"
+
+
+def test_register_does_not_grant_default_project_membership(client):
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={"email": "regular@example.com", "password": "Tr0ub4dor3a"},
+    )
+    assert registered.status_code == 201
+    projects = client.get("/api/projects")
+    assert projects.status_code == 200
+    assert projects.json() == {"items": [], "next_cursor": None}
+
+
+def test_initialize_bootstrap_failure_is_sanitized_and_does_not_issue_session(client, monkeypatch):
+    from app.projects.errors import ProjectBootstrapFailed
+
+    bootstrap = AsyncMock(side_effect=ProjectBootstrapFailed("AMBIGUOUS_BOOTSTRAP_ADMIN"))
+    monkeypatch.setattr("app.projects.bootstrap.bootstrap_default_project", bootstrap)
+    response = client.post("/api/v1/auth/initialize", json=_init_payload())
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {
+            "code": "AMBIGUOUS_BOOTSTRAP_ADMIN",
+            "message": "Project bootstrap failed",
+        }
+    }
+    assert "access_token" not in response.cookies
+    assert "postgresql" not in response.text
+    bootstrap.assert_awaited_once()
 
 
 # ── Rejection when already initialized ───────────────────────────────────

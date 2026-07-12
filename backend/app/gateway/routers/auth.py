@@ -529,6 +529,21 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
             detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
         )
 
+    from app.projects.bootstrap import bootstrap_default_project
+    from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
+    from deerflow.persistence.engine import get_session_factory
+
+    factory = get_session_factory()
+    if factory is None:
+        raise HTTPException(status_code=503, detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"})
+    try:
+        async with factory() as session:
+            await bootstrap_default_project(session)
+    except ProjectBootstrapFailed as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.code, "message": "Project bootstrap failed"}) from None
+    except ProjectDatabaseUnavailable:
+        raise HTTPException(status_code=503, detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"}) from None
+
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request)
 

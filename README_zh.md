@@ -139,6 +139,10 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    只修改当前成员自己的偏好，不影响项目中的其他成员。
    `ProjectContext` 解析和后续 repository 操作各自结束自己的 transaction；修改操作会在
    同一 transaction 内再次核对成员版本并完成 read-back，确认结果有效后才提交。
+   项目 API 位于 `/api/projects`，只从认证 session 取得用户身份；默认项目使用固定
+   `default-project` slug，并在 PostgreSQL transaction advisory lock 下幂等创建。首次
+   `/initialize` 已创建管理员但默认项目初始化失败时不会签发 cookie；修复数据库冲突后可
+   运行 `make setup-db` 重试，系统不会猜测新 slug 或自动挂接不完整项目。
    为避免误删项目，项目表或成员关系表存在数据时，数据库会拒绝降级到 0004；必须先按
    运维方案迁出数据，不能依赖 downgrade 自动删除。
 

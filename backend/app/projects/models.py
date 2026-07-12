@@ -57,3 +57,16 @@ class ProjectView:
 class ProjectPage:
     items: tuple[ProjectView, ...]
     next_cursor: str | None
+
+
+class BootstrapStatus(StrEnum):
+    NO_USERS = "no_users"
+    WAITING_FOR_ADMIN = "waiting_for_admin"
+    CREATED = "created"
+    EXISTING = "existing"
+
+
+@dataclass(frozen=True)
+class BootstrapResult:
+    status: BootstrapStatus
+    project_id: uuid.UUID | None = None

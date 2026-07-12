@@ -20,12 +20,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
@@ -192,6 +193,20 @@ def get_config() -> AppConfig:
     except Exception as exc:  # noqa: BLE001 - request boundary: log and degrade gracefully
         logger.exception("Failed to load AppConfig at request time")
         raise HTTPException(status_code=503, detail="Configuration not available") from exc
+
+
+async def project_session() -> AsyncIterator[AsyncSession]:
+    """Yield the request-scoped project session or fail closed before routing."""
+    from deerflow.persistence.engine import get_session_factory
+
+    factory = get_session_factory()
+    if factory is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"},
+        )
+    async with factory() as session:
+        yield session
 
 
 @asynccontextmanager
