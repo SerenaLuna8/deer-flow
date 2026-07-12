@@ -86,13 +86,14 @@ async def test_concurrent_slug_pagination_query_and_stale_scope(migrated_postgre
         assert sum(not isinstance(result, Exception) for result in results) == 1
         assert sum(isinstance(result, ProjectSlugConflict) for result in results) == 1
         context = next(result for result in results if not isinstance(result, Exception))
+        second_membership = uuid.uuid4()
         async with engine.begin() as connection:
             await connection.execute(text("ALTER TABLE projects DROP CONSTRAINT ck_projects_status"))
             await connection.execute(text("ALTER TABLE project_memberships DROP CONSTRAINT ck_project_memberships_status"))
             await connection.execute(
                 text("""INSERT INTO project_memberships
                 (id,project_id,user_id,role,status) VALUES (:id,:project,:user,'viewer','disabled')"""),
-                {"id": uuid.uuid4(), "project": context.project_id, "user": str(second)},
+                {"id": second_membership, "project": context.project_id, "user": str(second)},
             )
             for slug, status, suspended in (("hidden-status", "archived", False), ("hidden-suspended", "active", True)):
                 hidden_id = uuid.uuid4()
@@ -176,12 +177,10 @@ async def test_concurrent_slug_pagination_query_and_stale_scope(migrated_postgre
                 page = await ProjectRepository(session).list_for_user(owner, literal, None, None, 20, "req")
             assert [item.display_name for item in page.items] == [expected_name]
 
-        second_membership = uuid.uuid4()
         async with engine.begin() as connection:
             await connection.execute(
-                text("""INSERT INTO project_memberships
-                (id,project_id,user_id,role) VALUES (:id,:project,:user,'viewer')"""),
-                {"id": second_membership, "project": context.project_id, "user": str(second)},
+                text("UPDATE project_memberships SET status='active' WHERE id=:id"),
+                {"id": second_membership},
             )
         async with factory() as session:
             repository = ProjectRepository(session)
