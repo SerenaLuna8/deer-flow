@@ -143,6 +143,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    `default-project` slug，并在 PostgreSQL transaction advisory lock 下幂等创建。首次
    `/initialize` 已创建管理员但默认项目初始化失败时不会签发 cookie；修复数据库冲突后可
    运行 `make setup-db` 重试，系统不会猜测新 slug 或自动挂接不完整项目。
+   多个 Gateway 同时收到首次初始化请求时，会由 PostgreSQL 串行选出唯一管理员；后到的
+   请求返回“系统已初始化”，不会留下第二个管理员账户。
    为避免误删项目，项目表或成员关系表存在数据时，数据库会拒绝降级到 0004；必须先按
    运维方案迁出数据，不能依赖 downgrade 自动删除。
 

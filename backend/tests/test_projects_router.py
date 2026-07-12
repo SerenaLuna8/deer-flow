@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -101,6 +101,24 @@ def test_project_router_requires_authentication() -> None:
     response = TestClient(app).get("/api/projects")
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "not_authenticated"
+
+
+@pytest.mark.asyncio
+async def test_project_session_maps_uninitialized_engine_to_stable_503(monkeypatch) -> None:
+    from deerflow.persistence import engine as persistence_engine
+
+    def unavailable_factory():
+        raise RuntimeError("Persistence engine is not initialized")
+
+    monkeypatch.setattr(persistence_engine, "get_session_factory", unavailable_factory)
+    dependency = project_session()
+    with pytest.raises(HTTPException) as exc_info:
+        await anext(dependency)
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {
+        "code": "DATABASE_UNAVAILABLE",
+        "message": "Project storage unavailable",
+    }
 
 
 def test_project_database_failure_is_503_without_driver_details(monkeypatch) -> None:

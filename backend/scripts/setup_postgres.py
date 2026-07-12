@@ -210,6 +210,7 @@ async def _complete_bootstrap_lock(database_url: str):
 
 async def _bootstrap_existing(database_url: str) -> str:
     engine = _create_setup_engine(DatabaseConfig(url=database_url))
+    primary_error: BaseException | None = None
     try:
         async with _complete_bootstrap_lock(database_url):
             async with engine.connect() as connection:
@@ -219,14 +220,17 @@ async def _bootstrap_existing(database_url: str) -> str:
             await _bootstrap_default_project_schema(engine)
         return _get_head_revision()
     except ProjectBootstrapFailed as exc:
+        primary_error = exc
         raise PostgresSetupError(exc.code) from None
-    except Exception:
+    except Exception as exc:
+        primary_error = exc
         raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None
     finally:
         try:
             await engine.dispose()
         except Exception:
-            raise PostgresSetupError("PostgreSQL engine 清理失败；请确认没有其他初始化任务仍在运行") from None
+            if primary_error is None:
+                raise PostgresSetupError("PostgreSQL engine 清理失败；请确认没有其他初始化任务仍在运行") from None
 
 
 async def _bootstrap_default_project_schema(engine: AsyncEngine) -> None:

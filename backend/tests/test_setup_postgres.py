@@ -252,6 +252,37 @@ async def test_bootstrap_existing_preserves_ambiguous_admin_code(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_existing_cleanup_failure_does_not_override_bootstrap_code(monkeypatch) -> None:
+    connection = AsyncMock()
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=connection)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine = MagicMock()
+    engine.connect.return_value = connection_context
+    engine.dispose = AsyncMock(side_effect=RuntimeError("postgresql://owner:private-password@localhost/private-db"))
+    monkeypatch.setattr(setup_postgres, "_create_setup_engine", lambda _config: engine)
+
+    @asynccontextmanager
+    async def coordination_lock(_database_url):
+        yield
+
+    monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
+    monkeypatch.setattr(setup_postgres, "bootstrap_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", AsyncMock())
+    monkeypatch.setattr(
+        setup_postgres,
+        "_bootstrap_default_project_schema",
+        AsyncMock(side_effect=ProjectBootstrapFailed("AMBIGUOUS_BOOTSTRAP_ADMIN")),
+    )
+
+    with pytest.raises(setup_postgres.PostgresSetupError) as exc_info:
+        await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc")
+    assert str(exc_info.value) == "AMBIGUOUS_BOOTSTRAP_ADMIN"
+    assert "private-password" not in str(exc_info.value)
+    engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_complete_bootstrap_lock_uses_dedicated_autocommit_session_and_cleanup(monkeypatch) -> None:
     calls = []
     lock_results = iter([False, False, True])

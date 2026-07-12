@@ -199,12 +199,13 @@ async def project_session() -> AsyncIterator[AsyncSession]:
     """Yield the request-scoped project session or fail closed before routing."""
     from deerflow.persistence.engine import get_session_factory
 
-    factory = get_session_factory()
-    if factory is None:
+    try:
+        factory = get_session_factory()
+    except RuntimeError:
         raise HTTPException(
             status_code=503,
             detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"},
-        )
+        ) from None
     async with factory() as session:
         yield session
 

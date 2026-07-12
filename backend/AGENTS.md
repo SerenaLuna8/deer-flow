@@ -766,6 +766,11 @@ resolver 的单条 joined SELECT 退出后先结束只读 transaction，mutation
 advisory lock 和固定 `default-project` slug；只在唯一 `system_admin` 可确定且现有结构完整
 时 create/existing，歧义、slug collision 或 partial state 均 fail closed。普通 register
 不加入默认项目；首次 initialize 后 bootstrap 失败时由 `setup-db` 安全重试恢复。
+首次 initialize 在查询管理员前先取得独立的 PostgreSQL session advisory lock，并在
+管理员写入和默认项目 bootstrap 完成后才释放；该锁使用短命 NullPool AUTOCOMMIT 物理连接，
+不在 runtime pool 中遗留 session lock 或 idle transaction。锁顺序固定为 initialize lock
+再 default-project transaction lock；`setup-db` 只取得后者，系统中不存在反向获取路径，
+因此两条恢复/初始化路径不会形成锁环。
 
 ### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
 

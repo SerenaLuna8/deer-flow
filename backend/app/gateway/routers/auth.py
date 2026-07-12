@@ -7,11 +7,16 @@ import re
 import secrets
 import time
 import urllib.parse
+from contextlib import asynccontextmanager
 from ipaddress import ip_address, ip_network
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 from starlette.responses import RedirectResponse
 
 from app.gateway.auth import (
@@ -34,11 +39,78 @@ from app.gateway.auth.oidc_state import (
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider
+from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
 from deerflow.config.auth_config import OIDCProviderConfig
+from deerflow.persistence.engine import get_engine, get_session_factory
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+_INITIALIZE_ADMIN_LOCK_KEY = 0x0DEE_12F1_494E_4954
+
+
+@asynccontextmanager
+async def _initialize_admin_lock():
+    """Serialize first-admin creation across gateway processes.
+
+    The short-lived NullPool engine gives this session-level lock a dedicated
+    physical PostgreSQL connection. Explicit unlock is the normal path; close
+    and dispose are the fail-safe, so a failed unlock can never return a
+    lock-bearing connection to the runtime pool.
+    """
+    runtime_engine = get_engine()
+    if runtime_engine is None:
+        raise ProjectDatabaseUnavailable()
+    lock_engine = create_async_engine(
+        runtime_engine.url,
+        poolclass=NullPool,
+        isolation_level="AUTOCOMMIT",
+    )
+    primary_error: BaseException | None = None
+    try:
+        try:
+            async with lock_engine.connect() as connection:
+                await connection.execute(text("SET statement_timeout = 0"))
+                await connection.execute(
+                    text("SELECT pg_advisory_lock(:lock_key)"),
+                    {"lock_key": _INITIALIZE_ADMIN_LOCK_KEY},
+                )
+                try:
+                    yield
+                finally:
+                    try:
+                        unlocked = await connection.scalar(
+                            text("SELECT pg_advisory_unlock(:lock_key)"),
+                            {"lock_key": _INITIALIZE_ADMIN_LOCK_KEY},
+                        )
+                        if unlocked is not True:
+                            await connection.invalidate()
+                    except asyncio.CancelledError:
+                        try:
+                            await connection.invalidate()
+                        except Exception:  # noqa: BLE001 - physical close remains the fail-safe
+                            pass
+                        raise
+                    except Exception:  # noqa: BLE001 - never return a possibly locked connection
+                        try:
+                            await connection.invalidate()
+                        except Exception:  # noqa: BLE001 - physical close remains the fail-safe
+                            pass
+                        logger.warning("Failed to release initialize advisory lock; discarded connection")
+        except DBAPIError:
+            raise ProjectDatabaseUnavailable() from None
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            await lock_engine.dispose()
+        except Exception as exc:  # noqa: BLE001 - preserve the request's primary failure
+            if primary_error is None:
+                if isinstance(exc, DBAPIError):
+                    raise ProjectDatabaseUnavailable() from None
+                raise
+            logger.warning("Failed to dispose initialize lock engine after request failure")
 
 
 # ── Request/Response Models ──────────────────────────────────────────────
@@ -503,42 +575,45 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     On success, the admin account is created with ``needs_setup=False`` and
     the session cookie is set.
     """
-    admin_count = await get_local_provider().count_admin_users()
-    if admin_count > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
-
     try:
-        user = await get_local_provider().create_user(
-            email=body.email,
-            password=body.password,
-            system_role="system_admin",
-            needs_setup=False,
-        )
-    except ValueError:
-        admin_count = await get_local_provider().count_admin_users()
-        if admin_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
-            )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
+        async with _initialize_admin_lock():
+            admin_count = await get_local_provider().count_admin_users()
+            if admin_count > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+                )
 
-    from app.projects.bootstrap import bootstrap_default_project
-    from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
-    from deerflow.persistence.engine import get_session_factory
+            try:
+                user = await get_local_provider().create_user(
+                    email=body.email,
+                    password=body.password,
+                    system_role="system_admin",
+                    needs_setup=False,
+                )
+            except ValueError:
+                admin_count = await get_local_provider().count_admin_users()
+                if admin_count == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+                )
 
-    factory = get_session_factory()
-    if factory is None:
-        raise HTTPException(status_code=503, detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"})
-    try:
-        async with factory() as session:
-            await bootstrap_default_project(session)
+            try:
+                factory = get_session_factory()
+            except RuntimeError:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"},
+                ) from None
+            from app.projects.bootstrap import bootstrap_default_project
+
+            async with factory() as session:
+                await bootstrap_default_project(session)
     except ProjectBootstrapFailed as exc:
         raise HTTPException(status_code=503, detail={"code": exc.code, "message": "Project bootstrap failed"}) from None
     except ProjectDatabaseUnavailable:
