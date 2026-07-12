@@ -23,6 +23,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "channel_credentials",
     "channel_oauth_states",
     "feedback",
+    "migration_ledger",
     "run_events",
     "runs",
     "scheduled_task_runs",

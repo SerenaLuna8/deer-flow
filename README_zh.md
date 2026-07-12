@@ -124,6 +124,18 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    只读检查 PostgreSQL 版本、Alembic revision 和必需表。命令输出不会显示 username、
    password 或完整 URL。Gateway 启动只验证和升级已配置的目标数据库，不会自动建库。
 
+   从旧版 SQLite 安装迁移时，先设置 `DATABASE_URL`，并把只读来源和 repo 外备份目录
+   作为参数传入。先执行 dry-run；只有所有来源都通过 schema、冲突和语义预检后才移除
+   `--dry-run`。写迁移会先为每个来源创建并校验原子备份，来源文件不会被修改或删除：
+
+   ```bash
+   make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups --dry-run"
+   make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups"
+   ```
+
+   可重复 `--source` 迁移多个来源。遇到未知表、非空 deferred 项目表、跨来源主键冲突、
+   解码或 read-back 校验失败时命令会停止；输出仅包含 fingerprint、计数和脱敏错误。
+
    如果你要提交本地安装、配置或运行问题，可以执行 `make support-bundle`。
    命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成
    `*-issue-summary.md`、面向 AI 辅助提 issue 的 `*-issue-draft.md`，以及可选证据

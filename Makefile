@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup setup-db migrate-db check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.PHONY: help config config-upgrade check install setup setup-db migrate-db migrate-sqlite check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -26,6 +26,7 @@ help:
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make setup-db        - 创建并初始化 PostgreSQL 数据库"
 	@echo "  make migrate-db      - 仅升级已存在 PostgreSQL 数据库"
+	@echo "  make migrate-sqlite  - 只读预检/备份并迁移 legacy SQLite（参数通过 ARGS 传入）"
 	@echo "  make check-db        - 只读检查 PostgreSQL 数据库状态"
 	@echo "  make detect-thread-boundaries - Inventory async/thread boundary points"
 	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
@@ -64,6 +65,9 @@ setup-db:
 
 migrate-db:
 	@$(MAKE) -C backend migrate-db
+
+migrate-sqlite:
+	@$(MAKE) -C backend migrate-sqlite ARGS="$(ARGS)"
 
 check-db:
 	@$(MAKE) -C backend check-db

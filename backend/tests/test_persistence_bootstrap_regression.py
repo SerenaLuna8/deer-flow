@@ -53,7 +53,7 @@ async def test_legacy_database_recovers_token_usage_column(postgres_database_url
     await init_engine(DatabaseConfig(url=postgres_database_url))
     try:
         assert "token_usage_by_model" in await _column_names(postgres_database_url)
-        assert await _version(postgres_database_url) == "0003_scheduled_tasks"
+        assert await _version(postgres_database_url) == "0004_migration_ledger"
 
         repo = RunRepository(get_session_factory())
         result = await repo.aggregate_tokens_by_thread(thread_id=str(uuid4()))
@@ -70,6 +70,6 @@ async def test_legacy_database_with_manual_alter_still_bootstraps(postgres_datab
     try:
         columns = await _column_names(postgres_database_url)
         assert columns.count("token_usage_by_model") == 1
-        assert await _version(postgres_database_url) == "0003_scheduled_tasks"
+        assert await _version(postgres_database_url) == "0004_migration_ledger"
     finally:
         await close_engine()

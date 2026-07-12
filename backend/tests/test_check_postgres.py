@@ -7,6 +7,10 @@ import pytest
 from scripts import check_postgres
 
 
+def test_task5_health_check_requires_migration_ledger() -> None:
+    assert "migration_ledger" in check_postgres.REQUIRED_TABLES
+
+
 def _connection(*, revision: str | None = "0003_scheduled_tasks", present_tables=None):
     connection = AsyncMock()
     connection.fetchval.side_effect = ["PostgreSQL 17.5", revision]

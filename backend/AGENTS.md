@@ -642,6 +642,19 @@ migrate-db` 只 bootstrap 已存在目标数据库，不读取管理员连接；
 参数化只读查询，报告 PostgreSQL 版本、current/head revision 和必需表。三个命令均不输出
 username、password 或完整 URL。Gateway runtime 仍只验证目标库，绝不自动创建数据库。
 
+**一次性 SQLite 数据迁移**：`make migrate-sqlite ARGS="..."` 调用
+`scripts/migrate_sqlite_to_postgres.py`。脚本只通过 Task 1 的 `mode=ro` /
+`PRAGMA query_only=ON` 路径读取 SQLite；固定映射 ORM 表，并使用 LangGraph serializer
+解码 checkpoint/writes 后再写 PostgreSQL，禁止把 SQLite BLOB 直接放进 JSONB。
+`--dry-run` 执行所有来源的 schema、冲突和语义预检且不写 target/ledger/sequence；实际
+迁移前必须用 `--backup-dir` 生成 size/SHA256 已验证的原子备份。ORM、checkpoint writes
+与 store 每表 target+ledger 同事务；checkpoint Saver API 无法加入该事务，因此使用冲突
+预检、语义 read-back、ledger replay 的安全收敛边界。未知表、非空
+`projects`/`project_memberships`、目标值冲突
+或校验差异均 fail closed。SQLite provider 包不是运行或迁移依赖；synthetic 测试只使用
+stdlib `sqlite3` 和 `JsonPlusSerializer`，真实 PostgreSQL 测试只创建随机
+`deerflow_test_*` 数据库。
+
 **Authoring a new revision**:
 ```bash
 cd backend && make migrate-rev MSG="add foo column to runs"
@@ -654,6 +667,7 @@ This invokes `alembic revision --autogenerate` against the live ORM models. Revi
 - `migrations/_helpers.py` — `safe_add_column` / `safe_drop_column`
 - `migrations/versions/0001_baseline.py` — chain root, matches the schema `create_all` produces from `Base.metadata`
 - `migrations/versions/0002_runs_token_usage.py` — fixes issue #3682
+- `migrations/versions/0004_migration_ledger.py` — per-source-row SQLite migration ledger
 - `persistence/bootstrap.py` — `bootstrap_schema(engine)`, the three-branch decision + PostgreSQL advisory locking
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor)
 
