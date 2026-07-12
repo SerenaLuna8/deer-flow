@@ -15,12 +15,15 @@ from sqlalchemy import DateTime, UniqueConstraint
 from deerflow.persistence.base import Base
 from deerflow.persistence.migration_ledger import MigrationLedgerRow
 from scripts.migrate_sqlite_to_postgres import (
+    DecodedCheckpoint,
     MigrationError,
     MigrationReport,
     TableMigrationReport,
+    UnionPlan,
     _json_canonical,
     _preflight_cross_source,
     _run_cli,
+    _strict_insert_checkpoint,
     backup_source,
     decode_checkpoint_rows,
     inspect_source,
@@ -91,6 +94,21 @@ def _sqlite(path: Path, statements: str) -> None:
         connection.executescript(statements)
 
 
+def _user_source(path: Path, rows: list[tuple[str, str, int]]) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """CREATE TABLE users (
+            id TEXT PRIMARY KEY, email TEXT NOT NULL, password_hash TEXT,
+            system_role TEXT NOT NULL, created_at TIMESTAMP NOT NULL,
+            oauth_provider TEXT, oauth_id TEXT, needs_setup BOOLEAN NOT NULL,
+            token_version INTEGER NOT NULL)"""
+        )
+        connection.executemany(
+            "INSERT INTO users VALUES (?,?,NULL,'user','2026-07-12T00:00:00+00:00',NULL,NULL,?,0)",
+            rows,
+        )
+
+
 def test_migration_ledger_is_registered_with_unique_source_identity() -> None:
     table = Base.metadata.tables["migration_ledger"]
     assert MigrationLedgerRow.__table__ is table
@@ -107,7 +125,7 @@ def test_migration_ledger_is_registered_with_unique_source_identity() -> None:
 
 def test_backup_is_atomic_digest_checked_and_idempotent(tmp_path: Path) -> None:
     source = tmp_path / "legacy.db"
-    _sqlite(source, "CREATE TABLE users (id TEXT PRIMARY KEY); INSERT INTO users VALUES ('u-1');")
+    _user_source(source, [("u-1", "u1@example.invalid", 0)])
     before = source.read_bytes()
 
     first = backup_source(source, tmp_path / "backup")
@@ -122,6 +140,24 @@ def test_backup_is_atomic_digest_checked_and_idempotent(tmp_path: Path) -> None:
     assert first.sha256 == hashlib.sha256(before).hexdigest()
     assert not list((tmp_path / "backup").glob("*.tmp"))
     assert source.read_bytes() == before
+
+
+def test_source_with_nonempty_wal_or_shm_fails_closed(tmp_path: Path) -> None:
+    source = tmp_path / "active.db"
+    _user_source(source, [])
+    source.with_name(f"{source.name}-wal").write_bytes(b"active")
+    with pytest.raises(MigrationError, match="active SQLite WAL/SHM"):
+        inspect_source(source)
+
+
+def test_backup_rejects_source_mutated_after_pinned_preflight(tmp_path: Path) -> None:
+    source = tmp_path / "mutated.db"
+    _user_source(source, [("u-1", "one@example.invalid", 0)])
+    pinned = inspect_source(source).inventory
+    with sqlite3.connect(source) as connection:
+        connection.execute("UPDATE users SET email='two@example.invalid' WHERE id='u-1'")
+    with pytest.raises(MigrationError, match="fingerprint changed"):
+        backup_source(source, tmp_path / "backup", (pinned.sha256, pinned.size_bytes))
 
 
 def test_inspect_source_rejects_unknown_table_even_when_empty(tmp_path: Path) -> None:
@@ -157,6 +193,13 @@ def test_inspect_source_rejects_unknown_columns_and_preserves_source(tmp_path: P
     assert source.stat().st_mtime_ns == before_mtime
 
 
+def test_inspect_source_rejects_incomplete_schema_even_when_empty(tmp_path: Path) -> None:
+    source = tmp_path / "incomplete-empty.db"
+    _sqlite(source, "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL);")
+    with pytest.raises(MigrationError, match="unsupported users source schema"):
+        inspect_source(source)
+
+
 def test_ledger_default_timestamp_is_timezone_aware() -> None:
     row = MigrationLedgerRow(
         source_sha256="a" * 64,
@@ -188,15 +231,17 @@ def test_business_normalization_decodes_json_bool_utc_and_stable_key(tmp_path: P
     )
 
     rows = normalize_business_rows(source, "threads_meta")
+    repeated = normalize_business_rows(source, "threads_meta")
     assert len(rows) == 1
     assert rows[0].source_key == '["t-1"]'
     assert rows[0].values["metadata_json"] == {"a": 1, "b": 2}
     assert rows[0].values["created_at"].tzinfo is UTC
     assert rows[0].values["updated_at"].tzinfo is not None
     assert len(rows[0].digest) == 64
+    assert repeated[0].digest == rows[0].digest
 
 
-def test_business_normalization_rejects_duplicate_nullable_composite_key(tmp_path: Path) -> None:
+def test_business_normalization_rejects_unapproved_nullable_composite_key(tmp_path: Path) -> None:
     source = tmp_path / "feedback.db"
     _sqlite(
         source,
@@ -211,35 +256,35 @@ def test_business_normalization_rejects_duplicate_nullable_composite_key(tmp_pat
         """,
     )
 
-    with pytest.raises(MigrationError, match="duplicate source key"):
+    with pytest.raises(MigrationError, match="unsupported feedback source primary key"):
         normalize_business_rows(source, "feedback")
 
 
 def test_business_normalization_rejects_nonempty_table_without_primary_key(tmp_path: Path) -> None:
     source = tmp_path / "no-pk.db"
     _sqlite(source, "CREATE TABLE users (id TEXT, email TEXT); INSERT INTO users VALUES ('u','e@example.invalid');")
-    with pytest.raises(MigrationError, match="source table has no primary key"):
+    with pytest.raises(MigrationError, match="unsupported users source schema"):
         normalize_business_rows(source, "users")
 
 
 def test_business_normalization_rejects_missing_required_and_invalid_typed_values(tmp_path: Path) -> None:
     missing = tmp_path / "missing.db"
     _sqlite(missing, "CREATE TABLE users (id TEXT PRIMARY KEY); INSERT INTO users VALUES ('u');")
-    with pytest.raises(MigrationError, match="missing required column: email"):
+    with pytest.raises(MigrationError, match="unsupported users source schema"):
         normalize_business_rows(missing, "users")
 
     invalid_bool = tmp_path / "bool.db"
-    _sqlite(
-        invalid_bool,
-        "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT, needs_setup BOOLEAN); INSERT INTO users VALUES ('u','e@example.invalid',2);",
-    )
+    _user_source(invalid_bool, [("u", "e@example.invalid", 2)])
     with pytest.raises(MigrationError, match="invalid boolean"):
         normalize_business_rows(invalid_bool, "users")
 
     invalid_json = tmp_path / "json.db"
     _sqlite(
         invalid_json,
-        "CREATE TABLE threads_meta (thread_id TEXT PRIMARY KEY, metadata_json JSON); INSERT INTO threads_meta VALUES ('t','{broken');",
+        "CREATE TABLE threads_meta (thread_id TEXT PRIMARY KEY, assistant_id TEXT, user_id TEXT, "
+        "display_name TEXT, status TEXT, metadata_json JSON, created_at TIMESTAMP, updated_at TIMESTAMP); "
+        "INSERT INTO threads_meta VALUES ('t',NULL,NULL,NULL,'idle','{broken',"
+        "'2026-07-12T00:00:00Z','2026-07-12T00:00:00Z');",
     )
     with pytest.raises(MigrationError, match="invalid JSON"):
         normalize_business_rows(invalid_json, "threads_meta")
@@ -319,11 +364,87 @@ def test_checkpoint_decoder_orders_parent_before_lexically_earlier_child(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_strict_checkpoint_blob_collision_compares_and_never_updates() -> None:
+    serde = JsonPlusSerializer()
+    value = HumanMessage(content="synthetic")
+    type_, blob = serde.dumps_typed(value)
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Connection:
+        def __init__(self):
+            self.fetchval_results = iter([None, "cp-1"])
+            self.sql: list[str] = []
+
+        def transaction(self):
+            return Transaction()
+
+        async def fetchval(self, sql, *_args):
+            self.sql.append(sql)
+            return next(self.fetchval_results)
+
+        async def fetchrow(self, sql, *_args):
+            self.sql.append(sql)
+            return {"type": type_, "blob": blob}
+
+    connection = Connection()
+    row = DecodedCheckpoint(
+        "t",
+        "",
+        "cp-1",
+        None,
+        {"id": "cp-1", "channel_values": {"messages": value}, "channel_versions": {"messages": "1"}},
+        {},
+    )
+    assert await _strict_insert_checkpoint(connection, row) is True
+    assert all("UPDATE" not in sql.upper() for sql in connection.sql)
+
+
+@pytest.mark.asyncio
+async def test_strict_checkpoint_blob_collision_stops_on_different_semantics() -> None:
+    serde = JsonPlusSerializer()
+    type_, blob = serde.dumps_typed(HumanMessage(content="different"))
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchval(self, _sql, *_args):
+            return None
+
+        async def fetchrow(self, _sql, *_args):
+            return {"type": type_, "blob": blob}
+
+    row = DecodedCheckpoint(
+        "t",
+        "",
+        "cp-1",
+        None,
+        {"id": "cp-1", "channel_values": {"messages": HumanMessage(content="source")}, "channel_versions": {"messages": "1"}},
+        {},
+    )
+    with pytest.raises(MigrationError, match="checkpoint blob conflict"):
+        await _strict_insert_checkpoint(Connection(), row)
+
+
+@pytest.mark.asyncio
 async def test_multi_source_cli_preflights_every_source_before_backup_or_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources = [tmp_path / "one.db", tmp_path / "two.db"]
     calls: list[tuple[str, bool]] = []
 
-    async def fake_migrate(source: Path, _target: str, dry_run: bool) -> MigrationReport:
+    async def fake_migrate(source: Path, _target: str, dry_run: bool, **_kwargs: object) -> MigrationReport:
         calls.append((source.name, dry_run))
         return MigrationReport(
             source_sha256="a" * 64,
@@ -334,11 +455,14 @@ async def test_multi_source_cli_preflights_every_source_before_backup_or_write(t
         )
 
     backups: list[str] = []
-    monkeypatch.setattr("scripts.migrate_sqlite_to_postgres._preflight_cross_source", lambda _sources: None)
+    monkeypatch.setattr(
+        "scripts.migrate_sqlite_to_postgres._preflight_cross_source",
+        lambda _sources: UnionPlan(frozenset()),
+    )
     monkeypatch.setattr("scripts.migrate_sqlite_to_postgres.migrate_source", fake_migrate)
     monkeypatch.setattr(
         "scripts.migrate_sqlite_to_postgres.backup_source",
-        lambda source, _directory: backups.append(source.name) or SimpleNamespace(path=source.with_suffix(".bak"), sha256="b" * 64),
+        lambda source, _directory, _fingerprint=None: backups.append(source.name) or SimpleNamespace(path=source.with_suffix(".bak"), sha256="b" * 64),
     )
 
     await _run_cli(
@@ -353,14 +477,8 @@ async def test_multi_source_cli_preflights_every_source_before_backup_or_write(t
 def test_cross_source_preflight_stops_conflicting_target_primary_key(tmp_path: Path) -> None:
     first = tmp_path / "first.db"
     second = tmp_path / "second.db"
-    _sqlite(
-        first,
-        "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT); INSERT INTO users VALUES ('u-shared','one@example.invalid');",
-    )
-    _sqlite(
-        second,
-        "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT); INSERT INTO users VALUES ('u-shared','two@example.invalid');",
-    )
+    _user_source(first, [("u-shared", "one@example.invalid", 0)])
+    _user_source(second, [("u-shared", "two@example.invalid", 0)])
     with pytest.raises(MigrationError, match="cross-source target conflict in users"):
         _preflight_cross_source([first, second])
 
@@ -392,8 +510,11 @@ async def test_real_postgres_semantic_migration_and_idempotent_replay(
     with sqlite3.connect(source) as connection:
         connection.executescript(
             """
-            CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL);
-            INSERT INTO users VALUES ('u-synthetic', 'synthetic@example.invalid');
+            CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, password_hash TEXT,
+                system_role TEXT NOT NULL, created_at TIMESTAMP NOT NULL, oauth_provider TEXT,
+                oauth_id TEXT, needs_setup BOOLEAN NOT NULL, token_version INTEGER NOT NULL);
+            INSERT INTO users VALUES ('u-synthetic','synthetic@example.invalid',NULL,'user',
+                '2026-07-12T00:00:00+00:00',NULL,NULL,0,0);
             CREATE TABLE checkpoints (
                 thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL DEFAULT '',
                 checkpoint_id TEXT NOT NULL, parent_checkpoint_id TEXT,
@@ -488,9 +609,13 @@ async def test_real_postgres_semantic_migration_and_idempotent_replay(
     with sqlite3.connect(conflict_source) as connection:
         connection.executescript(
             """
-            CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL);
-            INSERT INTO users VALUES ('u-new', 'new@example.invalid');
-            INSERT INTO users VALUES ('u-synthetic', 'conflict@example.invalid');
+            CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, password_hash TEXT,
+                system_role TEXT NOT NULL, created_at TIMESTAMP NOT NULL, oauth_provider TEXT,
+                oauth_id TEXT, needs_setup BOOLEAN NOT NULL, token_version INTEGER NOT NULL);
+            INSERT INTO users VALUES ('u-new','new@example.invalid',NULL,'user',
+                '2026-07-12T00:00:00+00:00',NULL,NULL,0,0);
+            INSERT INTO users VALUES ('u-synthetic','conflict@example.invalid',NULL,'user',
+                '2026-07-12T00:00:00+00:00',NULL,NULL,0,0);
             CREATE TABLE alembic_version (version_num TEXT PRIMARY KEY);
             INSERT INTO alembic_version VALUES ('synthetic-conflict');
             """

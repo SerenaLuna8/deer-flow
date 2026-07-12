@@ -654,6 +654,12 @@ username、password 或完整 URL。Gateway runtime 仍只验证目标库，绝�
 或校验差异均 fail closed。SQLite provider 包不是运行或迁移依赖；synthetic 测试只使用
 stdlib `sqlite3` 和 `JsonPlusSerializer`，真实 PostgreSQL 测试只创建随机
 `deerflow_test_*` 数据库。
+迁移器接受的每张 ORM source schema 与 primary key 都由显式常量锁定；空表也必须 exact，
+不得调用 ORM callable default 猜测缺列。多来源在备份前合并检查 PK、unique index/constraint
+和 checkpoint blob identity。dry-run 固定每个来源的 SHA256/size，后续 backup 与正式迁移
+必须使用相同 fingerprint，并在结束时复验；非空 `-wal`/`-shm` 直接拒绝。checkpoint 与
+blob 使用 `INSERT ... ON CONFLICT DO NOTHING` 后 semantic compare，绝不通过 Saver UPSERT
+覆盖目标；Saver 仅用于完整 read-back 验证。
 
 **Authoring a new revision**:
 ```bash

@@ -42,6 +42,103 @@ ORM_TABLE_ORDER = (
 LANGGRAPH_SOURCE_TABLES = frozenset({"checkpoints", "writes", "store"})
 SOURCE_METADATA_TABLES = frozenset({"alembic_version", "store_migrations"})
 DEFERRED_EMPTY_TABLES = frozenset({"projects", "project_memberships"})
+SOURCE_SCHEMA_SIGNATURES = {
+    "users": frozenset({"id", "email", "password_hash", "system_role", "created_at", "oauth_provider", "oauth_id", "needs_setup", "token_version"}),
+    "threads_meta": frozenset({"thread_id", "assistant_id", "user_id", "display_name", "status", "metadata_json", "created_at", "updated_at"}),
+    "runs": frozenset(
+        {
+            "run_id",
+            "thread_id",
+            "assistant_id",
+            "user_id",
+            "status",
+            "model_name",
+            "multitask_strategy",
+            "metadata_json",
+            "kwargs_json",
+            "error",
+            "message_count",
+            "first_human_message",
+            "last_ai_message",
+            "total_input_tokens",
+            "total_output_tokens",
+            "total_tokens",
+            "llm_call_count",
+            "lead_agent_tokens",
+            "subagent_tokens",
+            "middleware_tokens",
+            "token_usage_by_model",
+            "follow_up_to_run_id",
+            "created_at",
+            "updated_at",
+        }
+    ),
+    "run_events": frozenset({"id", "thread_id", "run_id", "user_id", "event_type", "category", "content", "event_metadata", "seq", "created_at"}),
+    "feedback": frozenset({"feedback_id", "run_id", "thread_id", "user_id", "message_id", "rating", "comment", "created_at"}),
+    "scheduled_tasks": frozenset(
+        {
+            "id",
+            "user_id",
+            "thread_id",
+            "context_mode",
+            "assistant_id",
+            "title",
+            "prompt",
+            "schedule_type",
+            "schedule_spec",
+            "timezone",
+            "status",
+            "overlap_policy",
+            "next_run_at",
+            "last_run_at",
+            "last_run_id",
+            "last_thread_id",
+            "last_error",
+            "lease_owner",
+            "lease_expires_at",
+            "run_count",
+            "created_at",
+            "updated_at",
+        }
+    ),
+    "scheduled_task_runs": frozenset({"id", "task_id", "thread_id", "run_id", "scheduled_for", "trigger", "status", "error", "started_at", "finished_at", "created_at"}),
+    "channel_connections": frozenset(
+        {
+            "id",
+            "owner_user_id",
+            "provider",
+            "status",
+            "external_account_id",
+            "external_account_name",
+            "workspace_id",
+            "workspace_name",
+            "bot_user_id",
+            "scopes_json",
+            "capabilities_json",
+            "metadata_json",
+            "created_at",
+            "updated_at",
+            "last_seen_at",
+            "last_error_at",
+        }
+    ),
+    "channel_credentials": frozenset({"connection_id", "encrypted_access_token", "encrypted_refresh_token", "token_type", "expires_at", "refresh_expires_at", "encrypted_extra_json", "version", "updated_at"}),
+    "channel_oauth_states": frozenset({"state_hash", "owner_user_id", "provider", "code_verifier_encrypted", "nonce_hash", "redirect_after", "requested_scopes_json", "metadata_json", "expires_at", "consumed_at", "created_at"}),
+    "channel_conversations": frozenset({"id", "connection_id", "owner_user_id", "provider", "external_conversation_id", "external_topic_id", "thread_id", "created_at", "updated_at"}),
+}
+SOURCE_PRIMARY_KEYS = {
+    "users": ("id",),
+    "threads_meta": ("thread_id",),
+    "runs": ("run_id",),
+    "run_events": ("id",),
+    "feedback": ("feedback_id",),
+    "scheduled_tasks": ("id",),
+    "scheduled_task_runs": ("id",),
+    "channel_connections": ("id",),
+    "channel_credentials": ("connection_id",),
+    "channel_oauth_states": ("state_hash",),
+    "channel_conversations": ("id",),
+}
 
 
 class MigrationError(RuntimeError):
@@ -108,7 +205,13 @@ class MigrationReport:
     tables: dict[str, TableMigrationReport]
     deferred_empty: tuple[str, ...]
     verified: bool
+    source_size_bytes: int = 0
     atomicity: str = "ORM, checkpoint writes, and store rows commit with ledger per table; checkpoint Saver writes converge through conflict preflight, semantic read-back, and ledger replay"
+
+
+@dataclass(frozen=True)
+class UnionPlan:
+    reference_keys: frozenset[tuple[str, tuple[str, ...], str]]
 
 
 def _known_orm_columns() -> dict[str, frozenset[str]]:
@@ -119,6 +222,10 @@ def _known_orm_columns() -> dict[str, frozenset[str]]:
 
 
 def inspect_source(source: Path) -> SourceInspection:
+    for suffix in ("-wal", "-shm"):
+        sidecar = source.with_name(f"{source.name}{suffix}")
+        if sidecar.exists() and sidecar.stat().st_size:
+            raise MigrationError("active SQLite WAL/SHM sidecar detected")
     try:
         inventory = inspect_sqlite(source)
     except Exception as exc:
@@ -137,6 +244,10 @@ def inspect_source(source: Path) -> SourceInspection:
             unknown = sorted(set(table.columns) - known_columns[table.name])
             if unknown:
                 raise MigrationError(f"{table.name} has unknown columns: {', '.join(unknown)}")
+            if frozenset(table.columns) != SOURCE_SCHEMA_SIGNATURES[table.name]:
+                raise MigrationError(f"unsupported {table.name} source schema")
+            if table.primary_key != SOURCE_PRIMARY_KEYS[table.name]:
+                raise MigrationError(f"unsupported {table.name} source primary key")
         if table.name == "checkpoints":
             expected = {
                 "thread_id",
@@ -170,9 +281,19 @@ def inspect_source(source: Path) -> SourceInspection:
     return SourceInspection(inventory=inventory, deferred_empty=tuple(sorted(deferred)))
 
 
-def backup_source(source: Path, backup_dir: Path) -> BackupResult:
+def _require_fingerprint(inventory: SQLiteInventory, expected: tuple[str, int] | None) -> None:
+    if expected is not None and (inventory.sha256, inventory.size_bytes) != expected:
+        raise MigrationError("SQLite source fingerprint changed after preflight")
+
+
+def backup_source(
+    source: Path,
+    backup_dir: Path,
+    expected_fingerprint: tuple[str, int] | None = None,
+) -> BackupResult:
     inspection = inspect_source(source)
     inventory = inspection.inventory
+    _require_fingerprint(inventory, expected_fingerprint)
     backup_dir.mkdir(parents=True, exist_ok=True)
     destination = backup_dir / f"{source.name}.{inventory.sha256[:12]}.bak"
     if destination.exists():
@@ -195,7 +316,13 @@ def backup_source(source: Path, backup_dir: Path) -> BackupResult:
             os.fsync(target.fileno())
         if digest.hexdigest() != inventory.sha256 or size != inventory.size_bytes:
             raise MigrationError("backup digest does not match source")
-        os.replace(temporary, destination)
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            existing = hashlib.sha256(destination.read_bytes()).hexdigest()
+            if existing != inventory.sha256 or destination.stat().st_size != inventory.size_bytes:
+                raise MigrationError("concurrent backup publish conflict") from None
+        temporary.unlink()
         directory_fd = os.open(backup_dir, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
@@ -308,32 +435,9 @@ def normalize_business_rows(source: Path, table: str) -> list[NormalizedRow]:
         if missing_target_key:
             raise MigrationError(f"{table} is missing target primary key columns")
         target_key = _json_canonical([values[name] for name in target_pk])
-        values = _complete_business_values(target, values, table=table)
         digest = hashlib.sha256(_json_canonical(values).encode()).hexdigest()
         normalized.append(NormalizedRow(source_key, target_key, values, digest))
     return sorted(normalized, key=lambda item: item.source_key.encode())
-
-
-def _complete_business_values(target: Any, values: dict[str, Any], *, table: str) -> dict[str, Any]:
-    result = dict(values)
-    for column in target.columns:
-        if column.name in result:
-            continue
-        if column.default is not None:
-            default = column.default.arg
-            if callable(default):
-                try:
-                    value = default(None)
-                except TypeError:
-                    value = default()
-            else:
-                value = default
-            result[column.name] = _normalize_value(value, column, table=table)
-        elif column.nullable:
-            result[column.name] = None
-        else:
-            raise MigrationError(f"{table} is missing required column: {column.name}")
-    return result
 
 
 def decode_checkpoint_rows(source: Path) -> tuple[list[DecodedCheckpoint], list[DecodedWrite]]:
@@ -444,6 +548,11 @@ async def _write_ledger(
     )
 
 
+def _validate_ledger(ledger: Any, *, target_table: str, target_key: str, digest: str) -> None:
+    if ledger["target_table"] != target_table or ledger["target_key"] != target_key or ledger["row_digest"] != digest or ledger["status"] not in {"migrated", "adopted"}:
+        raise MigrationError("migration ledger semantic conflict")
+
+
 async def _fetch_business_target(connection: Any, target: Any, row: NormalizedRow) -> dict[str, Any] | None:
     pk = tuple(column.name for column in target.primary_key.columns)
     where = " AND ".join(f'"{name}" IS NOT DISTINCT FROM ${idx}' for idx, name in enumerate(pk, 1))
@@ -471,6 +580,50 @@ async def _insert_business_target(connection: Any, target: Any, row: NormalizedR
     )
 
 
+async def _preflight_target_uniques(connection: Any, target: Any, row: NormalizedRow) -> None:
+    primary_key = tuple(column.name for column in target.primary_key.columns)
+    for _name, unique_key in _business_unique_keys(target.name, row.values):
+        values = json.loads(unique_key)
+        matching_columns = None
+        for constraint in list(target.constraints) + list(target.indexes):
+            if not getattr(constraint, "unique", False) and constraint.__class__.__name__ != "UniqueConstraint":
+                continue
+            columns = tuple(column.name for column in constraint.columns)
+            if _json_canonical([row.values[column] for column in columns]) == unique_key:
+                matching_columns = columns
+                break
+        if not matching_columns:
+            continue
+        where = " AND ".join(f'"{column}" IS NOT DISTINCT FROM ${idx}' for idx, column in enumerate(matching_columns, 1))
+        existing = await connection.fetchrow(
+            f'SELECT {", ".join(f"{column}" for column in primary_key)} FROM "{target.name}" WHERE {where}',
+            *values,
+        )
+        if existing is not None and any(existing[column] != row.values[column] for column in primary_key):
+            raise MigrationError(f"target unique constraint conflict in {target.name}")
+
+
+async def _preflight_foreign_keys(
+    connection: Any,
+    target: Any,
+    row: NormalizedRow,
+    union_reference_keys: frozenset[tuple[str, tuple[str, ...], str]],
+) -> None:
+    for constraint in target.foreign_key_constraints:
+        local_columns = tuple(element.parent.name for element in constraint.elements)
+        remote_table = constraint.elements[0].column.table.name
+        remote_columns = tuple(element.column.name for element in constraint.elements)
+        values = [row.values[column] for column in local_columns]
+        if any(value is None for value in values):
+            continue
+        identity = (remote_table, remote_columns, _json_canonical(values))
+        if identity in union_reference_keys:
+            continue
+        where = " AND ".join(f'"{column}" IS NOT DISTINCT FROM ${idx}' for idx, column in enumerate(remote_columns, 1))
+        if not await connection.fetchval(f'SELECT 1 FROM "{remote_table}" WHERE {where}', *values):
+            raise MigrationError(f"missing foreign key target for {target.name}")
+
+
 async def _migrate_business_table(
     connection: Any,
     source: Path,
@@ -478,6 +631,7 @@ async def _migrate_business_table(
     table: str,
     *,
     dry_run: bool,
+    union_reference_keys: frozenset[tuple[str, tuple[str, ...], str]],
 ) -> TableMigrationReport:
     import deerflow.persistence.models  # noqa: F401
     from deerflow.persistence.base import Base
@@ -491,13 +645,15 @@ async def _migrate_business_table(
         for row in rows:
             ledger = await _ledger_row(connection, source_sha256, table, row.source_key)
             if ledger is not None:
-                if ledger["row_digest"] != row.digest or ledger["target_key"] != row.target_key:
-                    raise MigrationError(f"migration ledger conflict in {table}")
+                _validate_ledger(ledger, target_table=table, target_key=row.target_key, digest=row.digest)
                 target_row = await _fetch_business_target(connection, target, row)
                 if target_row is None or hashlib.sha256(_json_canonical(target_row).encode()).hexdigest() != row.digest:
                     raise MigrationError(f"target verification conflict in {table}")
                 already += 1
                 continue
+
+            await _preflight_target_uniques(connection, target, row)
+            await _preflight_foreign_keys(connection, target, row, union_reference_keys)
 
             target_row = await _fetch_business_target(connection, target, row)
             status = "adopted"
@@ -506,6 +662,9 @@ async def _migrate_business_table(
                     planned += 1
                     continue
                 await _insert_business_target(connection, target, row)
+                inserted_row = await _fetch_business_target(connection, target, row)
+                if inserted_row is None or hashlib.sha256(_json_canonical(inserted_row).encode()).hexdigest() != row.digest:
+                    raise MigrationError(f"target semantic read-back failed in {table}")
                 inserted += 1
                 status = "migrated"
             elif hashlib.sha256(_json_canonical(target_row).encode()).hexdigest() == row.digest:
@@ -572,7 +731,12 @@ async def _migrate_checkpoints(
     dry_run: bool,
 ) -> TableMigrationReport:
     inserted = adopted = already = planned = 0
+    source_checkpoint_ids = {(item.thread_id, item.checkpoint_ns, item.checkpoint_id) for item in checkpoints}
     for row in checkpoints:
+        if row.parent_checkpoint_id and (row.thread_id, row.checkpoint_ns, row.parent_checkpoint_id) not in source_checkpoint_ids:
+            parent = await saver.aget_tuple({"configurable": {"thread_id": row.thread_id, "checkpoint_ns": row.checkpoint_ns, "checkpoint_id": row.parent_checkpoint_id}})
+            if parent is None:
+                raise MigrationError("checkpoint parent missing from source and target")
         source_key = _checkpoint_identity(row)
         digest = _checkpoint_digest(row)
         ledger = await _ledger_row(connection, source_sha256, "checkpoints", source_key)
@@ -596,8 +760,7 @@ async def _migrate_checkpoints(
             if _checkpoint_digest(target_row) != digest:
                 raise MigrationError("target checkpoint conflict")
             if ledger is not None:
-                if ledger["row_digest"] != digest:
-                    raise MigrationError("checkpoint ledger conflict")
+                _validate_ledger(ledger, target_table="checkpoints", target_key=source_key, digest=digest)
                 already += 1
                 continue
             if dry_run:
@@ -611,19 +774,26 @@ async def _migrate_checkpoints(
             if dry_run:
                 planned += 1
                 continue
-            parent_config = {
-                "configurable": {
-                    "thread_id": row.thread_id,
-                    "checkpoint_ns": row.checkpoint_ns,
-                    **({"checkpoint_id": row.parent_checkpoint_id} if row.parent_checkpoint_id else {}),
-                }
-            }
-            await saver.aput(parent_config, row.checkpoint, row.metadata, row.checkpoint.get("channel_versions", {}))
+            created = await _strict_insert_checkpoint(connection, row)
             read_back = await saver.aget_tuple(config)
             if read_back is None:
                 raise MigrationError("checkpoint semantic verification failed")
-            inserted += 1
-            status = "migrated"
+            verified_row = DecodedCheckpoint(
+                row.thread_id,
+                row.checkpoint_ns,
+                row.checkpoint_id,
+                read_back.parent_config["configurable"]["checkpoint_id"] if read_back.parent_config else None,
+                read_back.checkpoint,
+                read_back.metadata,
+            )
+            if _checkpoint_digest(verified_row) != digest:
+                raise MigrationError("checkpoint semantic verification failed")
+            if created:
+                inserted += 1
+                status = "migrated"
+            else:
+                adopted += 1
+                status = "adopted"
         await _write_ledger(
             connection,
             source_sha256=source_sha256,
@@ -637,6 +807,51 @@ async def _migrate_checkpoints(
     return TableMigrationReport(len(checkpoints), inserted, adopted, already, planned, True)
 
 
+async def _strict_insert_checkpoint(connection: Any, row: DecodedCheckpoint) -> bool:
+    serde = JsonPlusSerializer()
+    checkpoint = dict(row.checkpoint)
+    channel_values = dict(checkpoint.get("channel_values", {}))
+    checkpoint["channel_values"] = dict(channel_values)
+    versions = checkpoint.get("channel_versions", {})
+    async with connection.transaction():
+        for channel, value in channel_values.items():
+            if value is None or isinstance(value, (str, int, float, bool)):
+                continue
+            checkpoint["channel_values"].pop(channel)
+            if channel not in versions:
+                raise MigrationError("checkpoint blob channel has no version")
+            type_, blob = serde.dumps_typed(value)
+            inserted = await connection.fetchval(
+                "INSERT INTO checkpoint_blobs (thread_id,checkpoint_ns,channel,version,type,blob) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING version",
+                row.thread_id,
+                row.checkpoint_ns,
+                channel,
+                str(versions[channel]),
+                type_,
+                blob,
+            )
+            if inserted is None:
+                existing = await connection.fetchrow(
+                    "SELECT type,blob FROM checkpoint_blobs WHERE thread_id=$1 AND checkpoint_ns=$2 AND channel=$3 AND version=$4",
+                    row.thread_id,
+                    row.checkpoint_ns,
+                    channel,
+                    str(versions[channel]),
+                )
+                if existing is None or _json_canonical(serde.loads_typed((existing["type"], bytes(existing["blob"])))) != _json_canonical(value):
+                    raise MigrationError("checkpoint blob conflict")
+        inserted_checkpoint = await connection.fetchval(
+            "INSERT INTO checkpoints (thread_id,checkpoint_ns,checkpoint_id,parent_checkpoint_id,checkpoint,metadata) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb) ON CONFLICT DO NOTHING RETURNING checkpoint_id",
+            row.thread_id,
+            row.checkpoint_ns,
+            row.checkpoint_id,
+            row.parent_checkpoint_id,
+            json.dumps(checkpoint, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(row.metadata, ensure_ascii=False, separators=(",", ":")),
+        )
+        return inserted_checkpoint is not None
+
+
 async def _migrate_writes_rows(
     connection: Any,
     source_sha256: str,
@@ -647,6 +862,13 @@ async def _migrate_writes_rows(
     serde = JsonPlusSerializer()
     inserted = adopted = already = planned = 0
     for row in writes:
+        if not await connection.fetchval(
+            "SELECT 1 FROM checkpoints WHERE thread_id=$1 AND checkpoint_ns=$2 AND checkpoint_id=$3",
+            row.thread_id,
+            row.checkpoint_ns,
+            row.checkpoint_id,
+        ):
+            raise MigrationError("checkpoint write references missing checkpoint")
         source_key = _write_identity(row)
         digest = hashlib.sha256(_json_canonical({"channel": row.channel, "value": row.value}).encode()).hexdigest()
         ledger = await _ledger_row(connection, source_sha256, "writes", source_key)
@@ -664,8 +886,7 @@ async def _migrate_writes_rows(
             if target_digest != digest:
                 raise MigrationError("target checkpoint write conflict")
             if ledger is not None:
-                if ledger["row_digest"] != digest:
-                    raise MigrationError("checkpoint write ledger conflict")
+                _validate_ledger(ledger, target_table="checkpoint_writes", target_key=source_key, digest=digest)
                 already += 1
                 continue
             adopted += 1
@@ -775,8 +996,7 @@ async def _migrate_store_rows(
             if target_digest != row.digest:
                 raise MigrationError("target store conflict")
             if ledger is not None:
-                if ledger["row_digest"] != row.digest:
-                    raise MigrationError("store ledger conflict")
+                _validate_ledger(ledger, target_table="store", target_key=row.target_key, digest=row.digest)
                 already += 1
                 continue
             adopted += 1
@@ -799,6 +1019,18 @@ async def _migrate_store_rows(
                 row.values["expires_at"],
                 row.values["ttl_minutes"],
             )
+            read_back = await connection.fetchrow(
+                "SELECT prefix,key,value,created_at,updated_at,expires_at,ttl_minutes FROM store WHERE prefix=$1 AND key=$2",
+                row.values["prefix"],
+                row.values["key"],
+            )
+            if read_back is None:
+                raise MigrationError("store semantic read-back failed")
+            read_values = dict(read_back)
+            if isinstance(read_values["value"], str):
+                read_values["value"] = json.loads(read_values["value"])
+            if hashlib.sha256(_json_canonical(read_values).encode()).hexdigest() != row.digest:
+                raise MigrationError("store semantic read-back failed")
             inserted += 1
             status = "migrated"
         await _write_ledger(
@@ -835,12 +1067,26 @@ async def _reset_run_event_sequence(connection: Any) -> None:
     if sequence:
         maximum = await connection.fetchval("SELECT COALESCE(MAX(id), 0) FROM run_events")
         await connection.execute("SELECT setval($1::regclass, $2, $3)", sequence, max(1, maximum), maximum > 0)
+        observed = await connection.fetchval("SELECT nextval($1::regclass)", sequence)
+        if observed != maximum + 1:
+            raise MigrationError("run_events sequence verification failed")
+        await connection.execute("SELECT setval($1::regclass, $2, $3)", sequence, max(1, maximum), maximum > 0)
 
 
-async def migrate_source(source: Path, target_url: str, dry_run: bool) -> MigrationReport:
+async def migrate_source(
+    source: Path,
+    target_url: str,
+    dry_run: bool,
+    expected_fingerprint: tuple[str, int] | None = None,
+    union_reference_keys: frozenset[tuple[str, tuple[str, ...], str]] | None = None,
+) -> MigrationReport:
     inspection = inspect_source(source)
+    _require_fingerprint(inspection.inventory, expected_fingerprint)
+    pinned_fingerprint = (inspection.inventory.sha256, inspection.inventory.size_bytes)
     tables = {table.name for table in inspection.inventory.tables}
     reports: dict[str, TableMigrationReport] = {}
+    if union_reference_keys is None:
+        union_reference_keys = _preflight_cross_source([source]).reference_keys
     connection = None
     try:
         try:
@@ -857,6 +1103,7 @@ async def migrate_source(source: Path, target_url: str, dry_run: bool) -> Migrat
                     inspection.inventory.sha256,
                     table,
                     dry_run=dry_run,
+                    union_reference_keys=union_reference_keys,
                 )
         checkpoints, writes = decode_checkpoint_rows(source)
         if checkpoints:
@@ -893,12 +1140,15 @@ async def migrate_source(source: Path, target_url: str, dry_run: bool) -> Migrat
     finally:
         if connection is not None:
             await connection.close()
+    final_inventory = inspect_source(source).inventory
+    _require_fingerprint(final_inventory, pinned_fingerprint)
     return MigrationReport(
         source_sha256=inspection.inventory.sha256,
         dry_run=dry_run,
         tables=reports,
         deferred_empty=inspection.deferred_empty,
         verified=all(report.verified for report in reports.values()),
+        source_size_bytes=inspection.inventory.size_bytes,
     )
 
 
@@ -920,10 +1170,15 @@ def _print_report(source: Path, report: MigrationReport) -> None:
 
 
 async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
-    _preflight_cross_source(args.source)
+    union_plan = _preflight_cross_source(args.source)
     preflights = []
     for source in args.source:
-        preflight = await migrate_source(source, target_url, dry_run=True)
+        preflight = await migrate_source(
+            source,
+            target_url,
+            dry_run=True,
+            union_reference_keys=union_plan.reference_keys,
+        )
         if not preflight.verified:
             raise MigrationError("dry-run verification failed")
         preflights.append((source, preflight))
@@ -934,16 +1189,26 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
         return
 
     for source, _report in preflights:
-        backup = backup_source(source, args.backup_dir)
+        backup = backup_source(
+            source,
+            args.backup_dir,
+            (_report.source_sha256, _report.source_size_bytes),
+        )
         print(f"备份: {backup.path.name} / SHA256 {backup.sha256[:12]}")
     for source, _report in preflights:
-        report = await migrate_source(source, target_url, dry_run=False)
+        report = await migrate_source(
+            source,
+            target_url,
+            dry_run=False,
+            expected_fingerprint=(_report.source_sha256, _report.source_size_bytes),
+            union_reference_keys=union_plan.reference_keys,
+        )
         if not report.verified:
             raise MigrationError("migration verification failed")
         _print_report(source, report)
 
 
-def _preflight_cross_source(sources: list[Path]) -> None:
+def _preflight_cross_source(sources: list[Path]) -> UnionPlan:
     seen: dict[tuple[str, str], str] = {}
 
     def register(table: str, key: str, digest: str) -> None:
@@ -953,21 +1218,71 @@ def _preflight_cross_source(sources: list[Path]) -> None:
             raise MigrationError(f"cross-source target conflict in {table}")
         seen[identity] = digest
 
+    business_rows: list[tuple[str, NormalizedRow]] = []
     for source in sources:
         inspection = inspect_source(source)
         table_names = {table.name for table in inspection.inventory.tables}
         for table in ORM_TABLE_ORDER:
             if table in table_names:
                 for row in normalize_business_rows(source, table):
+                    business_rows.append((table, row))
                     register(table, row.target_key, row.digest)
+                    for constraint_name, unique_key in _business_unique_keys(table, row.values):
+                        register(f"{table}.{constraint_name}", unique_key, row.digest)
         checkpoints, writes = decode_checkpoint_rows(source)
         for row in checkpoints:
             register("checkpoints", _checkpoint_identity(row), _checkpoint_digest(row))
+            versions = row.checkpoint.get("channel_versions", {})
+            for channel, value in row.checkpoint.get("channel_values", {}).items():
+                if value is None or isinstance(value, (str, int, float, bool)):
+                    continue
+                if channel not in versions:
+                    raise MigrationError("checkpoint blob channel has no version")
+                blob_key = _json_canonical([row.thread_id, row.checkpoint_ns, channel, str(versions[channel])])
+                blob_digest = hashlib.sha256(_json_canonical(value).encode()).hexdigest()
+                register("checkpoint_blobs", blob_key, blob_digest)
         for row in writes:
             digest = hashlib.sha256(_json_canonical({"channel": row.channel, "value": row.value}).encode()).hexdigest()
             register("checkpoint_writes", _write_identity(row), digest)
         for row in _decode_store_rows(source):
             register("store", row.target_key, row.digest)
+    import deerflow.persistence.models  # noqa: F401
+    from deerflow.persistence.base import Base
+
+    referenced_specs: set[tuple[str, tuple[str, ...]]] = set()
+    for table in Base.metadata.tables.values():
+        for constraint in table.foreign_key_constraints:
+            referenced_specs.add(
+                (
+                    constraint.elements[0].column.table.name,
+                    tuple(element.column.name for element in constraint.elements),
+                )
+            )
+    reference_keys = {(table, columns, _json_canonical([row.values[column] for column in columns])) for table, row in business_rows for referenced_table, columns in referenced_specs if table == referenced_table}
+    return UnionPlan(frozenset(reference_keys))
+
+
+def _business_unique_keys(table_name: str, values: dict[str, Any]) -> list[tuple[str, str]]:
+    import deerflow.persistence.models  # noqa: F401
+    from deerflow.persistence.base import Base
+
+    table = Base.metadata.tables[table_name]
+    results: list[tuple[str, str]] = []
+    for constraint in table.constraints:
+        if constraint.__class__.__name__ != "UniqueConstraint":
+            continue
+        columns = tuple(column.name for column in constraint.columns)
+        if any(values[column] is None for column in columns):
+            continue
+        results.append((constraint.name or "+".join(columns), _json_canonical([values[column] for column in columns])))
+    for index in table.indexes:
+        if not index.unique:
+            continue
+        columns = tuple(column.name for column in index.columns)
+        if any(values[column] is None for column in columns):
+            continue
+        results.append((index.name, _json_canonical([values[column] for column in columns])))
+    return results
 
 
 def main(argv: list[str] | None = None) -> int:
