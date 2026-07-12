@@ -61,7 +61,7 @@
 
 ---
 
-### 任务 1：M2 PostgreSQL schema 与 migration
+### Task 1（任务 1）：M2 PostgreSQL schema 与 migration
 
 **文件：**
 
@@ -147,7 +147,7 @@ git add backend/packages/harness/deerflow/persistence/projects backend/packages/
 git commit -m "feat(projects): add M2 governance schema"
 ```
 
-### 任务 2：成员 repository 与业务不变量
+### Task 2（任务 2）：成员 repository 与业务不变量
 
 **文件：**
 
@@ -224,7 +224,7 @@ git add backend/app/projects backend/tests/test_project_membership_service.py ba
 git commit -m "feat(projects): enforce membership lifecycle invariants"
 ```
 
-### 任务 3：邀请创建、撤销和一次性兑换
+### Task 3（任务 3）：邀请创建、撤销和一次性兑换
 
 **文件：**
 
@@ -299,7 +299,7 @@ git add backend/app/projects/invitation_models.py backend/app/projects/invitatio
 git commit -m "feat(projects): add secure project invitations"
 ```
 
-### 任务 4：项目删除恢复生命周期
+### Task 4（任务 4）：项目删除恢复生命周期
 
 **文件：**
 
@@ -372,7 +372,7 @@ git add backend/app/projects backend/tests/test_project_lifecycle_service.py bac
 git commit -m "feat(projects): add deletion recovery lifecycle"
 ```
 
-### 任务 5：成员、邀请和生命周期 API
+### Task 5（任务 5）：成员、邀请和生命周期 API
 
 **文件：**
 
@@ -444,7 +444,7 @@ git add backend/app/gateway backend/tests/test_project_members_router.py backend
 git commit -m "feat(api): expose project governance endpoints"
 ```
 
-### 任务 6：登录后工作空间和旧版壳层分流
+### Task 6（任务 6）：登录后工作空间和旧版壳层分流
 
 **文件：**
 
@@ -509,7 +509,7 @@ git add frontend/src/app/workspace frontend/src/components/projects frontend/src
 git commit -m "feat(frontend): make workspace the project entry"
 ```
 
-### 任务 7：绑定 ProjectContext 的项目壳层
+### Task 7（任务 7）：绑定 ProjectContext 的项目壳层
 
 **文件：**
 
@@ -583,7 +583,7 @@ git add frontend/src/app/projects frontend/src/components/projects frontend/test
 git commit -m "feat(frontend): add project-scoped navigation shell"
 ```
 
-### 任务 8：成员、邀请、兑换和删除恢复界面
+### Task 8（任务 8）：成员、邀请、兑换和删除恢复界面
 
 **文件：**
 
@@ -658,7 +658,7 @@ git add frontend/src/core/projects frontend/src/app/projects frontend/src/app/in
 git commit -m "feat(frontend): add project governance workflows"
 ```
 
-### 任务 9：M2 隔离门禁、文档和里程碑证据
+### Task 9（任务 9）：M2 隔离门禁、文档和里程碑证据
 
 **文件：**
 
