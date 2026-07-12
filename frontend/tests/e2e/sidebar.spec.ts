@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 test.describe("Sidebar navigation", () => {
-  test("project-first sidebar hides legacy entries and exposes Projects", async ({
+  test("project-first sidebar hides legacy entries and exposes workspace", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
@@ -13,8 +13,12 @@ test.describe("Sidebar navigation", () => {
     // Sidebar uses data-sidebar="menu-button" with asChild rendering on <Link>
     const sidebar = page.locator("[data-sidebar='sidebar']");
     await expect(
-      sidebar.locator("a[href='/workspace/projects']").first(),
+      sidebar.getByRole("link", { name: "工作空间" }).first(),
     ).toBeVisible({ timeout: 15_000 });
+    await expect(sidebar.locator("a[href='/workspace']").first()).toBeVisible();
+    await expect(sidebar.locator("a[href='/workspace/projects']")).toHaveCount(
+      0,
+    );
     await expect(sidebar.locator("a[href='/workspace/chats']")).toHaveCount(0);
     await expect(sidebar.locator("a[href='/workspace/chats/new']")).toHaveCount(
       0,
@@ -53,9 +57,9 @@ test.describe("Sidebar navigation", () => {
     await page.goto("/workspace/chats/new");
 
     const sidebar = page.locator("[data-sidebar='sidebar']");
-    await expect(
-      sidebar.locator("a[href='/workspace/projects']").first(),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(sidebar.locator("a[href='/workspace']").first()).toBeVisible({
+      timeout: 15_000,
+    });
     await expect(sidebar.locator("a[href='/workspace/agents']")).toHaveCount(0);
 
     // The disabled Agents button is rendered and announces its disabled state.
@@ -115,7 +119,10 @@ test.describe("Sidebar navigation", () => {
     );
     await expect(mobileSidebar).toBeVisible();
     await expect(
-      mobileSidebar.locator("a[href='/workspace/projects']").first(),
+      mobileSidebar.getByRole("link", { name: "工作空间" }).first(),
+    ).toBeVisible();
+    await expect(
+      mobileSidebar.locator("a[href='/workspace']").first(),
     ).toBeVisible();
     await expect(
       mobileSidebar.locator("a[href='/workspace/agents']"),

@@ -9,10 +9,10 @@ export function ProjectHeader({ project }: { project: Project }) {
     <header className="border-border/70 border-b">
       <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
         <Link
-          href="/workspace/projects"
+          href="/workspace"
           className="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex w-fit items-center gap-2 rounded text-sm focus-visible:ring-2 focus-visible:outline-none"
         >
-          <ArrowLeftIcon size={16} /> 返回项目工作台
+          <ArrowLeftIcon size={16} /> 返回工作空间
         </Link>
         <div className="flex items-start gap-4">
           <div className="bg-primary/10 text-primary flex size-14 shrink-0 items-center justify-center rounded-2xl">

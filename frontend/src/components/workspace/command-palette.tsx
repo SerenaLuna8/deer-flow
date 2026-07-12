@@ -42,9 +42,7 @@ export function CommandPalette() {
   const showLegacyChats = !PROJECT_FIRST_MODE || isStaticWebsiteOnly();
 
   const handleNewChat = useCallback(() => {
-    router.push(
-      showLegacyChats ? "/workspace/chats/new" : "/workspace/projects",
-    );
+    router.push(showLegacyChats ? "/workspace/chats/new" : "/workspace");
     setOpen(false);
   }, [router, showLegacyChats]);
 
@@ -90,7 +88,7 @@ export function CommandPalette() {
               ) : (
                 <FolderKanbanIcon className="mr-2 h-4 w-4" />
               )}
-              {showLegacyChats ? t.sidebar.newChat : "项目工作台"}
+              {showLegacyChats ? t.sidebar.newChat : "工作空间"}
               <CommandShortcut>
                 {metaKey}
                 {shiftKey}N
@@ -123,7 +121,7 @@ export function CommandPalette() {
               { keys: `${metaKey}K`, label: t.shortcuts.openCommandPalette },
               {
                 keys: `${metaKey}${shiftKey}N`,
-                label: showLegacyChats ? t.sidebar.newChat : "项目工作台",
+                label: showLegacyChats ? t.sidebar.newChat : "工作空间",
               },
               { keys: `${metaKey}B`, label: t.shortcuts.toggleSidebar },
               { keys: `${metaKey},`, label: t.common.settings },

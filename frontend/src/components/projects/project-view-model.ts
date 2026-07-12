@@ -32,7 +32,7 @@ export function projectErrorMessage(error: unknown): string {
         return "这个项目标识已存在，请换一个后重试。";
       case "PROJECT_NOT_FOUND":
       case "PROJECT_FORBIDDEN":
-        return "项目不可用或成员关系已失效，请返回项目工作台。";
+        return "项目不可用或成员关系已失效，请返回工作空间。";
       case "PROJECT_VALIDATION_FAILED":
         return "项目信息不符合要求，请检查后重试。";
       case "AUTH_REQUIRED":

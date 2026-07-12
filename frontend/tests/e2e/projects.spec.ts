@@ -236,7 +236,7 @@ test("project workbench supports create, search, pin, edit, enter, and return", 
   mockLangGraphAPI(page);
   const api = await mockProjectsAPI(page);
 
-  await page.goto("/workspace/projects");
+  await page.goto("/workspace");
   await expect(page.getByTestId("project-workbench")).toBeVisible();
   await expect(page.getByText("Research Lab", { exact: true })).toBeVisible();
 
@@ -284,7 +284,7 @@ test("project workbench supports create, search, pin, edit, enter, and return", 
     "research-lab",
   );
 
-  await page.getByRole("link", { name: "返回项目工作台" }).click();
+  await page.getByRole("link", { name: "返回工作空间" }).click();
   await expect(page).toHaveURL(/\/workspace$/);
 });
 
@@ -295,7 +295,7 @@ test("project workbench exposes loading-safe API error and retry", async ({
   const api = await mockProjectsAPI(page, []);
   api.failNextList();
 
-  await page.goto("/workspace/projects");
+  await page.goto("/workspace");
   const error = page.getByTestId("project-load-error");
   await expect(error).toBeVisible({ timeout: 12_000 });
   await expect(error).toContainText("项目服务暂时不可用，请稍后重试。");
@@ -312,7 +312,7 @@ test("project create conflict stays handled and shows a safe message", async ({
   const pageErrors: Error[] = [];
   page.on("pageerror", (error) => pageErrors.push(error));
 
-  await page.goto("/workspace/projects");
+  await page.goto("/workspace");
   await page.getByRole("button", { name: "创建项目" }).first().click();
   const dialog = page.getByRole("dialog", { name: "创建项目" });
   await dialog.getByLabel("项目名称").fill("Duplicate Research");

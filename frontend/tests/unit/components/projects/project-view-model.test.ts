@@ -69,7 +69,7 @@ describe("project workbench view model", () => {
       projectErrorMessage(
         new ProjectApiError(404, "PROJECT_NOT_FOUND", "unsafe raw"),
       ),
-    ).toContain("返回项目工作台");
+    ).toContain("返回工作空间");
     expect(projectErrorMessage(new Error("postgresql://secret"))).not.toContain(
       "secret",
     );

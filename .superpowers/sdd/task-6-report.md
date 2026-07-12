@@ -60,3 +60,42 @@
 
 - Playwright 的 Next build 继续输出既有 NFT 动态文件跟踪警告，以及 Node/颜色环境警告；
   本任务构建和全部目标断言仍通过，未发现 Task 6 引入的新构建错误。
+
+## 审查修复（2026-07-13）
+
+### 修复内容
+
+- 将项目首页、项目加载失败页、命令面板、旧版壳层 header/sidebar 中的用户可见名称统一为
+  “工作空间”，canonical link 统一为 `/workspace`。
+- `project-first-mode` unit 增加 command palette、workspace header 与
+  workspace nav 的 canonical 名称和地址约束；项目组件与错误文案 unit 覆盖“返回工作空间”。
+- landing 的非静态 Get Started E2E 改为断言 `/workspace`；静态 demo 的
+  `/workspace/chats/<demo-thread>` 与 `/workspace/chats/new` unit 断言保持不变。
+- projects E2E 的正常入口改用 `/workspace`，仅兼容 redirect 测试访问
+  `/workspace/projects`；sidebar E2E 同时断言工作空间链接存在且旧 canonical link 不存在。
+- 保留 `/workspace/projects` 服务端 redirect 和 `WorkspaceRouteFrame` 兼容分支；未实现
+  Task 7/8，也未运行全量 E2E。
+
+### RED
+
+1. focused unit：
+   `pnpm test run tests/unit/core/projects/project-first-mode.test.ts tests/unit/components/projects/project-components.test.ts tests/unit/components/projects/project-view-model.test.ts`
+   - 3 files、14 tests 中 4 个按预期失败：项目 header/加载失败页/错误提示仍使用
+     “项目工作台”，command palette/workspace header/workspace nav 仍包含旧文案或旧地址。
+2. focused E2E，独立端口 3106、`workers=1`：
+   `PORT=3106 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3106 pnpm exec playwright test tests/e2e/landing.spec.ts tests/e2e/projects.spec.ts tests/e2e/sidebar.spec.ts --grep "Get Started link|supports create|project-first sidebar" --workers=1`
+   - 3 tests 中 2 个按预期失败：projects 找不到“返回工作空间”，sidebar 找不到 canonical
+     工作空间链接；landing 的 `/workspace` 断言已通过，证明实现已正确而旧 E2E 断言过时。
+
+### GREEN
+
+- focused unit：4 files、16 tests，全部通过；包含 workspace route frame 兼容 redirect 测试。
+- landing/projects/sidebar focused E2E：16 tests，全部通过，独立端口 3106，`workers=1`。
+- `pnpm check`：通过（ESLint + TypeScript）。
+- `pnpm format`：通过。
+- `git diff --check`：通过。
+
+### 审查修复顾虑
+
+- focused E2E 的 Next build 仍输出既有 NFT 动态文件跟踪警告、Node
+  `--localstorage-file` 与颜色环境警告；16 个目标断言全部通过，未发现本修复引入的新错误。

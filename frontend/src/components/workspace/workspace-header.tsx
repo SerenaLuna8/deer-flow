@@ -58,22 +58,20 @@ export function WorkspaceHeader({ className }: { className?: string }) {
             isActive={
               showLegacyChats
                 ? pathname === "/workspace/chats/new"
-                : pathname.startsWith("/workspace/projects")
+                : pathname === "/workspace"
             }
             asChild
           >
             <Link
               className="text-muted-foreground"
-              href={
-                showLegacyChats ? "/workspace/chats/new" : "/workspace/projects"
-              }
+              href={showLegacyChats ? "/workspace/chats/new" : "/workspace"}
             >
               {showLegacyChats ? (
                 <MessageSquarePlus size={16} />
               ) : (
                 <FolderKanbanIcon size={16} />
               )}
-              <span>{showLegacyChats ? t.sidebar.newChat : "项目工作台"}</span>
+              <span>{showLegacyChats ? t.sidebar.newChat : "工作空间"}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

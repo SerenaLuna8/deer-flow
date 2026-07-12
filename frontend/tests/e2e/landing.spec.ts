@@ -38,7 +38,7 @@ test.describe("Landing page", () => {
     const getStarted = page.getByRole("link", { name: /get started/i });
     await getStarted.click();
 
-    await page.waitForURL("**/workspace/projects");
-    await expect(page).toHaveURL(/\/workspace\/projects/);
+    await page.waitForURL("**/workspace");
+    await expect(page).toHaveURL(/\/workspace$/);
   });
 });

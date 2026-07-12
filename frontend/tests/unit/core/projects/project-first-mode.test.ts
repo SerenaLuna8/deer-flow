@@ -68,13 +68,17 @@ describe("project-first routing", () => {
     expect(source).toContain("<GatewayOfflineBanner gatewayUnavailable />");
   });
 
-  test("project-first shortcut description names the project workbench", () => {
-    const source = readFileSync(
-      resolve(process.cwd(), "src/components/workspace/command-palette.tsx"),
-      "utf8",
-    );
-    expect(source).toContain(
-      'showLegacyChats ? t.sidebar.newChat : "项目工作台"',
-    );
+  test("project-first navigation uses the canonical workspace name and path", () => {
+    for (const file of [
+      "src/components/workspace/command-palette.tsx",
+      "src/components/workspace/workspace-header.tsx",
+      "src/components/workspace/workspace-nav-chat-list.tsx",
+    ]) {
+      const source = readFileSync(resolve(process.cwd(), file), "utf8");
+      expect(source).toContain('"/workspace"');
+      expect(source).toContain("工作空间");
+      expect(source).not.toContain('"/workspace/projects"');
+      expect(source).not.toContain("项目工作台");
+    }
   });
 });

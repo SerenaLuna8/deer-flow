@@ -49,16 +49,10 @@ export function WorkspaceNavChatList() {
       <SidebarMenu>
         {!staticMode && (
           <SidebarMenuItem>
-            <SidebarMenuButton
-              isActive={pathname.startsWith("/workspace/projects")}
-              asChild
-            >
-              <Link
-                className="text-muted-foreground"
-                href="/workspace/projects"
-              >
+            <SidebarMenuButton isActive={pathname === "/workspace"} asChild>
+              <Link className="text-muted-foreground" href="/workspace">
                 <FolderKanbanIcon />
-                <span>项目工作台</span>
+                <span>工作空间</span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>

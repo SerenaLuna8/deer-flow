@@ -119,7 +119,7 @@ export function ProjectHomeLoader({ slug }: { slug: string }) {
             重试
           </Button>
           <Button asChild>
-            <Link href="/workspace/projects">返回项目工作台</Link>
+            <Link href="/workspace">返回工作空间</Link>
           </Button>
         </div>
       </main>

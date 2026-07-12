@@ -60,11 +60,14 @@ describe("project presentation contracts", () => {
     ).not.toContain("编辑项目");
   });
 
-  test("home has privacy boundary, placeholders, and only a workbench return", () => {
+  test("home has privacy boundary, placeholders, and only a workspace return", () => {
     const html = renderToStaticMarkup(createElement(ProjectHome, { project }));
     expect(html).toContain("对话和记忆私有");
     expect(html).toContain("Agent、Skill 和 MCP 共享");
-    expect(html).toContain("返回项目工作台");
+    expect(html).toContain("返回工作空间");
+    expect(html).toContain('href="/workspace"');
+    expect(html).not.toContain("/workspace/projects");
+    expect(html).not.toContain("项目工作台");
     expect(html).toContain("后续里程碑");
     expect(html).not.toContain("项目切换");
   });
@@ -109,6 +112,9 @@ describe("project presentation contracts", () => {
       "utf8",
     );
     expect(source).toContain("重试");
+    expect(source).toContain('<Link href="/workspace">返回工作空间</Link>');
+    expect(source).not.toContain("/workspace/projects");
+    expect(source).not.toContain("项目工作台");
     expect(source).not.toContain("enter.data ?? projectQuery.data");
   });
 });

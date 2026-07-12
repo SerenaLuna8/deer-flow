@@ -16,7 +16,7 @@ test.describe("UI polish mobile regressions", () => {
     await expect(
       page
         .locator("[data-mobile='true'][data-sidebar='sidebar']")
-        .getByRole("link", { name: /项目工作台/i })
+        .getByRole("link", { name: /工作空间/i })
         .first(),
     ).toBeVisible();
     await expect(page.getByRole("link", { name: /agents/i })).toBeVisible();
