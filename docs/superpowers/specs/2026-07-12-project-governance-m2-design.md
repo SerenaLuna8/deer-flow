@@ -1,9 +1,9 @@
 # M2 工作空间与项目治理专项规格
 
 - 日期：2026-07-12
-- 状态：规划中
+- 状态：已完成
 - 所属总体设计：`2026-07-12-project-first-saas-design.md`
-- 当前完成度：0
+- 当前完成度：100%
 
 ## 1. 目标
 
@@ -284,3 +284,21 @@ M2 不执行物理删除。跨业务域清除必须等相关数据完成项目�
 - 所有 token、数据库错误和跨项目标识均不泄露；
 - README、AGENTS 和中文用户文档同步；
 - M2 状态更新为已完成前，专项测试证据和审查结论已经记录。
+
+## 13. 实施证据
+
+- 真实 PostgreSQL 双项目治理矩阵使用随机 `deerflow_test_*` 数据库，不连接普通
+  `deerflow` 数据库，不使用 PostgreSQL RLS；
+- 矩阵覆盖跨项目成员/邀请读取和 mutation 统一 `404` 且目标行零变化、并发兑换仅一次
+  成功、并发最后一名 Admin 违规为零；
+- CI 固定运行 M1 cutover、M1 isolation 和 M2 governance 三个 PostgreSQL 集成文件，缺少
+  `POSTGRES_TEST_URL` 时硬失败；
+- 独立预门禁审查在补齐双 worker ready barrier 后结论为 Ready，无 Critical、Important
+  或 Minor；
+- 最终证据：backend lint 通过；真实 PostgreSQL 三文件门禁 `4 passed`；backend 全量
+  `7114 passed, 18 skipped`，3 个 M1 固定 `0005` 的陈旧 head 断言失败，改为动态
+  Alembic head 后 targeted `3 passed`；frontend check 通过，原全量 unit `702 passed`，新增
+  user ID contract focused `5 passed`；完整 Playwright `142 passed`，其中 1 个 user ID
+  contract 问题经 RED/GREEN 修复后 targeted `1 passed`，3 个 Nextra dev overlay 环境失败
+  在 production build/server 下 targeted `3 passed`。未重复运行 backend 全量或完整 146 项
+  Playwright。

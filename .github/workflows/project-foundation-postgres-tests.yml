@@ -85,22 +85,22 @@ jobs:
           make setup-db
           make check-db
 
-      - name: Run PostgreSQL migration and project release gates
+      - name: Require PostgreSQL test administrator URL
+        working-directory: backend
+        run: |
+          if [ -z "${POSTGRES_TEST_URL:-}" ]; then
+            echo "POSTGRES_TEST_URL is required for the PostgreSQL release gate" >&2
+            exit 1
+          fi
+
+      - name: Run M1 and M2 PostgreSQL isolation gates
         working-directory: backend
         run: >-
-          uv run pytest -q
+          uv run pytest
           tests/integration/test_m1_postgres_cutover.py
           tests/integration/test_project_isolation_postgres.py
-          tests/test_postgres_fixture.py
-          tests/test_persistence_bootstrap.py
-          tests/test_persistence_bootstrap_concurrency.py
-          tests/test_project_schema_postgres.py
-          tests/test_default_project_bootstrap.py
-          tests/test_project_repository_postgres.py
-          tests/test_project_context.py
-          tests/test_projects_router.py
-          tests/test_sqlite_inventory.py
-          tests/test_sqlite_to_postgres_migration.py
+          tests/integration/test_m2_project_governance_postgres.py
+          -q
 
       - name: Run PostgreSQL scripts and project lint gates
         working-directory: backend

@@ -63,6 +63,9 @@ platform role in frontend schemas or admin-only UI gates.
 Project server state lives under `src/core/projects/`. Its Zod contracts are strict and
 capabilities always come from the Gateway response; UI code must never infer capabilities
 from a project role. Every project query key starts with the authenticated account ID.
+项目、membership 和 invitation 资源 ID 必须保持 UUID；membership 的 `user_id` 对应 backend
+既有 `VARCHAR(36)` 用户标识，并允许 auth-disabled 的 `default`，因此使用独立的 1 至 36
+字符 schema，不能复用 project UUID schema，也不能放宽资源 ID。
 Account changes and logout cancel in-flight TanStack queries before clearing the provider-
 owned QueryClient, so data or late responses from one account cannot enter another account's
 cache. `AuthProvider` therefore must always render inside `QueryClientProvider`; do not add a
@@ -88,6 +91,12 @@ not repeat either request. The project shell shows only implemented M2 destinati
 settings from server-returned `project.lifecycle.manage` or `project.update` capabilities, and
 never derives visibility from role. Its private-work CTA remains visibly disabled and has no
 thread or router integration until the private-work milestone.
+登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
+项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
+邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie
+跨越登录流程，不写入 storage；产品不发送邀请邮件。M2 的退出/移除和删除恢复 UI 只反映
+30 天保留窗口，不代表私有数据或项目数据已被物理清除。Thread、run、file、memory、
+automation 尚未完成项目与 owner 双重隔离，因此 M2 仍不能作为完整多用户 SaaS 发布。
 
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)

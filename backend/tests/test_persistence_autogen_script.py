@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 import deerflow.persistence.models  # noqa: F401
 from deerflow.persistence.base import Base
+from deerflow.persistence.bootstrap import _get_head_revision
 
 
 @pytest.fixture(scope="module")
@@ -261,7 +262,7 @@ async def test_autogen_temp_db_is_at_head(autogen_module, postgres_database_url:
     try:
         async with engine.connect() as connection:
             revision = (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
-        assert revision == "0005_project_foundation"
+        assert revision == _get_head_revision()
     finally:
         await engine.dispose()
 

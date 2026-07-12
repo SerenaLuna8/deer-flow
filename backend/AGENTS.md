@@ -703,12 +703,16 @@ digest 写 migration ledger；引用行保留原 source key，并以归一化后
 首次写被吸收 users ledger 前还必须确认目标库不存在其 legacy 原 id；若已存在且没有匹配
 的 `reconciled` ledger，users 事务立即回滚，禁止把既有目标用户静默吸收。
 
-**M1 PostgreSQL 发布门禁**：`tests/integration/test_m1_postgres_cutover.py` 串联
+**M1/M2 PostgreSQL 发布门禁**：`tests/integration/test_m1_postgres_cutover.py` 串联
 inventory、backup、0004→SQLite migration→head、完整 runtime schema、默认项目 bootstrap
 与来源不变性；`tests/integration/test_project_isolation_postgres.py` 验证跨项目/账户 API、
-`ProjectContext` 和 repository scope。两者只复用 `POSTGRES_TEST_URL` 创建随机
+`ProjectContext` 和 repository scope；`tests/integration/test_m2_project_governance_postgres.py`
+使用两个项目验证成员/邀请跨项目读取和 mutation 统一 404 且零写入，并发邀请只能成功兑换
+一次，双 Admin 并发降级不能绕过最后一名 active Admin 保护。三个文件只复用
+`POSTGRES_TEST_URL` 创建随机
 `deerflow_test_*` 数据库，缺变量才 skip，连接或清理失败必须 fail。CI 入口为
-`.github/workflows/project-foundation-postgres-tests.yml`；本地命令：
+`.github/workflows/project-foundation-postgres-tests.yml`，CI 缺少 `POSTGRES_TEST_URL` 时必须在
+pytest 前硬失败；本地命令：
 `POSTGRES_TEST_URL="$POSTGRES_TEST_ADMIN_URL" uv run pytest -m "postgres and integration" tests/integration -q`。
 `POSTGRES_TEST_ADMIN_URL` 必须是仅供测试的 maintenance/admin URL，具备 `CREATEDB`、
 terminate connection 和 drop 随机测试库的权限，并且只能指向可丢弃的隔离测试实例；绝不
@@ -746,6 +750,7 @@ target database.
 - `migrations/versions/0002_runs_token_usage.py` — fixes issue #3682
 - `migrations/versions/0004_migration_ledger.py` — per-source-row SQLite migration ledger
 - `migrations/versions/0005_project_foundation.py` — PostgreSQL project/membership tables and platform-role rename
+- `migrations/versions/0006_project_governance.py` — 项目成员生命周期、邀请、限流和项目删除恢复字段
 - `persistence/bootstrap.py` — `bootstrap_schema(engine)`, the three-branch decision + PostgreSQL advisory locking
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor)
 

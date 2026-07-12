@@ -99,6 +99,39 @@ describe("project contracts", () => {
     ).toBe(true);
   });
 
+  test("accepts backend user IDs without relaxing resource UUIDs", () => {
+    const membership = {
+      membership_id: "33333333-3333-4333-8333-333333333333",
+      user_id: "44444444-4444-4444-8444-444444444444",
+      account_email: "member@example.com",
+      role: "viewer",
+      status: "active",
+      version: 1,
+      joined_at: "2026-07-12T08:00:00+00:00",
+    } as const;
+
+    expect(projectMembershipSchema.safeParse(membership).success).toBe(true);
+    expect(
+      projectMembershipSchema.safeParse({ ...membership, user_id: "default" })
+        .success,
+    ).toBe(true);
+    expect(
+      projectMembershipSchema.safeParse({ ...membership, user_id: "" }).success,
+    ).toBe(false);
+    expect(
+      projectMembershipSchema.safeParse({
+        ...membership,
+        user_id: "x".repeat(37),
+      }).success,
+    ).toBe(false);
+    expect(
+      projectMembershipSchema.safeParse({
+        ...membership,
+        membership_id: "default",
+      }).success,
+    ).toBe(false);
+  });
+
   test("fails closed when invitation responses contain the Admin role", () => {
     const contracts = [
       [projectInvitationSchema, invitation],

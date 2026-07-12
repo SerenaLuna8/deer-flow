@@ -299,6 +299,19 @@ make check-db
 `project_private_workspace` 仍硬关闭，Thread、run、file、memory、automation 尚未完成
 项目与 owner 双重隔离，因此不能把 M1 当作完整多用户 SaaS 发布。
 
+### 工作空间与项目治理（M2）
+
+登录后的默认入口 `/workspace` 是多项目工作空间：页面展示多个项目卡片、待兑换邀请和
+可恢复项目，但不显示项目级左侧菜单。只有进入 `/projects/{project_slug}` 后才加载项目
+菜单，并提供项目概览、成员与邀请、项目设置以及返回工作空间入口。成员、邀请、角色、
+退出、移除和项目删除恢复都由服务端返回的能力与作用域 repository 授权，前端不根据
+角色推导权限。
+
+M2 不接入邮件服务；Admin 创建邀请后只获得一次性 fragment 链接。M2 不使用
+PostgreSQL RLS，也不物理清除成员私有数据或项目数据，只记录 30 天保留或恢复窗口。
+Thread、run、file、memory、automation 等私有业务数据仍未完成项目与 owner 双重隔离，
+因此 M2 仍不能作为完整多用户 SaaS 发布。
+
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 > [!IMPORTANT]
