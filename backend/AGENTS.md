@@ -641,7 +641,8 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the author
 head，并用同一个显式 `DATABASE_URL` 幂等执行 LangGraph
 `AsyncPostgresSaver.setup()` / `AsyncPostgresStore.setup()`；它不创建 role，也不提升权限。
 `make migrate-db` 对已存在目标库执行相同的 ORM/Alembic + LangGraph 完整初始化，但不读取
-管理员连接；`make check-db` 只执行参数化只读查询，除业务表外还要求
+管理员连接；`make check-db` 只执行参数化只读查询，业务表要求包含
+`projects`、`project_memberships`，此外还要求
 `checkpoint_migrations`、`checkpoints`、`checkpoint_blobs`、`checkpoint_writes`、
 `store_migrations`、`store`。三个命令均不输出 username、password 或完整 URL。Gateway
 runtime 仍只验证目标库，绝不自动创建数据库。

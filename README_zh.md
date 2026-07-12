@@ -123,8 +123,9 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    使用 `make migrate-db`，它不读取管理员连接，也不会创建数据库。`setup-db` 和
    `migrate-db` 都会先初始化 ORM/Alembic，再用同一个显式 `DATABASE_URL` 幂等初始化
    LangGraph checkpointer/store 完整 schema。`make check-db` 只读检查 PostgreSQL 版本、
-   Alembic revision、业务表以及 checkpoint/store 必需表；只到 Alembic head 但缺少
-   LangGraph 表仍会判定为不健康。命令输出不会显示 username、password 或完整 URL。
+   Alembic revision、业务表（包括 `projects`、`project_memberships`）以及
+   checkpoint/store 必需表；只到 Alembic head 但缺少其中任一表仍会判定为不健康。
+   命令输出不会显示 username、password 或完整 URL。
    Gateway 启动只验证和升级已配置的目标数据库，不会自动建库。
 
    当前 PostgreSQL schema 会创建项目与项目成员关系基础表。平台角色仅为

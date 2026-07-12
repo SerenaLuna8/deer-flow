@@ -28,6 +28,8 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "checkpoints",
     "feedback",
     "migration_ledger",
+    "project_memberships",
+    "projects",
     "run_events",
     "runs",
     "scheduled_task_runs",

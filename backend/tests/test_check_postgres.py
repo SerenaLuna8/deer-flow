@@ -11,6 +11,31 @@ def test_task5_health_check_requires_migration_ledger() -> None:
     assert "migration_ledger" in check_postgres.REQUIRED_TABLES
 
 
+def test_required_tables_exactly_cover_current_application_and_langgraph_schema() -> None:
+    assert set(check_postgres.REQUIRED_TABLES) == {
+        "channel_connections",
+        "channel_conversations",
+        "channel_credentials",
+        "channel_oauth_states",
+        "checkpoint_blobs",
+        "checkpoint_migrations",
+        "checkpoint_writes",
+        "checkpoints",
+        "feedback",
+        "migration_ledger",
+        "project_memberships",
+        "projects",
+        "run_events",
+        "runs",
+        "scheduled_task_runs",
+        "scheduled_tasks",
+        "store",
+        "store_migrations",
+        "threads_meta",
+        "users",
+    }
+
+
 def test_health_check_requires_complete_langgraph_schema() -> None:
     assert {
         "checkpoint_migrations",
@@ -64,6 +89,22 @@ async def test_check_distinguishes_missing_revision_and_tables(monkeypatch) -> N
     assert result.revision_matches is False
     assert "users" not in result.missing_tables
     assert result.missing_tables
+    assert result.healthy is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_table", ["projects", "project_memberships"])
+async def test_check_is_unhealthy_when_project_foundation_table_is_missing(monkeypatch, missing_table: str) -> None:
+    present = set(check_postgres.REQUIRED_TABLES) - {missing_table}
+    connection = _connection(revision="0005_project_foundation", present_tables=present)
+    monkeypatch.setattr(check_postgres.asyncpg, "connect", AsyncMock(return_value=connection))
+    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: "0005_project_foundation")
+
+    result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
+
+    assert result.current_revision == "0005_project_foundation"
+    assert result.revision_matches is True
+    assert result.missing_tables == (missing_table,)
     assert result.healthy is False
 
 
