@@ -5,6 +5,7 @@ export interface NormalizedProjectFilters {
   readonly pinned: boolean | null;
   readonly cursor: string | null;
   readonly limit: number | null;
+  readonly includeRecoverable: boolean;
 }
 
 export function normalizeProjectFilters(
@@ -17,12 +18,16 @@ export function normalizeProjectFilters(
     pinned: parsed.pinned ?? null,
     cursor: parsed.cursor ?? null,
     limit: parsed.limit ?? null,
+    includeRecoverable: parsed.includeRecoverable ?? false,
   });
 }
 
 export const projectKeys = {
-  lists: (userId: string) => ["account", userId, "projects"] as const,
+  workspace: (userId: string) => ["account", userId, "projects"] as const,
+  lists: (userId: string) => projectKeys.workspace(userId),
   details: (userId: string) => ["account", userId, "project"] as const,
+  myInvitations: (userId: string) =>
+    ["account", userId, "project-invitations", "mine"] as const,
 };
 
 export function accountProjectsKey(
@@ -41,4 +46,12 @@ export function projectDetailKey(userId: string, projectId: string) {
 
 export function projectBySlugKey(userId: string, slug: string) {
   return [...projectKeys.lists(userId), "slug", slug] as const;
+}
+
+export function projectMembersKey(userId: string, projectId: string) {
+  return [...projectKeys.details(userId), projectId, "members"] as const;
+}
+
+export function projectInvitationKey(userId: string, projectId: string) {
+  return [...projectKeys.details(userId), projectId, "invitations"] as const;
 }

@@ -15,7 +15,13 @@ describe("project query keys", () => {
       "account",
       "u1",
       "projects",
-      { query: "alpha", pinned: true, cursor: null, limit: null },
+      {
+        query: "alpha",
+        pinned: true,
+        cursor: null,
+        limit: null,
+        includeRecoverable: false,
+      },
     ]);
     expect(projectDetailKey("u1", "p1")).toEqual([
       "account",
@@ -41,6 +47,7 @@ describe("project query keys", () => {
       pinned: null,
       cursor: null,
       limit: 20,
+      includeRecoverable: false,
     });
     expect(Object.values(first)).not.toContain(undefined);
     expect(Object.isFrozen(first)).toBe(true);

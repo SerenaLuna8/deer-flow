@@ -1,0 +1,391 @@
+import { expect, test, type Page, type Route } from "@playwright/test";
+
+import type {
+  Project,
+  ProjectInvitation,
+  ProjectMembership,
+} from "@/core/projects/types";
+
+import { mockLangGraphAPI } from "./utils/mock-api";
+
+const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
+const RECOVERABLE_ID = "10000000-0000-4000-8000-000000000002";
+const MEMBER_ID = "20000000-0000-4000-8000-000000000001";
+const INVITATION_ID = "30000000-0000-4000-8000-000000000001";
+
+const project: Project = {
+  id: PROJECT_ID,
+  slug: "research-lab",
+  display_name: "Research Lab",
+  description: "Shared research workspace",
+  icon: "folder",
+  role: "viewer",
+  capabilities: [
+    "project.read",
+    "project.enter",
+    "project.members.manage",
+    "project.lifecycle.manage",
+  ],
+  is_pinned: false,
+  last_entered_at: null,
+  member_count: 2,
+  agent_count: 0,
+  skill_count: 0,
+  mcp_count: 0,
+  status: "active",
+  is_suspended: false,
+  membership_version: 4,
+  request_id: "request-project",
+};
+
+const recoverableProject: Project = {
+  ...project,
+  id: RECOVERABLE_ID,
+  slug: "archive-lab",
+  display_name: "待删除项目",
+  status: "pending_deletion",
+  deletion_effective_at: "2026-08-11T08:00:00+00:00",
+};
+
+const members: ProjectMembership[] = [
+  {
+    membership_id: MEMBER_ID,
+    user_id: "40000000-0000-4000-8000-000000000001",
+    account_email: "default@test.local",
+    role: "viewer",
+    status: "active",
+    version: 4,
+    joined_at: "2026-07-01T08:00:00+00:00",
+  },
+  {
+    membership_id: "20000000-0000-4000-8000-000000000002",
+    user_id: "40000000-0000-4000-8000-000000000002",
+    account_email: "editor@example.com",
+    role: "editor",
+    status: "active",
+    version: 2,
+    joined_at: "2026-07-02T08:00:00+00:00",
+  },
+];
+
+const invitation: ProjectInvitation = {
+  id: INVITATION_ID,
+  project_id: PROJECT_ID,
+  invited_email: "invitee@example.com",
+  role: "viewer",
+  status: "pending",
+  expires_at: "2026-07-19T08:00:00+00:00",
+  version: 1,
+  created_at: "2026-07-12T08:00:00+00:00",
+};
+
+async function json(route: Route, body: unknown, status = 200) {
+  await route.fulfill({
+    status,
+    contentType: "application/json",
+    body: JSON.stringify(body),
+  });
+}
+
+type GovernanceMock = {
+  claimBodies: unknown[];
+  redeemBodies: Array<string | null>;
+};
+
+async function mockProjectGovernance(
+  page: Page,
+  currentProject: Project = project,
+): Promise<GovernanceMock> {
+  let currentMembers = structuredClone(members);
+  let projectInvitations = [structuredClone(invitation)];
+  let projectState = structuredClone(currentProject);
+  let recoverableVisible = true;
+  const claimBodies: unknown[] = [];
+  const redeemBodies: Array<string | null> = [];
+
+  await page.route(
+    /\/api\/(?:projects|project-invitations)(?:\/.*)?(?:\?.*)?$/,
+    async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const path = url.pathname;
+      const method = request.method();
+
+      if (
+        path.endsWith("/api/project-invitations/claim") &&
+        method === "POST"
+      ) {
+        claimBodies.push(request.postDataJSON());
+        await json(route, { message: "Invitation claim processed" });
+        return;
+      }
+      if (
+        path.endsWith("/api/project-invitations/redeem") &&
+        method === "POST"
+      ) {
+        redeemBodies.push(request.postData());
+        await json(route, {
+          invitation_id: INVITATION_ID,
+          project_id: PROJECT_ID,
+          project_slug: "research-lab",
+          membership_id: MEMBER_ID,
+          role: "viewer",
+        });
+        return;
+      }
+      if (path.endsWith("/api/project-invitations/mine") && method === "GET") {
+        await json(route, [invitation]);
+        return;
+      }
+      if (path.endsWith("/api/projects") && method === "GET") {
+        const items = url.searchParams.has("include_recoverable")
+          ? [
+              currentProject,
+              ...(recoverableVisible ? [recoverableProject] : []),
+            ]
+          : [currentProject];
+        await json(route, { items, next_cursor: null });
+        return;
+      }
+      if (path.endsWith(`/api/projects/${PROJECT_ID}/enter`)) {
+        await json(route, projectState);
+        return;
+      }
+      if (path.endsWith(`/api/projects/${PROJECT_ID}/members`)) {
+        if (method === "GET") {
+          await json(route, currentMembers);
+          return;
+        }
+      }
+      const memberMatch = new RegExp(
+        `/api/projects/${PROJECT_ID}/members/([^/]+)$`,
+      ).exec(path);
+      if (memberMatch && method === "PATCH") {
+        const input = request.postDataJSON() as {
+          role: ProjectMembership["role"];
+        };
+        currentMembers = currentMembers.map((member) =>
+          member.membership_id === memberMatch[1]
+            ? { ...member, role: input.role, version: member.version + 1 }
+            : member,
+        );
+        await json(
+          route,
+          currentMembers.find(
+            (member) => member.membership_id === memberMatch[1],
+          ),
+        );
+        return;
+      }
+      if (memberMatch && method === "DELETE") {
+        const removed = currentMembers.find(
+          (member) => member.membership_id === memberMatch[1],
+        )!;
+        currentMembers = currentMembers.filter(
+          (member) => member.membership_id !== memberMatch[1],
+        );
+        await json(route, { ...removed, status: "removed" });
+        return;
+      }
+      if (
+        path.endsWith(`/api/projects/${PROJECT_ID}/leave`) &&
+        method === "POST"
+      ) {
+        await json(route, { ...currentMembers[0], status: "left", version: 5 });
+        return;
+      }
+      if (path.endsWith(`/api/projects/${PROJECT_ID}/invitations`)) {
+        if (method === "GET") {
+          await json(route, projectInvitations);
+          return;
+        }
+        if (method === "POST") {
+          const input = request.postDataJSON() as {
+            email: string;
+            role: ProjectInvitation["role"];
+          };
+          const created: ProjectInvitation & { invite_url_fragment: string } = {
+            ...invitation,
+            id: "30000000-0000-4000-8000-000000000002",
+            invited_email: input.email,
+            role: input.role,
+            invite_url_fragment: "/invite#token=new-secret-token",
+          };
+          const ordinaryInvitation: ProjectInvitation = {
+            id: created.id,
+            project_id: created.project_id,
+            invited_email: created.invited_email,
+            role: created.role,
+            status: created.status,
+            expires_at: created.expires_at,
+            version: created.version,
+            created_at: created.created_at,
+          };
+          projectInvitations = [...projectInvitations, ordinaryInvitation];
+          await json(route, created, 201);
+          return;
+        }
+      }
+      const invitationMatch = new RegExp(
+        `/api/projects/${PROJECT_ID}/invitations/([^/]+)$`,
+      ).exec(path);
+      if (invitationMatch && method === "DELETE") {
+        const revoked = projectInvitations.find(
+          (item) => item.id === invitationMatch[1],
+        )!;
+        projectInvitations = projectInvitations.filter(
+          (item) => item.id !== invitationMatch[1],
+        );
+        await json(route, { ...revoked, status: "revoked" });
+        return;
+      }
+      if (
+        path.endsWith(`/api/projects/${PROJECT_ID}/deletion`) &&
+        method === "POST"
+      ) {
+        projectState = {
+          ...projectState,
+          status: "pending_deletion",
+          deletion_effective_at: "2026-08-11T08:00:00+00:00",
+        };
+        await json(route, projectState);
+        return;
+      }
+      if (
+        path.endsWith(`/api/projects/${RECOVERABLE_ID}/restore`) &&
+        method === "POST"
+      ) {
+        recoverableVisible = false;
+        await json(route, {
+          ...recoverableProject,
+          status: "active",
+          deletion_effective_at: null,
+        });
+        return;
+      }
+      await json(
+        route,
+        {
+          detail: {
+            code: "PROJECT_OR_MEMBER_NOT_FOUND",
+            message: "not found",
+            request_id: "request-404",
+          },
+        },
+        404,
+      );
+    },
+  );
+
+  return { claimBodies, redeemBodies };
+}
+
+test("claims a fragment secret once, clears the URL, and redeems without a body", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const api = await mockProjectGovernance(page);
+
+  await page.goto("/invite#token=plain-secret-token");
+
+  await expect.poll(() => page.url()).not.toContain("plain-secret-token");
+  expect(
+    await page.evaluate(() => localStorage.getItem("invitation-token")),
+  ).toBeNull();
+  expect(
+    await page.evaluate(() => sessionStorage.getItem("invitation-token")),
+  ).toBeNull();
+  await expect(page.getByRole("heading", { name: "邀请已接受" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "进入项目" })).toHaveAttribute(
+    "href",
+    "/projects/research-lab",
+  );
+  expect(api.claimBodies).toEqual([{ token: "plain-secret-token" }]);
+  expect(api.redeemBodies).toEqual([null]);
+});
+
+test("workspace separates invitations and recoverable projects from active projects", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectGovernance(page);
+
+  await page.goto("/workspace");
+
+  await expect(page.getByText("Research Lab", { exact: true })).toBeVisible();
+  const activeGrid = page.getByTestId("project-grid");
+  await expect(
+    activeGrid.getByText("Research Lab", { exact: true }),
+  ).toBeVisible();
+  await expect(activeGrid.getByText("待删除项目", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole("region", { name: "待接受邀请" })).toContainText(
+    "invitee@example.com",
+  );
+  const recovery = page.getByRole("region", { name: "可恢复项目" });
+  await expect(recovery).toContainText("待删除项目");
+  await recovery.getByRole("button", { name: "恢复项目" }).click();
+  await expect(recovery).not.toContainText("待删除项目");
+});
+
+test("server capabilities expose governance actions even when the role label is viewer", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectGovernance(page);
+
+  await page.goto("/projects/research-lab/members");
+
+  await expect(page.getByRole("heading", { name: "成员与邀请" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "邀请成员" })).toBeVisible();
+  const editorRow = page.getByRole("row", { name: /editor@example\.com/ });
+  await editorRow.getByRole("button", { name: "修改角色" }).click();
+  await page.getByRole("radio", { name: "Admin" }).click();
+  await page.getByRole("button", { name: "保存角色" }).click();
+  await expect(editorRow).toContainText("admin");
+
+  await page.getByRole("button", { name: "邀请成员" }).click();
+  const invitationDialog = page.getByRole("dialog", { name: "邀请成员" });
+  await invitationDialog.getByLabel("邮箱").fill("new@example.com");
+  await invitationDialog.getByRole("button", { name: "创建邀请" }).click();
+  await expect(invitationDialog.getByLabel("邀请链接")).toHaveValue(
+    /\/invite#token=new-secret-token$/,
+  );
+  await invitationDialog.getByRole("button", { name: "完成" }).click();
+  await expect(
+    page.getByText("new@example.com", { exact: true }),
+  ).toBeVisible();
+});
+
+test("role labels never grant actions without server capabilities", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectGovernance(page, {
+    ...project,
+    role: "admin",
+    capabilities: ["project.read", "project.enter"],
+  });
+
+  await page.goto("/projects/research-lab/members");
+
+  await expect(page.getByRole("heading", { name: "成员与邀请" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "邀请成员" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "修改角色" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "移除成员" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "项目设置" })).toHaveCount(0);
+});
+
+test("leaving or requesting deletion replaces the current project with workspace", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectGovernance(page);
+
+  await page.goto("/projects/research-lab/settings");
+  await page.getByRole("button", { name: "请求删除项目" }).click();
+  const dialog = page.getByRole("dialog", { name: "确认删除项目" });
+  await dialog.getByRole("button", { name: "确认请求删除" }).click();
+  await expect(page).toHaveURL(/\/workspace$/);
+});

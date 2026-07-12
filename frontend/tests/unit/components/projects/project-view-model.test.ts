@@ -74,4 +74,35 @@ describe("project workbench view model", () => {
       "secret",
     );
   });
+
+  test("maps recoverable governance conflicts without backend details", () => {
+    expect(
+      projectErrorMessage(
+        new ProjectApiError(409, "PROJECT_LAST_ADMIN", "unsafe raw"),
+      ),
+    ).toContain("最后一名 Admin");
+    expect(
+      projectErrorMessage(
+        new ProjectApiError(
+          409,
+          "PROJECT_MEMBERSHIP_VERSION_CONFLICT",
+          "unsafe raw",
+        ),
+      ),
+    ).toContain("成员信息已更新");
+    expect(
+      projectErrorMessage(
+        new ProjectApiError(409, "PROJECT_INVITATION_INVALID", "unsafe raw"),
+      ),
+    ).toContain("邀请已失效");
+    expect(
+      projectErrorMessage(
+        new ProjectApiError(
+          409,
+          "PROJECT_DELETION_STATE_CONFLICT",
+          "unsafe raw",
+        ),
+      ),
+    ).toContain("项目状态已变化");
+  });
 });

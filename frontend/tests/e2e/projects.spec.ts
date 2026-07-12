@@ -36,7 +36,7 @@ type ProjectMock = {
   projects: () => Project[];
   listRequests: () => URL[];
   enterPaths: () => string[];
-  failNextList: () => void;
+  failNextList: (count?: number) => void;
   holdEnters: () => void;
   releaseEnters: () => void;
   refreshLookup: (requestId: string) => void;
@@ -196,10 +196,8 @@ async function mockProjectsAPI(
     projects: () => projects,
     listRequests: () => listRequests,
     enterPaths: () => enterPaths,
-    failNextList: () => {
-      // TanStack Query retries failed queries three times by default. Fail the
-      // initial request plus those retries so the visible retry state is real.
-      listFailuresRemaining = 4;
+    failNextList: (count = 4) => {
+      listFailuresRemaining = count;
     },
     holdEnters: () => {
       enterGate = new Promise((resolve) => {
@@ -340,7 +338,9 @@ test("project workbench exposes loading-safe API error and retry", async ({
 }) => {
   mockLangGraphAPI(page);
   const api = await mockProjectsAPI(page, []);
-  api.failNextList();
+  // Active and recoverable workspace lists each retry three times. Fail both
+  // initial requests plus their retries so the active grid reaches its error.
+  api.failNextList(8);
 
   await page.goto("/workspace");
   const error = page.getByTestId("project-load-error");

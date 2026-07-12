@@ -23,6 +23,13 @@ export const CAPABILITIES = [
 export const PROJECT_ERROR_CODES = [
   "PROJECT_NOT_FOUND",
   "PROJECT_FORBIDDEN",
+  "PROJECT_OR_MEMBER_NOT_FOUND",
+  "PROJECT_MEMBERSHIP_FORBIDDEN",
+  "PROJECT_LAST_ADMIN",
+  "PROJECT_MEMBERSHIP_VERSION_CONFLICT",
+  "PROJECT_INVITATION_CONFLICT",
+  "PROJECT_INVITATION_INVALID",
+  "PROJECT_DELETION_STATE_CONFLICT",
   "PROJECT_SLUG_CONFLICT",
   "PROJECT_VALIDATION_FAILED",
   "DATABASE_UNAVAILABLE",
@@ -52,10 +59,15 @@ export const projectSchema = z
     agent_count: z.number().int().nonnegative(),
     skill_count: z.number().int().nonnegative(),
     mcp_count: z.number().int().nonnegative(),
-    status: z.literal("active"),
+    status: z.enum(["active", "pending_deletion"]),
     is_suspended: z.boolean(),
     membership_version: z.number().int().positive(),
     request_id: z.string().min(1),
+    deletion_effective_at: z
+      .string()
+      .datetime({ offset: true })
+      .nullable()
+      .optional(),
   })
   .strict();
 
@@ -95,6 +107,85 @@ export const projectFiltersSchema = z
     pinned: z.boolean().optional(),
     cursor: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(100).optional(),
+    includeRecoverable: z.boolean().optional(),
+  })
+  .strict();
+
+export const membershipStatusSchema = z.enum(["active", "left", "removed"]);
+
+export const projectMembershipSchema = z
+  .object({
+    membership_id: projectIdSchema,
+    user_id: projectIdSchema,
+    account_email: z.string().email(),
+    role: projectRoleSchema,
+    status: membershipStatusSchema,
+    version: z.number().int().positive(),
+    joined_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export const projectMembershipListSchema = z.array(projectMembershipSchema);
+
+export const changeProjectMemberRoleSchema = z
+  .object({
+    role: projectRoleSchema,
+    version: z.number().int().positive(),
+  })
+  .strict();
+
+export const membershipVersionSchema = z
+  .object({ version: z.number().int().positive() })
+  .strict();
+
+export const invitationStatusSchema = z.enum([
+  "pending",
+  "redeemed",
+  "revoked",
+  "expired",
+]);
+
+export const projectInvitationSchema = z
+  .object({
+    id: projectIdSchema,
+    project_id: projectIdSchema,
+    invited_email: z.string().email(),
+    role: projectRoleSchema,
+    status: invitationStatusSchema,
+    expires_at: z.string().datetime({ offset: true }),
+    version: z.number().int().positive(),
+    created_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export const projectInvitationListSchema = z.array(projectInvitationSchema);
+
+export const createProjectInvitationSchema = z
+  .object({
+    email: z.string().trim().email(),
+    role: projectRoleSchema,
+  })
+  .strict();
+
+export const createdProjectInvitationSchema = projectInvitationSchema
+  .extend({ invite_url_fragment: z.string().startsWith("/invite#token=") })
+  .strict();
+
+export const invitationClaimSchema = z
+  .object({ token: z.string().min(1) })
+  .strict();
+
+export const invitationClaimResponseSchema = z
+  .object({ message: z.literal("Invitation claim processed") })
+  .strict();
+
+export const redeemedProjectInvitationSchema = z
+  .object({
+    invitation_id: projectIdSchema,
+    project_id: projectIdSchema,
+    project_slug: z.string().min(1),
+    membership_id: projectIdSchema,
+    role: projectRoleSchema,
   })
   .strict();
 
@@ -107,3 +198,19 @@ export type CreateProjectInput = z.input<typeof createProjectSchema>;
 export type PatchProjectInput = z.input<typeof patchProjectSchema>;
 export type PinProjectInput = z.input<typeof pinProjectSchema>;
 export type ProjectFilters = z.input<typeof projectFiltersSchema>;
+export type MembershipStatus = z.infer<typeof membershipStatusSchema>;
+export type ProjectMembership = z.infer<typeof projectMembershipSchema>;
+export type ChangeProjectMemberRoleInput = z.input<
+  typeof changeProjectMemberRoleSchema
+>;
+export type InvitationStatus = z.infer<typeof invitationStatusSchema>;
+export type ProjectInvitation = z.infer<typeof projectInvitationSchema>;
+export type CreateProjectInvitationInput = z.input<
+  typeof createProjectInvitationSchema
+>;
+export type CreatedProjectInvitation = z.infer<
+  typeof createdProjectInvitationSchema
+>;
+export type RedeemedProjectInvitation = z.infer<
+  typeof redeemedProjectInvitationSchema
+>;

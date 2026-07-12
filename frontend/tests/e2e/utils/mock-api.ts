@@ -298,6 +298,20 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  // Project-first workspace always asks for the current account's pending
+  // invitations. Keep unrelated E2E files isolated from a real gateway; tests
+  // that exercise invitation behavior register a more specific override.
+  void page.route("**/api/project-invitations/mine", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      });
+    }
+    return route.fallback();
+  });
+
   void page.route("**/api/channels/providers", (route) => {
     if (route.request().method() === "GET") {
       return route.fulfill({

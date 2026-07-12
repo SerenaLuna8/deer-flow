@@ -40,6 +40,8 @@ import {
   filterAndSortProjects,
   projectErrorMessage,
 } from "./project-view-model";
+import { WorkspaceInvitations } from "./workspace-invitations";
+import { WorkspaceRecoverySection } from "./workspace-recovery-section";
 
 function ProjectCardWithActions({
   project,
@@ -152,6 +154,9 @@ export function ProjectWorkbench({
             />
           </div>
 
+          <WorkspaceInvitations userId={userId} />
+          <WorkspaceRecoverySection userId={userId} />
+
           {projectsQuery.isLoading ? (
             <div
               data-testid="project-loading"
@@ -187,7 +192,10 @@ export function ProjectWorkbench({
               onClearSearch={() => setSearch("")}
             />
           ) : (
-            <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+            <div
+              data-testid="project-grid"
+              className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3"
+            >
               {projects.map((project) => (
                 <ProjectCardWithActions
                   key={project.id}

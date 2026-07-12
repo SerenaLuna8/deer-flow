@@ -32,7 +32,19 @@ export function projectErrorMessage(error: unknown): string {
         return "这个项目标识已存在，请换一个后重试。";
       case "PROJECT_NOT_FOUND":
       case "PROJECT_FORBIDDEN":
+      case "PROJECT_OR_MEMBER_NOT_FOUND":
+      case "PROJECT_MEMBERSHIP_FORBIDDEN":
         return "项目不可用或成员关系已失效，请返回工作空间。";
+      case "PROJECT_LAST_ADMIN":
+        return "不能移除或降级最后一名 Admin，请先指定其他 Admin。";
+      case "PROJECT_MEMBERSHIP_VERSION_CONFLICT":
+        return "成员信息已更新，请刷新后重试。";
+      case "PROJECT_INVITATION_CONFLICT":
+        return "该邀请已存在或刚刚被处理，请刷新后重试。";
+      case "PROJECT_INVITATION_INVALID":
+        return "邀请已失效、撤销或不适用于当前账户。";
+      case "PROJECT_DELETION_STATE_CONFLICT":
+        return "项目状态已变化，请刷新工作空间后重试。";
       case "PROJECT_VALIDATION_FAILED":
         return "项目信息不符合要求，请检查后重试。";
       case "AUTH_REQUIRED":

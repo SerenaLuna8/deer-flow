@@ -5,23 +5,47 @@ import { getBackendBaseURL } from "@/core/config";
 
 import { normalizeProjectFilters } from "./query-keys";
 import {
+  changeProjectMemberRoleSchema,
+  createProjectInvitationSchema,
   createProjectSchema,
+  createdProjectInvitationSchema,
+  invitationClaimResponseSchema,
+  invitationClaimSchema,
+  membershipVersionSchema,
   patchProjectSchema,
   pinProjectSchema,
+  projectInvitationListSchema,
+  projectInvitationSchema,
   projectIdSchema,
+  projectMembershipListSchema,
+  projectMembershipSchema,
   projectPageSchema,
   projectSchema,
+  redeemedProjectInvitationSchema,
+  type ChangeProjectMemberRoleInput,
   type CreateProjectInput,
+  type CreateProjectInvitationInput,
+  type CreatedProjectInvitation,
   type PatchProjectInput,
   type Project,
   type ProjectErrorCode,
   type ProjectFilters,
+  type ProjectInvitation,
+  type ProjectMembership,
   type ProjectPage,
+  type RedeemedProjectInvitation,
 } from "./types";
 
 const serverErrorCodeSchema = z.enum([
   "PROJECT_NOT_FOUND",
   "PROJECT_FORBIDDEN",
+  "PROJECT_OR_MEMBER_NOT_FOUND",
+  "PROJECT_MEMBERSHIP_FORBIDDEN",
+  "PROJECT_LAST_ADMIN",
+  "PROJECT_MEMBERSHIP_VERSION_CONFLICT",
+  "PROJECT_INVITATION_CONFLICT",
+  "PROJECT_INVITATION_INVALID",
+  "PROJECT_DELETION_STATE_CONFLICT",
   "PROJECT_SLUG_CONFLICT",
   "PROJECT_VALIDATION_FAILED",
   "DATABASE_UNAVAILABLE",
@@ -33,6 +57,7 @@ const errorEnvelopeSchema = z
       .object({
         code: serverErrorCodeSchema,
         message: z.string().min(1),
+        request_id: z.string().min(1).optional(),
       })
       .strict(),
   })
@@ -44,6 +69,14 @@ const SAFE_SERVER_MESSAGES: Record<
 > = {
   PROJECT_NOT_FOUND: "Project not found",
   PROJECT_FORBIDDEN: "Project capability required",
+  PROJECT_OR_MEMBER_NOT_FOUND: "Project or member not found",
+  PROJECT_MEMBERSHIP_FORBIDDEN:
+    "Project membership does not allow this operation",
+  PROJECT_LAST_ADMIN: "Project must keep an active admin",
+  PROJECT_MEMBERSHIP_VERSION_CONFLICT: "Project membership version conflict",
+  PROJECT_INVITATION_CONFLICT: "Project invitation conflict",
+  PROJECT_INVITATION_INVALID: "Project invitation is invalid",
+  PROJECT_DELETION_STATE_CONFLICT: "Project deletion state conflict",
   PROJECT_SLUG_CONFLICT: "Project slug already exists",
   PROJECT_VALIDATION_FAILED: "Project validation failed",
   DATABASE_UNAVAILABLE: "Project storage unavailable",
@@ -139,6 +172,22 @@ async function parseProjectResponse(
   return parsed.data;
 }
 
+async function parseResponse<T>(
+  response: Response,
+  schema: z.ZodType<T>,
+): Promise<T> {
+  if (!response.ok) await throwResponseError(response);
+  const parsed = schema.safeParse(await readJson(response));
+  if (!parsed.success) {
+    throw new ProjectApiError(
+      response.status,
+      "PROJECT_RESPONSE_INVALID",
+      "Project response was invalid",
+    );
+  }
+  return parsed.data;
+}
+
 async function throwResponseError(response: Response): Promise<never> {
   const parsed = errorEnvelopeSchema.safeParse(await readJson(response));
   if (!parsed.success) {
@@ -179,6 +228,7 @@ export async function listProjects(
     params.set("pinned", String(normalized.pinned));
   if (normalized.cursor !== null) params.set("cursor", normalized.cursor);
   if (normalized.limit !== null) params.set("limit", String(normalized.limit));
+  if (normalized.includeRecoverable) params.set("include_recoverable", "true");
   const query = params.toString();
   const response = await request(projectUrl(query ? `?${query}` : ""), {
     signal,
@@ -340,5 +390,195 @@ export async function pinProject(
       signal,
     }),
     id,
+  );
+}
+
+function projectGovernanceUrl(projectId: string, path = ""): string {
+  const id = parseInput(projectIdSchema, projectId);
+  return projectUrl(`/${encodeURIComponent(id)}${path}`);
+}
+
+function jsonRequest(
+  method: "POST" | "PATCH" | "DELETE",
+  body: unknown,
+  signal?: AbortSignal,
+): RequestInit {
+  return {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  };
+}
+
+export async function listProjectMembers(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ProjectMembership[]> {
+  return parseResponse(
+    await request(projectGovernanceUrl(projectId, "/members"), { signal }),
+    projectMembershipListSchema,
+  );
+}
+
+export async function changeProjectMemberRole(
+  projectId: string,
+  membershipId: string,
+  input: ChangeProjectMemberRoleInput,
+  signal?: AbortSignal,
+): Promise<ProjectMembership> {
+  const memberId = parseInput(projectIdSchema, membershipId);
+  const body = parseInput(changeProjectMemberRoleSchema, input);
+  return parseResponse(
+    await request(
+      projectGovernanceUrl(
+        projectId,
+        `/members/${encodeURIComponent(memberId)}`,
+      ),
+      jsonRequest("PATCH", body, signal),
+    ),
+    projectMembershipSchema,
+  );
+}
+
+export async function removeProjectMember(
+  projectId: string,
+  membershipId: string,
+  version: number,
+  signal?: AbortSignal,
+): Promise<ProjectMembership> {
+  const memberId = parseInput(projectIdSchema, membershipId);
+  const body = parseInput(membershipVersionSchema, { version });
+  return parseResponse(
+    await request(
+      projectGovernanceUrl(
+        projectId,
+        `/members/${encodeURIComponent(memberId)}`,
+      ),
+      jsonRequest("DELETE", body, signal),
+    ),
+    projectMembershipSchema,
+  );
+}
+
+export async function leaveProject(
+  projectId: string,
+  version: number,
+  signal?: AbortSignal,
+): Promise<ProjectMembership> {
+  const body = parseInput(membershipVersionSchema, { version });
+  return parseResponse(
+    await request(
+      projectGovernanceUrl(projectId, "/leave"),
+      jsonRequest("POST", body, signal),
+    ),
+    projectMembershipSchema,
+  );
+}
+
+function projectInvitationsUrl(path = ""): string {
+  return `${getBackendBaseURL()}/api/project-invitations${path}`;
+}
+
+export async function listMyProjectInvitations(
+  signal?: AbortSignal,
+): Promise<ProjectInvitation[]> {
+  return parseResponse(
+    await request(projectInvitationsUrl("/mine"), { signal }),
+    projectInvitationListSchema,
+  );
+}
+
+export async function listProjectInvitations(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ProjectInvitation[]> {
+  return parseResponse(
+    await request(projectGovernanceUrl(projectId, "/invitations"), { signal }),
+    projectInvitationListSchema,
+  );
+}
+
+export async function createProjectInvitation(
+  projectId: string,
+  input: CreateProjectInvitationInput,
+  signal?: AbortSignal,
+): Promise<CreatedProjectInvitation> {
+  const body = parseInput(createProjectInvitationSchema, input);
+  return parseResponse(
+    await request(
+      projectGovernanceUrl(projectId, "/invitations"),
+      jsonRequest("POST", body, signal),
+    ),
+    createdProjectInvitationSchema,
+  );
+}
+
+export async function revokeProjectInvitation(
+  projectId: string,
+  invitationId: string,
+  version: number,
+  signal?: AbortSignal,
+): Promise<ProjectInvitation> {
+  const id = parseInput(projectIdSchema, invitationId);
+  const body = parseInput(membershipVersionSchema, { version });
+  return parseResponse(
+    await request(
+      projectGovernanceUrl(projectId, `/invitations/${encodeURIComponent(id)}`),
+      jsonRequest("DELETE", body, signal),
+    ),
+    projectInvitationSchema,
+  );
+}
+
+export async function claimProjectInvitation(
+  token: string,
+  signal?: AbortSignal,
+): Promise<{ message: "Invitation claim processed" }> {
+  const body = parseInput(invitationClaimSchema, { token });
+  return parseResponse(
+    await request(
+      projectInvitationsUrl("/claim"),
+      jsonRequest("POST", body, signal),
+    ),
+    invitationClaimResponseSchema,
+  );
+}
+
+export async function redeemProjectInvitation(
+  signal?: AbortSignal,
+): Promise<RedeemedProjectInvitation> {
+  return parseResponse(
+    await request(projectInvitationsUrl("/redeem"), {
+      method: "POST",
+      signal,
+    }),
+    redeemedProjectInvitationSchema,
+  );
+}
+
+export async function requestProjectDeletion(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<Project> {
+  return parseProjectResponse(
+    await request(projectGovernanceUrl(projectId, "/deletion"), {
+      method: "POST",
+      signal,
+    }),
+    projectId,
+  );
+}
+
+export async function restoreProject(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<Project> {
+  return parseProjectResponse(
+    await request(projectGovernanceUrl(projectId, "/restore"), {
+      method: "POST",
+      signal,
+    }),
+    projectId,
   );
 }
