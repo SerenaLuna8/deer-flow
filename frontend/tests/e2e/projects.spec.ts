@@ -198,6 +198,38 @@ async function mockProjectsAPI(
   };
 }
 
+test("workspace shows project cards without project navigation", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectsAPI(page);
+
+  await page.goto("/workspace");
+
+  await expect(page.getByTestId("project-workbench")).toBeVisible();
+  await expect(page.getByText("Research Lab", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Agents" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Skills" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Tools" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Memory" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Scheduled tasks" })).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole("button", { name: "账户" })).toBeVisible();
+});
+
+test("legacy project workspace address redirects to workspace", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectsAPI(page);
+
+  await page.goto("/workspace/projects");
+
+  await expect(page).toHaveURL(/\/workspace$/);
+  await expect(page.getByTestId("project-workbench")).toBeVisible();
+});
+
 test("project workbench supports create, search, pin, edit, enter, and return", async ({
   page,
 }) => {
@@ -253,7 +285,7 @@ test("project workbench supports create, search, pin, edit, enter, and return", 
   );
 
   await page.getByRole("link", { name: "返回项目工作台" }).click();
-  await expect(page).toHaveURL(/\/workspace\/projects$/);
+  await expect(page).toHaveURL(/\/workspace$/);
 });
 
 test("project workbench exposes loading-safe API error and retry", async ({

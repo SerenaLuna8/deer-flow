@@ -7,6 +7,7 @@ import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
 
 import { WorkspaceContent } from "./workspace-content";
+import { WorkspaceRouteFrame } from "./workspace-route-frame";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +21,11 @@ export default async function WorkspaceLayout({
       return (
         <QueryClientProvider>
           <AuthProvider initialUser={result.user}>
-            <WorkspaceContent>{children}</WorkspaceContent>
+            <WorkspaceRouteFrame
+              legacyShell={<WorkspaceContent>{children}</WorkspaceContent>}
+            >
+              {children}
+            </WorkspaceRouteFrame>
           </AuthProvider>
         </QueryClientProvider>
       );
@@ -31,13 +36,20 @@ export default async function WorkspaceLayout({
     case "unauthenticated":
       redirect("/login");
     case "gateway_unavailable":
-      // GatewayOfflineFallback supplies the AuthProvider; WorkspaceContent
-      // already mounts the banner inside its sidebar layout, so renderBanner
-      // stays false here to avoid double-mounting.
+      // GatewayOfflineFallback supplies the AuthProvider. Compatibility routes
+      // keep the existing offline banner inside WorkspaceContent.
       return (
         <QueryClientProvider>
           <GatewayOfflineFallback>
-            <WorkspaceContent gatewayUnavailable>{children}</WorkspaceContent>
+            <WorkspaceRouteFrame
+              legacyShell={
+                <WorkspaceContent gatewayUnavailable>
+                  {children}
+                </WorkspaceContent>
+              }
+            >
+              {children}
+            </WorkspaceRouteFrame>
           </GatewayOfflineFallback>
         </QueryClientProvider>
       );

@@ -46,7 +46,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace/projects` (project workbench), `/projects/[project_slug]` (independent project home), `/workspace/chats/[thread_id]` (legacy chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace` (multi-project workspace; `/workspace/projects` redirects here), `/projects/[project_slug]` (independent project home), `/workspace/chats/[thread_id]` (legacy chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
@@ -74,9 +74,11 @@ The M1 `PROJECT_PRIVATE_WORKSPACE` feature constant is hard-disabled and must no
 environment- or user-configurable before the later private-work milestone.
 M1 仍保留旧版私有对话兼容路径，但 Thread、run、file、memory、automation 尚未完成项目与
 owner 双重隔离，因此项目优先界面不能被描述或发布为完整多用户 SaaS。
-Project-first mode sends the normal `/workspace` landing and primary navigation to
-`/workspace/projects`; static demo builds preserve their existing chat landing and must not
-expose a project entry that can call the project API. Project slug URLs are resolved only by
+Project-first mode renders the normal `/workspace` landing directly without the legacy
+`WorkspaceContent` sidebar; `/workspace/projects` is a compatibility redirect, while legacy
+`/workspace/chats`, agents, memory, skills, tools, and scheduled-task routes keep the existing
+shell. Static demo builds preserve their existing chat landing and must not expose a project
+entry that can call the project API. Project slug URLs are resolved only by
 paging the member-scoped list endpoint and exact-matching the returned slug; UUID-only detail,
 enter, pin, and update endpoints must never receive a slug. `/projects/[project_slug]` has its
 own server-side auth, QueryClient, and AuthProvider layout and must not be nested in

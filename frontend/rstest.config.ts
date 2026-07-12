@@ -15,5 +15,5 @@ export default defineConfig({
     // Rsbuild processes that CSS import instead of Node trying to load it.
     bundleDependencies: ["streamdown", "katex"],
   },
-  include: ["tests/unit/**/*.test.ts"],
+  include: ["tests/unit/**/*.test.{ts,tsx}"],
 });

@@ -10,5 +10,5 @@ export function workspaceLandingPath(
       ? `/workspace/chats/${demoThreadId}`
       : "/workspace/chats/new";
   }
-  return PROJECT_FIRST_MODE ? "/workspace/projects" : "/workspace/chats/new";
+  return PROJECT_FIRST_MODE ? "/workspace" : "/workspace/chats/new";
 }

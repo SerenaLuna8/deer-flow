@@ -21,6 +21,7 @@ test.describe("Sidebar navigation", () => {
     );
     await expect(sidebar.getByText("Channels")).toHaveCount(0);
     await expect(sidebar.locator("a[href='/workspace/agents']")).toBeVisible();
+    await expect(page.getByTestId("project-workbench")).toHaveCount(0);
   });
 
   test("Agents link navigates to agents page", async ({ page }) => {

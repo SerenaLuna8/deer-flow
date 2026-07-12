@@ -1,15 +1,28 @@
 "use client";
 
-import { FolderKanbanIcon, PlusIcon, SearchIcon } from "lucide-react";
+import {
+  FolderKanbanIcon,
+  LogOutIcon,
+  PlusIcon,
+  SearchIcon,
+  UserRoundIcon,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   WorkspaceBody,
   WorkspaceContainer,
-  WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
 import {
   useCreateProject,
@@ -48,7 +61,15 @@ function ProjectCardWithActions({
   );
 }
 
-export function ProjectWorkbench({ userId }: { userId: string }) {
+export function ProjectWorkbench({
+  userId,
+  accountEmail,
+  onLogout,
+}: {
+  userId: string;
+  accountEmail: string;
+  onLogout: () => Promise<void>;
+}) {
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
@@ -73,21 +94,46 @@ export function ProjectWorkbench({ userId }: { userId: string }) {
 
   return (
     <WorkspaceContainer data-testid="project-workbench">
-      <WorkspaceHeader>
-        <span className="font-medium">项目工作台</span>
-      </WorkspaceHeader>
+      <header className="flex h-16 shrink-0 items-center justify-between gap-4 border-b px-4 sm:px-6">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="text-primary font-serif text-lg">DeerFlow</span>
+          <span className="text-muted-foreground hidden text-sm sm:inline">
+            工作空间
+          </span>
+        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="ghost" aria-label="账户">
+              <UserRoundIcon className="size-4" />
+              <span className="hidden max-w-56 truncate sm:inline">
+                {accountEmail}
+              </span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-64">
+            <DropdownMenuLabel className="truncate">
+              {accountEmail}
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void onLogout()}>
+              <LogOutIcon className="size-4" />
+              退出登录
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </header>
       <WorkspaceBody className="overflow-y-auto">
         <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
           <div className="mb-8 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <div className="text-primary mb-2 flex items-center gap-2 text-sm font-medium">
-                <FolderKanbanIcon size={18} /> Project-first workspace
+                <FolderKanbanIcon size={18} /> 多项目工作空间
               </div>
               <h1 className="text-3xl font-semibold tracking-tight">
-                项目工作台
+                工作空间
               </h1>
               <p className="text-muted-foreground mt-2">
-                管理你的项目、成员身份与共享资产入口。
+                创建、搜索和整理你参与的项目。
               </p>
             </div>
             <Button type="button" onClick={() => setCreateOpen(true)}>

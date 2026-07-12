@@ -3,6 +3,7 @@ import path from "path";
 
 import { redirect } from "next/navigation";
 
+import { ProjectWorkbenchPage } from "@/components/projects/project-workbench-page";
 import { workspaceLandingPath } from "@/core/projects/features";
 import { env } from "@/env";
 
@@ -18,5 +19,5 @@ export default function WorkspacePage() {
     }
     return redirect(workspaceLandingPath(true, null));
   }
-  return redirect(workspaceLandingPath(false, null));
+  return <ProjectWorkbenchPage />;
 }
