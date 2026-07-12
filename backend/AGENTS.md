@@ -751,6 +751,10 @@ active 状态统一返回 `project_not_found`。UUID 对象按 project ID 解析
 解析（即使字符串形似 UUID），禁止接收客户端 role/capability 作为授权依据。
 `app.projects` 可以依赖 `deerflow.persistence.projects`，harness 永远不得反向 import
 `app.*`。
+项目 repository 的读取和修改必须同时绑定 context 中的 user/project/membership/version，
+并重复检查 active membership 与 active、未暂停项目；陈旧 context 与 outsider 统一
+`project_not_found`。列表从 membership 出发，使用 pinned、last-entered、created-at、UUID
+四键 keyset cursor，不允许 offset；member count 只聚合 active membership，禁止 N+1。
 
 ### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
 

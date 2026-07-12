@@ -19,3 +19,25 @@ class ProjectForbidden(Exception):
     def __init__(self, capability: Capability) -> None:
         self.capability = capability
         super().__init__("Project capability required")
+
+
+class ProjectValidationFailed(Exception):
+    code = "project_validation_failed"
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__("Project validation failed")
+
+
+class ProjectSlugConflict(Exception):
+    code = "project_slug_conflict"
+
+    def __init__(self) -> None:
+        super().__init__("Project slug already exists")
+
+
+class ProjectDatabaseUnavailable(Exception):
+    code = "project_database_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("Project storage unavailable")
