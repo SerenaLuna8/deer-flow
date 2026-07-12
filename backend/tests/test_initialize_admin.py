@@ -211,16 +211,24 @@ async def test_initialize_uninitialized_session_factory_is_stable_503(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_initialize_unlock_failure_does_not_override_body_error(monkeypatch):
+@pytest.mark.parametrize(
+    "unlock_result",
+    [
+        False,
+        DBAPIError("unlock", {}, Exception("lost"), False),
+        InvalidRequestError("unlock misuse"),
+    ],
+)
+async def test_initialize_unlock_failure_does_not_override_body_error(monkeypatch, unlock_result):
     from app.gateway.routers import auth
 
     connection = AsyncMock()
-    connection.scalar.side_effect = DBAPIError("unlock", {}, Exception("lost"), False)
+    connection.scalar.side_effect = [None, unlock_result]
     context = AsyncMock()
     context.__aenter__.return_value = connection
     lock_engine = MagicMock()
     lock_engine.connect.return_value = context
-    lock_engine.dispose = AsyncMock()
+    lock_engine.dispose = AsyncMock(side_effect=RuntimeError("cleanup failed"))
     monkeypatch.setattr(auth, "get_engine", MagicMock())
     monkeypatch.setattr(auth, "create_async_engine", MagicMock(return_value=lock_engine))
 
@@ -232,6 +240,119 @@ async def test_initialize_unlock_failure_does_not_override_body_error(monkeypatc
             raise BodyError
     connection.invalidate.assert_awaited_once()
     lock_engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unlock_result",
+    [False, DBAPIError("unlock", {}, Exception("lost"), False)],
+)
+async def test_initialize_unlock_database_failure_is_503_without_session_cookie(monkeypatch, unlock_result):
+    from app.gateway.auth.models import User
+    from app.gateway.routers import auth
+    from app.projects import bootstrap as bootstrap_module
+
+    connection = AsyncMock()
+    connection.scalar.side_effect = [None, unlock_result]
+    context = AsyncMock()
+    context.__aenter__.return_value = connection
+    lock_engine = MagicMock()
+    lock_engine.connect.return_value = context
+    lock_engine.dispose = AsyncMock()
+    monkeypatch.setattr(auth, "get_engine", MagicMock())
+    monkeypatch.setattr(auth, "create_async_engine", MagicMock(return_value=lock_engine))
+
+    provider = AsyncMock()
+    provider.count_admin_users.return_value = 0
+    provider.create_user.return_value = User(id=uuid.uuid4(), email="admin@example.com", system_role="system_admin")
+    monkeypatch.setattr(auth, "get_local_provider", lambda: provider)
+    session_context = AsyncMock()
+    session_context.__aenter__.return_value = MagicMock()
+    monkeypatch.setattr(auth, "get_session_factory", lambda: MagicMock(return_value=session_context))
+    monkeypatch.setattr(bootstrap_module, "bootstrap_default_project", AsyncMock())
+    set_cookie = MagicMock()
+    monkeypatch.setattr(auth, "_set_session_cookie", set_cookie)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.initialize_admin(_request(), Response(), auth.InitializeAdminRequest(**_init_payload()))
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {
+        "code": "DATABASE_UNAVAILABLE",
+        "message": "Project storage unavailable",
+    }
+    set_cookie.assert_not_called()
+    connection.invalidate.assert_awaited_once()
+    lock_engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("unlock_result", "expected_error"),
+    [
+        (False, "database"),
+        (DBAPIError("unlock", {}, Exception("lost"), False), "database"),
+        (InvalidRequestError("unlock misuse"), "programming"),
+    ],
+)
+async def test_initialize_success_fails_closed_when_unlock_is_lost(monkeypatch, unlock_result, expected_error):
+    from app.gateway.routers import auth
+    from app.projects.errors import ProjectDatabaseUnavailable
+
+    connection = AsyncMock()
+    connection.scalar.side_effect = [None, unlock_result]
+    context = AsyncMock()
+    context.__aenter__.return_value = connection
+    lock_engine = MagicMock()
+    lock_engine.connect.return_value = context
+    lock_engine.dispose = AsyncMock()
+    monkeypatch.setattr(auth, "get_engine", MagicMock())
+    monkeypatch.setattr(auth, "create_async_engine", MagicMock(return_value=lock_engine))
+
+    if expected_error == "database":
+        expected = pytest.raises(ProjectDatabaseUnavailable)
+    else:
+        expected = pytest.raises(InvalidRequestError, match="unlock misuse")
+    with expected:
+        async with auth._initialize_admin_lock():
+            pass
+
+    connection.invalidate.assert_awaited_once()
+    context.__aexit__.assert_awaited_once()
+    lock_engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_initialize_lock_configures_timeouts_before_lock_with_pg13_compatibility(
+    monkeypatch,
+):
+    from app.gateway.routers import auth
+
+    async def run_once(idle_setting):
+        connection = AsyncMock()
+        connection.scalar.side_effect = [idle_setting, True]
+        context = AsyncMock()
+        context.__aenter__.return_value = connection
+        lock_engine = MagicMock()
+        lock_engine.connect.return_value = context
+        lock_engine.dispose = AsyncMock()
+        monkeypatch.setattr(auth, "get_engine", MagicMock())
+        monkeypatch.setattr(auth, "create_async_engine", MagicMock(return_value=lock_engine))
+        async with auth._initialize_admin_lock():
+            pass
+        statements = [str(call.args[0]) for call in connection.execute.await_args_list]
+        return connection, statements
+
+    connection, statements = await run_once(None)
+    assert "current_setting('idle_session_timeout', true)" in str(connection.scalar.await_args_list[0].args[0])
+    assert all("SET idle_session_timeout" not in statement for statement in statements)
+    assert next(i for i, value in enumerate(statements) if "SET statement_timeout" in value) < next(i for i, value in enumerate(statements) if "pg_advisory_lock" in value)
+
+    _, statements = await run_once("10min")
+    idle_index = next(i for i, value in enumerate(statements) if "SET idle_session_timeout" in value)
+    statement_index = next(i for i, value in enumerate(statements) if "SET statement_timeout" in value)
+    lock_index = next(i for i, value in enumerate(statements) if "pg_advisory_lock" in value)
+    assert idle_index < lock_index
+    assert statement_index < lock_index
 
 
 @pytest.mark.asyncio

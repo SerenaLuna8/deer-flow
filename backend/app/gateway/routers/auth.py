@@ -67,9 +67,13 @@ async def _initialize_admin_lock():
         isolation_level="AUTOCOMMIT",
     )
     primary_error: BaseException | None = None
+    flow_primary: BaseException | None = None
     try:
         try:
             async with lock_engine.connect() as connection:
+                idle_session_timeout = await connection.scalar(text("SELECT current_setting('idle_session_timeout', true)"))
+                if idle_session_timeout is not None:
+                    await connection.execute(text("SET idle_session_timeout = 0"))
                 await connection.execute(text("SET statement_timeout = 0"))
                 await connection.execute(
                     text("SELECT pg_advisory_lock(:lock_key)"),
@@ -77,28 +81,40 @@ async def _initialize_admin_lock():
                 )
                 try:
                     yield
+                except BaseException as exc:
+                    flow_primary = exc
+                    raise
                 finally:
+                    unlock_failure: BaseException | None = None
                     try:
                         unlocked = await connection.scalar(
                             text("SELECT pg_advisory_unlock(:lock_key)"),
                             {"lock_key": _INITIALIZE_ADMIN_LOCK_KEY},
                         )
                         if unlocked is not True:
-                            await connection.invalidate()
-                    except asyncio.CancelledError:
+                            unlock_failure = ProjectDatabaseUnavailable()
+                    except asyncio.CancelledError as exc:
+                        unlock_failure = exc
+                    except DBAPIError:
+                        unlock_failure = ProjectDatabaseUnavailable()
+                    except Exception as exc:  # noqa: BLE001 - programming errors remain visible
+                        unlock_failure = exc
+                    if unlock_failure is not None:
                         try:
                             await connection.invalidate()
                         except Exception:  # noqa: BLE001 - physical close remains the fail-safe
                             pass
-                        raise
-                    except Exception:  # noqa: BLE001 - never return a possibly locked connection
-                        try:
-                            await connection.invalidate()
-                        except Exception:  # noqa: BLE001 - physical close remains the fail-safe
-                            pass
-                        logger.warning("Failed to release initialize advisory lock; discarded connection")
-        except DBAPIError:
+                        if flow_primary is None:
+                            flow_primary = unlock_failure
+                            raise unlock_failure
+        except DBAPIError as exc:
+            if flow_primary is not None and exc is not flow_primary:
+                raise flow_primary
             raise ProjectDatabaseUnavailable() from None
+        except BaseException as exc:
+            if flow_primary is not None and exc is not flow_primary:
+                raise flow_primary
+            raise
     except BaseException as exc:
         primary_error = exc
         raise
