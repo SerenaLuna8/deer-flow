@@ -45,7 +45,6 @@ export const invitableProjectRoleSchema = z.enum(INVITABLE_PROJECT_ROLES);
 export const capabilitySchema = z.enum(CAPABILITIES);
 export const projectErrorCodeSchema = z.enum(PROJECT_ERROR_CODES);
 export const projectIdSchema = z.string().uuid();
-export const projectUserIdSchema = z.string().min(1).max(36);
 
 export const projectSchema = z
   .object({
@@ -119,7 +118,7 @@ export const membershipStatusSchema = z.enum(["active", "left", "removed"]);
 export const projectMembershipSchema = z
   .object({
     membership_id: projectIdSchema,
-    user_id: projectUserIdSchema,
+    user_id: projectIdSchema,
     account_email: z.string().email(),
     role: projectRoleSchema,
     status: membershipStatusSchema,

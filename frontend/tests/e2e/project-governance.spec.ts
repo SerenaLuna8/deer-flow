@@ -50,7 +50,7 @@ const recoverableProject: Project = {
 const members: ProjectMembership[] = [
   {
     membership_id: MEMBER_ID,
-    user_id: "default",
+    user_id: "40000000-0000-4000-8000-000000000001",
     account_email: "default@test.local",
     role: "viewer",
     status: "active",

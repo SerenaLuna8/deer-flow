@@ -63,9 +63,9 @@ platform role in frontend schemas or admin-only UI gates.
 Project server state lives under `src/core/projects/`. Its Zod contracts are strict and
 capabilities always come from the Gateway response; UI code must never infer capabilities
 from a project role. Every project query key starts with the authenticated account ID.
-项目、membership 和 invitation 资源 ID 必须保持 UUID；membership 的 `user_id` 对应 backend
-既有 `VARCHAR(36)` 用户标识，并允许 auth-disabled 的 `default`，因此使用独立的 1 至 36
-字符 schema，不能复用 project UUID schema，也不能放宽资源 ID。
+项目、membership、invitation 及公共 membership `user_id` contract 均保持 UUID。
+`findSelfMembership` 只在当前身份的 ID 和 email 同时精确等于 `AUTH_DISABLED_USER` 时允许
+按 email 识别本人；普通认证用户必须按 `user_id` 匹配，禁止普遍使用 email 推断成员身份。
 Account changes and logout cancel in-flight TanStack queries before clearing the provider-
 owned QueryClient, so data or late responses from one account cannot enter another account's
 cache. `AuthProvider` therefore must always render inside `QueryClientProvider`; do not add a

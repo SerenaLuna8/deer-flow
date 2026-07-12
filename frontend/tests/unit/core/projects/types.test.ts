@@ -99,7 +99,7 @@ describe("project contracts", () => {
     ).toBe(true);
   });
 
-  test("accepts backend user IDs without relaxing resource UUIDs", () => {
+  test("keeps membership user and resource IDs as UUIDs", () => {
     const membership = {
       membership_id: "33333333-3333-4333-8333-333333333333",
       user_id: "44444444-4444-4444-8444-444444444444",
@@ -114,15 +114,6 @@ describe("project contracts", () => {
     expect(
       projectMembershipSchema.safeParse({ ...membership, user_id: "default" })
         .success,
-    ).toBe(true);
-    expect(
-      projectMembershipSchema.safeParse({ ...membership, user_id: "" }).success,
-    ).toBe(false);
-    expect(
-      projectMembershipSchema.safeParse({
-        ...membership,
-        user_id: "x".repeat(37),
-      }).success,
     ).toBe(false);
     expect(
       projectMembershipSchema.safeParse({

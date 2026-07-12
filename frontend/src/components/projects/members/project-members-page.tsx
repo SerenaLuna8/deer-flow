@@ -23,6 +23,7 @@ import { projectErrorMessage } from "../project-view-model";
 
 import { CreateInvitationDialog } from "./create-invitation-dialog";
 import { MemberRoleDialog } from "./member-role-dialog";
+import { findSelfMembership } from "./self-membership";
 
 export function ProjectMembersPage() {
   const project = useCurrentProject();
@@ -48,9 +49,7 @@ export function ProjectMembersPage() {
     if (changeRole.isSuccess) setEditingMember(null);
   }, [changeRole.isSuccess]);
 
-  const selfMembership = members.data?.find(
-    (membership) => membership.user_id === user?.id,
-  );
+  const selfMembership = findSelfMembership(members.data ?? [], user);
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
