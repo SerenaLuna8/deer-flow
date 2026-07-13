@@ -751,8 +751,24 @@ target database.
 - `migrations/versions/0004_migration_ledger.py` — per-source-row SQLite migration ledger
 - `migrations/versions/0005_project_foundation.py` — PostgreSQL project/membership tables and platform-role rename
 - `migrations/versions/0006_project_governance.py` — 项目成员生命周期、邀请、限流和项目删除恢复字段
+- `migrations/versions/0007_project_shared_assets.py` — M3 Agent、Skill、MCP、Credential 类型化共享资产 schema、复合约束与数据库 trigger
 - `persistence/bootstrap.py` — `bootstrap_schema(engine)`, the three-branch decision + PostgreSQL advisory locking
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor)
+
+**M3 共享资产持久化边界**：`deerflow.persistence.shared_assets` 分别定义 Agent、
+Skill、MCP 和 Credential 的类型化 ORM，不使用通用 JSONB 资产注册表。逻辑资产以
+`system|project` 作用域 CHECK 和作用域内部分唯一索引隔离名称；版本、绑定、credential
+slot/grant 均使用复合外键证明资产与版本归属。三类 system binding 只能固定到对应 system
+asset 的 `published` 版本；绑定存续期间数据库禁止把该版本降级为其他工作流状态。
+
+版本 payload、Skill 文件、Agent dependency refs 和 MCP credential slots 在版本离开
+`draft` 后不可变：draft 创建事务可以写入初始子表行，published 后的 INSERT、UPDATE、
+DELETE 均由 PostgreSQL trigger 拒绝。publish、archive、suspend、binding、grant 和 revoke 等
+影响 resolver 的变更会递增 `asset_catalog_state.generation`；migration 只建单例表，不预置
+`id=1`，首次相关事务或 cutover 才创建状态行。ORM 的 trigger 安装 listener 只在完整 M3
+metadata `create_all` 时执行，legacy bootstrap 的 baseline selective `create_all` 不得发出任何
+M3 DDL。`0007` downgrade 仅允许所有 M3 表（包括状态行）均为空时执行，任一表有数据必须在
+任何 schema 变更前拒绝。
 
 **Platform and project roles**: `users.system_role` is restricted to
 `system_admin|user`; the legacy platform value `admin` is converted by revision 0005.

@@ -125,6 +125,134 @@ async def _insert_agent_version(
     return version_id
 
 
+async def _insert_system_asset_version(
+    engine: AsyncEngine,
+    *,
+    user_id: str,
+    kind: str,
+    workflow_status: str,
+    version_number: int = 1,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    slug = f"{kind}-{str(asset_id)[:8]}"
+    if kind == "agent":
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """INSERT INTO agents
+                    (id,scope,slug,display_name,created_by_user_id)
+                    VALUES (:id,'system',:slug,:slug,:user_id)"""
+                ),
+                {"id": asset_id, "slug": slug, "user_id": user_id},
+            )
+        await _insert_agent_version(
+            engine,
+            user_id=user_id,
+            agent_id=asset_id,
+            version_number=version_number,
+            workflow_status=workflow_status,
+        )
+        async with engine.connect() as conn:
+            version_id = (
+                await conn.execute(
+                    text("SELECT id FROM agent_versions WHERE agent_id=:asset_id AND version_number=:number"),
+                    {"asset_id": asset_id, "number": version_number},
+                )
+            ).scalar_one()
+    elif kind == "skill":
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """INSERT INTO skills
+                    (id,scope,slug,display_name,created_by_user_id)
+                    VALUES (:id,'system',:slug,:slug,:user_id)"""
+                ),
+                {"id": asset_id, "slug": slug, "user_id": user_id},
+            )
+            await conn.execute(
+                text(
+                    """INSERT INTO skill_versions
+                    (id,skill_id,version_number,workflow_status,description,
+                     frontmatter,secret_requirements,scan_decision,scan_summary,
+                     payload_checksum,created_by_user_id)
+                    VALUES (:id,:asset_id,:number,:status,'','{}'::jsonb,
+                            '[]'::jsonb,'allow','{}'::jsonb,:checksum,:user_id)"""
+                ),
+                {
+                    "id": version_id,
+                    "asset_id": asset_id,
+                    "number": version_number,
+                    "status": workflow_status,
+                    "checksum": f"{version_number + 100:064x}",
+                    "user_id": user_id,
+                },
+            )
+    elif kind == "mcp":
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """INSERT INTO mcp_servers
+                    (id,scope,slug,display_name,created_by_user_id)
+                    VALUES (:id,'system',:slug,:slug,:user_id)"""
+                ),
+                {"id": asset_id, "slug": slug, "user_id": user_id},
+            )
+            await conn.execute(
+                text(
+                    """INSERT INTO mcp_server_versions
+                    (id,mcp_server_id,version_number,workflow_status,description,
+                     transport,args,non_secret_env,non_secret_headers,
+                     oauth_metadata,routing,tool_overrides,timeout_seconds,
+                     payload_checksum,created_by_user_id)
+                    VALUES (:id,:asset_id,:number,:status,'','stdio','[]'::jsonb,
+                            '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,
+                            '{}'::jsonb,30,:checksum,:user_id)"""
+                ),
+                {
+                    "id": version_id,
+                    "asset_id": asset_id,
+                    "number": version_number,
+                    "status": workflow_status,
+                    "checksum": f"{version_number + 200:064x}",
+                    "user_id": user_id,
+                },
+            )
+    else:  # pragma: no cover - test helper guard
+        raise AssertionError(f"unknown asset kind: {kind}")
+    return asset_id, version_id
+
+
+async def _insert_system_binding(
+    engine: AsyncEngine,
+    *,
+    kind: str,
+    project_id: uuid.UUID,
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    user_id: str,
+) -> None:
+    table, asset_column, version_column = {
+        "agent": ("project_system_agent_bindings", "system_agent_id", "agent_version_id"),
+        "skill": ("project_system_skill_bindings", "system_skill_id", "skill_version_id"),
+        "mcp": ("project_system_mcp_bindings", "system_mcp_server_id", "mcp_server_version_id"),
+    }[kind]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                f"""INSERT INTO {table}
+                (project_id,{asset_column},{version_column},created_by_user_id,updated_by_user_id)
+                VALUES (:project_id,:asset_id,:version_id,:user_id,:user_id)"""  # noqa: S608 - fixed test-only allowlist
+            ),
+            {
+                "project_id": project_id,
+                "asset_id": asset_id,
+                "version_id": version_id,
+                "user_id": user_id,
+            },
+        )
+
+
 @pytest.mark.asyncio
 async def test_m3_schema_has_all_typed_tables(migrated_postgres_database_url: str) -> None:
     importlib.import_module("deerflow.persistence.models")
@@ -242,6 +370,222 @@ async def test_system_binding_composite_foreign_keys_pin_a_version_of_that_syste
                     ),
                     {"version_id": other_version_id, "agent_id": system_agent_id},
                 )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["agent", "skill", "mcp"])
+async def test_system_bindings_accept_only_published_versions(
+    migrated_postgres_database_url: str,
+    kind: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    user_id, project_id = await _seed_user_and_project(engine)
+    try:
+        for number, status in enumerate(("draft", "pending_approval", "rejected"), start=1):
+            asset_id, version_id = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind=kind,
+                workflow_status=status,
+                version_number=number,
+            )
+            with pytest.raises(IntegrityError, match="published"):
+                await _insert_system_binding(
+                    engine,
+                    kind=kind,
+                    project_id=project_id,
+                    asset_id=asset_id,
+                    version_id=version_id,
+                    user_id=user_id,
+                )
+
+        published_asset_id, published_version_id = await _insert_system_asset_version(
+            engine,
+            user_id=user_id,
+            kind=kind,
+            workflow_status="published",
+            version_number=4,
+        )
+        await _insert_system_binding(
+            engine,
+            kind=kind,
+            project_id=project_id,
+            asset_id=published_asset_id,
+            version_id=published_version_id,
+            user_id=user_id,
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "version_table"),
+    [
+        ("agent", "agent_versions"),
+        ("skill", "skill_versions"),
+        ("mcp", "mcp_server_versions"),
+    ],
+)
+async def test_bound_published_version_cannot_be_downgraded(
+    migrated_postgres_database_url: str,
+    kind: str,
+    version_table: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    user_id, project_id = await _seed_user_and_project(engine)
+    try:
+        asset_id, version_id = await _insert_system_asset_version(
+            engine,
+            user_id=user_id,
+            kind=kind,
+            workflow_status="published",
+        )
+        await _insert_system_binding(
+            engine,
+            kind=kind,
+            project_id=project_id,
+            asset_id=asset_id,
+            version_id=version_id,
+            user_id=user_id,
+        )
+
+        with pytest.raises(DBAPIError, match="bound published"):
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(f"UPDATE {version_table} SET workflow_status='rejected' WHERE id=:id"),  # noqa: S608 - fixed parametrized table allowlist
+                    {"id": version_id},
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child_kind", ["skill_file", "agent_skill_ref", "agent_mcp_ref", "mcp_slot"])
+async def test_published_version_child_rows_reject_insert_and_delete(
+    migrated_postgres_database_url: str,
+    child_kind: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    user_id, _project_id = await _seed_user_and_project(engine)
+    try:
+        if child_kind == "skill_file":
+            _asset_id, parent_version_id = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind="skill",
+                workflow_status="draft",
+            )
+            initial_params = {
+                "version_id": parent_version_id,
+                "path": "SKILL.md",
+                "sha256": "a" * 64,
+                "content": b"a",
+            }
+            added_params = {
+                "version_id": parent_version_id,
+                "path": "extra.txt",
+                "sha256": "b" * 64,
+                "content": b"b",
+            }
+            insert_sql = """INSERT INTO skill_version_files
+                (skill_version_id,path,media_type,size_bytes,sha256,content)
+                VALUES (:version_id,:path,'text/plain',1,:sha256,:content)"""
+            delete_sql = """DELETE FROM skill_version_files
+                WHERE skill_version_id=:version_id AND path=:path"""
+            parent_table = "skill_versions"
+        elif child_kind == "agent_skill_ref":
+            _asset_id, parent_version_id = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind="agent",
+                workflow_status="draft",
+            )
+            _dependency_id, initial_dependency = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind="skill",
+                workflow_status="published",
+            )
+            _dependency_id, added_dependency = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind="skill",
+                workflow_status="published",
+                version_number=2,
+            )
+            initial_params = {"version_id": parent_version_id, "dependency_id": initial_dependency}
+            added_params = {"version_id": parent_version_id, "dependency_id": added_dependency}
+            insert_sql = """INSERT INTO agent_version_skill_refs
+                (agent_version_id,skill_version_id)
+                VALUES (:version_id,:dependency_id)"""
+            delete_sql = """DELETE FROM agent_version_skill_refs
+                WHERE agent_version_id=:version_id AND skill_version_id=:dependency_id"""
+            parent_table = "agent_versions"
+        elif child_kind == "agent_mcp_ref":
+            _asset_id, parent_version_id = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind="agent",
+                workflow_status="draft",
+            )
+            _dependency_id, initial_dependency = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind="mcp",
+                workflow_status="published",
+            )
+            _dependency_id, added_dependency = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind="mcp",
+                workflow_status="published",
+                version_number=2,
+            )
+            initial_params = {"version_id": parent_version_id, "dependency_id": initial_dependency}
+            added_params = {"version_id": parent_version_id, "dependency_id": added_dependency}
+            insert_sql = """INSERT INTO agent_version_mcp_refs
+                (agent_version_id,mcp_server_version_id)
+                VALUES (:version_id,:dependency_id)"""
+            delete_sql = """DELETE FROM agent_version_mcp_refs
+                WHERE agent_version_id=:version_id AND mcp_server_version_id=:dependency_id"""
+            parent_table = "agent_versions"
+        else:
+            _asset_id, parent_version_id = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind="mcp",
+                workflow_status="draft",
+            )
+            initial_params = {"id": uuid.uuid4(), "version_id": parent_version_id, "name": "token"}
+            added_params = {"id": uuid.uuid4(), "version_id": parent_version_id, "name": "refresh"}
+            insert_sql = """INSERT INTO mcp_version_credential_slots
+                (id,mcp_server_version_id,name,purpose,payload_schema)
+                VALUES (:id,:version_id,:name,'','{}'::jsonb)"""
+            delete_sql = "DELETE FROM mcp_version_credential_slots WHERE id=:id"
+            parent_table = "mcp_server_versions"
+
+        async with engine.begin() as conn:
+            await conn.execute(text(insert_sql), initial_params)
+            assert (
+                await conn.execute(
+                    text(f"SELECT count(*) FROM {parent_table} WHERE id=:version_id AND workflow_status='draft'"),  # noqa: S608 - fixed test allowlist
+                    {"version_id": parent_version_id},
+                )
+            ).scalar_one() == 1
+            await conn.execute(
+                text(f"UPDATE {parent_table} SET workflow_status='published' WHERE id=:version_id"),  # noqa: S608 - fixed test allowlist
+                {"version_id": parent_version_id},
+            )
+
+        with pytest.raises(IntegrityError, match="published version child rows are immutable"):
+            async with engine.begin() as conn:
+                await conn.execute(text(insert_sql), added_params)
+        with pytest.raises(IntegrityError, match="published version child rows are immutable"):
+            async with engine.begin() as conn:
+                await conn.execute(text(delete_sql), initial_params)
     finally:
         await engine.dispose()
 

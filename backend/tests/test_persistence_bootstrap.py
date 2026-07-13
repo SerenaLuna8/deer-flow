@@ -41,6 +41,40 @@ def test_baseline_table_names_are_pinned() -> None:
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_selective_legacy_backfill_does_not_install_shared_asset_triggers(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(_run_baseline_create_all_sync)
+        async with engine.connect() as connection:
+            tables = await connection.run_sync(lambda sync_connection: set(sa_inspect(sync_connection).get_table_names()))
+            trigger_functions = set(
+                (
+                    await connection.execute(
+                        text(
+                            """SELECT proname FROM pg_proc
+                            WHERE proname IN (
+                                'prevent_shared_asset_version_payload_update',
+                                'bump_asset_catalog_generation',
+                                'ensure_system_binding_published_version',
+                                'prevent_bound_published_version_downgrade',
+                                'prevent_published_version_child_mutation'
+                            )"""
+                        )
+                    )
+                ).scalars()
+            )
+        assert _BASELINE_TABLE_NAMES <= tables
+        assert not ({"agents", "skills", "mcp_servers", "asset_catalog_state"} & tables)
+        assert trigger_functions == set()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_bootstrap_empty_database_creates_schema_and_stamps_head(postgres_database_url: str) -> None:
     engine = create_async_engine(postgres_database_url)
     try:
