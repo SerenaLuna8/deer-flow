@@ -60,7 +60,8 @@ async def test_selective_legacy_backfill_does_not_install_shared_asset_triggers(
                                 'bump_asset_catalog_generation',
                                 'ensure_system_binding_published_version',
                                 'prevent_bound_published_version_downgrade',
-                                'prevent_published_version_child_mutation'
+                                'prevent_published_version_child_mutation',
+                                'enforce_shared_asset_version_state_transition'
                             )"""
                         )
                     )

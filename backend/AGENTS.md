@@ -763,7 +763,10 @@ asset 的 `published` 版本；绑定存续期间数据库禁止把该版本降�
 
 版本 payload、Skill 文件、Agent dependency refs 和 MCP credential slots 在版本离开
 `draft` 后不可变：draft 创建事务可以写入初始子表行，published 后的 INSERT、UPDATE、
-DELETE 均由 PostgreSQL trigger 拒绝。publish、archive、suspend、binding、grant 和 revoke 等
+DELETE 均由 PostgreSQL trigger 拒绝。版本工作流只允许 `draft→published`、
+`draft→pending_approval` 和 `pending_approval→published|rejected`；`published` 与 `rejected`
+均为终态，不能回退到 draft。Credential semantic version 只允许 `active→retired|revoked` 和
+`retired→revoked`，revoked 不可逆。publish、archive、suspend、binding、grant 和 revoke 等
 影响 resolver 的变更会递增 `asset_catalog_state.generation`；migration 只建单例表，不预置
 `id=1`，首次相关事务或 cutover 才创建状态行。ORM 的 trigger 安装 listener 只在完整 M3
 metadata `create_all` 时执行，legacy bootstrap 的 baseline selective `create_all` 不得发出任何

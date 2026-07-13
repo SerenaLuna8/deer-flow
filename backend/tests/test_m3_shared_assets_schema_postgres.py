@@ -463,6 +463,165 @@ async def test_bound_published_version_cannot_be_downgraded(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["agent", "skill", "mcp"])
+async def test_asset_version_workflow_state_machine_allows_only_declared_transitions(
+    migrated_postgres_database_url: str,
+    kind: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    user_id, _project_id = await _seed_user_and_project(engine)
+    version_table = {
+        "agent": "agent_versions",
+        "skill": "skill_versions",
+        "mcp": "mcp_server_versions",
+    }[kind]
+    allowed = (
+        ("draft", "pending_approval"),
+        ("draft", "published"),
+        ("pending_approval", "published"),
+        ("pending_approval", "rejected"),
+    )
+    forbidden = (
+        ("draft", "rejected"),
+        ("pending_approval", "draft"),
+        ("published", "draft"),
+        ("published", "pending_approval"),
+        ("published", "rejected"),
+        ("rejected", "draft"),
+        ("rejected", "pending_approval"),
+        ("rejected", "published"),
+    )
+    try:
+        for number, (old_status, new_status) in enumerate(allowed, start=1):
+            _asset_id, version_id = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind=kind,
+                workflow_status=old_status,
+                version_number=number,
+            )
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        f"""UPDATE {version_table}
+                        SET workflow_status=:new_status,review_note='reviewed'
+                        WHERE id=:id"""  # noqa: S608 - fixed test allowlist
+                    ),
+                    {"new_status": new_status, "id": version_id},
+                )
+
+        for number, (old_status, new_status) in enumerate(forbidden, start=101):
+            _asset_id, version_id = await _insert_system_asset_version(
+                engine,
+                user_id=user_id,
+                kind=kind,
+                workflow_status=old_status,
+                version_number=number,
+            )
+            with pytest.raises(IntegrityError, match="invalid shared asset version workflow transition"):
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            f"""UPDATE {version_table}
+                            SET workflow_status=:new_status WHERE id=:id"""  # noqa: S608 - fixed test allowlist
+                        ),
+                        {"new_status": new_status, "id": version_id},
+                    )
+
+        _asset_id, stable_version_id = await _insert_system_asset_version(
+            engine,
+            user_id=user_id,
+            kind=kind,
+            workflow_status="published",
+            version_number=999,
+        )
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"""UPDATE {version_table}
+                    SET workflow_status=workflow_status,review_note='metadata only'
+                    WHERE id=:id"""  # noqa: S608 - fixed test allowlist
+                ),
+                {"id": stable_version_id},
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_credential_version_status_state_machine_is_irreversible(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    user_id, _project_id = await _seed_user_and_project(engine)
+
+    async def insert_version(status: str, number: int) -> uuid.UUID:
+        credential_id, version_id = uuid.uuid4(), uuid.uuid4()
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """INSERT INTO credentials
+                    (id,scope,name,display_name,credential_type,created_by_user_id)
+                    VALUES (:id,'system',:name,:name,'token',:user_id)"""
+                ),
+                {"id": credential_id, "name": f"credential-{number}", "user_id": user_id},
+            )
+            await conn.execute(
+                text(
+                    """INSERT INTO credential_versions
+                    (id,credential_id,version_number,status,payload_schema,
+                     created_by_user_id)
+                    VALUES (:id,:credential_id,:number,:status,'{}'::jsonb,:user_id)"""
+                ),
+                {
+                    "id": version_id,
+                    "credential_id": credential_id,
+                    "number": number,
+                    "status": status,
+                    "user_id": user_id,
+                },
+            )
+        return version_id
+
+    try:
+        for number, (old_status, new_status) in enumerate(
+            (("active", "retired"), ("active", "revoked"), ("retired", "revoked")),
+            start=1,
+        ):
+            version_id = await insert_version(old_status, number)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("UPDATE credential_versions SET status=:status WHERE id=:id"),
+                    {"status": new_status, "id": version_id},
+                )
+
+        for number, (old_status, new_status) in enumerate(
+            (("retired", "active"), ("revoked", "active"), ("revoked", "retired")),
+            start=101,
+        ):
+            version_id = await insert_version(old_status, number)
+            with pytest.raises(IntegrityError, match="invalid credential version status transition"):
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text("UPDATE credential_versions SET status=:status WHERE id=:id"),
+                        {"status": new_status, "id": version_id},
+                    )
+
+        stable_version_id = await insert_version("revoked", 999)
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """UPDATE credential_versions
+                    SET status=status,revoked_at=now(),revoked_by_user_id=:user_id
+                    WHERE id=:id"""
+                ),
+                {"user_id": user_id, "id": stable_version_id},
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("child_kind", ["skill_file", "agent_skill_ref", "agent_mcp_ref", "mcp_slot"])
 async def test_published_version_child_rows_reject_insert_and_delete(
     migrated_postgres_database_url: str,
@@ -579,6 +738,13 @@ async def test_published_version_child_rows_reject_insert_and_delete(
                 text(f"UPDATE {parent_table} SET workflow_status='published' WHERE id=:version_id"),  # noqa: S608 - fixed test allowlist
                 {"version_id": parent_version_id},
             )
+
+        with pytest.raises(IntegrityError, match="invalid shared asset version workflow transition"):
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(f"UPDATE {parent_table} SET workflow_status='draft' WHERE id=:version_id"),  # noqa: S608 - fixed test allowlist
+                    {"version_id": parent_version_id},
+                )
 
         with pytest.raises(IntegrityError, match="published version child rows are immutable"):
             async with engine.begin() as conn:

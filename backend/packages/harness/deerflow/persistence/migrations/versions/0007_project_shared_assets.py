@@ -641,12 +641,40 @@ END;
 $$ LANGUAGE plpgsql
 """
 
+_CREATE_VERSION_STATE_FUNCTION = """
+CREATE OR REPLACE FUNCTION enforce_shared_asset_version_state_transition()
+RETURNS trigger AS $$
+BEGIN
+    IF TG_TABLE_NAME = 'credential_versions' THEN
+        IF NEW.status = OLD.status
+           OR (OLD.status = 'active' AND NEW.status IN ('retired', 'revoked'))
+           OR (OLD.status = 'retired' AND NEW.status = 'revoked') THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'invalid credential version status transition'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF NEW.workflow_status = OLD.workflow_status
+       OR (OLD.workflow_status = 'draft'
+           AND NEW.workflow_status IN ('pending_approval', 'published'))
+       OR (OLD.workflow_status = 'pending_approval'
+           AND NEW.workflow_status IN ('published', 'rejected')) THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'invalid shared asset version workflow transition'
+        USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$ LANGUAGE plpgsql
+"""
+
 _TRIGGER_DDL = (
     _CREATE_IMMUTABLE_FUNCTION,
     _CREATE_GENERATION_FUNCTION,
     _CREATE_BINDING_PUBLISHED_FUNCTION,
     _CREATE_BOUND_VERSION_FUNCTION,
     _CREATE_CHILD_IMMUTABILITY_FUNCTION,
+    _CREATE_VERSION_STATE_FUNCTION,
     "CREATE TRIGGER trg_agent_versions_immutable BEFORE UPDATE ON agent_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_skill_versions_immutable BEFORE UPDATE ON skill_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_mcp_server_versions_immutable BEFORE UPDATE ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
@@ -665,6 +693,10 @@ _TRIGGER_DDL = (
     "CREATE TRIGGER trg_agent_version_skill_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_skill_refs FOR EACH ROW EXECUTE FUNCTION prevent_published_version_child_mutation()",
     "CREATE TRIGGER trg_agent_version_mcp_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_mcp_refs FOR EACH ROW EXECUTE FUNCTION prevent_published_version_child_mutation()",
     "CREATE TRIGGER trg_mcp_credential_slots_child_immutable BEFORE INSERT OR DELETE ON mcp_version_credential_slots FOR EACH ROW EXECUTE FUNCTION prevent_published_version_child_mutation()",
+    "CREATE TRIGGER trg_agent_versions_state_transition BEFORE UPDATE OF workflow_status ON agent_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition()",
+    "CREATE TRIGGER trg_skill_versions_state_transition BEFORE UPDATE OF workflow_status ON skill_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition()",
+    "CREATE TRIGGER trg_mcp_server_versions_state_transition BEFORE UPDATE OF workflow_status ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition()",
+    "CREATE TRIGGER trg_credential_versions_state_transition BEFORE UPDATE OF status ON credential_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition()",
     "CREATE TRIGGER trg_agents_generation AFTER UPDATE OF status, current_published_version_id ON agents FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_skills_generation AFTER UPDATE OF status, current_published_version_id ON skills FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_mcp_servers_generation AFTER UPDATE OF status, current_published_version_id ON mcp_servers FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
@@ -736,6 +768,7 @@ def downgrade() -> None:
     op.drop_index("uq_agents_system_slug", table_name="agents")
     op.drop_table("agents")
     op.drop_table("asset_catalog_state")
+    op.execute(sa.text("DROP FUNCTION IF EXISTS enforce_shared_asset_version_state_transition()"))
     op.execute(sa.text("DROP FUNCTION IF EXISTS prevent_published_version_child_mutation()"))
     op.execute(sa.text("DROP FUNCTION IF EXISTS prevent_bound_published_version_downgrade()"))
     op.execute(sa.text("DROP FUNCTION IF EXISTS ensure_system_binding_published_version()"))
