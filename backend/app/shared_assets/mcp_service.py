@@ -431,6 +431,20 @@ class McpService:
 
         return await self._execute(actor, operation)
 
+    async def list_visible(self, actor: _Actor) -> tuple[McpAssetView, ...]:
+        self._require_capability(actor, Capability.SHARED_ASSETS_READ)
+
+        async def operation(repository: McpRepository) -> tuple[McpAssetView, ...]:
+            if isinstance(actor, ProjectContext):
+                rows = await repository.list_project_visible(actor)
+            elif actor.project_id is not None:
+                rows = await repository.list_override_visible(actor)
+            else:
+                rows = await repository.list_system_visible(actor)
+            return tuple(self._asset_view(row) for row in rows)
+
+        return await self._execute(actor, operation)
+
     async def grant_is_usable(self, actor: _Actor, grant_id: uuid.UUID) -> bool:
         self._require_capability(actor, Capability.SHARED_ASSETS_READ)
 

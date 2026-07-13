@@ -88,6 +88,8 @@ class ProjectRepository:
         return ProjectContext(user_id, project.id, membership.id, ProjectRole.ADMIN, capabilities_for(ProjectRole.ADMIN), membership.version, request_id)
 
     def _scope(self, context: ProjectContext):
+        if not isinstance(context, ProjectContext):
+            raise ProjectNotFound()
         return and_(
             ProjectMembershipRow.id == context.membership_id,
             ProjectMembershipRow.project_id == context.project_id,

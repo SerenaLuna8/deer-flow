@@ -4,7 +4,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import and_, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
@@ -18,6 +18,7 @@ from deerflow.persistence.shared_assets import (
     McpCredentialSlotRow,
     McpServerRow,
     McpServerVersionRow,
+    ProjectSystemMcpBindingRow,
 )
 
 
@@ -265,6 +266,72 @@ class McpRepository:
         if row is None:
             raise AssetNotFound(context.request_id)
         return row
+
+    async def list_project_visible(self, context: ProjectContext) -> tuple[McpServerRow, ...]:
+        self._require_project_actor(context)
+        await self.lock_project(context)
+        project_rows = (
+            (
+                await self.session.execute(
+                    select(McpServerRow).where(
+                        McpServerRow.scope == "project",
+                        McpServerRow.project_id == context.project_id,
+                        self._project_context_exists(context),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        system_rows = (
+            (
+                await self.session.execute(
+                    select(McpServerRow)
+                    .join(
+                        ProjectSystemMcpBindingRow,
+                        and_(
+                            ProjectSystemMcpBindingRow.system_mcp_server_id == McpServerRow.id,
+                            ProjectSystemMcpBindingRow.project_id == context.project_id,
+                            ProjectSystemMcpBindingRow.enabled.is_(True),
+                        ),
+                    )
+                    .where(
+                        McpServerRow.scope == "system",
+                        McpServerRow.project_id.is_(None),
+                        self._project_context_exists(context),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return tuple(sorted((*project_rows, *system_rows), key=lambda row: (row.created_at, row.id)))
+
+    async def list_override_visible(
+        self,
+        context: SystemAssetGovernanceContext,
+    ) -> tuple[McpServerRow, ...]:
+        self._require_system_actor(context)
+        await self.lock_override_project(context)
+        statement = (
+            select(McpServerRow)
+            .where(
+                McpServerRow.scope == "project",
+                McpServerRow.project_id == context.project_id,
+            )
+            .order_by(McpServerRow.created_at, McpServerRow.id)
+        )
+        return tuple((await self.session.execute(statement)).scalars().all())
+
+    async def list_system_visible(
+        self,
+        context: SystemAssetGovernanceContext,
+    ) -> tuple[McpServerRow, ...]:
+        self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetForbidden(context.request_id)
+        statement = select(McpServerRow).where(McpServerRow.scope == "system", McpServerRow.project_id.is_(None)).order_by(McpServerRow.created_at, McpServerRow.id)
+        return tuple((await self.session.execute(statement)).scalars().all())
 
     async def next_version_number(self, asset: McpServerRow) -> int:
         statement = select(func.coalesce(func.max(McpServerVersionRow.version_number), 0) + 1).where(McpServerVersionRow.mcp_server_id == asset.id)

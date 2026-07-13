@@ -443,6 +443,8 @@ class SkillService:
         async def operation(repository: SkillRepository) -> SkillAssetView:
             if isinstance(actor, ProjectContext):
                 row = await repository.create_project_asset(actor, command)
+            elif actor.project_id is not None:
+                row = await repository.create_override_asset(actor, command)
             else:
                 row = await repository.create_system_asset(actor, command)
             return self._asset_view(row)
@@ -468,6 +470,8 @@ class SkillService:
                 raise AssetConflict(actor.request_id)
             if isinstance(actor, ProjectContext):
                 version_number = await repository.next_project_version_number(actor, asset)
+            elif actor.project_id is not None:
+                version_number = await repository.next_override_version_number(actor, asset)
             else:
                 version_number = await repository.next_system_version_number(actor, asset)
             version_id = uuid.uuid4()
@@ -499,6 +503,8 @@ class SkillService:
             )
             if isinstance(actor, ProjectContext):
                 record = await repository.create_project_version(actor, asset.id, row, file_rows)
+            elif actor.project_id is not None:
+                record = await repository.create_override_version(actor, asset.id, row, file_rows)
             else:
                 record = await repository.create_system_version(actor, asset.id, row, file_rows)
             asset.version += 1
@@ -592,6 +598,8 @@ class SkillService:
         async def operation(repository: SkillRepository) -> tuple[SkillAssetView, ...]:
             if isinstance(actor, ProjectContext):
                 rows = await repository.list_project_visible(actor)
+            elif actor.project_id is not None:
+                rows = await repository.list_override_visible(actor)
             else:
                 rows = await repository.list_system_visible(actor)
             return tuple(self._asset_view(row) for row in rows)
@@ -608,6 +616,8 @@ class SkillService:
         async def operation(repository: SkillRepository) -> tuple[SkillVersionView, ...]:
             if isinstance(actor, ProjectContext):
                 records = await repository.get_project_version_history(actor, asset_id)
+            elif actor.project_id is not None:
+                records = await repository.get_override_version_history(actor, asset_id)
             else:
                 records = await repository.get_system_version_history(actor, asset_id)
             return tuple(self._version_view(record) for record in records)
@@ -625,6 +635,8 @@ class SkillService:
         async def operation(repository: SkillRepository) -> tuple[SkillArchiveFile, ...]:
             if isinstance(actor, ProjectContext):
                 record = await repository.load_project_version(actor, asset_id, version_id)
+            elif isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
+                record = await repository.load_override_version(actor, asset_id, version_id)
             elif isinstance(actor, SystemAssetGovernanceContext):
                 record = await repository.load_system_version(actor, asset_id, version_id)
             else:
@@ -685,6 +697,8 @@ class SkillService:
     ) -> SkillRow:
         if isinstance(actor, ProjectContext):
             return await repository.get_project_asset(actor, asset_id, for_update=for_update)
+        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
+            return await repository.get_override_asset(actor, asset_id, for_update=for_update)
         if isinstance(actor, SystemAssetGovernanceContext):
             return await repository.get_system_asset(actor, asset_id, for_update=for_update)
         raise AssetForbidden("unknown")
@@ -700,6 +714,8 @@ class SkillService:
     ) -> SkillVersionRecord:
         if isinstance(actor, ProjectContext):
             return await repository.get_project_version(actor, asset_id, version_id, for_update=for_update)
+        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
+            return await repository.get_override_version(actor, asset_id, version_id, for_update=for_update)
         if isinstance(actor, SystemAssetGovernanceContext):
             return await repository.get_system_version(actor, asset_id, version_id, for_update=for_update)
         raise AssetForbidden("unknown")

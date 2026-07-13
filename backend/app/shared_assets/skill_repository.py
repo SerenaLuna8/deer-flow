@@ -89,6 +89,22 @@ class SkillRepository:
         if (await self.session.execute(statement)).scalar_one_or_none() is None:
             raise AssetNotFound(context.request_id)
 
+    async def _lock_override_project(self, context: SystemAssetGovernanceContext) -> None:
+        self._require_system_actor(context)
+        if context.project_id is None:
+            raise AssetForbidden(context.request_id)
+        statement = (
+            select(ProjectRow.id)
+            .where(
+                ProjectRow.id == context.project_id,
+                ProjectRow.status == "active",
+                ProjectRow.is_suspended.is_(False),
+            )
+            .with_for_update(of=ProjectRow)
+        )
+        if (await self.session.execute(statement)).scalar_one_or_none() is None:
+            raise AssetNotFound(context.request_id)
+
     async def create_project_asset(self, context: ProjectContext, command: SkillCreateCommand) -> SkillRow:
         self._require_project_actor(context)
         await self._lock_project_context(context)
@@ -109,9 +125,28 @@ class SkillRepository:
         command: SkillCreateCommand,
     ) -> SkillRow:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetForbidden(context.request_id)
         row = SkillRow(
             scope="system",
             project_id=None,
+            slug=command.slug,
+            display_name=command.display_name,
+            created_by_user_id=str(context.user_id),
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def create_override_asset(
+        self,
+        context: SystemAssetGovernanceContext,
+        command: SkillCreateCommand,
+    ) -> SkillRow:
+        await self._lock_override_project(context)
+        row = SkillRow(
+            scope="project",
+            project_id=context.project_id,
             slug=command.slug,
             display_name=command.display_name,
             created_by_user_id=str(context.user_id),
@@ -151,10 +186,35 @@ class SkillRepository:
         for_update: bool = False,
     ) -> SkillRow:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         statement = select(SkillRow).where(
             SkillRow.id == asset_id,
             SkillRow.scope == "system",
             SkillRow.project_id.is_(None),
+        )
+        if for_update:
+            statement = statement.with_for_update(of=SkillRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise AssetNotFound(context.request_id)
+        return row
+
+    async def get_override_asset(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> SkillRow:
+        self._require_system_actor(context)
+        if context.project_id is None:
+            raise AssetNotFound(context.request_id)
+        await self._lock_override_project(context)
+        statement = select(SkillRow).where(
+            SkillRow.id == asset_id,
+            SkillRow.scope == "project",
+            SkillRow.project_id == context.project_id,
         )
         if for_update:
             statement = statement.with_for_update(of=SkillRow)
@@ -183,6 +243,8 @@ class SkillRepository:
         asset: SkillRow,
     ) -> int:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         statement = (
             select(func.coalesce(func.max(SkillVersionRow.version_number), 0) + 1)
             .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
@@ -190,6 +252,26 @@ class SkillRepository:
                 SkillRow.id == asset.id,
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
+            )
+        )
+        return int((await self.session.execute(statement)).scalar_one())
+
+    async def next_override_version_number(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset: SkillRow,
+    ) -> int:
+        self._require_system_actor(context)
+        if context.project_id is None:
+            raise AssetNotFound(context.request_id)
+        await self._lock_override_project(context)
+        statement = (
+            select(func.coalesce(func.max(SkillVersionRow.version_number), 0) + 1)
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(
+                SkillRow.id == asset.id,
+                SkillRow.scope == "project",
+                SkillRow.project_id == context.project_id,
             )
         )
         return int((await self.session.execute(statement)).scalar_one())
@@ -216,6 +298,19 @@ class SkillRepository:
     ) -> SkillVersionRecord:
         self._require_system_actor(context)
         asset = await self.get_system_asset(context, asset_id, for_update=True)
+        if version.skill_id != asset.id or any(file.skill_version_id != version.id for file in files):
+            raise AssetNotFound(context.request_id)
+        return await self._create_version(version, files)
+
+    async def create_override_version(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        version: SkillVersionRow,
+        files: Sequence[SkillVersionFileRow],
+    ) -> SkillVersionRecord:
+        self._require_system_actor(context)
+        asset = await self.get_override_asset(context, asset_id, for_update=True)
         if version.skill_id != asset.id or any(file.skill_version_id != version.id for file in files):
             raise AssetNotFound(context.request_id)
         return await self._create_version(version, files)
@@ -268,6 +363,8 @@ class SkillRepository:
         for_update: bool = False,
     ) -> SkillVersionRecord:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         statement = (
             select(SkillVersionRow)
             .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
@@ -276,6 +373,35 @@ class SkillRepository:
                 SkillVersionRow.skill_id == asset_id,
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
+            )
+        )
+        if for_update:
+            statement = statement.with_for_update(of=SkillVersionRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise AssetNotFound(context.request_id)
+        return SkillVersionRecord(row, await self._load_files(row.id, for_update=for_update))
+
+    async def get_override_version(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> SkillVersionRecord:
+        self._require_system_actor(context)
+        if context.project_id is None:
+            raise AssetNotFound(context.request_id)
+        await self._lock_override_project(context)
+        statement = (
+            select(SkillVersionRow)
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(
+                SkillVersionRow.id == version_id,
+                SkillVersionRow.skill_id == asset_id,
+                SkillRow.scope == "project",
+                SkillRow.project_id == context.project_id,
             )
         )
         if for_update:
@@ -347,6 +473,8 @@ class SkillRepository:
         version_id: uuid.UUID,
     ) -> SkillVersionRecord:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         statement = (
             select(SkillVersionRow)
             .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
@@ -356,6 +484,31 @@ class SkillRepository:
                 SkillVersionRow.workflow_status == "published",
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
+                SkillRow.status != "suspended",
+            )
+            .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
+        )
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise AssetNotFound(context.request_id)
+        return SkillVersionRecord(row, await self._load_files(row.id))
+
+    async def load_override_version(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+    ) -> SkillVersionRecord:
+        await self._lock_override_project(context)
+        statement = (
+            select(SkillVersionRow)
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(
+                SkillVersionRow.id == version_id,
+                SkillVersionRow.skill_id == asset_id,
+                SkillVersionRow.workflow_status == "published",
+                SkillRow.scope == "project",
+                SkillRow.project_id == context.project_id,
                 SkillRow.status != "suspended",
             )
             .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
@@ -399,6 +552,25 @@ class SkillRepository:
                 SkillVersionRow.skill_id == asset_id,
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
+            )
+            .order_by(SkillVersionRow.version_number.desc())
+        )
+        return await self._history(statement)
+
+    async def get_override_version_history(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+    ) -> tuple[SkillVersionRecord, ...]:
+        self._require_system_actor(context)
+        await self.get_override_asset(context, asset_id)
+        statement = (
+            select(SkillVersionRow)
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(
+                SkillVersionRow.skill_id == asset_id,
+                SkillRow.scope == "project",
+                SkillRow.project_id == context.project_id,
             )
             .order_by(SkillVersionRow.version_number.desc())
         )
@@ -465,11 +637,28 @@ class SkillRepository:
         context: SystemAssetGovernanceContext,
     ) -> tuple[SkillRow, ...]:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetForbidden(context.request_id)
         statement = (
             select(SkillRow)
             .where(
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
+            )
+            .order_by(SkillRow.created_at, SkillRow.id)
+        )
+        return tuple((await self.session.execute(statement)).scalars().all())
+
+    async def list_override_visible(
+        self,
+        context: SystemAssetGovernanceContext,
+    ) -> tuple[SkillRow, ...]:
+        await self._lock_override_project(context)
+        statement = (
+            select(SkillRow)
+            .where(
+                SkillRow.scope == "project",
+                SkillRow.project_id == context.project_id,
             )
             .order_by(SkillRow.created_at, SkillRow.id)
         )

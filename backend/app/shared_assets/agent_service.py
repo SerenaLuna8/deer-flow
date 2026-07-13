@@ -106,6 +106,8 @@ class AgentService:
         async def operation(repository: AgentRepository) -> AgentAssetView:
             if isinstance(actor, ProjectContext):
                 row = await repository.create_project_asset(actor, command)
+            elif actor.project_id is not None:
+                row = await repository.create_override_asset(actor, command)
             else:
                 row = await repository.create_system_asset(actor, command)
             return self._asset_view(row)
@@ -133,6 +135,8 @@ class AgentService:
             await self._validate_dependency_closure(repository, actor, payload.skill_version_ids, payload.mcp_version_ids)
             if isinstance(actor, ProjectContext):
                 version_number = await repository.next_project_version_number(actor, asset)
+            elif actor.project_id is not None:
+                version_number = await repository.next_override_version_number(actor, asset)
             else:
                 version_number = await repository.next_system_version_number(actor, asset)
             row = AgentVersionRow(
@@ -149,6 +153,14 @@ class AgentService:
             )
             if isinstance(actor, ProjectContext):
                 record = await repository.create_project_version(
+                    actor,
+                    asset.id,
+                    row,
+                    payload.skill_version_ids,
+                    payload.mcp_version_ids,
+                )
+            elif actor.project_id is not None:
+                record = await repository.create_override_version(
                     actor,
                     asset.id,
                     row,
@@ -263,6 +275,8 @@ class AgentService:
         async def operation(repository: AgentRepository) -> tuple[AgentAssetView, ...]:
             if isinstance(actor, ProjectContext):
                 rows = await repository.list_project_visible(actor)
+            elif actor.project_id is not None:
+                rows = await repository.list_override_visible(actor)
             else:
                 rows = await repository.list_system_visible(actor)
             return tuple(self._asset_view(row) for row in rows)
@@ -279,6 +293,8 @@ class AgentService:
         async def operation(repository: AgentRepository) -> tuple[AgentVersionView, ...]:
             if isinstance(actor, ProjectContext):
                 records = await repository.get_project_version_history(actor, asset_id)
+            elif actor.project_id is not None:
+                records = await repository.get_override_version_history(actor, asset_id)
             else:
                 records = await repository.get_system_version_history(actor, asset_id)
             return tuple(self._version_view(record) for record in records)
@@ -333,6 +349,8 @@ class AgentService:
     ) -> AgentRow:
         if isinstance(actor, ProjectContext):
             return await repository.get_project_asset(actor, asset_id, for_update=for_update)
+        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
+            return await repository.get_override_asset(actor, asset_id, for_update=for_update)
         if isinstance(actor, SystemAssetGovernanceContext):
             return await repository.get_system_asset(actor, asset_id, for_update=for_update)
         raise AssetForbidden("unknown")
@@ -348,6 +366,13 @@ class AgentService:
     ) -> AgentVersionRecord:
         if isinstance(actor, ProjectContext):
             return await repository.get_project_version(
+                actor,
+                asset_id,
+                version_id,
+                for_update=for_update,
+            )
+        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
+            return await repository.get_override_version(
                 actor,
                 asset_id,
                 version_id,
@@ -426,6 +451,9 @@ class AgentService:
         if isinstance(actor, ProjectContext):
             resolved_skill_ids = await repository.resolve_project_skill_versions(actor, skill_version_ids)
             resolved_mcp_ids = await repository.resolve_project_mcp_versions(actor, mcp_version_ids)
+        elif isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
+            resolved_skill_ids = await repository.resolve_override_skill_versions(actor, skill_version_ids)
+            resolved_mcp_ids = await repository.resolve_override_mcp_versions(actor, mcp_version_ids)
         elif isinstance(actor, SystemAssetGovernanceContext):
             resolved_skill_ids = await repository.resolve_system_skill_versions(actor, skill_version_ids)
             resolved_mcp_ids = await repository.resolve_system_mcp_versions(actor, mcp_version_ids)

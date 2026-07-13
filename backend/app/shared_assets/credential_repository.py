@@ -204,6 +204,46 @@ class CredentialRepository:
             raise AssetNotFound(context.request_id)
         return row
 
+    async def list_project_visible(self, context: ProjectContext) -> tuple[CredentialRow, ...]:
+        self._require_project_actor(context)
+        await self.lock_project(context)
+        statement = (
+            select(CredentialRow)
+            .where(
+                CredentialRow.scope == "project",
+                CredentialRow.project_id == context.project_id,
+                self._project_context_exists(context),
+            )
+            .order_by(CredentialRow.created_at, CredentialRow.id)
+        )
+        return tuple((await self.session.execute(statement)).scalars().all())
+
+    async def list_override_visible(
+        self,
+        context: SystemAssetGovernanceContext,
+    ) -> tuple[CredentialRow, ...]:
+        self._require_system_actor(context)
+        await self.lock_override_project(context)
+        statement = (
+            select(CredentialRow)
+            .where(
+                CredentialRow.scope == "project",
+                CredentialRow.project_id == context.project_id,
+            )
+            .order_by(CredentialRow.created_at, CredentialRow.id)
+        )
+        return tuple((await self.session.execute(statement)).scalars().all())
+
+    async def list_system_visible(
+        self,
+        context: SystemAssetGovernanceContext,
+    ) -> tuple[CredentialRow, ...]:
+        self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetForbidden(context.request_id)
+        statement = select(CredentialRow).where(CredentialRow.scope == "system", CredentialRow.project_id.is_(None)).order_by(CredentialRow.created_at, CredentialRow.id)
+        return tuple((await self.session.execute(statement)).scalars().all())
+
     async def lock_project_credential_version(
         self,
         context: ProjectContext,

@@ -275,6 +275,20 @@ class CredentialService:
 
         return await self._execute(actor, operation)
 
+    async def list_visible(self, actor: _Actor) -> tuple[CredentialView, ...]:
+        self._require_capability(actor, Capability.SHARED_ASSETS_READ)
+
+        async def operation(repository: CredentialRepository) -> tuple[CredentialView, ...]:
+            if isinstance(actor, ProjectContext):
+                rows = await repository.list_project_visible(actor)
+            elif actor.project_id is not None:
+                rows = await repository.list_override_visible(actor)
+            else:
+                rows = await repository.list_system_visible(actor)
+            return tuple(self._credential_view(row) for row in rows)
+
+        return await self._execute(actor, operation)
+
     async def _execute(
         self,
         actor: _Actor,

@@ -12,6 +12,7 @@ from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
+    admin_assets,
     agents,
     artifacts,
     assistants_compat,
@@ -26,6 +27,7 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    project_assets,
     project_invitations,
     project_lifecycle,
     project_members,
@@ -426,6 +428,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(project_members.router)
     app.include_router(project_invitations.router)
     app.include_router(project_lifecycle.router)
+    app.include_router(project_assets.project_router)
+    app.include_router(admin_assets.admin_router)
+    app.include_router(admin_assets.admin_project_router)
 
     # Features API is mounted at /api/features
     app.include_router(features.router)

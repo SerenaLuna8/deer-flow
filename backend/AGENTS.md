@@ -785,6 +785,17 @@ action、`request_id` 六类治理元数据；禁止记录 payload、diff、cred
 私有 Thread、run、file、Memory、automation 资源 ID。M6 可替换持久化 sink，但不得改变
 service 调用接口。
 
+**M3 共享资产 HTTP API**：项目成员通过 `/api/projects/{project_id}/agents|skills|mcp-servers|credentials`
+读取明确分开的 `system_items` 与 `project_items`，并在同一前缀下执行资产版本、发布、状态、
+credential 和三类 system binding 操作；所有项目调用先解析不可变 `ProjectContext`。平台治理位于
+`/api/admin/assets/*` 与 `/api/admin/projects/{project_id}/assets/*`，只接受
+`system_admin` 并构建独立 `SystemAssetGovernanceContext`；带项目 ID 的治理 context 只锁定目标
+active project，不创建或伪造 membership，也不能进入 `ProjectRepository` 的成员 scope。router
+只转换严格 `extra="forbid"` 的 request/response model、调用 domain service，并把共享资产错误稳定
+映射为 404/403/409/422/503。credential 响应仅包含名称、类型、状态、版本与时间元数据，永不返回
+plaintext、ciphertext、nonce、key ID、storage locator 或 secret hash。平台 override 的治理事件由
+service 在成功事务后写入 `SharedAssetGovernanceEventSink`，router 不接触 payload 或 secret。
+
 **M3 Agent domain**：`app.shared_assets.agent_repository.AgentRepository` 不提供裸
 `project_id` 的项目资产接口；每个 project 读写都接收可信 `ProjectContext`，并在 SQL 中
 同时固定 `agents.scope='project'`、`agents.project_id=context.project_id` 与 active、未过期

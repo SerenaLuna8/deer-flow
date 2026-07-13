@@ -97,6 +97,22 @@ class AgentRepository:
         if (await self.session.execute(statement)).scalar_one_or_none() is None:
             raise AssetNotFound(context.request_id)
 
+    async def _lock_override_project(self, context: SystemAssetGovernanceContext) -> None:
+        self._require_system_actor(context)
+        if context.project_id is None:
+            raise AssetForbidden(context.request_id)
+        statement = (
+            select(ProjectRow.id)
+            .where(
+                ProjectRow.id == context.project_id,
+                ProjectRow.status == "active",
+                ProjectRow.is_suspended.is_(False),
+            )
+            .with_for_update(of=ProjectRow)
+        )
+        if (await self.session.execute(statement)).scalar_one_or_none() is None:
+            raise AssetNotFound(context.request_id)
+
     async def create_project_asset(self, context: ProjectContext, command: AgentCreateCommand) -> AgentRow:
         self._require_project_actor(context)
         await self._lock_project_context(context)
@@ -117,9 +133,28 @@ class AgentRepository:
         command: AgentCreateCommand,
     ) -> AgentRow:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetForbidden(context.request_id)
         row = AgentRow(
             scope="system",
             project_id=None,
+            slug=command.slug,
+            display_name=command.display_name,
+            created_by_user_id=str(context.user_id),
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def create_override_asset(
+        self,
+        context: SystemAssetGovernanceContext,
+        command: AgentCreateCommand,
+    ) -> AgentRow:
+        await self._lock_override_project(context)
+        row = AgentRow(
+            scope="project",
+            project_id=context.project_id,
             slug=command.slug,
             display_name=command.display_name,
             created_by_user_id=str(context.user_id),
@@ -159,10 +194,35 @@ class AgentRepository:
         for_update: bool = False,
     ) -> AgentRow:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         statement = select(AgentRow).where(
             AgentRow.id == asset_id,
             AgentRow.scope == "system",
             AgentRow.project_id.is_(None),
+        )
+        if for_update:
+            statement = statement.with_for_update(of=AgentRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise AssetNotFound(context.request_id)
+        return row
+
+    async def get_override_asset(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> AgentRow:
+        self._require_system_actor(context)
+        if context.project_id is None:
+            raise AssetNotFound(context.request_id)
+        await self._lock_override_project(context)
+        statement = select(AgentRow).where(
+            AgentRow.id == asset_id,
+            AgentRow.scope == "project",
+            AgentRow.project_id == context.project_id,
         )
         if for_update:
             statement = statement.with_for_update(of=AgentRow)
@@ -191,6 +251,8 @@ class AgentRepository:
         asset: AgentRow,
     ) -> int:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         statement = (
             select(func.coalesce(func.max(AgentVersionRow.version_number), 0) + 1)
             .join(AgentRow, AgentRow.id == AgentVersionRow.agent_id)
@@ -198,6 +260,26 @@ class AgentRepository:
                 AgentRow.id == asset.id,
                 AgentRow.scope == "system",
                 AgentRow.project_id.is_(None),
+            )
+        )
+        return int((await self.session.execute(statement)).scalar_one())
+
+    async def next_override_version_number(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset: AgentRow,
+    ) -> int:
+        self._require_system_actor(context)
+        if context.project_id is None:
+            raise AssetNotFound(context.request_id)
+        await self._lock_override_project(context)
+        statement = (
+            select(func.coalesce(func.max(AgentVersionRow.version_number), 0) + 1)
+            .join(AgentRow, AgentRow.id == AgentVersionRow.agent_id)
+            .where(
+                AgentRow.id == asset.id,
+                AgentRow.scope == "project",
+                AgentRow.project_id == context.project_id,
             )
         )
         return int((await self.session.execute(statement)).scalar_one())
@@ -229,6 +311,23 @@ class AgentRepository:
     ) -> AgentVersionRecord:
         self._require_system_actor(context)
         asset = await self.get_system_asset(context, asset_id, for_update=True)
+        if version.agent_id != asset.id:
+            raise AssetNotFound(context.request_id)
+        self.session.add(version)
+        await self.session.flush()
+        await self._add_refs(version.id, skill_version_ids, mcp_version_ids)
+        return AgentVersionRecord(version, tuple(skill_version_ids), tuple(mcp_version_ids))
+
+    async def create_override_version(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        version: AgentVersionRow,
+        skill_version_ids: Sequence[uuid.UUID],
+        mcp_version_ids: Sequence[uuid.UUID],
+    ) -> AgentVersionRecord:
+        self._require_system_actor(context)
+        asset = await self.get_override_asset(context, asset_id, for_update=True)
         if version.agent_id != asset.id:
             raise AssetNotFound(context.request_id)
         self.session.add(version)
@@ -297,6 +396,8 @@ class AgentRepository:
         for_update: bool = False,
     ) -> AgentVersionRecord:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         statement = (
             select(AgentVersionRow)
             .join(AgentRow, AgentRow.id == AgentVersionRow.agent_id)
@@ -305,6 +406,36 @@ class AgentRepository:
                 AgentVersionRow.agent_id == asset_id,
                 AgentRow.scope == "system",
                 AgentRow.project_id.is_(None),
+            )
+        )
+        if for_update:
+            statement = statement.with_for_update(of=AgentVersionRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise AssetNotFound(context.request_id)
+        skill_ids, mcp_ids = await self._load_refs((row.id,), for_update=for_update)
+        return AgentVersionRecord(row, skill_ids.get(row.id, ()), mcp_ids.get(row.id, ()))
+
+    async def get_override_version(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> AgentVersionRecord:
+        self._require_system_actor(context)
+        if context.project_id is None:
+            raise AssetNotFound(context.request_id)
+        await self._lock_override_project(context)
+        statement = (
+            select(AgentVersionRow)
+            .join(AgentRow, AgentRow.id == AgentVersionRow.agent_id)
+            .where(
+                AgentVersionRow.id == version_id,
+                AgentVersionRow.agent_id == asset_id,
+                AgentRow.scope == "project",
+                AgentRow.project_id == context.project_id,
             )
         )
         if for_update:
@@ -348,11 +479,28 @@ class AgentRepository:
         context: SystemAssetGovernanceContext,
     ) -> tuple[AgentRow, ...]:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetForbidden(context.request_id)
         statement = (
             select(AgentRow)
             .where(
                 AgentRow.scope == "system",
                 AgentRow.project_id.is_(None),
+            )
+            .order_by(AgentRow.created_at, AgentRow.id)
+        )
+        return tuple((await self.session.execute(statement)).scalars().all())
+
+    async def list_override_visible(
+        self,
+        context: SystemAssetGovernanceContext,
+    ) -> tuple[AgentRow, ...]:
+        await self._lock_override_project(context)
+        statement = (
+            select(AgentRow)
+            .where(
+                AgentRow.scope == "project",
+                AgentRow.project_id == context.project_id,
             )
             .order_by(AgentRow.created_at, AgentRow.id)
         )
@@ -392,6 +540,25 @@ class AgentRepository:
                 AgentVersionRow.agent_id == asset_id,
                 AgentRow.scope == "system",
                 AgentRow.project_id.is_(None),
+            )
+            .order_by(AgentVersionRow.version_number.desc())
+        )
+        return await self._history(statement)
+
+    async def get_override_version_history(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+    ) -> tuple[AgentVersionRecord, ...]:
+        self._require_system_actor(context)
+        await self.get_override_asset(context, asset_id)
+        statement = (
+            select(AgentVersionRow)
+            .join(AgentRow, AgentRow.id == AgentVersionRow.agent_id)
+            .where(
+                AgentVersionRow.agent_id == asset_id,
+                AgentRow.scope == "project",
+                AgentRow.project_id == context.project_id,
             )
             .order_by(AgentVersionRow.version_number.desc())
         )
@@ -544,6 +711,8 @@ class AgentRepository:
         version_ids: Sequence[uuid.UUID],
     ) -> tuple[uuid.UUID, ...]:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         if not version_ids:
             return ()
         statement = (
@@ -560,12 +729,62 @@ class AgentRepository:
         )
         return tuple((await self.session.execute(statement)).scalars().all())
 
+    async def resolve_override_skill_versions(
+        self,
+        context: SystemAssetGovernanceContext,
+        version_ids: Sequence[uuid.UUID],
+    ) -> tuple[uuid.UUID, ...]:
+        await self._lock_override_project(context)
+        if not version_ids:
+            return ()
+        project_statement = (
+            select(SkillVersionRow.id)
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(
+                SkillVersionRow.id.in_(version_ids),
+                SkillVersionRow.workflow_status == "published",
+                SkillRow.scope == "project",
+                SkillRow.project_id == context.project_id,
+                SkillRow.status == "active",
+            )
+            .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
+        )
+        system_statement = (
+            select(SkillVersionRow.id)
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .join(
+                ProjectSystemSkillBindingRow,
+                and_(
+                    ProjectSystemSkillBindingRow.system_skill_id == SkillRow.id,
+                    ProjectSystemSkillBindingRow.skill_version_id == SkillVersionRow.id,
+                ),
+            )
+            .where(
+                SkillVersionRow.id.in_(version_ids),
+                SkillVersionRow.workflow_status == "published",
+                SkillRow.scope == "system",
+                SkillRow.project_id.is_(None),
+                SkillRow.status == "active",
+                ProjectSystemSkillBindingRow.project_id == context.project_id,
+                ProjectSystemSkillBindingRow.enabled.is_(True),
+            )
+            .with_for_update(
+                read=True,
+                of=[SkillRow, SkillVersionRow, ProjectSystemSkillBindingRow],
+            )
+        )
+        project_ids = (await self.session.execute(project_statement)).scalars().all()
+        system_ids = (await self.session.execute(system_statement)).scalars().all()
+        return tuple((*project_ids, *system_ids))
+
     async def resolve_system_mcp_versions(
         self,
         context: SystemAssetGovernanceContext,
         version_ids: Sequence[uuid.UUID],
     ) -> tuple[uuid.UUID, ...]:
         self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         if not version_ids:
             return ()
         statement = (
@@ -581,3 +800,51 @@ class AgentRepository:
             .with_for_update(read=True, of=[McpServerRow, McpServerVersionRow])
         )
         return tuple((await self.session.execute(statement)).scalars().all())
+
+    async def resolve_override_mcp_versions(
+        self,
+        context: SystemAssetGovernanceContext,
+        version_ids: Sequence[uuid.UUID],
+    ) -> tuple[uuid.UUID, ...]:
+        await self._lock_override_project(context)
+        if not version_ids:
+            return ()
+        project_statement = (
+            select(McpServerVersionRow.id)
+            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            .where(
+                McpServerVersionRow.id.in_(version_ids),
+                McpServerVersionRow.workflow_status == "published",
+                McpServerRow.scope == "project",
+                McpServerRow.project_id == context.project_id,
+                McpServerRow.status == "active",
+            )
+            .with_for_update(read=True, of=[McpServerRow, McpServerVersionRow])
+        )
+        system_statement = (
+            select(McpServerVersionRow.id)
+            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            .join(
+                ProjectSystemMcpBindingRow,
+                and_(
+                    ProjectSystemMcpBindingRow.system_mcp_server_id == McpServerRow.id,
+                    ProjectSystemMcpBindingRow.mcp_server_version_id == McpServerVersionRow.id,
+                ),
+            )
+            .where(
+                McpServerVersionRow.id.in_(version_ids),
+                McpServerVersionRow.workflow_status == "published",
+                McpServerRow.scope == "system",
+                McpServerRow.project_id.is_(None),
+                McpServerRow.status == "active",
+                ProjectSystemMcpBindingRow.project_id == context.project_id,
+                ProjectSystemMcpBindingRow.enabled.is_(True),
+            )
+            .with_for_update(
+                read=True,
+                of=[McpServerRow, McpServerVersionRow, ProjectSystemMcpBindingRow],
+            )
+        )
+        project_ids = (await self.session.execute(project_statement)).scalars().all()
+        system_ids = (await self.session.execute(system_statement)).scalars().all()
+        return tuple((*project_ids, *system_ids))

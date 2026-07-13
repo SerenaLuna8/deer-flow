@@ -312,6 +312,17 @@ PostgreSQL RLS，也不物理清除成员私有数据或项目数据，只记录
 Thread、run、file、memory、automation 等私有业务数据仍未完成项目与 owner 双重隔离，
 因此 M2 仍不能作为完整多用户 SaaS 发布。
 
+### 共享资产治理 API（M3）
+
+项目成员通过 `/api/projects/{project_id}/agents|skills|mcp-servers|credentials` 查看明确分开的
+系统资产与项目资产，并按 capability 创建版本、发布、审批、管理 credential 和固定 system
+binding。`system_admin` 使用 `/api/admin/assets/*` 管理系统资产，或使用
+`/api/admin/projects/{project_id}/assets/*` 对目标项目共享资产执行显式治理 override；该权限不会
+产生项目 membership，也不会开放成员或私有 Thread、run、file、Memory、automation 数据。
+
+Credential API 只返回名称、类型、状态、版本和时间等脱敏元数据。plaintext、ciphertext、nonce、
+key ID、storage locator 与 secret hash 永远不会出现在 HTTP 响应中。
+
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 > [!IMPORTANT]
