@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import uuid
@@ -12,12 +13,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.shared_assets.crypto import encrypt_credential_payload
 from app.shared_assets.keyring import CredentialKeyring, CredentialKeyringInvalid
-from deerflow.persistence.shared_assets import CredentialEnvelopeRow
+from deerflow.persistence.shared_assets import CredentialEnvelopeRow, CredentialVersionRow
 from scripts.rotate_credentials import (
     CredentialRotationError,
     CredentialRotationRunner,
     RotationCursor,
+    RotationLedger,
     build_rotation_parser,
+    build_rotation_pending_selection,
     build_rotation_selection,
     keyring_for_target,
     validate_payload_schema,
@@ -50,7 +53,32 @@ def test_rotation_query_orders_uuid_and_uses_skip_locked() -> None:
     assert "ORDER BY CREDENTIAL_VERSIONS.ID" in normalized
     assert "FOR UPDATE OF CREDENTIAL_VERSIONS SKIP LOCKED" in normalized
     assert "LIMIT 17" in normalized
-    assert str(cursor.version_id) in sql
+    assert str(cursor.version_id) not in sql
+
+
+def test_resume_cursor_does_not_exclude_a_previously_locked_lower_uuid() -> None:
+    """A cursor is audit metadata; target-key state, not UUID high-water, proves completion."""
+    skipped = uuid.UUID(int=1)
+    cursor = RotationCursor(uuid.UUID(int=2))
+
+    statement = build_rotation_selection(target_key_id="next", cursor=cursor, batch_size=17)
+    sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+    assert str(skipped) not in sql  # The query must remain eligible to select every non-target row.
+    assert str(cursor.version_id) not in sql
+    assert "credential_versions.id >" not in sql.lower()
+
+
+def test_empty_skip_locked_batch_requires_authoritative_pending_barrier() -> None:
+    """An empty SKIP LOCKED page is not completion until a blocking probe sees no target."""
+    statement = build_rotation_pending_selection(target_key_id="next")
+    sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    normalized = " ".join(sql.upper().split())
+
+    assert "SKIP LOCKED" not in normalized
+    assert "FOR UPDATE" in normalized
+    assert "LIMIT 1" in normalized
+    assert "CREDENTIAL_ENVELOPES.KEY_ID != 'NEXT'" in normalized
 
 
 def test_resume_cursor_requires_uuid_and_batch_is_bounded() -> None:
@@ -190,4 +218,41 @@ async def test_rotation_batches_resume_and_tamper_rolls_back_current_batch(
         bad_envelopes = tuple((await session.execute(select(CredentialEnvelopeRow).where(CredentialEnvelopeRow.credential_version_id == ordered[1]))).scalars().all())
         assert first_active.key_id == "next"
         assert len(bad_envelopes) == 1 and bad_envelopes[0].is_active is True and bad_envelopes[0].key_id == "old"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rotation_waits_for_skipped_locked_version_before_completed(
+    migrated_postgres_database_url: str,
+    tmp_path,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    _, version_id = await _seed_credential(engine, _keyring(), version_id=uuid.UUID(int=1))
+    ledger = RotationLedger(tmp_path / "rotation-ledger")
+    runner = CredentialRotationRunner(
+        factory,
+        _keyring(),
+        target_key_id="next",
+        batch_size=1,
+        ledger=ledger,
+    )
+
+    async with factory() as lock_session:
+        async with lock_session.begin():
+            await lock_session.execute(select(CredentialVersionRow).where(CredentialVersionRow.id == version_id).with_for_update(of=CredentialVersionRow))
+            rotation = asyncio.create_task(runner.run(execute=True))
+            await asyncio.sleep(0.1)
+            assert not rotation.done()
+            assert not ledger.path.exists()  # no false completed/incomplete record while target is locked
+
+        result = await asyncio.wait_for(rotation, timeout=5)
+
+    assert result.rotated == 1
+    async with factory() as session:
+        envelopes = tuple((await session.execute(select(CredentialEnvelopeRow).where(CredentialEnvelopeRow.credential_version_id == version_id).order_by(CredentialEnvelopeRow.envelope_generation))).scalars().all())
+    assert [(envelope.key_id, envelope.is_active) for envelope in envelopes] == [("old", False), ("next", True)]
+    records = [json.loads(line) for line in ledger.path.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["status"] == "completed"
+    assert sum(record.get("rotated", 0) for record in records if record["status"] == "batch_committed") == 1
     await engine.dispose()

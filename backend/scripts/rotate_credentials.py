@@ -86,14 +86,60 @@ def build_rotation_selection(*, target_key_id: str, cursor: RotationCursor | Non
         .where(CredentialEnvelopeRow.key_id != target_key_id, CredentialVersionRow.status != "revoked")
         .where(CredentialRow.status == "active")
     )
-    if cursor is not None:
-        statement = statement.where(CredentialVersionRow.id > cursor.version_id)
+    # ``SKIP LOCKED`` may temporarily omit a smaller UUID.  Completion is
+    # therefore proved by the target-key predicate, never by a UUID high-water
+    # mark.  ``cursor`` remains operator/audit metadata only; every batch and
+    # resumed run rescans all still-eligible rows.
+    del cursor
     return (
         statement.order_by(CredentialVersionRow.id)
         .limit(batch_size)
         .with_for_update(
             of=CredentialVersionRow,
             skip_locked=True,
+        )
+    )
+
+
+def build_rotation_pending_selection(*, target_key_id: str):
+    """Blocking completion barrier for targets hidden by ``SKIP LOCKED``.
+
+    An empty worker page cannot distinguish exhaustion from contention.  This
+    query waits for the first remaining target lock and only reports complete
+    when no eligible row exists.
+    """
+
+    return (
+        select(CredentialVersionRow.id)
+        .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
+        .join(
+            CredentialEnvelopeRow,
+            (CredentialEnvelopeRow.credential_version_id == CredentialVersionRow.id) & CredentialEnvelopeRow.is_active.is_(True),
+        )
+        .where(
+            CredentialEnvelopeRow.key_id != target_key_id,
+            CredentialVersionRow.status != "revoked",
+            CredentialRow.status == "active",
+        )
+        .order_by(CredentialVersionRow.id)
+        .limit(1)
+        .with_for_update(of=CredentialVersionRow)
+    )
+
+
+def build_rotation_plan_count(*, target_key_id: str):
+    return (
+        select(func.count())
+        .select_from(CredentialVersionRow)
+        .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
+        .join(
+            CredentialEnvelopeRow,
+            (CredentialEnvelopeRow.credential_version_id == CredentialVersionRow.id) & CredentialEnvelopeRow.is_active.is_(True),
+        )
+        .where(
+            CredentialEnvelopeRow.key_id != target_key_id,
+            CredentialVersionRow.status != "revoked",
+            CredentialRow.status == "active",
         )
     )
 
@@ -243,10 +289,19 @@ class CredentialRotationRunner:
     ) -> RotationResult:
         if max_batches is not None and max_batches < 1:
             raise CredentialRotationError("credential rotation max batches invalid")
+        if not execute:
+            try:
+                async with self.session_factory() as session:
+                    async with session.begin():
+                        planned = int((await session.execute(build_rotation_plan_count(target_key_id=self.target_key_id))).scalar_one())
+                return RotationResult(planned=planned, resume_cursor=resume_cursor)
+            except Exception:
+                raise CredentialRotationError("credential rotation database operation failed") from None
         cursor = resume_cursor
         planned = 0
         rotated = 0
         batches = 0
+        completed = False
         try:
             while max_batches is None or batches < max_batches:
                 rows: tuple[tuple[CredentialVersionRow, CredentialRow, CredentialEnvelopeRow], ...]
@@ -265,20 +320,28 @@ class CredentialRotationRunner:
                                 ).tuples()
                             )
                             if not rows:
-                                break
+                                pending = (
+                                    await session.execute(
+                                        build_rotation_pending_selection(
+                                            target_key_id=self.target_key_id,
+                                        )
+                                    )
+                                ).scalar_one_or_none()
+                                if pending is None:
+                                    completed = True
+                                    break
+                                continue
                             for version, credential, envelope in rows:
-                                if execute:
-                                    await self._rotate_one(session, version, credential, envelope)
+                                await self._rotate_one(session, version, credential, envelope)
                             planned += len(rows)
-                            if execute:
-                                rotated += len(rows)
+                            rotated += len(rows)
                             cursor = RotationCursor(uuid.UUID(str(rows[-1][0].id)))
                     except CredentialRotationError:
                         raise
                     except Exception:
                         raise CredentialRotationError("credential rotation database operation failed") from None
                 batches += 1
-                if execute and self.ledger is not None:
+                if self.ledger is not None:
                     self.ledger.record(
                         {
                             "status": "batch_committed",
@@ -298,10 +361,10 @@ class CredentialRotationRunner:
                     }
                 )
             raise
-        if execute and self.ledger is not None:
+        if self.ledger is not None:
             self.ledger.record(
                 {
-                    "status": "completed",
+                    "status": "completed" if completed else "incomplete",
                     "batches": batches,
                     "planned": planned,
                     "rotated": rotated,

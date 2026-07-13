@@ -11,6 +11,7 @@ import inspect
 import json
 import mimetypes
 import os
+import stat
 import sys
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -23,17 +24,21 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 import yaml
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.shared_assets.agent_service import AgentService
 from app.shared_assets.contexts import SystemAssetGovernanceContext
+from app.shared_assets.credential_closure import McpCredentialClosureInvalid, McpCredentialClosureTarget, lock_mcp_credential_closures
 from app.shared_assets.crypto import EncryptedEnvelope, decrypt_credential_payload, encrypt_credential_payload
 from app.shared_assets.keyring import CredentialKeyring, CredentialKeyringInvalid
 from app.shared_assets.mcp_service import McpCredentialSlot, McpDefinition, McpService
-from app.shared_assets.models import AgentPayload, SkillArchiveFile
+from app.shared_assets.models import AgentPayload, AssetScope, SkillArchiveFile
 from app.shared_assets.skill_service import _analyze_skill_files
+from deerflow.config.agents_config import AgentConfig
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
@@ -42,6 +47,7 @@ from deerflow.persistence.shared_assets import (
     AgentVersionSkillRefRow,
     AssetCatalogStateRow,
     CredentialEnvelopeRow,
+    CredentialGrantRow,
     CredentialRow,
     CredentialVersionRow,
     McpCredentialSlotRow,
@@ -98,6 +104,37 @@ def build_migration_parser() -> argparse.ArgumentParser:
 class SourceLayout:
     repo_root: Path
     data_root: Path
+    extensions_config_path: Path | None = None
+
+
+def resolve_data_root(repo_root: Path, explicit: Path | None) -> Path:
+    """Mirror ``runtime_home`` while honoring the CLI's explicit project root."""
+
+    if explicit is not None:
+        return explicit.absolute()
+    if configured := os.environ.get("DEER_FLOW_HOME"):
+        return Path(configured).absolute()
+    return (repo_root / ".deer-flow").absolute()
+
+
+def resolve_extensions_config_path(repo_root: Path) -> Path | None:
+    """Use the canonical ExtensionsConfig resolution, then explicit repo fallbacks."""
+
+    try:
+        resolved = ExtensionsConfig.resolve_config_path()
+    except FileNotFoundError:
+        raise AssetMigrationError("extensions config path is unavailable") from None
+    if resolved is not None:
+        return resolved.absolute()
+    for candidate in (
+        repo_root / "extensions_config.json",
+        repo_root / "mcp_config.json",
+        repo_root / "backend/extensions_config.json",
+        repo_root / "backend/mcp_config.json",
+    ):
+        if candidate.is_file():
+            return candidate.absolute()
+    return None
 
 
 @dataclass(frozen=True)
@@ -126,16 +163,16 @@ def _skill_checksum(files: Sequence[InventoryFile]) -> str:
 
 
 def _read_regular_file(path: Path) -> bytes:
-    """Read one source without following a final symlink."""
+    """Read one source through pinned, no-follow directory descriptors."""
+
+    parent_descriptor: int | None = None
     try:
-        for parent in (path, *path.parents):
-            if parent.is_symlink():
-                raise AssetMigrationError("source symlink is not allowed")
+        parent_descriptor = _open_directory_chain(path.parent)
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
+        descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
         try:
             metadata = os.fstat(descriptor)
-            if not os.path.isfile(path) or not (metadata.st_mode & 0o170000) == 0o100000:
+            if not stat.S_ISREG(metadata.st_mode):
                 raise AssetMigrationError("source is not a regular file")
             with os.fdopen(descriptor, "rb", closefd=False) as stream:
                 return stream.read()
@@ -145,6 +182,9 @@ def _read_regular_file(path: Path) -> bytes:
         raise
     except OSError:
         raise AssetMigrationError("source file cannot be read safely") from None
+    finally:
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
 
 
 def _archive_root(paths: Sequence[Path]) -> Path:
@@ -222,19 +262,66 @@ class BackupResult:
     files: tuple[Path, ...]
 
 
-def _private_directory(path: Path) -> None:
-    if any(candidate.is_symlink() for candidate in (path, *path.parents)):
-        raise AssetMigrationError("backup path is a symlink")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if not path.is_dir() or path.is_symlink():
-        raise AssetMigrationError("backup path is not a private directory")
-    os.chmod(path, 0o700)
+def _open_directory_chain(
+    path: Path,
+    *,
+    create: bool = False,
+    exclusive_final: bool = False,
+) -> int:
+    """Return a pinned dirfd after ``openat(O_NOFOLLOW)`` on every component."""
+
+    absolute = path.absolute()
+    parts = absolute.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts[1:]):
+        raise AssetMigrationError("path cannot be opened safely")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(parts[0], flags)
+    try:
+        for index, component in enumerate(parts[1:], start=1):
+            final = index == len(parts) - 1
+            created = False
+            if create:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                    created = True
+                except FileExistsError:
+                    if final and exclusive_final:
+                        raise AssetMigrationError("backup path already exists") from None
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            metadata = os.fstat(next_descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                os.close(next_descriptor)
+                raise AssetMigrationError("path component is not a directory")
+            os.close(descriptor)
+            descriptor = next_descriptor
+            if created:
+                os.fchmod(descriptor, 0o700)
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _private_directory(path: Path, *, exclusive: bool = False) -> None:
+    descriptor: int | None = None
+    try:
+        descriptor = _open_directory_chain(path, create=True, exclusive_final=exclusive)
+        os.fchmod(descriptor, 0o700)
+    except AssetMigrationError:
+        raise
+    except OSError:
+        raise AssetMigrationError("backup path cannot be opened safely") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _write_private_file(path: Path, content: bytes) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    parent_descriptor: int | None = None
     try:
-        descriptor = os.open(path, flags, 0o600)
+        parent_descriptor = _open_directory_chain(path.parent)
+        descriptor = os.open(path.name, flags, 0o600, dir_fd=parent_descriptor)
         try:
             with os.fdopen(descriptor, "wb", closefd=False) as stream:
                 stream.write(content)
@@ -244,46 +331,146 @@ def _write_private_file(path: Path, content: bytes) -> None:
             os.close(descriptor)
     except OSError:
         raise AssetMigrationError("secure backup write failed") from None
+    finally:
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
 
 
 def create_secure_backup(
     inventory: Sequence[InventoryItem],
     root: Path,
     *,
+    keyring: CredentialKeyring | None = None,
     run_id: uuid.UUID | None = None,
 ) -> BackupResult:
     run_id = run_id or uuid.uuid4()
     _private_directory(root)
     run_dir = root / str(run_id)
     backup_dir = run_dir / "backup"
-    _private_directory(run_dir)
-    _private_directory(backup_dir)
+    _private_directory(run_dir, exclusive=True)
+    _private_directory(backup_dir, exclusive=True)
     copied: list[Path] = []
     ledger: list[dict[str, object]] = []
+    requires_encryption = any(item.kind == "mcp" and bool(item.payload.get("secret_payload")) for item in inventory)
+    if requires_encryption and keyring is None:
+        raise AssetMigrationError("active credential key is unavailable for secure backup")
+    unique_sources: dict[tuple[Path, str, str], dict[str, object]] = {}
     for item in inventory:
-        for index, source in enumerate(item.files):
+        for source in item.files:
+            source_identity = (source.source_path.absolute(), source.sha256, source.archive_path)
+            existing = unique_sources.get(source_identity)
+            if existing is not None:
+                existing["item_ids"].append(str(item.item_id))  # type: ignore[union-attr]
+                existing["source_key_hashes"].append(hashlib.sha256(item.source_key.encode()).hexdigest())  # type: ignore[union-attr]
+                continue
             if source.source_path.is_symlink():
                 raise AssetMigrationError("source symlink is not allowed")
             current = _read_regular_file(source.source_path)
             if hashlib.sha256(current).hexdigest() != source.sha256:
                 raise AssetMigrationError("source checksum changed before backup")
-            destination = backup_dir / f"{item.item_id}-{index}-{Path(source.archive_path).name}"
-            _write_private_file(destination, current)
-            copied.append(destination)
-            ledger.append(
-                {
-                    "item_id": str(item.item_id),
-                    "source_key_hash": hashlib.sha256(item.source_key.encode()).hexdigest(),
-                    "checksum": source.sha256,
-                    "backup_file": destination.name,
-                }
+            destination = backup_dir / f"{uuid.uuid4()}.dfab"
+            encrypted = keyring is not None
+            stored = (
+                _encrypt_backup_content(
+                    current,
+                    keyring,
+                    run_id=run_id,
+                    checksum=source.sha256,
+                    archive_path=source.archive_path,
+                )
+                if encrypted
+                else current
             )
+            _write_private_file(destination, stored)
+            copied.append(destination)
+            entry: dict[str, object] = {
+                "item_ids": [str(item.item_id)],
+                "source_key_hashes": [hashlib.sha256(item.source_key.encode()).hexdigest()],
+                "archive_path": source.archive_path,
+                "checksum": source.sha256,
+                "size_bytes": len(current),
+                "encrypted": encrypted,
+                "backup_file": destination.name,
+            }
+            unique_sources[source_identity] = entry
+            ledger.append(entry)
     ledger_path = run_dir / "ledger.json"
     _write_private_file(
         ledger_path,
         json.dumps(ledger, separators=(",", ":"), sort_keys=True).encode("utf-8"),
     )
     return BackupResult(run_id, run_dir, backup_dir, ledger_path, tuple(copied))
+
+
+_BACKUP_MAGIC = b"DFAB1"
+
+
+def _backup_aad(run_id: uuid.UUID, checksum: str, archive_path: str) -> bytes:
+    return run_id.bytes + checksum.encode("ascii") + b"\0" + archive_path.encode("utf-8")
+
+
+def _encrypt_backup_content(
+    content: bytes,
+    keyring: CredentialKeyring | None,
+    *,
+    run_id: uuid.UUID,
+    checksum: str,
+    archive_path: str,
+) -> bytes:
+    if keyring is None:
+        raise AssetMigrationError("active credential key is unavailable for secure backup")
+    key_id = keyring.active_key_id.encode("utf-8")
+    if len(key_id) > 65535:
+        raise AssetMigrationError("active credential key is unavailable for secure backup")
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(keyring.key_for(keyring.active_key_id)).encrypt(
+        nonce,
+        content,
+        _backup_aad(run_id, checksum, archive_path),
+    )
+    return _BACKUP_MAGIC + len(key_id).to_bytes(2, "big") + key_id + nonce + ciphertext
+
+
+def restore_secure_backup(backup: BackupResult, keyring: CredentialKeyring) -> dict[str, bytes]:
+    """Authenticate and reconstruct backup bytes without logging their content."""
+
+    try:
+        ledger = json.loads(_read_regular_file(backup.ledger_path).decode("utf-8"))
+        if not isinstance(ledger, list):
+            raise ValueError
+        restored: dict[str, bytes] = {}
+        for entry in ledger:
+            if not isinstance(entry, dict):
+                raise ValueError
+            filename = str(entry["backup_file"])
+            checksum = str(entry["checksum"])
+            archive_path = str(entry["archive_path"])
+            stored = _read_regular_file(backup.backup_dir / filename)
+            if entry.get("encrypted"):
+                if not stored.startswith(_BACKUP_MAGIC) or len(stored) < len(_BACKUP_MAGIC) + 2 + 12 + 16:
+                    raise ValueError
+                offset = len(_BACKUP_MAGIC)
+                key_length = int.from_bytes(stored[offset : offset + 2], "big")
+                offset += 2
+                key_id = stored[offset : offset + key_length].decode("utf-8")
+                offset += key_length
+                nonce = stored[offset : offset + 12]
+                ciphertext = stored[offset + 12 :]
+                content = AESGCM(keyring.key_for(key_id)).decrypt(
+                    nonce,
+                    ciphertext,
+                    _backup_aad(backup.run_id, checksum, archive_path),
+                )
+            else:
+                content = stored
+            if len(content) != int(entry["size_bytes"]) or hashlib.sha256(content).hexdigest() != checksum:
+                raise ValueError
+            restored[filename] = content
+        return restored
+    except (AssetMigrationError, CredentialKeyringInvalid):
+        raise
+    except Exception:
+        raise AssetMigrationError("secure backup restore failed") from None
 
 
 def _write_migration_status(backup: BackupResult, payload: Mapping[str, object]) -> None:
@@ -296,11 +483,55 @@ def _write_migration_status(backup: BackupResult, payload: Mapping[str, object])
 _OAUTH_SECRET_FIELDS = frozenset({"client_secret", "refresh_token"})
 
 
-def _mcp_parts(raw: Mapping[str, object]) -> tuple[McpDefinition, dict[str, object]]:
+def _stored_agent_payload(
+    version: AgentVersionRow,
+    skill_version_ids: Sequence[uuid.UUID],
+    mcp_version_ids: Sequence[uuid.UUID],
+) -> AgentPayload:
+    return AgentPayload(
+        description=str(version.description),
+        soul=str(version.soul),
+        model_ref=str(version.model_ref),
+        tool_groups=tuple(version.tool_groups),
+        skill_version_ids=tuple(uuid.UUID(str(value)) for value in skill_version_ids),
+        mcp_version_ids=tuple(uuid.UUID(str(value)) for value in mcp_version_ids),
+    )
+
+
+def _stored_mcp_definition(
+    version: McpServerVersionRow,
+    slots: Sequence[McpCredentialSlotRow],
+) -> McpDefinition:
+    return McpDefinition(
+        description=str(version.description),
+        transport=str(version.transport),
+        command=version.command,
+        args=tuple(version.args),
+        url=version.url,
+        env=dict(version.non_secret_env),
+        headers=dict(version.non_secret_headers),
+        oauth=dict(version.oauth_metadata),
+        routing=dict(version.routing),
+        tool_overrides=dict(version.tool_overrides),
+        timeout_seconds=int(version.timeout_seconds),
+        credential_slots=tuple(
+            McpCredentialSlot(
+                name=str(slot.name),
+                purpose=str(slot.purpose),
+                payload_schema={key: tuple(sorted(values)) for key, values in dict(slot.payload_schema).items()},
+                required=bool(slot.required),
+            )
+            for slot in slots
+        ),
+    )
+
+
+def _mcp_parts(raw: Mapping[str, object]) -> tuple[McpDefinition, dict[str, object], bool]:
     try:
-        env = dict(raw.get("env") or {})
-        headers = dict(raw.get("headers") or {})
-        oauth_raw = dict(raw.get("oauth") or {})
+        config = McpServerConfig.model_validate(dict(raw))
+        env = dict(config.env)
+        headers = dict(config.headers)
+        oauth_raw = config.oauth.model_dump(exclude_none=True) if config.oauth is not None else {}
         oauth = {key: value for key, value in oauth_raw.items() if key not in _OAUTH_SECRET_FIELDS}
         oauth_secrets = {key: value for key, value in oauth_raw.items() if key in _OAUTH_SECRET_FIELDS}
         secret_payload: dict[str, object] = {}
@@ -326,25 +557,29 @@ def _mcp_parts(raw: Mapping[str, object]) -> tuple[McpDefinition, dict[str, obje
             if schema
             else ()
         )
-        timeout = raw.get("tool_call_timeout", raw.get("timeout_seconds", 30))
+        timeout = config.tool_call_timeout
+        if timeout is None:
+            timeout = 30
         if isinstance(timeout, float) and timeout.is_integer():
             timeout = int(timeout)
+        if not isinstance(timeout, int):
+            raise ValueError
         definition = McpDefinition(
-            description=str(raw.get("description") or ""),
-            transport=str(raw.get("type") or raw.get("transport") or "stdio"),
-            command=raw.get("command") if isinstance(raw.get("command"), str) else None,
-            args=tuple(raw.get("args") or ()),
-            url=raw.get("url") if isinstance(raw.get("url"), str) else None,
+            description=config.description,
+            transport=config.type,
+            command=config.command,
+            args=tuple(config.args),
+            url=config.url,
             env={},
             headers={},
             oauth=oauth,
-            routing=dict(raw.get("routing") or {}),
-            tool_overrides=dict(raw.get("tools") or raw.get("tool_overrides") or {}),
+            routing=config.routing.model_dump(mode="json"),
+            tool_overrides={name: value.model_dump(mode="json") for name, value in config.tools.items()},
             timeout_seconds=timeout,
             credential_slots=slots,
         )
-        return definition, secret_payload
-    except (TypeError, ValueError):
+        return definition, secret_payload, config.enabled
+    except Exception:
         raise AssetMigrationError("MCP source validation failed") from None
 
 
@@ -352,7 +587,10 @@ def build_inventory(layout: SourceLayout, owners: OwnerMap) -> tuple[InventoryIt
     items: list[InventoryItem] = []
 
     def add_skill(path: Path, source_key: str, scope: str, owner: str, project: uuid.UUID | None, status: str, label: str) -> None:
-        files = tuple(candidate for candidate in path.rglob("*") if candidate.is_file())
+        entries = tuple(path.rglob("*"))
+        if any(candidate.is_symlink() for candidate in entries):
+            raise AssetMigrationError("skill source symlink is not allowed")
+        files = tuple(candidate for candidate in entries if candidate.is_file())
         if files:
             item = InventoryItem.for_skill(
                 source_key=source_key,
@@ -375,10 +613,11 @@ def build_inventory(layout: SourceLayout, owners: OwnerMap) -> tuple[InventoryIt
         config_content = _read_regular_file(config_path)
         soul_content = _read_regular_file(soul_path)
         try:
-            config = yaml.safe_load(config_content.decode("utf-8")) or {}
-            if not isinstance(config, dict):
+            raw_config = yaml.safe_load(config_content.decode("utf-8")) or {}
+            if not isinstance(raw_config, dict):
                 raise ValueError
-        except (UnicodeError, yaml.YAMLError, ValueError):
+            config = AgentConfig.model_validate({**raw_config, "name": raw_config.get("name") or path.name})
+        except Exception:
             raise AssetMigrationError("agent source validation failed") from None
         files = (
             InventoryFile(config_path, "config.yaml", config_content, hashlib.sha256(config_content).hexdigest()),
@@ -396,21 +635,76 @@ def build_inventory(layout: SourceLayout, owners: OwnerMap) -> tuple[InventoryIt
                 source_key=source_key,
                 source_label=label,
                 slug=path.name,
-                display_name=str(config.get("name") or path.name),
+                display_name=config.name,
                 scope=scope,
                 project_id=project,
                 owner_user_id=owner,
                 checksum=hashlib.sha256(canonical).hexdigest(),
                 files=files,
                 payload={
-                    "description": config.get("description", ""),
-                    "model_ref": config.get("model") or "default",
-                    "tool_groups": config.get("tool_groups") or [],
-                    "skill_slugs": config.get("skills") or [],
-                    "mcp_slugs": config.get("mcp_servers") or config.get("mcp") or [],
+                    "description": config.description,
+                    "model_ref": config.model or "default",
+                    "tool_groups": config.tool_groups or [],
+                    "skill_slugs": config.skills,
+                    "mcp_slugs": raw_config.get("mcp_servers") if "mcp_servers" in raw_config else raw_config.get("mcp") if "mcp" in raw_config else None,
                     "soul": soul_content.decode("utf-8"),
                 },
                 status=status,
+            )
+        )
+
+    def add_default_agent() -> None:
+        """Snapshot the real no-``agent_name`` lead-agent configuration.
+
+        Runtime selects the first configured model, all configured tool groups,
+        all enabled skills/MCP servers, and the optional root ``SOUL.md``.
+        """
+
+        config_path = layout.repo_root / "config.yaml"
+        if not config_path.is_file():
+            return
+        config_content = _read_regular_file(config_path)
+        try:
+            config = yaml.safe_load(config_content.decode("utf-8")) or {}
+            models = config.get("models")
+            groups = config.get("tool_groups") or []
+            if not isinstance(config, dict) or not isinstance(models, list) or not models or not isinstance(models[0], dict) or not isinstance(models[0].get("name"), str):
+                raise ValueError
+            if not isinstance(groups, list) or any(not isinstance(group, dict) or not isinstance(group.get("name"), str) for group in groups):
+                raise ValueError
+        except (UnicodeError, yaml.YAMLError, TypeError, ValueError):
+            raise AssetMigrationError("default agent source validation failed") from None
+        soul_path = layout.data_root / "SOUL.md"
+        soul_content = _read_regular_file(soul_path) if soul_path.is_file() else b""
+        files = [InventoryFile(config_path, "config.yaml", config_content, hashlib.sha256(config_content).hexdigest())]
+        if soul_path.is_file():
+            files.append(InventoryFile(soul_path, "SOUL.md", soul_content, hashlib.sha256(soul_content).hexdigest()))
+        canonical = json.dumps(
+            {"files": [{"path": file.archive_path, "sha256": file.sha256} for file in files]},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        items.append(
+            InventoryItem(
+                item_id=uuid.uuid5(uuid.NAMESPACE_URL, "system-agent:lead-agent"),
+                kind="agent",
+                source_key="system-agent:lead-agent",
+                source_label="repo-default-agent",
+                slug="lead-agent",
+                display_name="lead-agent",
+                scope="system",
+                project_id=None,
+                owner_user_id=owners.system_actor or "",
+                checksum=hashlib.sha256(canonical).hexdigest(),
+                files=tuple(files),
+                payload={
+                    "description": "",
+                    "model_ref": models[0]["name"],
+                    "tool_groups": tuple(group["name"] for group in groups),
+                    "skill_slugs": None,
+                    "mcp_slugs": None,
+                    "soul": soul_content.decode("utf-8"),
+                },
             )
         )
 
@@ -455,8 +749,14 @@ def build_inventory(layout: SourceLayout, owners: OwnerMap) -> tuple[InventoryIt
         for agent in sorted(repository_agents.iterdir()):
             if agent.is_dir() and not agent.name.startswith("."):
                 add_agent(agent, f"system-agent:{agent.name}", "system", owners.system_actor or "", None, "ready", "repo-system-agent")
-    extensions = layout.repo_root / "extensions_config.json"
-    if extensions.is_file():
+    add_default_agent()
+    extensions = layout.extensions_config_path
+    if extensions is None:
+        for candidate in (layout.repo_root / "extensions_config.json", layout.repo_root / "mcp_config.json"):
+            if candidate.is_file():
+                extensions = candidate
+                break
+    if extensions is not None and extensions.is_file():
         content = _read_regular_file(extensions)
         try:
             raw = json.loads(content.decode("utf-8"))
@@ -467,7 +767,7 @@ def build_inventory(layout: SourceLayout, owners: OwnerMap) -> tuple[InventoryIt
         for slug, definition in sorted(raw.get("mcpServers", {}).items()):
             if not isinstance(definition, dict):
                 raise AssetMigrationError("MCP source validation failed")
-            safe_definition, secret_payload = _mcp_parts(definition)
+            safe_definition, secret_payload, enabled = _mcp_parts(definition)
             item_file = InventoryFile(extensions, extensions.name, content, hashlib.sha256(content).hexdigest())
             items.append(
                 InventoryItem(
@@ -482,7 +782,11 @@ def build_inventory(layout: SourceLayout, owners: OwnerMap) -> tuple[InventoryIt
                     owner_user_id=owners.system_actor or "",
                     checksum=McpService._checksum(safe_definition),
                     files=(item_file,),
-                    payload={"definition": safe_definition, "secret_payload": secret_payload},
+                    payload={
+                        "definition": safe_definition,
+                        "secret_payload": secret_payload,
+                        "asset_status": "active" if enabled else "suspended",
+                    },
                 )
             )
     return tuple(sorted(items, key=lambda item: (item.kind, item.source_key)))
@@ -690,7 +994,7 @@ class AssetMigrationRunner:
                     .join(asset_model, asset_model.id == asset_fk)
                     .where(
                         func.lower(asset_model.slug) == slug.casefold(),
-                        asset_model.status != "suspended",
+                        asset_model.status == "active",
                         version_model.id == asset_model.current_published_version_id,
                         version_model.workflow_status == "published",
                         *([] if len(allowed) == 0 else [allowed[0] if len(allowed) == 1 else allowed[0] | allowed[1]]),
@@ -704,8 +1008,32 @@ class AssetMigrationRunner:
 
     async def _agent_payload(self, session, item: InventoryItem) -> AgentPayload:
         try:
-            skill_slugs = tuple(item.payload.get("skill_slugs") or ())
-            mcp_slugs = tuple(item.payload.get("mcp_slugs") or ())
+
+            async def selected_slugs(kind: str) -> tuple[str, ...]:
+                configured = item.payload.get(f"{kind}_slugs")
+                if configured is not None:
+                    return tuple(configured)
+                asset_model = SkillRow if kind == "skill" else McpServerRow
+                allowed = [asset_model.scope == "system"]
+                if item.scope == "project":
+                    allowed.append((asset_model.scope == "project") & (asset_model.project_id == item.project_id))
+                scope_filter = allowed[0] if len(allowed) == 1 else allowed[0] | allowed[1]
+                return tuple(
+                    (
+                        await session.execute(
+                            select(asset_model.slug)
+                            .where(
+                                asset_model.status == "active",
+                                asset_model.current_published_version_id.is_not(None),
+                                scope_filter,
+                            )
+                            .order_by(asset_model.scope, asset_model.slug)
+                        )
+                    ).scalars()
+                )
+
+            skill_slugs = await selected_slugs("skill")
+            mcp_slugs = await selected_slugs("mcp")
             if any(not isinstance(value, str) for value in (*skill_slugs, *mcp_slugs)):
                 raise ValueError
             skill_ids = tuple([await self._resolve_dependency_version(session, item, "skill", slug) for slug in skill_slugs])
@@ -721,9 +1049,41 @@ class AssetMigrationRunner:
         except (KeyError, TypeError, ValueError):
             raise AssetMigrationError("agent source validation failed") from None
 
+    async def _preflight_inventory(self, inventory: Sequence[InventoryItem]) -> tuple[InventoryItem, ...]:
+        """Freeze every actor/project mapping before the first catalog write."""
+
+        effective: list[InventoryItem] = []
+        async with self.session_factory() as session:
+            async with session.begin():
+                for item in inventory:
+                    actor_id = await self._validate_scope(session, item)
+                    effective.append(item if item.owner_user_id == actor_id else replace(item, owner_user_id=actor_id))
+
+                planned = tuple(effective)
+                for item in planned:
+                    if item.kind != "agent":
+                        continue
+                    for kind in ("skill", "mcp"):
+                        configured = item.payload.get(f"{kind}_slugs")
+                        if configured is None:
+                            continue
+                        if not isinstance(configured, (list, tuple)) or any(not isinstance(slug, str) for slug in configured):
+                            raise AssetMigrationError("agent source validation failed")
+                        for slug in configured:
+                            planned_matches = [
+                                candidate
+                                for candidate in planned
+                                if candidate.kind == kind
+                                and candidate.slug.casefold() == slug.casefold()
+                                and (candidate.scope == "system" or (item.scope == "project" and candidate.scope == "project" and candidate.project_id == item.project_id))
+                            ]
+                            if len(planned_matches) > 1:
+                                raise AssetMigrationError("agent dependency is missing or ambiguous")
+                            if not planned_matches:
+                                await self._resolve_dependency_version(session, item, kind, slug)
+        return tuple(effective)
+
     async def _migrate_agent(self, session, item: InventoryItem) -> tuple[int, int]:
-        payload = await self._agent_payload(session, item)
-        checksum = AgentService._payload_checksum(payload)
         asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == item.source_key).with_for_update(of=AgentRow))).scalar_one_or_none()
         if asset is not None:
             if asset.scope != item.scope or asset.project_id != item.project_id or asset.slug.casefold() != item.slug.casefold():
@@ -732,7 +1092,6 @@ class AssetMigrationRunner:
                 await session.execute(
                     select(AgentVersionRow).where(
                         AgentVersionRow.agent_id == asset.id,
-                        AgentVersionRow.payload_checksum == checksum,
                         AgentVersionRow.review_note == f"migration-source:{item.checksum}",
                     )
                 )
@@ -746,6 +1105,8 @@ class AssetMigrationRunner:
                     asset.version += 1
                 await session.flush()
                 return 0, 1
+        payload = await self._agent_payload(session, item)
+        checksum = AgentService._payload_checksum(payload)
         if asset is None:
             asset = AgentRow(
                 scope=item.scope,
@@ -805,9 +1166,9 @@ class AssetMigrationRunner:
             resolved[section] = section_values
         return resolved
 
-    async def _ensure_mcp_credential(self, session, item: InventoryItem, payload: Mapping[str, object]) -> int:
+    async def _ensure_mcp_credential(self, session, item: InventoryItem, payload: Mapping[str, object]) -> tuple[int, uuid.UUID | None]:
         if not payload:
-            return 0
+            return 0, None
         if self.keyring is None:
             raise AssetMigrationError("active credential key is unavailable")
         resolved_payload = self._resolve_environment_secrets(payload)
@@ -842,7 +1203,7 @@ class AssetMigrationRunner:
             except Exception:
                 raise AssetMigrationError("MCP credential decrypt probe failed") from None
             if existing_payload == resolved_payload:
-                return 0
+                return 0, uuid.UUID(str(current.id))
             current.status = "retired"
             current.retired_at = datetime.now(UTC)
             number = int((await session.execute(select(func.coalesce(func.max(CredentialVersionRow.version_number), 0) + 1).where(CredentialVersionRow.credential_id == credential.id))).scalar_one())
@@ -897,7 +1258,59 @@ class AssetMigrationRunner:
         if number > 1:
             credential.version += 1
         await session.flush()
-        return 1
+        return 1, uuid.UUID(str(version.id))
+
+    async def _ensure_mcp_grant(
+        self,
+        session,
+        item: InventoryItem,
+        *,
+        mcp_version_id: uuid.UUID,
+        credential_version_id: uuid.UUID | None,
+    ) -> None:
+        slot = (
+            await session.execute(
+                select(McpCredentialSlotRow).where(
+                    McpCredentialSlotRow.mcp_server_version_id == mcp_version_id,
+                    McpCredentialSlotRow.name == "legacy-secrets",
+                    McpCredentialSlotRow.required.is_(True),
+                )
+            )
+        ).scalar_one_or_none()
+        if credential_version_id is None:
+            if slot is not None:
+                raise AssetMigrationError("MCP credential closure is incomplete")
+            return
+        if slot is None:
+            raise AssetMigrationError("MCP credential closure is incomplete")
+        existing = (
+            await session.execute(
+                select(CredentialGrantRow)
+                .where(
+                    CredentialGrantRow.mcp_server_version_id == mcp_version_id,
+                    CredentialGrantRow.credential_slot_id == slot.id,
+                    CredentialGrantRow.status == "active",
+                )
+                .with_for_update(of=CredentialGrantRow)
+            )
+        ).scalar_one_or_none()
+        if existing is not None and existing.credential_version_id == credential_version_id:
+            return
+        if existing is not None:
+            existing.status = "revoked"
+            existing.revoked_at = datetime.now(UTC)
+            existing.revoked_by_user_id = item.owner_user_id
+            existing.version += 1
+            await session.flush()
+        session.add(
+            CredentialGrantRow(
+                mcp_server_version_id=mcp_version_id,
+                credential_slot_id=slot.id,
+                credential_version_id=credential_version_id,
+                created_by_user_id=item.owner_user_id,
+            )
+        )
+        await session.flush()
 
     async def _migrate_mcp(self, session, item: InventoryItem) -> tuple[int, int]:
         definition = item.payload.get("definition")
@@ -922,6 +1335,10 @@ class AssetMigrationRunner:
         if asset is not None:
             if asset.scope != item.scope or asset.project_id != item.project_id or asset.slug.casefold() != item.slug.casefold():
                 raise AssetMigrationError("source_key conflicts with an existing asset")
+            desired_status = str(item.payload.get("asset_status") or "active")
+            if asset.status != desired_status:
+                asset.status = desired_status
+                asset.version += 1
             imported = (
                 await session.execute(
                     select(McpServerVersionRow).where(
@@ -938,7 +1355,13 @@ class AssetMigrationRunner:
                 if asset.current_published_version_id != imported.id:
                     asset.current_published_version_id = imported.id
                     asset.version += 1
-                credential_versions = await self._ensure_mcp_credential(session, item, secret_payload)
+                credential_versions, credential_version_id = await self._ensure_mcp_credential(session, item, secret_payload)
+                await self._ensure_mcp_grant(
+                    session,
+                    item,
+                    mcp_version_id=uuid.UUID(str(imported.id)),
+                    credential_version_id=credential_version_id,
+                )
                 await session.flush()
                 return credential_versions, 1
         if asset is None:
@@ -949,6 +1372,7 @@ class AssetMigrationRunner:
                 display_name=item.display_name,
                 source_key=item.source_key,
                 created_by_user_id=item.owner_user_id,
+                status=str(item.payload.get("asset_status") or "active"),
             )
             session.add(asset)
             await session.flush()
@@ -991,75 +1415,50 @@ class AssetMigrationRunner:
             ]
         )
         await session.flush()
+        credential_versions, credential_version_id = await self._ensure_mcp_credential(session, item, secret_payload)
+        await self._ensure_mcp_grant(
+            session,
+            item,
+            mcp_version_id=uuid.UUID(str(version.id)),
+            credential_version_id=credential_version_id,
+        )
         version.workflow_status = "published"
         asset.current_published_version_id = version.id
         if number > 1:
             asset.version += 1
-        credential_versions = await self._ensure_mcp_credential(session, item, secret_payload)
         await session.flush()
         return 1 + credential_versions, 0
 
+    async def _current_imported_version(self, session, item: InventoryItem):
+        types = {
+            "agent": (AgentRow, AgentVersionRow, AgentVersionRow.agent_id),
+            "skill": (SkillRow, SkillVersionRow, SkillVersionRow.skill_id),
+            "mcp": (McpServerRow, McpServerVersionRow, McpServerVersionRow.mcp_server_id),
+        }
+        selected = types.get(item.kind)
+        if selected is None:
+            return None
+        asset_model, version_model, parent_column = selected
+        return (
+            await session.execute(
+                select(version_model)
+                .join(asset_model, asset_model.id == parent_column)
+                .where(
+                    asset_model.source_key == item.source_key,
+                    asset_model.current_published_version_id == version_model.id,
+                    version_model.workflow_status == "published",
+                    version_model.review_note == f"migration-source:{item.checksum}",
+                )
+            )
+        ).scalar_one_or_none()
+
     async def _default_counts_probe(self, session, inventory: Sequence[InventoryItem]) -> bool:
-        for item in inventory:
-            if item.kind == "skill":
-                row = (
-                    await session.execute(
-                        select(SkillRow.id)
-                        .join(SkillVersionRow, SkillVersionRow.skill_id == SkillRow.id)
-                        .where(
-                            SkillRow.source_key == item.source_key,
-                            SkillVersionRow.payload_checksum == item.checksum,
-                            SkillVersionRow.workflow_status == "published",
-                            SkillRow.current_published_version_id == SkillVersionRow.id,
-                        )
-                    )
-                ).first()
-            elif item.kind == "mcp":
-                row = (
-                    await session.execute(
-                        select(McpServerRow.id)
-                        .join(McpServerVersionRow, McpServerVersionRow.mcp_server_id == McpServerRow.id)
-                        .where(
-                            McpServerRow.source_key == item.source_key,
-                            McpServerVersionRow.payload_checksum == item.checksum,
-                            McpServerVersionRow.workflow_status == "published",
-                            McpServerRow.current_published_version_id == McpServerVersionRow.id,
-                        )
-                    )
-                ).first()
-            elif item.kind == "agent":
-                payload = await self._agent_payload(session, item)
-                row = (
-                    await session.execute(
-                        select(AgentRow.id)
-                        .join(AgentVersionRow, AgentVersionRow.agent_id == AgentRow.id)
-                        .where(
-                            AgentRow.source_key == item.source_key,
-                            AgentVersionRow.payload_checksum == AgentService._payload_checksum(payload),
-                            AgentVersionRow.workflow_status == "published",
-                            AgentRow.current_published_version_id == AgentVersionRow.id,
-                        )
-                    )
-                ).first()
-            else:
-                return False
-            if row is None:
-                return False
-        return True
+        return all([await self._current_imported_version(session, item) is not None for item in inventory])
 
     async def _default_checksums_probe(self, session, inventory: Sequence[InventoryItem]) -> bool:
         for item in inventory:
             if item.kind == "skill":
-                version = (
-                    await session.execute(
-                        select(SkillVersionRow)
-                        .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
-                        .where(
-                            SkillRow.source_key == item.source_key,
-                            SkillVersionRow.payload_checksum == item.checksum,
-                        )
-                    )
-                ).scalar_one_or_none()
+                version = await self._current_imported_version(session, item)
                 if version is None:
                     return False
                 files = tuple((await session.execute(select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == version.id).order_by(SkillVersionFileRow.path))).scalars().all())
@@ -1073,32 +1472,44 @@ class AssetMigrationRunner:
                     return False
                 if any(hashlib.sha256(file.content).hexdigest() != file.sha256 for file in files):
                     return False
-            elif item.kind == "mcp":
-                version = (
-                    await session.execute(
-                        select(McpServerVersionRow)
-                        .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
-                        .where(
-                            McpServerRow.source_key == item.source_key,
-                            McpServerVersionRow.payload_checksum == item.checksum,
+                try:
+                    archive = tuple(
+                        SkillArchiveFile(
+                            path=file.path,
+                            content=bytes(file.content),
+                            media_type=file.media_type,
                         )
+                        for file in files
                     )
-                ).scalar_one_or_none()
-                if version is None or version.id is None:
+                    preview = await asyncio.to_thread(_analyze_skill_files, archive, "asset-migration-probe")
+                except Exception:
+                    return False
+                if (
+                    version.payload_checksum != preview.checksum
+                    or version.description != preview.description
+                    or dict(version.frontmatter) != dict(preview.frontmatter)
+                    or version.compatibility != preview.compatibility
+                    or list(version.secret_requirements) != [{"name": requirement.name, "optional": requirement.optional} for requirement in preview.secret_requirements]
+                    or version.scan_decision != preview.scan_decision
+                    or dict(version.scan_summary) != dict(preview.scan_summary)
+                ):
+                    return False
+            elif item.kind == "mcp":
+                version = await self._current_imported_version(session, item)
+                if version is None:
+                    return False
+                slots = tuple((await session.execute(select(McpCredentialSlotRow).where(McpCredentialSlotRow.mcp_server_version_id == version.id).order_by(McpCredentialSlotRow.name, McpCredentialSlotRow.id))).scalars().all())
+                definition = _stored_mcp_definition(version, slots)
+                if version.payload_checksum != item.checksum or McpService._checksum(definition) != version.payload_checksum:
                     return False
             elif item.kind == "agent":
-                payload = await self._agent_payload(session, item)
-                version = (
-                    await session.execute(
-                        select(AgentVersionRow)
-                        .join(AgentRow, AgentRow.id == AgentVersionRow.agent_id)
-                        .where(
-                            AgentRow.source_key == item.source_key,
-                            AgentVersionRow.payload_checksum == AgentService._payload_checksum(payload),
-                        )
-                    )
-                ).scalar_one_or_none()
+                version = await self._current_imported_version(session, item)
                 if version is None:
+                    return False
+                skill_ids = tuple((await session.execute(select(AgentVersionSkillRefRow.skill_version_id).where(AgentVersionSkillRefRow.agent_version_id == version.id).order_by(AgentVersionSkillRefRow.sort_order))).scalars())
+                mcp_ids = tuple((await session.execute(select(AgentVersionMcpRefRow.mcp_server_version_id).where(AgentVersionMcpRefRow.agent_version_id == version.id).order_by(AgentVersionMcpRefRow.sort_order))).scalars())
+                payload = _stored_agent_payload(version, skill_ids, mcp_ids)
+                if AgentService._payload_checksum(payload) != version.payload_checksum:
                     return False
             else:
                 return False
@@ -1106,19 +1517,54 @@ class AssetMigrationRunner:
 
     async def _default_dependencies_probe(self, session, inventory: Sequence[InventoryItem]) -> bool:
         for item in inventory:
-            if item.kind != "agent":
-                continue
-            payload = await self._agent_payload(session, item)
-            checksum = AgentService._payload_checksum(payload)
-            version = (await session.execute(select(AgentVersionRow).join(AgentRow, AgentRow.id == AgentVersionRow.agent_id).where(AgentRow.source_key == item.source_key, AgentVersionRow.payload_checksum == checksum))).scalar_one_or_none()
-            if version is None:
-                return False
-            skill_ids = tuple((await session.execute(select(AgentVersionSkillRefRow.skill_version_id).where(AgentVersionSkillRefRow.agent_version_id == version.id).order_by(AgentVersionSkillRefRow.sort_order))).scalars())
-            mcp_ids = tuple((await session.execute(select(AgentVersionMcpRefRow.mcp_server_version_id).where(AgentVersionMcpRefRow.agent_version_id == version.id).order_by(AgentVersionMcpRefRow.sort_order))).scalars())
-            if tuple(map(uuid.UUID, map(str, skill_ids))) != payload.skill_version_ids:
-                return False
-            if tuple(map(uuid.UUID, map(str, mcp_ids))) != payload.mcp_version_ids:
-                return False
+            if item.kind == "agent":
+                version = await self._current_imported_version(session, item)
+                if version is None:
+                    return False
+                skill_ids = tuple((await session.execute(select(AgentVersionSkillRefRow.skill_version_id).where(AgentVersionSkillRefRow.agent_version_id == version.id).order_by(AgentVersionSkillRefRow.sort_order))).scalars())
+                mcp_ids = tuple((await session.execute(select(AgentVersionMcpRefRow.mcp_server_version_id).where(AgentVersionMcpRefRow.agent_version_id == version.id).order_by(AgentVersionMcpRefRow.sort_order))).scalars())
+                payload = _stored_agent_payload(version, skill_ids, mcp_ids)
+                if AgentService._payload_checksum(payload) != version.payload_checksum:
+                    return False
+                for dependency_kind, dependency_ids in (("skill", payload.skill_version_ids), ("mcp", payload.mcp_version_ids)):
+                    asset_model = SkillRow if dependency_kind == "skill" else McpServerRow
+                    version_model = SkillVersionRow if dependency_kind == "skill" else McpServerVersionRow
+                    parent_column = SkillVersionRow.skill_id if dependency_kind == "skill" else McpServerVersionRow.mcp_server_id
+                    allowed = asset_model.scope == "system"
+                    if item.scope == "project":
+                        allowed = allowed | ((asset_model.scope == "project") & (asset_model.project_id == item.project_id))
+                    for dependency_id in dependency_ids:
+                        exists = (
+                            await session.execute(
+                                select(version_model.id)
+                                .join(asset_model, asset_model.id == parent_column)
+                                .where(
+                                    version_model.id == dependency_id,
+                                    version_model.workflow_status == "published",
+                                    asset_model.status == "active",
+                                    allowed,
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if exists is None:
+                            return False
+            elif item.kind == "mcp":
+                mcp = (await session.execute(select(McpServerRow).where(McpServerRow.source_key == item.source_key))).scalar_one_or_none()
+                if mcp is None or mcp.current_published_version_id is None:
+                    return False
+                try:
+                    await lock_mcp_credential_closures(
+                        session,
+                        (
+                            McpCredentialClosureTarget(
+                                uuid.UUID(str(mcp.current_published_version_id)),
+                                AssetScope(item.scope),
+                                item.project_id,
+                            ),
+                        ),
+                    )
+                except McpCredentialClosureInvalid:
+                    return False
         return True
 
     async def _default_decrypt_probe(self, session, inventory: Sequence[InventoryItem]) -> bool:
@@ -1144,6 +1590,27 @@ class AssetMigrationRunner:
                 )
             ).scalar_one_or_none()
             if version is None or envelope is None:
+                return False
+            mcp = (await session.execute(select(McpServerRow).where(McpServerRow.source_key == item.source_key))).scalar_one_or_none()
+            if mcp is None or mcp.current_published_version_id is None:
+                return False
+            try:
+                closure = (
+                    await lock_mcp_credential_closures(
+                        session,
+                        (
+                            McpCredentialClosureTarget(
+                                uuid.UUID(str(mcp.current_published_version_id)),
+                                AssetScope(item.scope),
+                                item.project_id,
+                            ),
+                        ),
+                        load_envelopes=True,
+                    )
+                )[uuid.UUID(str(mcp.current_published_version_id))]
+            except McpCredentialClosureInvalid:
+                return False
+            if len(closure.materials) != 1 or closure.materials[0].version.id != version.id:
                 return False
             try:
                 decrypted = decrypt_credential_payload(
@@ -1211,10 +1678,16 @@ class AssetMigrationRunner:
             return MigrationResult(resume_cursor=MigrationCursor(snapshot[-1].item_id) if snapshot else resume_cursor)
         if not full_snapshot:
             raise AssetMigrationError("executable inventory is empty")
+        full_snapshot = await self._preflight_inventory(full_snapshot)
+        if resume_cursor is None:
+            snapshot = full_snapshot
+        else:
+            positions = [index for index, item in enumerate(full_snapshot) if item.item_id == resume_cursor.item_id]
+            snapshot = full_snapshot[positions[0] + 1 :]
         if not snapshot:
             await self._validate_and_cutover(full_snapshot)
             return MigrationResult(resume_cursor=resume_cursor)
-        backup = create_secure_backup(snapshot, self.backup_root)
+        backup = create_secure_backup(snapshot, self.backup_root, keyring=self.keyring)
         created = 0
         noop = 0
         try:
@@ -1223,8 +1696,7 @@ class AssetMigrationRunner:
                 async with self.session_factory() as session:
                     async with session.begin():
                         for item in batch:
-                            actor_id = await self._validate_scope(session, item)
-                            effective_item = item if item.owner_user_id == actor_id else replace(item, owner_user_id=actor_id)
+                            effective_item = item
                             if item.kind == "skill":
                                 item_created, item_noop = await self._migrate_skill(session, effective_item)
                             elif item.kind == "agent":
@@ -1319,9 +1791,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_migration_parser().parse_args(argv)
     try:
         repo_root = args.repo_root.absolute()
-        data_root = (args.data_root or Path(os.environ.get("DEER_FLOW_HOME", repo_root / ".deer-flow/local-data"))).absolute()
+        data_root = resolve_data_root(repo_root, args.data_root)
         owners = _load_owner_map(args.owner_map, args.actor_user_id)
-        inventory = build_inventory(SourceLayout(repo_root, data_root), owners)
+        inventory = build_inventory(
+            SourceLayout(
+                repo_root,
+                data_root,
+                resolve_extensions_config_path(repo_root),
+            ),
+            owners,
+        )
         print(render_inventory(inventory))
         validate_executable_inventory(inventory)
         if args.dry_run:

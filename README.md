@@ -330,6 +330,42 @@ M3 的兼容运行不会构造项目运行身份：credential materialization �
 不可变 `ProjectContext`。嵌入式 client 在 cutover 后必须显式接收该 opaque context；缺少 context
 或客户端传入的字典都会 fail closed。把项目 context 接入项目私有 run 生命周期属于 M4。
 
+#### M3 共享资产迁移与 credential 轮换
+
+迁移不会随应用启动自动执行。先设置 `DATABASE_URL` 与 credential keyring，先 dry-run 核对脱敏
+inventory，再进入维护窗口执行：
+
+```bash
+export DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID='m3-current'
+export DEER_FLOW_CREDENTIAL_KEYRING_JSON='{"m3-current":"<32-byte-key-base64>"}'
+make migrate-assets ARGS="--dry-run --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
+make migrate-assets ARGS="--execute --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
+```
+
+来源包含项目根 `config.yaml` 对应的默认 Agent、repo system Agent、`skills/public`、canonical
+`extensions_config.json`/`mcp_config.json`，以及 `.deer-flow`（或 `DEER_FLOW_HOME`）下的用户
+Agent/Skill。`owner-map.json` 的 `default_projects` 必须显式映射 user UUID 到其 active default
+project UUID；legacy shared custom 来源还必须设置 `legacy_shared_owner`，不得自动归入 system 或
+任意项目。`system_actor` 可写在 map 中，也可用 `--actor-user-id` 覆盖。
+
+execute 在 `.deer-flow/migrations/assets/<run-id>/` 写 0700 目录与 0600 文件；含 legacy secret 的
+source snapshot 使用认证加密，脱敏 ledger 保存原始 checksum、大小和可精确恢复的相对路径，不输出
+明文、ciphertext 或 nonce。全部 scope/owner/dependency 预检成功后才写资产；counts、canonical
+checksums、dependency closure、credential decrypt 四类 probe 全部通过后才写 cutover marker。
+
+轮换时 keyring 必须同时保留旧 key 和目标 key，且目标 `--key-id` 必须是 active key：
+
+```bash
+make rotate-credentials ARGS="--dry-run --key-id m3-next --batch-size 100"
+make rotate-credentials ARGS="--execute --key-id m3-next --batch-size 100"
+```
+
+轮换按独立事务分批并使用 gap-safe `SKIP LOCKED` 重扫；`resume_cursor` 仅是审计 checkpoint，完成由
+“不存在仍使用非目标 key 的 envelope”证明，暂时被锁的小 UUID 不会被越过。认证失败或 payload
+tamper 会回滚当前批，已提交批保持可安全续跑；旧 envelope 仅在新 envelope 验证成功后变为 inactive。
+真实 PostgreSQL 回归只能使用具备建库/删库权限的隔离测试 maintenance URL，并且只创建随机
+`deerflow_test_*` 数据库；禁止把业务库或 production URL 用作 `POSTGRES_TEST_URL`。
+
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 > [!IMPORTANT]

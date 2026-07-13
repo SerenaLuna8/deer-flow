@@ -4,19 +4,27 @@ import json
 import os
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from app.shared_assets.keyring import CredentialKeyring
 from scripts.migrate_assets import (
     AssetMigrationError,
     InventoryItem,
     MigrationCursor,
     OwnerMap,
     SourceLayout,
+    _mcp_parts,
+    _stored_agent_payload,
+    _stored_mcp_definition,
     build_inventory,
     build_migration_parser,
     create_secure_backup,
     render_inventory,
+    resolve_data_root,
+    resolve_extensions_config_path,
+    restore_secure_backup,
     validate_executable_inventory,
 )
 
@@ -163,3 +171,233 @@ def test_inventory_checksum_changes_when_source_changes(tmp_path: Path) -> None:
         files=(source,),
     )
     assert first.checksum != second.checksum
+
+
+def test_default_runtime_home_and_repo_default_agent_are_discovered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    data = repo / ".deer-flow"
+    monkeypatch.delenv("DEER_FLOW_HOME", raising=False)
+    _write(
+        repo / "config.yaml",
+        "models:\n  - name: first-model\n    use: example:Model\ntool_groups:\n  - name: web\n  - name: bash\n",
+    )
+    _write(data / "SOUL.md", "Default operator soul.\n")
+    _write(repo / "skills/public/demo/SKILL.md", "---\nname: demo\ndescription: demo\n---\nbody\n")
+
+    assert resolve_data_root(repo, None) == data
+    inventory = build_inventory(
+        SourceLayout(repo_root=repo, data_root=resolve_data_root(repo, None)),
+        OwnerMap({}, system_actor=str(uuid.uuid4())),
+    )
+    default_agent = next(item for item in inventory if item.source_key == "system-agent:lead-agent")
+
+    assert default_agent.source_label == "repo-default-agent"
+    assert default_agent.payload["model_ref"] == "first-model"
+    assert default_agent.payload["tool_groups"] == ("web", "bash")
+    assert default_agent.payload["skill_slugs"] is None  # omitted means all enabled skills
+    assert default_agent.payload["soul"] == "Default operator soul.\n"
+    assert {file.archive_path for file in default_agent.files} == {"config.yaml", "SOUL.md"}
+
+
+def test_extensions_backup_is_authenticated_encrypted_deduplicated_and_exactly_restorable(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    raw = json.dumps(
+        {
+            "mcpServers": {
+                "first": {"type": "http", "url": "https://example.invalid/a", "headers": {"Authorization": "plain-token"}},
+                "second": {"type": "http", "url": "https://example.invalid/b", "headers": {"Authorization": "other-token"}},
+            }
+        },
+        separators=(",", ":"),
+    )
+    _write(repo / "extensions_config.json", raw)
+    keyring = CredentialKeyring(active_key_id="backup-key", _keys={"backup-key": b"b" * 32})
+    inventory = build_inventory(
+        SourceLayout(repo_root=repo, data_root=tmp_path / "data"),
+        OwnerMap({}, system_actor=str(uuid.uuid4())),
+    )
+
+    backup = create_secure_backup(inventory, tmp_path / "migrations", keyring=keyring, run_id=uuid.uuid4())
+
+    assert len(backup.files) == 1  # one shared extensions source, not one plaintext copy per MCP
+    assert all(b"plain-token" not in path.read_bytes() and b"other-token" not in path.read_bytes() for path in backup.run_dir.rglob("*") if path.is_file())
+    ledger_text = backup.ledger_path.read_text(encoding="utf-8")
+    assert "plain-token" not in ledger_text
+    assert "other-token" not in ledger_text
+    assert "nonce" not in ledger_text
+    assert "ciphertext" not in ledger_text
+    ledger = json.loads(ledger_text)
+    assert ledger[0]["archive_path"] == "extensions_config.json"
+    assert ledger[0]["checksum"] == __import__("hashlib").sha256(raw.encode()).hexdigest()
+    assert list(restore_secure_backup(backup, keyring).values()) == [raw.encode()]
+
+
+def test_source_and_backup_parent_symlinks_cannot_bypass_nofollow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_source = tmp_path / "real-source"
+    _write(real_source / "SKILL.md", "---\nname: safe\n---\nbody\n")
+    linked_source = tmp_path / "linked-source"
+    linked_source.symlink_to(real_source, target_is_directory=True)
+    # Simulate a check/use race: path-level checks saw a regular parent, but
+    # the actual open must still reject the now-symlinked component.
+    monkeypatch.setattr(Path, "is_symlink", lambda _self: False)
+    with pytest.raises(AssetMigrationError, match="safely|symlink"):
+        InventoryItem.for_skill(
+            source_key="system-skill:parent-link",
+            slug="parent-link",
+            display_name="Parent link",
+            scope="system",
+            project_id=None,
+            owner_user_id=str(uuid.uuid4()),
+            files=(linked_source / "SKILL.md",),
+        )
+
+    source = real_source / "SKILL.md"
+    item = InventoryItem.for_skill(
+        source_key="system-skill:write-parent-link",
+        slug="write-parent-link",
+        display_name="Write parent link",
+        scope="system",
+        project_id=None,
+        owner_user_id=str(uuid.uuid4()),
+        files=(source,),
+    )
+    real_backup = tmp_path / "real-backup"
+    real_backup.mkdir()
+    linked_backup = tmp_path / "linked-backup"
+    linked_backup.symlink_to(real_backup, target_is_directory=True)
+    with pytest.raises(AssetMigrationError, match="backup path|secure backup"):
+        create_secure_backup((item,), linked_backup, run_id=uuid.uuid4())
+
+
+def test_inventory_rejects_symlink_anywhere_in_selected_skill_tree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    skill = repo / "skills/public/demo"
+    _write(skill / "SKILL.md", "---\nname: demo\n---\nbody\n")
+    outside = tmp_path / "outside"
+    _write(outside / "payload.txt", "payload")
+    (skill / "linked-dir").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(AssetMigrationError, match="symlink"):
+        build_inventory(
+            SourceLayout(repo_root=repo, data_root=tmp_path / "data"),
+            OwnerMap({}, system_actor=str(uuid.uuid4())),
+        )
+
+
+def test_agent_skills_omitted_or_null_mean_all_enabled_but_empty_means_none(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    for name, skills_line in (("omitted", ""), ("null", "skills: null\n"), ("empty", "skills: []\n")):
+        _write(repo / f"agents/{name}/config.yaml", f"name: {name}\n{skills_line}")
+        _write(repo / f"agents/{name}/SOUL.md", f"{name} soul")
+
+    inventory = build_inventory(
+        SourceLayout(repo_root=repo, data_root=tmp_path / "data"),
+        OwnerMap({}, system_actor=str(uuid.uuid4())),
+    )
+    by_slug = {item.slug: item for item in inventory if item.kind == "agent"}
+
+    assert by_slug["omitted"].payload["skill_slugs"] is None
+    assert by_slug["null"].payload["skill_slugs"] is None
+    assert by_slug["empty"].payload["skill_slugs"] == []
+
+
+def test_canonical_extensions_path_and_mcp_config_semantics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    configured = repo / "operator-extensions.json"
+    _write(configured, "{}")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(configured))
+    assert resolve_extensions_config_path(repo) == configured
+
+    definition, secrets, enabled = _mcp_parts(
+        {
+            "enabled": False,
+            "transport": "http",
+            "url": "https://example.invalid/mcp",
+            "tool_call_timeout": None,
+            "oauth": {
+                "enabled": True,
+                "token_url": "https://example.invalid/token",
+                "grant_type": "refresh_token",
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "refresh_token": "refresh-token",
+                "scope": "read",
+                "custom_metadata": "kept",
+            },
+        }
+    )
+
+    assert enabled is False
+    assert definition.transport == "http"
+    assert definition.timeout_seconds == 30
+    assert definition.oauth["client_id"] == "client-id"
+    assert definition.oauth["custom_metadata"] == "kept"
+    assert "client_secret" not in definition.oauth and "refresh_token" not in definition.oauth
+    assert secrets["oauth"] == {"client_secret": "client-secret", "refresh_token": "refresh-token"}
+
+
+def test_stored_agent_and_mcp_payloads_are_canonically_reconstructed() -> None:
+    skill_version_id = uuid.uuid4()
+    mcp_version_id = uuid.uuid4()
+    agent = SimpleNamespace(
+        description="stored description",
+        soul="stored soul",
+        model_ref="stored-model",
+        tool_groups=["web"],
+    )
+    payload = _stored_agent_payload(agent, (skill_version_id,), (mcp_version_id,))
+    assert payload.description == "stored description"
+    assert payload.soul == "stored soul"
+    assert payload.skill_version_ids == (skill_version_id,)
+    agent.description = "tampered"
+    assert _stored_agent_payload(agent, (skill_version_id,), (mcp_version_id,)) != payload
+
+    mcp = SimpleNamespace(
+        description="stored MCP",
+        transport="http",
+        command=None,
+        args=[],
+        url="https://example.invalid/mcp",
+        non_secret_env={},
+        non_secret_headers={},
+        oauth_metadata={"client_id": "client"},
+        routing={"mode": "prefer", "priority": 1, "keywords": ["demo"]},
+        tool_overrides={},
+        timeout_seconds=30,
+    )
+    slot = SimpleNamespace(name="legacy-secrets", purpose="auth", payload_schema={"headers": ["Authorization"]}, required=True)
+    definition = _stored_mcp_definition(mcp, (slot,))
+    assert definition.description == "stored MCP"
+    assert definition.credential_slots[0].payload_schema == {"headers": ("Authorization",)}
+    mcp.timeout_seconds = 31
+    assert _stored_mcp_definition(mcp, (slot,)) != definition
+
+
+def test_cli_normalizes_unexpected_failure_without_secret_or_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import migrate_assets
+
+    repo = tmp_path / "repo"
+    _write(repo / "skills/public/demo/SKILL.md", "---\nname: demo\n---\nbody\n")
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("SQL params plain-token ciphertext nonce")
+
+    monkeypatch.setattr(migrate_assets, "_run_cli", fail)
+    assert migrate_assets.main(["--execute", "--repo-root", str(repo), "--data-root", str(tmp_path / "data")]) == 1
+    output = capsys.readouterr()
+    assert output.err.strip() == "asset migration failed safely"
+    assert "plain-token" not in output.out + output.err
+    assert "ciphertext" not in output.out + output.err
+    assert "nonce" not in output.out + output.err
+    assert "Traceback" not in output.out + output.err

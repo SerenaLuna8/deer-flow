@@ -99,6 +99,8 @@ make format             # Format code with ruff
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see Schema Migrations section)
 make setup-db           # 显式创建目标 PostgreSQL 数据库并 bootstrap 到 head
 make migrate-db         # 仅升级已存在数据库，不执行管理员建库操作
+make migrate-assets ARGS="--dry-run ..."  # shared asset 脱敏 inventory / 显式 cutover
+make rotate-credentials ARGS="--dry-run --key-id m3-next"  # credential envelope key rotation
 make check-db           # 只读检查连接、revision 和必需表
 ```
 
@@ -978,6 +980,25 @@ materializer 只接受可信 `ProjectContext`；env/header 按 transport 合并�
 adapter。明文不得进入 `ExtensionsConfig`、全局 MCP cache、日志、checkpoint 或文件。
 cutover 后 legacy Agent/Skill/MCP 文件写 API 在任何 IO 前统一返回
 `409 ASSET_CATALOG_CUTOVER` 并引导 `/admin/assets`；legacy custom Skill 读取不再暴露文件内容。
+
+**M3 asset migration 与 credential rotation 运维**：两个脚本都必须显式选择 `--dry-run` 或
+`--execute`，禁止 startup 自动导入。`migrate_assets.py` 使用 runtime 相同的 `.deer-flow` /
+`DEER_FLOW_HOME`、canonical extensions config resolution，inventory 覆盖 repo 默认/system Agent、
+public Skill、MCP 和 user custom Agent/Skill。system source 要求唯一或显式 system-admin actor；
+project/user/legacy shared source 必须通过 owner map 固定 active default project，任何未解析或失效映射
+都在首个 asset/version write 前 fail closed。execute 先创建 0700 run/backup 目录和 0600 文件；含
+secret 的 source 使用 AES-GCM 认证加密，ledger 只保留 source-key hash、原始 checksum/size、相对
+restore path 和 backup filename，不记录明文、ciphertext 或 nonce。导入以 source fingerprint 幂等，
+Agent 固定首次导入的 dependency version；counts、stored canonical checksum、dependency/credential
+closure、decrypt 四类 probe 在同一 cutover transaction 全通过后才写 marker。
+
+`rotate_credentials.py` 只接受 keyring 中存在且等于 active key 的目标 `--key-id`。execute 对 active、
+non-revoked semantic version 使用独立事务批次与 `FOR UPDATE SKIP LOCKED`；空 worker page 还必须经过
+不跳锁的 authoritative pending barrier，防止临时锁住的低 UUID 被 high-water cursor 永久遗漏。
+`resume_cursor` 是脱敏审计 checkpoint，不是排除条件；`max_batches` 未证明耗尽时只写 incomplete。
+每个 envelope 在切换前完成 decrypt/schema/re-encrypt/decrypt 验证，tamper 或认证失败回滚当前批，
+已提交批可重跑收敛。聚焦 PostgreSQL 测试必须从隔离 maintenance `POSTGRES_TEST_URL` 创建随机
+`deerflow_test_*` 并清理，禁止使用 `DATABASE_URL`、业务库或 production 实例。
 M3 runtime adapter 不得从 client 字典、project ID 或其他请求字段合成 `ProjectContext`。MCP secret
 materialization 只接受 app 内部已经解析出的真实 opaque `ProjectContext`；lead/subagent 只透传该
 对象，嵌入式 `DeerFlowClient` 在 cutover 后缺少该对象或收到 client-shaped dict 必须在 tool loading

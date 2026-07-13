@@ -93,6 +93,8 @@ make install     # Install all dependencies (frontend + backend + pre-commit hoo
 make setup-db    # 显式创建并完整初始化 PostgreSQL 目标库
 make migrate-db  # 升级已存在 PostgreSQL 目标库
 make migrate-sqlite ARGS="..."  # 只读预检、备份并迁移 legacy SQLite
+make migrate-assets ARGS="--dry-run ..."  # 脱敏 inventory；execute 前必须先 dry-run
+make rotate-credentials ARGS="--dry-run --key-id m3-next"  # 分批轮换 credential envelope
 make check-db    # 只读检查连接、Alembic head 与必需表
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)
@@ -148,3 +150,9 @@ These apply repo-wide; module guides own the module-specific detail.
   固定运行 M1 cutover、M1 isolation 和 M2 governance 三个真实 PostgreSQL 集成文件；每个
   测试使用临时 `deerflow_test_*` 数据库。缺少 `POSTGRES_TEST_URL` 只能在本地明确 skip，
   CI 必须在进入 pytest 前硬失败。
+- **M3 asset cutover 运维** — `migrate-assets` 扫描 repo 默认/system Agent、`skills/public`、
+  canonical extensions config 和 `.deer-flow` 用户目录；project 来源必须通过 owner map 显式给出
+  active default project，system 来源必须给出 system-admin actor。执行前先 dry-run；execute 先做
+  全量 scope/dependency 预检和认证加密 backup/脱敏 ledger，四类 probe 全通过才写 cutover marker。
+  `rotate-credentials` 要求目标 key 已是 active key，使用 gap-safe `SKIP LOCKED` 分批重扫；cursor 只作
+  审计 checkpoint，tamper 回滚当前批。真实测试只准使用随机 `deerflow_test_*`，绝不连接业务库。
