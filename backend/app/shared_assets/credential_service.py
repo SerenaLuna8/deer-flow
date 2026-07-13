@@ -289,6 +289,24 @@ class CredentialService:
 
         return await self._execute(actor, operation)
 
+    async def get_version_history(
+        self,
+        actor: _Actor,
+        credential_id: uuid.UUID,
+    ) -> tuple[CredentialVersionView, ...]:
+        self._require_capability(actor, Capability.SHARED_ASSETS_READ)
+
+        async def operation(repository: CredentialRepository) -> tuple[CredentialVersionView, ...]:
+            if isinstance(actor, ProjectContext):
+                rows = await repository.get_project_version_history(actor, credential_id)
+            elif actor.project_id is not None:
+                rows = await repository.get_override_version_history(actor, credential_id)
+            else:
+                rows = await repository.get_system_version_history(actor, credential_id)
+            return tuple(self._version_view(row) for row in rows)
+
+        return await self._execute(actor, operation)
+
     async def _execute(
         self,
         actor: _Actor,

@@ -6,22 +6,60 @@ import { getBackendBaseURL } from "@/core/config";
 import {
   adminAssetListSchema,
   adminCredentialListSchema,
+  agentVersionHistoryResponseSchema,
+  agentVersionInputSchema,
+  agentVersionResponseSchema,
+  approveMcpInputSchema,
   assetIdSchema,
+  assetKindSchema,
   assetListKindSchema,
   assetMutationResponseSchema,
   createAssetInputSchema,
+  createCredentialInputSchema,
+  credentialMutationResponseSchema,
+  credentialVersionHistoryResponseSchema,
+  credentialVersionResponseSchema,
+  disableSystemBindingInputSchema,
+  enableSystemBindingInputSchema,
   expectedAssetVersionInputSchema,
+  moveSystemBindingInputSchema,
+  mcpVersionHistoryResponseSchema,
+  mcpVersionInputSchema,
+  mcpVersionResponseSchema,
   projectAssetListSchema,
   projectCredentialListSchema,
+  replaceCredentialInputSchema,
+  revokeCredentialInputSchema,
+  skillVersionHistoryResponseSchema,
+  skillVersionInputSchema,
+  skillVersionResponseSchema,
+  systemBindingSchema,
   type AdminAssetList,
   type AdminCredentialList,
+  type AgentVersionInput,
+  type ApproveMcpInput,
+  type AssetKind,
   type AssetListKind,
   type AssetMutationResponse,
   type CreateAssetInput,
+  type CreateCredentialInput,
+  type CredentialMutationResponse,
+  type DisableSystemBindingInput,
+  type EnableSystemBindingInput,
   type ExpectedAssetVersionInput,
+  type MoveSystemBindingInput,
+  type McpVersionInput,
   type ProjectAssetList,
   type ProjectCredentialList,
+  type ReplaceCredentialInput,
+  type RevokeCredentialInput,
+  type SkillVersionInput,
+  type SystemBinding,
+  type VersionHistoryResponse,
+  type VersionResponse,
 } from "./types";
+
+type MutableAssetListKind = Exclude<AssetListKind, "credentials">;
 
 const serverErrorCodeSchema = z.enum([
   "asset_not_found",
@@ -181,6 +219,23 @@ function adminAssetUrl(kind: AssetListKind): string {
   )}`;
 }
 
+function versionHistorySchema(
+  kind: AssetListKind,
+): z.ZodType<VersionHistoryResponse> {
+  if (kind === "agents") return agentVersionHistoryResponseSchema;
+  if (kind === "skills") return skillVersionHistoryResponseSchema;
+  if (kind === "mcp-servers") return mcpVersionHistoryResponseSchema;
+  return credentialVersionHistoryResponseSchema;
+}
+
+function publishVersionSchema(
+  kind: Exclude<AssetListKind, "credentials">,
+): z.ZodType<VersionResponse> {
+  if (kind === "agents") return agentVersionResponseSchema;
+  if (kind === "skills") return skillVersionResponseSchema;
+  return mcpVersionResponseSchema;
+}
+
 export function listProjectAssets(
   projectId: string,
   kind: "credentials",
@@ -253,6 +308,125 @@ export async function createAdminAsset(
   return parseResponse(response, assetMutationResponseSchema);
 }
 
+type AssetVersionAuthoringInput =
+  | AgentVersionInput
+  | SkillVersionInput
+  | McpVersionInput;
+
+function authoringInputSchema(
+  kind: Exclude<AssetListKind, "credentials">,
+): z.ZodType<unknown> {
+  if (kind === "agents") return agentVersionInputSchema;
+  if (kind === "skills") return skillVersionInputSchema;
+  return mcpVersionInputSchema;
+}
+
+export function createProjectAssetVersion(
+  projectId: string,
+  kind: "agents",
+  assetId: string,
+  input: AgentVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse>;
+export function createProjectAssetVersion(
+  projectId: string,
+  kind: "skills",
+  assetId: string,
+  input: SkillVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse>;
+export function createProjectAssetVersion(
+  projectId: string,
+  kind: "mcp-servers",
+  assetId: string,
+  input: McpVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse>;
+export function createProjectAssetVersion(
+  projectId: string,
+  kind: MutableAssetListKind,
+  assetId: string,
+  input: AssetVersionAuthoringInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  return postVersionMutation(
+    `${projectAssetUrl(projectId, kind)}/${id}/versions`,
+    authoringInputSchema(kind),
+    publishVersionSchema(kind),
+    input,
+    signal,
+  );
+}
+
+export function createAdminAssetVersion(
+  kind: "agents",
+  assetId: string,
+  input: AgentVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse>;
+export function createAdminAssetVersion(
+  kind: "skills",
+  assetId: string,
+  input: SkillVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse>;
+export function createAdminAssetVersion(
+  kind: "mcp-servers",
+  assetId: string,
+  input: McpVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse>;
+export function createAdminAssetVersion(
+  kind: MutableAssetListKind,
+  assetId: string,
+  input: AssetVersionAuthoringInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  return postVersionMutation(
+    `${adminAssetUrl(kind)}/${id}/versions`,
+    authoringInputSchema(kind),
+    publishVersionSchema(kind),
+    input,
+    signal,
+  );
+}
+
+async function createCredential(
+  url: string,
+  input: CreateCredentialInput,
+  signal?: AbortSignal,
+): Promise<CredentialMutationResponse> {
+  const body = parseInput(createCredentialInputSchema, input);
+  const response = await request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse(response, credentialMutationResponseSchema);
+}
+
+export function createProjectCredential(
+  projectId: string,
+  input: CreateCredentialInput,
+  signal?: AbortSignal,
+): Promise<CredentialMutationResponse> {
+  return createCredential(
+    projectAssetUrl(projectId, "credentials"),
+    input,
+    signal,
+  );
+}
+
+export function createAdminCredential(
+  input: CreateCredentialInput,
+  signal?: AbortSignal,
+): Promise<CredentialMutationResponse> {
+  return createCredential(adminAssetUrl("credentials"), input, signal);
+}
+
 async function changeAssetStatus(
   url: string,
   input: ExpectedAssetVersionInput,
@@ -294,6 +468,340 @@ export function changeAdminAssetStatus(
   const id = parseInput(assetIdSchema, assetId);
   return changeAssetStatus(
     `${adminAssetUrl(kind)}/${id}/${action}`,
+    input,
+    signal,
+  );
+}
+
+export async function listProjectAssetVersions(
+  projectId: string,
+  kind: AssetListKind,
+  assetId: string,
+  signal?: AbortSignal,
+): Promise<VersionHistoryResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  const response = await request(
+    `${projectAssetUrl(projectId, kind)}/${id}/versions`,
+    { signal },
+  );
+  return parseResponse(response, versionHistorySchema(kind));
+}
+
+export async function listAdminAssetVersions(
+  kind: AssetListKind,
+  assetId: string,
+  signal?: AbortSignal,
+): Promise<VersionHistoryResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  const response = await request(`${adminAssetUrl(kind)}/${id}/versions`, {
+    signal,
+  });
+  return parseResponse(response, versionHistorySchema(kind));
+}
+
+async function postVersionMutation<T>(
+  url: string,
+  inputSchema: z.ZodType<T>,
+  responseSchema: z.ZodType<VersionResponse>,
+  input: unknown,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  const body = parseInput(inputSchema, input);
+  const response = await request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse(response, responseSchema);
+}
+
+export function publishProjectAssetVersion(
+  projectId: string,
+  kind: Exclude<AssetListKind, "credentials">,
+  assetId: string,
+  versionId: string,
+  input: ExpectedAssetVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  const asset = parseInput(assetIdSchema, assetId);
+  const version = parseInput(assetIdSchema, versionId);
+  return postVersionMutation(
+    `${projectAssetUrl(projectId, kind)}/${asset}/versions/${version}/publish`,
+    expectedAssetVersionInputSchema,
+    publishVersionSchema(kind),
+    input,
+    signal,
+  );
+}
+
+export function publishAdminAssetVersion(
+  kind: Exclude<AssetListKind, "credentials">,
+  assetId: string,
+  versionId: string,
+  input: ExpectedAssetVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  const asset = parseInput(assetIdSchema, assetId);
+  const version = parseInput(assetIdSchema, versionId);
+  return postVersionMutation(
+    `${adminAssetUrl(kind)}/${asset}/versions/${version}/publish`,
+    expectedAssetVersionInputSchema,
+    publishVersionSchema(kind),
+    input,
+    signal,
+  );
+}
+
+export function replaceProjectCredential(
+  projectId: string,
+  credentialId: string,
+  input: ReplaceCredentialInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  const id = parseInput(assetIdSchema, credentialId);
+  return postVersionMutation(
+    `${projectAssetUrl(projectId, "credentials")}/${id}/replace`,
+    replaceCredentialInputSchema,
+    credentialVersionResponseSchema,
+    input,
+    signal,
+  );
+}
+
+export function replaceAdminCredential(
+  credentialId: string,
+  input: ReplaceCredentialInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  const id = parseInput(assetIdSchema, credentialId);
+  return postVersionMutation(
+    `${adminAssetUrl("credentials")}/${id}/replace`,
+    replaceCredentialInputSchema,
+    credentialVersionResponseSchema,
+    input,
+    signal,
+  );
+}
+
+async function revokeCredential(
+  url: string,
+  input: RevokeCredentialInput,
+  signal?: AbortSignal,
+): Promise<CredentialMutationResponse> {
+  const body = parseInput(revokeCredentialInputSchema, input);
+  const response = await request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse(response, credentialMutationResponseSchema);
+}
+
+export function revokeProjectCredential(
+  projectId: string,
+  credentialId: string,
+  input: RevokeCredentialInput,
+  signal?: AbortSignal,
+): Promise<CredentialMutationResponse> {
+  const id = parseInput(assetIdSchema, credentialId);
+  return revokeCredential(
+    `${projectAssetUrl(projectId, "credentials")}/${id}/revoke`,
+    input,
+    signal,
+  );
+}
+
+export function revokeAdminCredential(
+  credentialId: string,
+  input: RevokeCredentialInput,
+  signal?: AbortSignal,
+): Promise<CredentialMutationResponse> {
+  const id = parseInput(assetIdSchema, credentialId);
+  return revokeCredential(
+    `${adminAssetUrl("credentials")}/${id}/revoke`,
+    input,
+    signal,
+  );
+}
+
+function projectMcpVersionUrl(
+  projectId: string,
+  assetId: string,
+  versionId: string,
+): string {
+  const asset = parseInput(assetIdSchema, assetId);
+  const version = parseInput(assetIdSchema, versionId);
+  return `${projectAssetUrl(projectId, "mcp-servers")}/${asset}/versions/${version}`;
+}
+
+function adminMcpVersionUrl(assetId: string, versionId: string): string {
+  const asset = parseInput(assetIdSchema, assetId);
+  const version = parseInput(assetIdSchema, versionId);
+  return `${adminAssetUrl("mcp-servers")}/${asset}/versions/${version}`;
+}
+
+export function submitProjectMcpVersion(
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  input: ExpectedAssetVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  return postVersionMutation(
+    `${projectMcpVersionUrl(projectId, assetId, versionId)}/submit-approval`,
+    expectedAssetVersionInputSchema,
+    mcpVersionResponseSchema,
+    input,
+    signal,
+  );
+}
+
+export function submitAdminMcpVersion(
+  assetId: string,
+  versionId: string,
+  input: ExpectedAssetVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  return postVersionMutation(
+    `${adminMcpVersionUrl(assetId, versionId)}/submit-approval`,
+    expectedAssetVersionInputSchema,
+    mcpVersionResponseSchema,
+    input,
+    signal,
+  );
+}
+
+export function approveProjectMcpVersion(
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  input: ApproveMcpInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  return postVersionMutation(
+    `${projectMcpVersionUrl(projectId, assetId, versionId)}/approve`,
+    approveMcpInputSchema,
+    mcpVersionResponseSchema,
+    input,
+    signal,
+  );
+}
+
+export function approveAdminMcpVersion(
+  assetId: string,
+  versionId: string,
+  input: ApproveMcpInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  return postVersionMutation(
+    `${adminMcpVersionUrl(assetId, versionId)}/approve`,
+    approveMcpInputSchema,
+    mcpVersionResponseSchema,
+    input,
+    signal,
+  );
+}
+
+function projectBindingUrl(projectId: string, kind: AssetKind): string {
+  const parsedProjectId = parseInput(assetIdSchema, projectId);
+  const parsedKind = parseInput(assetKindSchema, kind);
+  return `${getBackendBaseURL()}/api/projects/${parsedProjectId}/system-${parsedKind}-bindings`;
+}
+
+async function mutateProjectBinding<T>(
+  url: string,
+  schema: z.ZodType<T>,
+  input: unknown,
+  signal?: AbortSignal,
+): Promise<SystemBinding> {
+  const body = parseInput(schema, input);
+  const response = await request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse(response, systemBindingSchema);
+}
+
+export function enableProjectSystemBinding(
+  projectId: string,
+  kind: AssetKind,
+  input: EnableSystemBindingInput,
+  signal?: AbortSignal,
+): Promise<SystemBinding> {
+  return mutateProjectBinding(
+    projectBindingUrl(projectId, kind),
+    enableSystemBindingInputSchema,
+    input,
+    signal,
+  );
+}
+
+function moveProjectSystemBinding(
+  projectId: string,
+  kind: AssetKind,
+  assetId: string,
+  action: "upgrade" | "rollback",
+  input: MoveSystemBindingInput,
+  signal?: AbortSignal,
+): Promise<SystemBinding> {
+  const id = parseInput(assetIdSchema, assetId);
+  return mutateProjectBinding(
+    `${projectBindingUrl(projectId, kind)}/${id}/${action}`,
+    moveSystemBindingInputSchema,
+    input,
+    signal,
+  );
+}
+
+export function upgradeProjectSystemBinding(
+  projectId: string,
+  kind: AssetKind,
+  assetId: string,
+  input: MoveSystemBindingInput,
+  signal?: AbortSignal,
+): Promise<SystemBinding> {
+  return moveProjectSystemBinding(
+    projectId,
+    kind,
+    assetId,
+    "upgrade",
+    input,
+    signal,
+  );
+}
+
+export function rollbackProjectSystemBinding(
+  projectId: string,
+  kind: AssetKind,
+  assetId: string,
+  input: MoveSystemBindingInput,
+  signal?: AbortSignal,
+): Promise<SystemBinding> {
+  return moveProjectSystemBinding(
+    projectId,
+    kind,
+    assetId,
+    "rollback",
+    input,
+    signal,
+  );
+}
+
+export function disableProjectSystemBinding(
+  projectId: string,
+  kind: AssetKind,
+  assetId: string,
+  input: DisableSystemBindingInput,
+  signal?: AbortSignal,
+): Promise<SystemBinding> {
+  const id = parseInput(assetIdSchema, assetId);
+  return mutateProjectBinding(
+    `${projectBindingUrl(projectId, kind)}/${id}/disable`,
+    disableSystemBindingInputSchema,
     input,
     signal,
   );

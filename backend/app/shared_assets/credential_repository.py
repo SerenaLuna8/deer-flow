@@ -243,6 +243,37 @@ class CredentialRepository:
         statement = select(CredentialRow).where(CredentialRow.scope == "system", CredentialRow.project_id.is_(None)).order_by(CredentialRow.created_at, CredentialRow.id)
         return tuple((await self.session.execute(statement)).scalars().all())
 
+    async def get_project_version_history(
+        self,
+        context: ProjectContext,
+        credential_id: uuid.UUID,
+    ) -> tuple[CredentialVersionRow, ...]:
+        await self.get_project_credential(context, credential_id)
+        return await self._version_history(credential_id)
+
+    async def get_override_version_history(
+        self,
+        context: SystemAssetGovernanceContext,
+        credential_id: uuid.UUID,
+    ) -> tuple[CredentialVersionRow, ...]:
+        await self.get_override_credential(context, credential_id)
+        return await self._version_history(credential_id)
+
+    async def get_system_version_history(
+        self,
+        context: SystemAssetGovernanceContext,
+        credential_id: uuid.UUID,
+    ) -> tuple[CredentialVersionRow, ...]:
+        await self.get_system_credential(context, credential_id)
+        return await self._version_history(credential_id)
+
+    async def _version_history(
+        self,
+        credential_id: uuid.UUID,
+    ) -> tuple[CredentialVersionRow, ...]:
+        statement = select(CredentialVersionRow).where(CredentialVersionRow.credential_id == credential_id).order_by(CredentialVersionRow.version_number.desc())
+        return tuple((await self.session.execute(statement)).scalars().all())
+
     async def lock_project_credential_version(
         self,
         context: ProjectContext,

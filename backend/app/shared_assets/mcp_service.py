@@ -445,6 +445,24 @@ class McpService:
 
         return await self._execute(actor, operation)
 
+    async def get_version_history(
+        self,
+        actor: _Actor,
+        asset_id: uuid.UUID,
+    ) -> tuple[McpVersionView, ...]:
+        self._require_capability(actor, Capability.SHARED_ASSETS_READ)
+
+        async def operation(repository: McpRepository) -> tuple[McpVersionView, ...]:
+            if isinstance(actor, ProjectContext):
+                records = await repository.get_project_version_history(actor, asset_id)
+            elif actor.project_id is not None:
+                records = await repository.get_override_version_history(actor, asset_id)
+            else:
+                records = await repository.get_system_version_history(actor, asset_id)
+            return tuple(self._version_view(record) for record in records)
+
+        return await self._execute(actor, operation)
+
     async def grant_is_usable(self, actor: _Actor, grant_id: uuid.UUID) -> bool:
         self._require_capability(actor, Capability.SHARED_ASSETS_READ)
 

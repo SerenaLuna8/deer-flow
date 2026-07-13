@@ -12,7 +12,7 @@ from app.gateway.routers import project_assets
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from app.shared_assets.agent_service import AgentAssetView
+from app.shared_assets.agent_service import AgentAssetView, AgentVersionView
 from app.shared_assets.binding_service import SystemAssetBinding
 from app.shared_assets.errors import (
     AssetConflict,
@@ -80,6 +80,49 @@ def test_project_asset_list_separates_scopes() -> None:
     actor = service.list_visible.await_args.args[0]
     assert actor.project_id == PROJECT_ID
     assert actor.request_id == "req-project-assets"
+
+
+def test_project_asset_version_history_returns_typed_envelope() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version = AgentVersionView(
+        id=uuid.uuid4(),
+        agent_id=asset_id,
+        version_number=2,
+        workflow_status="published",
+        description="Review changes",
+        soul="Be precise",
+        model_ref="default",
+        tool_groups=("web",),
+        skill_version_ids=(),
+        mcp_version_ids=(),
+        supersedes_version_id=None,
+        payload_checksum="a" * 64,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+    )
+    service.get_version_history.return_value = (version,)
+
+    response = _client(agent_service=service).get(f"/api/projects/{PROJECT_ID}/agents/{asset_id}/versions")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "data": [
+            {
+                **response.json()["data"][0],
+                "id": str(version.id),
+                "agent_id": str(asset_id),
+                "version_number": 2,
+                "workflow_status": "published",
+            }
+        ],
+        "request_id": "req-project-assets",
+    }
+    service.get_version_history.assert_awaited_once()
+    actor, requested_asset_id = service.get_version_history.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert actor.request_id == "req-project-assets"
+    assert requested_asset_id == asset_id
 
 
 @pytest.mark.parametrize(

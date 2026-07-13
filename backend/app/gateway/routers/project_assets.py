@@ -229,6 +229,11 @@ class VersionResponse(_StrictModel):
     request_id: str
 
 
+class VersionHistoryResponse(_StrictModel):
+    data: list[dict[str, Any]]
+    request_id: str
+
+
 ASSET_ERRORS = (
     AssetNotFound,
     AssetForbidden,
@@ -361,6 +366,17 @@ async def _asset_call(actor, operation, *, version: bool = False):
         raise_asset_domain(exc)
 
 
+async def _version_history(actor, operation) -> VersionHistoryResponse:
+    try:
+        versions = await operation()
+        return VersionHistoryResponse(
+            data=[jsonable_encoder(version) for version in versions],
+            request_id=actor.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
 def _decode_skill_files(body: SkillVersionRequest, request_id: str) -> tuple[SkillArchiveFile, ...]:
     try:
         return tuple(
@@ -418,6 +434,9 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
         )
         return await _asset_call(actor, lambda: service.create_version(actor, asset_id, payload, expected_asset_version=body.expected_asset_version), version=True)
 
+    async def get_agent_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
+        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id))
+
     async def publish_agent(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         return await _asset_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), version=True)
 
@@ -431,6 +450,9 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
         files = _decode_skill_files(body, actor.request_id)
         return await _asset_call(actor, lambda: service.create_version_from_archive(actor, asset_id, files, expected_asset_version=body.expected_asset_version), version=True)
 
+    async def get_skill_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
+        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id))
+
     async def publish_skill(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         return await _asset_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), version=True)
 
@@ -442,6 +464,9 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
 
     async def create_mcp_version(asset_id: uuid.UUID, body: McpVersionRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _asset_call(actor, lambda: service.create_version(actor, asset_id, _mcp_definition(body), expected_asset_version=body.expected_asset_version), version=True)
+
+    async def get_mcp_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
+        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id))
 
     async def publish_mcp(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _asset_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), version=True)
@@ -474,6 +499,9 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
+    async def get_credential_versions(credential_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
+        return await _version_history(actor, lambda: service.get_version_history(actor, credential_id))
+
     async def replace_credential(credential_id: uuid.UUID, body: CredentialReplaceRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
         return await _asset_call(actor, lambda: service.replace(actor, credential_id, body.payload, expected_credential_version=body.expected_credential_version), version=True)
 
@@ -487,20 +515,24 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
     for path, endpoint, methods, response_model, code in (
         ("/agents", create_agent, ["POST"], AssetMutationResponse, 201),
         ("/agents/{asset_id}", get_agent, ["GET"], AssetMutationResponse, 200),
+        ("/agents/{asset_id}/versions", get_agent_versions, ["GET"], VersionHistoryResponse, 200),
         ("/agents/{asset_id}/versions", create_agent_version, ["POST"], VersionResponse, 201),
         ("/agents/{asset_id}/versions/{version_id}/publish", publish_agent, ["POST"], VersionResponse, 200),
         ("/skills", create_skill, ["POST"], AssetMutationResponse, 201),
         ("/skills/{asset_id}", get_skill, ["GET"], AssetMutationResponse, 200),
+        ("/skills/{asset_id}/versions", get_skill_versions, ["GET"], VersionHistoryResponse, 200),
         ("/skills/{asset_id}/versions", create_skill_version, ["POST"], VersionResponse, 201),
         ("/skills/{asset_id}/versions/{version_id}/publish", publish_skill, ["POST"], VersionResponse, 200),
         ("/mcp-servers", create_mcp, ["POST"], AssetMutationResponse, 201),
         ("/mcp-servers/{asset_id}", get_mcp, ["GET"], AssetMutationResponse, 200),
+        ("/mcp-servers/{asset_id}/versions", get_mcp_versions, ["GET"], VersionHistoryResponse, 200),
         ("/mcp-servers/{asset_id}/versions", create_mcp_version, ["POST"], VersionResponse, 201),
         ("/mcp-servers/{asset_id}/versions/{version_id}/publish", publish_mcp, ["POST"], VersionResponse, 200),
         ("/mcp-servers/{asset_id}/versions/{version_id}/submit-approval", submit_mcp, ["POST"], VersionResponse, 200),
         ("/mcp-servers/{asset_id}/versions/{version_id}/approve", approve_mcp, ["POST"], VersionResponse, 200),
         ("/credentials", create_credential, ["POST"], CredentialMutationResponse, 201),
         ("/credentials/{credential_id}", get_credential, ["GET"], CredentialMutationResponse, 200),
+        ("/credentials/{credential_id}/versions", get_credential_versions, ["GET"], VersionHistoryResponse, 200),
         ("/credentials/{credential_id}/replace", replace_credential, ["POST"], VersionResponse, 200),
         ("/credentials/{credential_id}/revoke", revoke_credential, ["POST"], CredentialMutationResponse, 200),
     ):

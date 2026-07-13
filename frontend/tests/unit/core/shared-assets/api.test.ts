@@ -9,9 +9,22 @@ rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "/backend" }));
 import { AuthRequiredError, fetch as fetchWithAuth } from "@/core/api/fetcher";
 import {
   SharedAssetApiError,
+  approveProjectMcpVersion,
+  createAdminAssetVersion,
+  createAdminCredential,
   createProjectAsset,
+  createProjectAssetVersion,
+  createProjectCredential,
+  disableProjectSystemBinding,
+  enableProjectSystemBinding,
   listAdminAssets,
+  listProjectAssetVersions,
   listProjectAssets,
+  publishProjectAssetVersion,
+  replaceProjectCredential,
+  revokeProjectCredential,
+  submitProjectMcpVersion,
+  upgradeProjectSystemBinding,
 } from "@/core/shared-assets/api";
 
 const mockedFetch = rs.mocked(fetchWithAuth);
@@ -28,6 +41,90 @@ const asset = {
   created_by_user_id: "user-1",
   created_at: "2026-07-14T00:00:00Z",
   updated_at: "2026-07-14T00:00:00Z",
+};
+const versionId = "22222222-2222-4222-8222-222222222222";
+const agentVersion = {
+  id: versionId,
+  agent_id: asset.id,
+  version_number: 1,
+  workflow_status: "published",
+  description: "Review changes",
+  soul: "Be precise",
+  model_ref: "default",
+  tool_groups: ["web"],
+  skill_version_ids: [],
+  mcp_version_ids: [],
+  supersedes_version_id: null,
+  payload_checksum: "a".repeat(64),
+  created_by_user_id: "user-1",
+  created_at: "2026-07-14T00:00:00Z",
+};
+const credentialVersion = {
+  id: versionId,
+  credential_id: asset.id,
+  version_number: 1,
+  status: "active",
+  payload_schema_version: 1,
+  payload_schema: { env: ["TOKEN"] },
+  supersedes_version_id: null,
+  created_by_user_id: "user-1",
+  created_at: "2026-07-14T00:00:00Z",
+};
+const mcpVersion = {
+  id: versionId,
+  mcp_server_id: asset.id,
+  version_number: 1,
+  workflow_status: "published",
+  definition: {
+    description: "GitHub MCP",
+    transport: "stdio",
+    command: "github-mcp",
+    args: [],
+    url: null,
+    env: {},
+    headers: {},
+    oauth: {},
+    routing: {},
+    tool_overrides: {},
+    timeout_seconds: 30,
+    credential_slots: [],
+  },
+  credential_slots: [],
+  credential_grants: [],
+  supersedes_version_id: null,
+  payload_checksum: "b".repeat(64),
+  submitted_at: "2026-07-14T00:00:00Z",
+  reviewed_at: "2026-07-14T00:01:00Z",
+  reviewed_by_user_id: "reviewer-1",
+  created_by_user_id: "user-1",
+  created_at: "2026-07-14T00:00:00Z",
+};
+const credential = {
+  id: asset.id,
+  scope: "project",
+  project_id: PROJECT_ID,
+  name: "github",
+  display_name: "GitHub",
+  credential_type: "token",
+  status: "revoked",
+  current_version_id: versionId,
+  version: 2,
+  created_by_user_id: "user-1",
+  created_at: "2026-07-14T00:00:00Z",
+  updated_at: "2026-07-14T00:01:00Z",
+};
+const binding = {
+  project_id: PROJECT_ID,
+  kind: "agent",
+  asset_id: asset.id,
+  version_id: versionId,
+  enabled: true,
+  version: 1,
+  created_by_user_id: "user-1",
+  updated_by_user_id: "user-1",
+  created_at: "2026-07-14T00:00:00Z",
+  updated_at: "2026-07-14T00:00:00Z",
+  request_id: "req-binding",
 };
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -145,5 +242,132 @@ describe("shared asset api", () => {
     const aborted = new DOMException("Aborted", "AbortError");
     mockedFetch.mockRejectedValueOnce(aborted);
     await expect(listAdminAssets("agents")).rejects.toBe(aborted);
+  });
+
+  test("covers the project version credential approval and binding mutation routes", async () => {
+    const responses = [
+      { data: [], request_id: "req-history" },
+      { data: agentVersion, request_id: "req-version" },
+      { data: credentialVersion, request_id: "req-version" },
+      { data: mcpVersion, request_id: "req-version" },
+      { data: mcpVersion, request_id: "req-version" },
+      { item: credential, request_id: "req-credential" },
+      binding,
+      { ...binding, version: 2 },
+      { ...binding, enabled: false, version: 3 },
+    ];
+    for (const body of responses) {
+      mockedFetch.mockResolvedValueOnce(jsonResponse(200, body));
+    }
+
+    await listProjectAssetVersions(PROJECT_ID, "agents", asset.id);
+    await publishProjectAssetVersion(
+      PROJECT_ID,
+      "agents",
+      asset.id,
+      versionId,
+      {
+        expected_asset_version: 1,
+      },
+    );
+    await replaceProjectCredential(PROJECT_ID, asset.id, {
+      payload: { env: { TOKEN: "write-only" } },
+      expected_credential_version: 1,
+    });
+    await submitProjectMcpVersion(PROJECT_ID, asset.id, versionId, {
+      expected_asset_version: 1,
+    });
+    await approveProjectMcpVersion(PROJECT_ID, asset.id, versionId, {
+      credential_versions: { github: versionId },
+      expected_asset_version: 1,
+    });
+    await revokeProjectCredential(PROJECT_ID, asset.id, {
+      expected_credential_version: 1,
+    });
+    await enableProjectSystemBinding(PROJECT_ID, "agent", {
+      asset_id: asset.id,
+      version_id: versionId,
+    });
+    await upgradeProjectSystemBinding(PROJECT_ID, "agent", asset.id, {
+      version_id: versionId,
+      expected_binding_version: 1,
+    });
+    await disableProjectSystemBinding(PROJECT_ID, "agent", asset.id, {
+      expected_binding_version: 2,
+    });
+
+    expect(mockedFetch.mock.calls.map(([url]) => url)).toEqual([
+      `/backend/api/projects/${PROJECT_ID}/agents/${asset.id}/versions`,
+      `/backend/api/projects/${PROJECT_ID}/agents/${asset.id}/versions/${versionId}/publish`,
+      `/backend/api/projects/${PROJECT_ID}/credentials/${asset.id}/replace`,
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/versions/${versionId}/submit-approval`,
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/versions/${versionId}/approve`,
+      `/backend/api/projects/${PROJECT_ID}/credentials/${asset.id}/revoke`,
+      `/backend/api/projects/${PROJECT_ID}/system-agent-bindings`,
+      `/backend/api/projects/${PROJECT_ID}/system-agent-bindings/${asset.id}/upgrade`,
+      `/backend/api/projects/${PROJECT_ID}/system-agent-bindings/${asset.id}/disable`,
+    ]);
+  });
+
+  test("creates typed project and admin versions plus write-only credentials", async () => {
+    const responses = [
+      { data: agentVersion, request_id: "req-agent" },
+      { data: mcpVersion, request_id: "req-mcp" },
+      { item: { ...credential, status: "active" }, request_id: "req-cred" },
+      { item: { ...credential, status: "active" }, request_id: "req-cred" },
+    ];
+    for (const body of responses) {
+      mockedFetch.mockResolvedValueOnce(jsonResponse(201, body));
+    }
+
+    const agentInput = {
+      description: "Writer",
+      soul: "Be precise",
+      model_ref: "default",
+      tool_groups: [],
+      skill_version_ids: [],
+      mcp_version_ids: [],
+      expected_asset_version: 1,
+    };
+    const mcpInput = {
+      description: "GitHub",
+      transport: "stdio",
+      command: "github-mcp",
+      args: [],
+      url: null,
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [],
+      expected_asset_version: 1,
+    };
+    const credentialInput = {
+      name: "github",
+      display_name: "GitHub",
+      credential_type: "token",
+      payload: { env: { TOKEN: "write-only" } },
+    };
+
+    await createProjectAssetVersion(PROJECT_ID, "agents", asset.id, agentInput);
+    await createAdminAssetVersion("mcp-servers", asset.id, mcpInput);
+    const credentialResult = await createProjectCredential(
+      PROJECT_ID,
+      credentialInput,
+    );
+    await createAdminCredential(credentialInput);
+
+    expect(mockedFetch.mock.calls.map(([url]) => url)).toEqual([
+      `/backend/api/projects/${PROJECT_ID}/agents/${asset.id}/versions`,
+      `/backend/api/admin/assets/mcp-servers/${asset.id}/versions`,
+      `/backend/api/projects/${PROJECT_ID}/credentials`,
+      "/backend/api/admin/assets/credentials",
+    ]);
+    expect(mockedFetch.mock.calls[2]?.[1]?.body).toBe(
+      JSON.stringify(credentialInput),
+    );
+    expect(credentialResult).not.toHaveProperty("payload");
   });
 });

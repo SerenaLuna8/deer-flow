@@ -436,6 +436,34 @@ class McpRepository:
             raise AssetNotFound(context.request_id)
         return await self._record(row, for_update=for_update)
 
+    async def get_project_version_history(
+        self,
+        context: ProjectContext,
+        asset_id: uuid.UUID,
+    ) -> tuple[McpVersionRecord, ...]:
+        await self.get_project_asset(context, asset_id)
+        return await self._history(select(McpServerVersionRow).where(McpServerVersionRow.mcp_server_id == asset_id).order_by(McpServerVersionRow.version_number.desc()))
+
+    async def get_override_version_history(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+    ) -> tuple[McpVersionRecord, ...]:
+        await self.get_override_asset(context, asset_id)
+        return await self._history(select(McpServerVersionRow).where(McpServerVersionRow.mcp_server_id == asset_id).order_by(McpServerVersionRow.version_number.desc()))
+
+    async def get_system_version_history(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+    ) -> tuple[McpVersionRecord, ...]:
+        await self.get_system_asset(context, asset_id)
+        return await self._history(select(McpServerVersionRow).where(McpServerVersionRow.mcp_server_id == asset_id).order_by(McpServerVersionRow.version_number.desc()))
+
+    async def _history(self, statement) -> tuple[McpVersionRecord, ...]:
+        rows = tuple((await self.session.execute(statement)).scalars().all())
+        return tuple([await self._record(row, for_update=False) for row in rows])
+
     async def _record(
         self,
         row: McpServerVersionRow,
