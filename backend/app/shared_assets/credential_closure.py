@@ -111,18 +111,19 @@ async def lock_mcp_credential_closures(
     slots_by_version: dict[uuid.UUID, tuple[McpCredentialSlotRow, ...]] = {}
     references_by_version: dict[uuid.UUID, tuple[object, ...]] = {}
 
-    # Collect the entire transaction's slot and grant-reference closure before
-    # acquiring even the first logical credential lock.
+    # Lock every target's slots before reading any grant reference. FOR UPDATE
+    # conflicts with the FK key-share lock required to insert or re-pin a grant,
+    # so the collected reference set stays stable for the transaction.
     for version_id in ordered_version_ids:
         slots_by_version[version_id] = tuple(
-            (
-                await session.execute(
-                    select(McpCredentialSlotRow).where(McpCredentialSlotRow.mcp_server_version_id == version_id).order_by(McpCredentialSlotRow.name, McpCredentialSlotRow.id).with_for_update(read=True, of=McpCredentialSlotRow)
-                )
-            )
+            (await session.execute(select(McpCredentialSlotRow).where(McpCredentialSlotRow.mcp_server_version_id == version_id).order_by(McpCredentialSlotRow.name, McpCredentialSlotRow.id).with_for_update(of=McpCredentialSlotRow)))
             .scalars()
             .all()
         )
+
+    # Collect the entire transaction's grant-reference closure only after all
+    # slot rows are protected, and before the first logical credential lock.
+    for version_id in ordered_version_ids:
         references_by_version[version_id] = tuple(
             (
                 await session.execute(

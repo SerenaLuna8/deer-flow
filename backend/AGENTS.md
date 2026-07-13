@@ -905,7 +905,10 @@ suspended 则立即 fail closed。系统发布新 version 绝不自动移动项�
 避免 joined nullable row lock 与不稳定锁序。项目资产只解析本项目
 `current_published_version_id`，system 资产只解析本项目 enabled binding 的 pinned version。
 Agent 含多个 MCP dependency 时必须先收集本事务全部 MCP version 的 slot/grant reference，
-再对 logical credential union 按 UUID 全局排序锁完，随后按
+具体顺序是先按 `(MCP version UUID, slot name, slot UUID)` 对所有 target 的 slot 行取得
+`FOR UPDATE`，全部 slot 锁完成后才能读取任何 active grant reference；该锁必须与 grant
+insert/re-pin 外键检查需要的 key-share 冲突，使 required 与空 optional slot 的 reference 集合
+在事务内都保持稳定。随后再对 logical credential union 按 UUID 全局排序锁完，并按
 `(credential UUID, semantic version UUID)` 锁 semantic version，最后稳定排序锁 active envelope
 与 grant 并逐 MCP 验证；禁止按 dependency ref 逐 MCP 获取 closure，避免与 MCP bulk approval 的
 全局 `C1→C2` 顺序形成 `C2→C1` 锁环。resolver 与 BindingRepository 复用同一个 batch closure，
@@ -925,7 +928,12 @@ version/slot 重建无 secret definition，与 snapshot definition 精确比较�
 checksum、UUID 或 grant。materializer 不维护第二套 closure：必须复用共享 batch 返回的 locked
 slot/grant/credential/version/envelope material，在任何 decrypt 前同时校验 snapshot grant IDs 和
 locked grant 的 `credential_slot_id`/`credential_version_id` 是否仍与最初 reference 一致，因此
-reference 读取后的 grant 原地 re-pin 必须 fail closed。retired semantic version 的既有 grant 可继续使用，membership/binding
+在锁取得前已经发生的 grant 原地 re-pin 必须 fail closed；合法 re-pin mutation 必须沿用 Task 6
+全局顺序，先按稳定顺序锁 old/new slot、再更新 grant，若 resolver/materializer 已持有 slot
+`FOR UPDATE` 则等待其稳定旧 closure 完成后再提交。绕过该顺序直接裸 `UPDATE` grant 不属于应用
+mutation contract。向原本空 optional slot 新增 active grant 同样必须等待当前事务释放 slot 锁后
+才能提交，不能让 snapshot generation 与 closure 跨代。retired semantic version 的既有 grant
+可继续使用，membership/binding
 失效、re-pin、错误项目、伪造 definition、revoke、suspend、grant 替换或缺失 required slot 均在
 解密前失败。解密边界把 asyncpg UUID 规范化为精确 `uuid.UUID` 以匹配 AES-GCM AAD；返回的短生命
 周期 `MaterializedMcpSecrets.by_slot` 使用 `repr=False`，不得写入 cache、日志、API、checkpoint 或

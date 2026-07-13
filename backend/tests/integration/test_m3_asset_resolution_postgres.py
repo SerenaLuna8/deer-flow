@@ -1522,10 +1522,9 @@ async def test_agent_two_mcp_closure_uses_global_credential_lock_order_with_bulk
 
 
 @pytest.mark.asyncio
-async def test_materializer_fails_closed_when_grant_is_repinned_after_reference_read(
+async def test_materializer_blocks_grant_repin_after_reference_read(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     import app.shared_assets.resolver as resolver_module
     from app.shared_assets.credential_service import CreateCredential, CredentialService
@@ -1553,6 +1552,7 @@ async def test_materializer_fails_closed_when_grant_is_repinned_after_reference_
     mcp = McpService(factory)
     resolver = ProjectAssetResolver(factory, keyring=keyring)
     materialize_task: asyncio.Task | None = None
+    repin_task: asyncio.Task | None = None
     release_materializer = asyncio.Event()
     try:
         original_credential = await credentials.create(
@@ -1613,6 +1613,8 @@ async def test_materializer_fails_closed_when_grant_is_repinned_after_reference_
         slots_by_name = {slot.name: slot for slot in approved.credential_slots}
 
         references_read = asyncio.Event()
+        repin_attempted = asyncio.Event()
+        repin_committed = asyncio.Event()
         original_execute = AsyncSession.execute
         paused = False
 
@@ -1653,6 +1655,35 @@ async def test_materializer_fails_closed_when_grant_is_repinned_after_reference_
             decrypt_calls += 1
             return original_decrypt(*args, **kwargs)
 
+        async def repin_grant() -> None:
+            repin_attempted.set()
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """SELECT id FROM mcp_version_credential_slots
+                        WHERE id IN (:old_slot, :new_slot)
+                        ORDER BY id
+                        FOR KEY SHARE"""
+                    ),
+                    {
+                        "old_slot": slots_by_name["primary"].id,
+                        "new_slot": slots_by_name["alternate"].id,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        """UPDATE credential_grants
+                        SET credential_slot_id=:slot, credential_version_id=:version
+                        WHERE id=:grant"""
+                    ),
+                    {
+                        "slot": slots_by_name["alternate"].id,
+                        "version": replacement_credential.current_version_id,
+                        "grant": grant.id,
+                    },
+                )
+            repin_committed.set()
+
         monkeypatch.setattr(AsyncSession, "execute", pause_after_reference_read)
         monkeypatch.setattr(
             resolver_module,
@@ -1661,28 +1692,28 @@ async def test_materializer_fails_closed_when_grant_is_repinned_after_reference_
         )
         materialize_task = asyncio.create_task(resolver.materialize_mcp_secrets(admin, snapshot))
         await asyncio.wait_for(references_read.wait(), timeout=5)
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """UPDATE credential_grants
-                    SET credential_slot_id=:slot, credential_version_id=:version
-                    WHERE id=:grant"""
-                ),
-                {
-                    "slot": slots_by_name["alternate"].id,
-                    "version": replacement_credential.current_version_id,
-                    "grant": grant.id,
-                },
-            )
+        repin_task = asyncio.create_task(repin_grant())
+        await asyncio.wait_for(repin_attempted.wait(), timeout=5)
+
+        committed_while_materializer_open = False
+        try:
+            await asyncio.wait_for(asyncio.shield(repin_task), timeout=0.2)
+        except TimeoutError:
+            pass
+        else:
+            committed_while_materializer_open = True
+        assert decrypt_calls == 0
         release_materializer.set()
 
-        with pytest.raises(AssetResolutionUnavailable) as exc_info:
-            await asyncio.wait_for(materialize_task, timeout=10)
-        assert decrypt_calls == 0
-        assert marker not in str(exc_info.value)
-        assert marker not in repr(exc_info.value)
-        assert marker not in caplog.text
-        assert marker not in repr(snapshot)
+        materialized, _repinned = await asyncio.wait_for(
+            asyncio.gather(materialize_task, repin_task),
+            timeout=10,
+        )
+        assert materialized.by_slot["primary"]["env"]["REP_TOKEN"] == marker
+        assert "alternate" not in materialized.by_slot
+        assert decrypt_calls == 1
+        assert not committed_while_materializer_open
+        assert repin_committed.is_set()
 
         async with factory() as session:
             stored_grant = await session.get(CredentialGrantRow, grant.id)
@@ -1691,7 +1722,224 @@ async def test_materializer_fails_closed_when_grant_is_repinned_after_reference_
         assert stored_grant.credential_version_id == replacement_credential.current_version_id
     finally:
         release_materializer.set()
-        if materialize_task is not None and not materialize_task.done():
-            materialize_task.cancel()
-            await asyncio.gather(materialize_task, return_exceptions=True)
+        pending = [task for task in (materialize_task, repin_task) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_materializer_blocks_new_optional_grant_after_reference_read(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.shared_assets.resolver as resolver_module
+    from app.shared_assets.credential_service import CreateCredential, CredentialService
+    from app.shared_assets.mcp_service import (
+        CreateMcpServer,
+        McpCredentialSlot,
+        McpDefinition,
+        McpService,
+    )
+    from app.shared_assets.resolver import ProjectAssetResolver
+    from deerflow.persistence.shared_assets import (
+        CredentialGrantRow,
+        CredentialVersionRow,
+    )
+
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin = await _seed_project(engine, factory, label="optional-grant-barrier")
+    keyring = CredentialKeyring(
+        active_key_id="optional-grant-key",
+        _keys={"optional-grant-key": b"o" * 32},
+    )
+    credentials = CredentialService(factory, keyring=keyring)
+    mcp = McpService(factory)
+    resolver = ProjectAssetResolver(factory, keyring=keyring)
+    materialize_task: asyncio.Task | None = None
+    insert_task: asyncio.Task | None = None
+    release_materializer = asyncio.Event()
+    try:
+        required_credential = await credentials.create(
+            admin,
+            CreateCredential("optional-required", "Optional Required", "token"),
+            {"env": {"OPTIONAL_TOKEN": "required-secret"}},
+        )
+        optional_credential = await credentials.create(
+            admin,
+            CreateCredential("optional-late", "Optional Late", "token"),
+            {"env": {"OPTIONAL_TOKEN": "late-secret"}},
+        )
+        asset = await mcp.create_asset(
+            admin,
+            CreateMcpServer("optional-grant-mcp", "Optional Grant MCP"),
+        )
+        draft = await mcp.create_version(
+            admin,
+            asset.id,
+            McpDefinition(
+                description="Optional grant insertion barrier",
+                transport="http",
+                url="https://optional-grant.example.test",
+                credential_slots=(
+                    McpCredentialSlot(
+                        "required",
+                        "Required credential",
+                        {"env": ["OPTIONAL_TOKEN"]},
+                    ),
+                    McpCredentialSlot(
+                        "optional",
+                        "Late optional credential",
+                        {"env": ["OPTIONAL_TOKEN"]},
+                        required=False,
+                    ),
+                ),
+            ),
+            expected_asset_version=1,
+        )
+        await mcp.submit_approval(
+            admin,
+            asset.id,
+            draft.id,
+            expected_asset_version=2,
+        )
+        approved = await mcp.approve(
+            admin,
+            asset.id,
+            draft.id,
+            {"required": required_credential.current_version_id},
+            expected_asset_version=3,
+        )
+        snapshot = await resolver.resolve_project_asset_snapshot(
+            admin,
+            AssetSelection(AssetKind.MCP, asset.id),
+        )
+        slots_by_name = {slot.name: slot for slot in approved.credential_slots}
+        late_grant_id = uuid.uuid4()
+
+        references_read = asyncio.Event()
+        insert_attempted = asyncio.Event()
+        insert_committed = asyncio.Event()
+        original_execute = AsyncSession.execute
+        paused = False
+
+        def is_grant_reference_query(statement: object) -> bool:
+            descriptions = getattr(statement, "column_descriptions", ())
+            entities = tuple(item.get("entity") for item in descriptions)
+            return (
+                entities
+                == (
+                    CredentialGrantRow,
+                    CredentialGrantRow,
+                    CredentialGrantRow,
+                    CredentialVersionRow,
+                )
+                and getattr(statement, "_for_update_arg", None) is None
+                and approved.id in {value for value in statement.compile().params.values() if isinstance(value, uuid.UUID)}
+            )
+
+        async def pause_after_reference_read(
+            session: AsyncSession,
+            statement,
+            *args,
+            **kwargs,
+        ):
+            nonlocal paused
+            result = await original_execute(session, statement, *args, **kwargs)
+            if not paused and asyncio.current_task() is materialize_task and is_grant_reference_query(statement):
+                paused = True
+                references_read.set()
+                await release_materializer.wait()
+            return result
+
+        decrypt_calls = 0
+        original_decrypt = resolver_module.decrypt_credential_payload
+
+        def track_decrypt(*args, **kwargs):
+            nonlocal decrypt_calls
+            decrypt_calls += 1
+            return original_decrypt(*args, **kwargs)
+
+        async def insert_optional_grant() -> None:
+            insert_attempted.set()
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """INSERT INTO credential_grants
+                        (id,mcp_server_version_id,credential_slot_id,
+                         credential_version_id,created_by_user_id)
+                        VALUES (:id,:mcp_version,:slot,:credential_version,:user)"""
+                    ),
+                    {
+                        "id": late_grant_id,
+                        "mcp_version": approved.id,
+                        "slot": slots_by_name["optional"].id,
+                        "credential_version": optional_credential.current_version_id,
+                        "user": str(admin.user_id),
+                    },
+                )
+            insert_committed.set()
+
+        monkeypatch.setattr(AsyncSession, "execute", pause_after_reference_read)
+        monkeypatch.setattr(
+            resolver_module,
+            "decrypt_credential_payload",
+            track_decrypt,
+        )
+        materialize_task = asyncio.create_task(resolver.materialize_mcp_secrets(admin, snapshot))
+        await asyncio.wait_for(references_read.wait(), timeout=5)
+        insert_task = asyncio.create_task(insert_optional_grant())
+        await asyncio.wait_for(insert_attempted.wait(), timeout=5)
+
+        committed_while_materializer_open = False
+        try:
+            await asyncio.wait_for(asyncio.shield(insert_task), timeout=0.2)
+        except TimeoutError:
+            pass
+        else:
+            committed_while_materializer_open = True
+        assert decrypt_calls == 0
+        release_materializer.set()
+
+        materialized, _inserted = await asyncio.wait_for(
+            asyncio.gather(materialize_task, insert_task),
+            timeout=10,
+        )
+        assert materialized.by_slot["required"]["env"]["OPTIONAL_TOKEN"] == "required-secret"
+        assert "optional" not in materialized.by_slot
+        assert decrypt_calls == 1
+        assert not committed_while_materializer_open
+        assert insert_committed.is_set()
+
+        async with factory() as session:
+            stored_grants = tuple(
+                (
+                    await session.execute(
+                        select(CredentialGrantRow)
+                        .where(
+                            CredentialGrantRow.mcp_server_version_id == approved.id,
+                            CredentialGrantRow.status == "active",
+                        )
+                        .order_by(CredentialGrantRow.credential_slot_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(stored_grants) == 2
+        assert {grant.id for grant in stored_grants} == {
+            *snapshot.credential_grant_ids,
+            late_grant_id,
+        }
+        assert await _generation(engine) > snapshot.catalog_generation
+    finally:
+        release_materializer.set()
+        pending = [task for task in (materialize_task, insert_task) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         await engine.dispose()
