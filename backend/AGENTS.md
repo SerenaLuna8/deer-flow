@@ -811,14 +811,19 @@ slug/version unique constraint 映射为 409，未知约束与存储错误统一
 optimistic asset version 和安全错误映射；跨项目、陈旧 membership 与错误 scope 统一返回
 404。每个 Skill version 保存完整目录快照，路径先规范为 Unicode NFC 的 POSIX 相对路径，并以
 NFC + casefold identity 拒绝大小写、NFC/NFD 重复和文件/ancestor alias；同时拒绝绝对路径、
-`..`、Windows drive、symlink、executable media type 与 ELF/PE/完整 Mach-O magic。根目录必须
-有 `SKILL.md`，总未压缩大小上限为 100 MiB。每个文件保存 SHA-256，version checksum 由按路径
+`..`、Windows drive、symlink、executable media type 与 ELF/PE/Mach-O fat32/fat64 magic。
+每个 path segment 还必须跨 Windows host 安全：拒绝 trailing dot/space、colon/NTFS ADS、Win32
+非法字符、control char，以及带 extension/大小写变体的 CON/PRN/AUX/NUL/COM1-9/LPT1-9；
+不能依赖 host tempfile 的 alias 行为。根目录必须有 `SKILL.md`，总未压缩大小上限为 100 MiB。
+每个文件保存 SHA-256，version checksum 由按路径
 排序的 normalized path、file SHA 和 size 生成，和调用方输入顺序无关。创建与发布均在 worker
 thread 中复用现有 frontmatter validator、Skill parser 和强制启用的 SkillScan；任何
 scanner/read error 都 fail-closed，数据库只保存 allow/warn decision、rule ID 与 severity
-count，不保存 finding evidence。调用 parser/validator 前先无日志解析 raw frontmatter，拒绝
-非字符串 top-level key 与非 canonical `required-secrets`/`secrets-autonomous`，因此 secret value
-不会进入 parser warning；只持久化 name/optional schema metadata，不创建 credential 或 grant。
+count，不保存 finding evidence。调用 parser/validator 前先用 duplicate-key-rejecting SafeLoader
+无日志解析 raw frontmatter；任意 mapping level 的重复 key、非字符串 top-level key 与非
+canonical `required-secrets`/`secrets-autonomous` 都稳定返回 422，因此 shadowed secret value
+不会进入 parser warning 或持久化；只保存 name/optional schema metadata，不创建 credential 或
+grant。
 发布事务锁定 Skill/version 后从当前文件行重建并重新验证快照、checksum 与 scan metadata；
 publish/load 的 row reconstruction、SHA 与 checksum 全部经 `asyncio.to_thread`，不得阻塞事件
 循环。项目加载同时共享锁定 project、

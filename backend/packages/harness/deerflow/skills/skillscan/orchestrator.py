@@ -598,6 +598,8 @@ def _is_executable_binary(prefix: bytes) -> bool:
         b"\xcf\xfa\xed\xfe",
         b"\xca\xfe\xba\xbe",
         b"\xbe\xba\xfe\xca",
+        b"\xca\xfe\xba\xbf",
+        b"\xbf\xba\xfe\xca",
     )
     return prefix.startswith(b"\x7fELF") or prefix.startswith(b"MZ") or prefix.startswith(mach_o_magics)
 

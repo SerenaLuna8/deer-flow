@@ -147,6 +147,8 @@ async def test_rejects_duplicate_symlink_executable_and_missing_manifest(
         b"\xcf\xfa\xed\xfe\x00\x00\x00\x00",
         b"\xca\xfe\xba\xbe\x00\x00\x00\x00",
         b"\xbe\xba\xfe\xca\x00\x00\x00\x00",
+        b"\xca\xfe\xba\xbf\x00\x00\x00\x00",
+        b"\xbf\xba\xfe\xca\x00\x00\x00\x00",
     ],
 )
 async def test_rejects_all_executable_magics_with_octet_stream_media_type(magic: bytes) -> None:
@@ -181,6 +183,78 @@ def test_rejects_host_filesystem_aliases_before_materializing(
 
     with pytest.raises(AssetValidationFailed):
         service_module.normalize_skill_files(files, request_id="req-alias")
+
+
+def test_rejects_win32_trailing_dot_alias_before_materializing() -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    files = (
+        SkillArchiveFile("SKILL.md", _manifest(), "text/markdown"),
+        SkillArchiveFile("scripts/run.py", b"print('safe')\n", "text/x-python"),
+        SkillArchiveFile("scripts/run.py.", b"exec('malicious')\n", "text/x-python"),
+    )
+
+    with pytest.raises(AssetValidationFailed):
+        service_module.normalize_skill_files(files, request_id="req-win-alias")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "scripts/run.py.",
+        "scripts/run.py ",
+        "scripts./run.py",
+        "scripts /run.py",
+        "scripts/run.py:payload",
+        "scripts/bad<name.py",
+        "scripts/bad>name.py",
+        'scripts/bad"name.py',
+        "scripts/bad|name.py",
+        "scripts/bad?name.py",
+        "scripts/bad*name.py",
+        "scripts/bad\x1fname.py",
+        "scripts/bad\x7fname.py",
+        "CON",
+        "con.txt",
+        "devices/PrN.py",
+        "AUX",
+        "nul.bin",
+        "COM1",
+        "devices/com9.log",
+        "LPT1",
+        "devices/lpt9.txt",
+    ],
+)
+def test_rejects_each_unsafe_win32_path_segment(path: str) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+
+    with pytest.raises(AssetValidationFailed):
+        service_module.normalize_skill_files(
+            (
+                SkillArchiveFile("SKILL.md", _manifest(), "text/markdown"),
+                SkillArchiveFile(path, b"payload"),
+            ),
+            request_id="req-win-segment",
+        )
+
+
+def test_allows_non_reserved_win32_name_prefixes() -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    normalized = service_module.normalize_skill_files(
+        (
+            SkillArchiveFile("SKILL.md", _manifest(), "text/markdown"),
+            SkillArchiveFile("devices/COM10.txt", b"safe"),
+            SkillArchiveFile("devices/LPT0.txt", b"safe"),
+            SkillArchiveFile("devices/CONSOLE.txt", b"safe"),
+        ),
+        request_id="req-win-safe",
+    )
+
+    assert {item.path for item in normalized} == {
+        "SKILL.md",
+        "devices/COM10.txt",
+        "devices/LPT0.txt",
+        "devices/CONSOLE.txt",
+    }
 
 
 def test_skill_archive_enforces_100_mib_total_boundary() -> None:
@@ -315,6 +389,26 @@ async def test_non_string_frontmatter_key_is_stable_validation_error() -> None:
         await service.preview_archive(
             _editor_context(),
             (SkillArchiveFile("SKILL.md", manifest, "text/markdown"),),
+        )
+    assert exc_info.value.request_id == "req-skill-unit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "metadata:\n  nested:\n    mode: first\n    mode: second\n",
+        "required-secrets:\n  - name: API_TOKEN\n    optional: false\n    optional: true\n",
+    ],
+)
+async def test_duplicate_yaml_key_at_any_mapping_level_is_rejected(declaration: str) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    service = service_module.SkillService(lambda: None)
+
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service.preview_archive(
+            _editor_context(),
+            (SkillArchiveFile("SKILL.md", _manifest(declaration), "text/markdown"),),
         )
     assert exc_info.value.request_id == "req-skill-unit"
 

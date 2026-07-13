@@ -87,7 +87,8 @@ git diff --check  # no output
 - Input collection is copied before the first database await. Paths normalize to sorted NFC POSIX relative paths;
   an NFC + casefold identity rejects host-filesystem aliases and ancestor collisions before materialization.
   Absolute/drive/traversal/NUL/trailing separator, duplicate, symlink and executable media types are rejected.
-  Root `SKILL.md` and the inclusive 100 MiB boundary are tested.
+  Every segment also rejects Win32 trailing dot/space, ADS/illegal/control characters and reserved device names,
+  independent of the current host filesystem. Root `SKILL.md` and the inclusive 100 MiB boundary are tested.
 - Every file row persists content, media type, size and SHA-256. Version checksum contains only sorted normalized
   path, file SHA and size, so file ordering cannot alter identity.
 - Preview/create/publish perform file-system parser/validator/scan work through `asyncio.to_thread`. M3 shared
@@ -95,8 +96,9 @@ git diff --check  # no output
   scanner exceptions and non-empty analyzer/read errors fail closed. Persistence contains only allow/warn, rule
   IDs and severity counts, never evidence.
 - Before invoking the existing parser or validator, a no-log raw frontmatter preflight rejects non-string keys
-  and malformed `required-secrets` / `secrets-autonomous`. Only canonical name/optional metadata persists; no
-  secret value, credential or grant is created.
+  and malformed `required-secrets` / `secrets-autonomous`. Its SafeLoader rejects duplicate keys recursively at
+  every mapping level before any shadowed value can reach parser logs or persistence. Only canonical
+  name/optional metadata persists; no secret value, credential or grant is created.
 - Publish locks the asset/version, checks optimistic asset version and draft workflow, reloads current child rows,
   verifies path/hash/size/media/total, reparses/rescans, then compares checksum and canonical metadata before the
   workflow transition and current pointer update. PostgreSQL triggers protect published parent/child immutability.
@@ -164,6 +166,48 @@ Task 5 unit focused suite：
 ........................................................................ [ 68%]
 ...................................................................      [100%]
 211 passed, 1 warning in 4.31s
+```
+
+## Second formal Task 5 review follow-up
+
+第二轮正式 reviewer 的 3 个 P1 继续逐项完成 RED→GREEN：
+
+1. **Official 64-bit universal Mach-O magic**
+   - RED：direct application/octet-stream preview 与 nested archive 各漏掉 FAT_MAGIC_64
+     `CA FE BA BF`、FAT_CIGAM_64 `BF BA FE CA`，合计 `4 failed, 16 passed`。
+   - GREEN：两个 magic 进入统一 executable 判定；direct 与 nested tests 同时覆盖 ELF、PE、
+     32/64-bit Mach-O、fat32、fat64 全集，输出 `20 passed`。
+
+2. **Recursive duplicate YAML keys and persistence**
+   - RED：nested metadata mapping 和 required-secret list-item mapping 的 duplicate 均 last-key-wins，
+     unit 输出 `2 failed`。真实 PostgreSQL case 用前一个含 forbidden value 的 `required-secrets`
+     再 shadow 为 canonical key，create-version 未抛 422 并会落库。
+   - GREEN：专用 SafeLoader 在每个 mapping constructor 中先 flatten merge，再检查所有 key；任何
+     duplicate/unhashable key 在 parser/validator 前映射为无 input detail 的 422。unit safety set
+     `5 passed`；真实 PostgreSQL `1 passed`，并断言该 Skill 的 version/file row 都为 0，caplog 与
+     exception 不含 raw value。
+
+3. **Win32-safe path segments**
+   - RED：`run.py`/`run.py.` alias、trailing space、segment trailing dot/space、NTFS ADS、Win32
+     illegal/control chars，以及带 extension/大小写变体的 CON/PRN/AUX/NUL/COM1-9/LPT1-9 共
+     `23 failed, 1 passed`；仅非 reserved COM10/LPT0/CONSOLE compatibility case 通过。
+   - GREEN：每个 normalized segment 独立校验上述规则，不依赖 host tempfile alias；连同既有
+     POSIX unsafe path、NFC/casefold alias 和 order-stable checksum regression 为 `34 passed`。
+
+第二轮修复后的最终 PostgreSQL gate：
+
+```text
+........................................................................ [ 72%]
+............................                                             [100%]
+100 passed in 22.90s
+```
+
+Task 5 unit 与受影响 parser/validation/SkillScan regression：
+
+```text
+........................................................................ [ 50%]
+......................................................................   [100%]
+142 passed in 0.53s
 ```
 
 ## Concerns

@@ -189,11 +189,29 @@ def test_archive_preflight_reports_package_findings(tmp_path: Path) -> None:
     assert result["blocked"] is True
 
 
-def test_nested_zip_with_executable_member_escalates_to_critical(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "magic",
+    [
+        b"\x7fELFdemo",
+        b"MZdemo",
+        b"\xfe\xed\xfa\xce-demo",
+        b"\xce\xfa\xed\xfe-demo",
+        b"\xfe\xed\xfa\xcf-demo",
+        b"\xcf\xfa\xed\xfe-demo",
+        b"\xca\xfe\xba\xbe-demo",
+        b"\xbe\xba\xfe\xca-demo",
+        b"\xca\xfe\xba\xbf-demo",
+        b"\xbf\xba\xfe\xca-demo",
+    ],
+)
+def test_nested_zip_with_executable_member_escalates_to_critical(
+    tmp_path: Path,
+    magic: bytes,
+) -> None:
     archive = tmp_path / "demo-skill.skill"
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("demo-skill/SKILL.md", "---\nname: demo-skill\ndescription: Demo skill\n---\n")
-        zf.writestr("demo-skill/payload.zip", _nested_zip_bytes("tool", b"\x7fELFdemo"))
+        zf.writestr("demo-skill/payload.zip", _nested_zip_bytes("tool", magic))
 
     result = scan_archive_preflight(archive)
 
@@ -203,7 +221,7 @@ def test_nested_zip_with_executable_member_escalates_to_critical(tmp_path: Path)
 
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
-    (skill_dir / "payload.zip").write_bytes(_nested_zip_bytes("tool", b"\x7fELFdemo"))
+    (skill_dir / "payload.zip").write_bytes(_nested_zip_bytes("tool", magic))
     dir_finding = _finding_by_rule(scan_skill_dir(skill_dir)["findings"], "package-nested-archive")
     assert dir_finding["severity"] == "CRITICAL"
 

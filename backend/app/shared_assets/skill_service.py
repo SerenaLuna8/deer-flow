@@ -47,6 +47,17 @@ _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _ENV_VAR_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _SYMLINK_MEDIA_TYPES = frozenset({"application/symlink", "application/x-symlink", "inode/symlink"})
+_WIN32_INVALID_SEGMENT_CHARS = frozenset('<>:"|?*')
+_WIN32_RESERVED_BASENAMES = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+    }
+)
 _EXECUTABLE_MEDIA_TYPES = frozenset(
     {
         "application/vnd.microsoft.portable-executable",
@@ -79,6 +90,45 @@ class _M3SkillScanConfig:
 
 
 _M3_SKILL_SCAN_CONFIG = _M3SkillScanConfig()
+
+
+class _DuplicateKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects shadowed keys at every mapping level."""
+
+
+def _construct_unique_mapping(
+    loader: _DuplicateKeySafeLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+):
+    loader.flatten_mapping(node)
+    seen: set[object] = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in seen
+        except TypeError:
+            raise yaml.constructor.ConstructorError(
+                None,
+                None,
+                "unhashable mapping key",
+                key_node.start_mark,
+            ) from None
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                None,
+                None,
+                "duplicate mapping key",
+                key_node.start_mark,
+            )
+        seen.add(key)
+    return yaml.constructor.BaseConstructor.construct_mapping(loader, node, deep=deep)
+
+
+_DuplicateKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 def _constraint_name(exc: BaseException) -> str | None:
@@ -175,6 +225,10 @@ def _validate_archive_file(item: SkillArchiveFile, request_id: str) -> SkillArch
     normalized_path = unicodedata.normalize("NFC", posixpath.normpath(posix_path).removeprefix("./"))
     if not normalized_path or normalized_path == "." or len(normalized_path) > 1024:
         raise AssetValidationFailed(request_id)
+    for segment in PurePosixPath(normalized_path).parts:
+        reserved_basename = segment.partition(".")[0].casefold()
+        if segment.endswith((".", " ")) or any(character in _WIN32_INVALID_SEGMENT_CHARS or unicodedata.category(character) == "Cc" for character in segment) or reserved_basename in _WIN32_RESERVED_BASENAMES:
+            raise AssetValidationFailed(request_id)
 
     media_type = item.media_type.strip()
     media_type_base = media_type.partition(";")[0].strip().lower()
@@ -247,7 +301,7 @@ def _preflight_skill_frontmatter(
     match = _FRONTMATTER_PATTERN.match(manifest_text)
     if match is None:
         raise AssetValidationFailed(request_id)
-    frontmatter = yaml.safe_load(match.group(1))
+    frontmatter = yaml.load(match.group(1), Loader=_DuplicateKeySafeLoader)
     if not isinstance(frontmatter, dict) or any(not isinstance(key, str) for key in frontmatter):
         raise AssetValidationFailed(request_id)
 

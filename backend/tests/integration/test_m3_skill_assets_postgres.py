@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import hashlib
 import importlib
+import logging
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -185,6 +186,70 @@ async def test_skill_secret_requirement_is_sanitized_without_credential_material
         async with engine.connect() as connection:
             assert (await connection.execute(text("SELECT count(*) FROM credentials"))).scalar_one() == credential_count_before
             assert (await connection.execute(text("SELECT count(*) FROM credential_grants"))).scalar_one() == grant_count_before
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_secret_key_is_rejected_before_version_persistence_without_log_leak(
+    migrated_postgres_database_url: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(engine, factory, label="skill-duplicate-secret")
+    service = service_module.SkillService(factory)
+    raw_value = "raw-" + "super-secret"
+    manifest = (
+        "---\n"
+        "name: duplicate-secret-skill\n"
+        "description: Duplicate secret key must fail closed\n"
+        "required-secrets:\n"
+        "  - name: API_TOKEN\n"
+        f"    value: {raw_value}\n"
+        "required-secrets:\n"
+        "  - name: API_TOKEN\n"
+        "    optional: false\n"
+        "---\n\n"
+        "Never persist the shadowed declaration.\n"
+    ).encode()
+    caplog.set_level(logging.WARNING)
+    try:
+        asset = await service.create_asset(
+            editor,
+            service_module.CreateSkill("duplicate-secret-skill", "Duplicate Secret Skill"),
+        )
+
+        with pytest.raises(AssetValidationFailed) as exc_info:
+            await service.create_version_from_archive(
+                editor,
+                asset.id,
+                (SkillArchiveFile("SKILL.md", manifest, "text/markdown"),),
+                expected_asset_version=1,
+            )
+
+        assert raw_value not in caplog.text
+        assert raw_value not in str(exc_info.value)
+        async with engine.connect() as connection:
+            version_count = (
+                await connection.execute(
+                    text("SELECT count(*) FROM skill_versions WHERE skill_id=:skill"),
+                    {"skill": asset.id},
+                )
+            ).scalar_one()
+            file_count = (
+                await connection.execute(
+                    text(
+                        """SELECT count(*) FROM skill_version_files AS files
+                        JOIN skill_versions AS versions ON versions.id=files.skill_version_id
+                        WHERE versions.skill_id=:skill"""
+                    ),
+                    {"skill": asset.id},
+                )
+            ).scalar_one()
+        assert version_count == 0
+        assert file_count == 0
     finally:
         await engine.dispose()
 
