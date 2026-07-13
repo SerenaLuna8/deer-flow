@@ -16,8 +16,10 @@ from app.projects.context import ProjectContext
 from app.shared_assets.binding_repository import BindingRepository
 from app.shared_assets.catalog_state_repository import CatalogStateRepository
 from app.shared_assets.credential_closure import (
+    LockedMcpCredentialClosure,
     McpCredentialClosureInvalid,
-    lock_mcp_credential_closure,
+    McpCredentialClosureTarget,
+    lock_mcp_credential_closures,
 )
 from app.shared_assets.crypto import (
     CredentialDecryptFailed,
@@ -52,10 +54,6 @@ from deerflow.persistence.shared_assets import (
     AgentVersionMcpRefRow,
     AgentVersionRow,
     AgentVersionSkillRefRow,
-    CredentialEnvelopeRow,
-    CredentialGrantRow,
-    CredentialRow,
-    CredentialVersionRow,
     McpCredentialSlotRow,
     McpServerRow,
     McpServerVersionRow,
@@ -81,15 +79,6 @@ class _ResolvedRecord:
     scope: AssetScope
     asset: AgentRow | SkillRow | McpServerRow
     version: AgentVersionRow | SkillVersionRow | McpServerVersionRow
-
-
-@dataclass(frozen=True)
-class _GrantMaterial:
-    slot: McpCredentialSlotRow
-    grant: CredentialGrantRow
-    credential: CredentialRow
-    version: CredentialVersionRow
-    envelope: CredentialEnvelopeRow
 
 
 _ASSET_TYPES = {
@@ -172,7 +161,7 @@ class ProjectAssetResolver:
         request_id = getattr(context, "request_id", "unknown")
         if not isinstance(context, ProjectContext):
             raise AssetForbidden(request_id)
-        if Capability.SHARED_ASSETS_READ not in context.capabilities:
+        if Capability.SHARED_ASSETS_EXECUTE not in context.capabilities:
             raise AssetForbidden(request_id)
         if (
             type(resolved) is not ResolvedMcpSnapshot
@@ -357,13 +346,20 @@ class ProjectAssetResolver:
             AssetKind.MCP,
             mcp_ids,
         )
+        mcp_records: list[_ResolvedRecord] = []
         for mcp_version_id in mcp_ids:
-            mcp_record = await self._mcp_record_for_version(
-                session,
-                context,
-                mcp_version_id,
+            mcp_records.append(
+                await self._mcp_record_for_version(
+                    session,
+                    context,
+                    mcp_version_id,
+                )
             )
-            await self._usable_grant_ids(session, mcp_record, context.request_id)
+        await self._lock_credential_closures(
+            session,
+            mcp_records,
+            context.request_id,
+        )
         dependencies = tuple((*skill_ids, *mcp_ids))
         return ResolvedAgentSnapshot(
             kind=AssetKind.AGENT,
@@ -608,17 +604,41 @@ class ProjectAssetResolver:
     ) -> tuple[uuid.UUID, ...]:
         if not isinstance(record.version, McpServerVersionRow):
             raise AssetResolutionUnavailable(request_id)
-        project_id = uuid.UUID(str(record.asset.project_id)) if record.scope is AssetScope.PROJECT and record.asset.project_id is not None else None
+        closures = await self._lock_credential_closures(
+            session,
+            (record,),
+            request_id,
+        )
+        return closures[uuid.UUID(str(record.version.id))].grant_ids
+
+    async def _lock_credential_closures(
+        self,
+        session: AsyncSession,
+        records: Sequence[_ResolvedRecord],
+        request_id: str,
+        *,
+        load_envelopes: bool = False,
+    ) -> dict[uuid.UUID, LockedMcpCredentialClosure]:
+        targets: list[McpCredentialClosureTarget] = []
+        for record in records:
+            if not isinstance(record.version, McpServerVersionRow):
+                raise AssetResolutionUnavailable(request_id)
+            project_id = uuid.UUID(str(record.asset.project_id)) if record.scope is AssetScope.PROJECT and record.asset.project_id is not None else None
+            targets.append(
+                McpCredentialClosureTarget(
+                    uuid.UUID(str(record.version.id)),
+                    record.scope,
+                    project_id,
+                )
+            )
         try:
-            closure = await lock_mcp_credential_closure(
+            return await lock_mcp_credential_closures(
                 session,
-                uuid.UUID(str(record.version.id)),
-                scope=record.scope,
-                project_id=project_id,
+                tuple(targets),
+                load_envelopes=load_envelopes,
             )
         except McpCredentialClosureInvalid:
             raise AssetResolutionUnavailable(request_id) from None
-        return closure.grant_ids
 
     async def _materialize(
         self,
@@ -664,110 +684,19 @@ class ProjectAssetResolver:
         if asset is None or version is None or asset.status == "suspended" or version.workflow_status != "published" or version.payload_checksum != resolved.checksum:
             raise AssetResolutionUnavailable(request_id)
 
-        slots = tuple(
-            (
-                await session.execute(
-                    select(McpCredentialSlotRow).where(McpCredentialSlotRow.mcp_server_version_id == version.id).order_by(McpCredentialSlotRow.name, McpCredentialSlotRow.id).with_for_update(read=True, of=McpCredentialSlotRow)
-                )
-            )
-            .scalars()
-            .all()
+        record = _ResolvedRecord(scope, asset, version)
+        closures = await self._lock_credential_closures(
+            session,
+            (record,),
+            request_id,
+            load_envelopes=True,
         )
+        closure = closures[uuid.UUID(str(version.id))]
         locked_definition = self._safe_mcp_definition(
-            McpVersionRecord(version, slots, ()),
+            McpVersionRecord(version, closure.slots, ()),
             request_id,
         )
-        if locked_definition != resolved.definition:
-            raise AssetResolutionUnavailable(request_id)
-        slots_by_id = {slot.id: slot for slot in slots}
-        references = (
-            await session.execute(
-                select(
-                    CredentialGrantRow.id,
-                    CredentialGrantRow.credential_slot_id,
-                    CredentialGrantRow.credential_version_id,
-                    CredentialVersionRow.credential_id,
-                )
-                .join(
-                    CredentialVersionRow,
-                    CredentialVersionRow.id == CredentialGrantRow.credential_version_id,
-                )
-                .where(
-                    CredentialGrantRow.mcp_server_version_id == version.id,
-                    CredentialGrantRow.status == "active",
-                )
-            )
-        ).all()
-        reference_by_grant = {row.id: row for row in references}
-        if set(reference_by_grant) != set(resolved.credential_grant_ids):
-            raise AssetResolutionUnavailable(request_id)
-        credential_ids = sorted(
-            {row.credential_id for row in references},
-            key=lambda value: value.int,
-        )
-        credentials: dict[uuid.UUID, CredentialRow] = {}
-        for credential_id in credential_ids:
-            statement = select(CredentialRow).where(CredentialRow.id == credential_id).with_for_update(read=True, of=CredentialRow)
-            credential = (await session.execute(statement)).scalar_one_or_none()
-            if credential is None:
-                raise AssetResolutionUnavailable(request_id)
-            credentials[credential_id] = credential
-        versions: dict[uuid.UUID, CredentialVersionRow] = {}
-        for version_id in sorted(
-            {row.credential_version_id for row in references},
-            key=lambda value: value.int,
-        ):
-            statement = select(CredentialVersionRow).where(CredentialVersionRow.id == version_id).with_for_update(read=True, of=CredentialVersionRow)
-            credential_version = (await session.execute(statement)).scalar_one_or_none()
-            if credential_version is None:
-                raise AssetResolutionUnavailable(request_id)
-            versions[version_id] = credential_version
-        envelopes: dict[uuid.UUID, CredentialEnvelopeRow] = {}
-        for version_id in sorted(versions, key=lambda value: value.int):
-            statement = (
-                select(CredentialEnvelopeRow)
-                .where(
-                    CredentialEnvelopeRow.credential_version_id == version_id,
-                    CredentialEnvelopeRow.is_active.is_(True),
-                )
-                .with_for_update(read=True, of=CredentialEnvelopeRow)
-            )
-            envelope = (await session.execute(statement)).scalar_one_or_none()
-            if envelope is None:
-                raise AssetResolutionUnavailable(request_id)
-            envelopes[version_id] = envelope
-        grants: dict[uuid.UUID, CredentialGrantRow] = {}
-        for grant_id in sorted(reference_by_grant, key=lambda value: value.int):
-            statement = (
-                select(CredentialGrantRow)
-                .where(
-                    CredentialGrantRow.id == grant_id,
-                    CredentialGrantRow.mcp_server_version_id == version.id,
-                )
-                .with_for_update(read=True, of=CredentialGrantRow)
-            )
-            grant = (await session.execute(statement)).scalar_one_or_none()
-            if grant is None:
-                raise AssetResolutionUnavailable(request_id)
-            grants[grant_id] = grant
-
-        materials: list[_GrantMaterial] = []
-        granted_slot_ids: set[uuid.UUID] = set()
-        for grant_id in resolved.credential_grant_ids:
-            reference = reference_by_grant[grant_id]
-            slot = slots_by_id.get(reference.credential_slot_id)
-            grant = grants[grant_id]
-            credential_version = versions[reference.credential_version_id]
-            credential = credentials[credential_version.credential_id]
-            envelope = envelopes[credential_version.id]
-            scope_matches = credential.scope == scope.value and ((scope is AssetScope.SYSTEM and credential.project_id is None) or (scope is AssetScope.PROJECT and credential.project_id == project_id))
-            expected_schema = {key: sorted(values) for key, values in slot.payload_schema.items()} if slot is not None else None
-            actual_schema = {key: sorted(values) for key, values in credential_version.payload_schema.items()}
-            if slot is None or grant.status != "active" or credential.status != "active" or credential_version.status not in {"active", "retired"} or not scope_matches or expected_schema != actual_schema:
-                raise AssetResolutionUnavailable(request_id)
-            granted_slot_ids.add(slot.id)
-            materials.append(_GrantMaterial(slot, grant, credential, credential_version, envelope))
-        if any(slot.required and slot.id not in granted_slot_ids for slot in slots):
+        if locked_definition != resolved.definition or closure.grant_ids != resolved.credential_grant_ids:
             raise AssetResolutionUnavailable(request_id)
 
         try:
@@ -775,11 +704,14 @@ class ProjectAssetResolver:
         except CredentialKeyringInvalid:
             raise
         by_slot: dict[str, Mapping[str, object]] = {}
-        for material in materials:
+        for material in closure.materials:
+            envelope = material.envelope
+            if envelope is None:
+                raise AssetResolutionUnavailable(request_id)
             encrypted = EncryptedEnvelope(
-                key_id=material.envelope.key_id,
-                nonce=bytes(material.envelope.nonce),
-                ciphertext=bytes(material.envelope.ciphertext),
+                key_id=envelope.key_id,
+                nonce=bytes(envelope.nonce),
+                ciphertext=bytes(envelope.ciphertext),
             )
             payload = await asyncio.to_thread(
                 decrypt_credential_payload,

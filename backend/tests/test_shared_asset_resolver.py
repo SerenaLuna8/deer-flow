@@ -21,13 +21,13 @@ def _must_not_open_session():
     raise AssertionError("type validation must run before database access")
 
 
-def _context() -> ProjectContext:
+def _context(role: ProjectRole = ProjectRole.ADMIN) -> ProjectContext:
     return ProjectContext(
         user_id=uuid.uuid4(),
         project_id=uuid.uuid4(),
         membership_id=uuid.uuid4(),
-        role=ProjectRole.ADMIN,
-        capabilities=capabilities_for(ProjectRole.ADMIN),
+        role=role,
+        capabilities=capabilities_for(role),
         membership_version=1,
         request_id="req-materialize-unit",
     )
@@ -111,3 +111,40 @@ async def test_materializer_rejects_untrusted_context_before_database_access() -
             object(),
             snapshot,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_function_adapter", [False, True])
+async def test_materializer_requires_execute_capability_before_database_access(
+    use_function_adapter: bool,
+) -> None:
+    from app.shared_assets.resolver import (
+        ProjectAssetResolver,
+        materialize_mcp_secrets,
+    )
+
+    snapshot = ResolvedMcpSnapshot(
+        kind=AssetKind.MCP,
+        scope=AssetScope.PROJECT,
+        asset_id=uuid.uuid4(),
+        version_id=uuid.uuid4(),
+        checksum="d" * 64,
+        catalog_generation=1,
+        dependency_version_ids=(),
+        definition={"transport": "http"},
+        credential_grant_ids=(),
+    )
+    viewer = _context(ProjectRole.VIEWER)
+
+    with pytest.raises(AssetForbidden):
+        if use_function_adapter:
+            await materialize_mcp_secrets(
+                viewer,
+                snapshot,
+                session_factory=_must_not_open_session,
+            )
+        else:
+            await ProjectAssetResolver(_must_not_open_session).materialize_mcp_secrets(
+                viewer,
+                snapshot,
+            )

@@ -11,7 +11,8 @@ from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.credential_closure import (
     McpCredentialClosureInvalid,
-    lock_mcp_credential_closure,
+    McpCredentialClosureTarget,
+    lock_mcp_credential_closures,
 )
 from app.shared_assets.errors import AssetForbidden, AssetNotFound, AssetValidationFailed
 from app.shared_assets.models import AssetKind, AssetScope, AssetSelection
@@ -375,16 +376,18 @@ class BindingRepository:
         )
         if set(version_rows) != set(version_ids):
             raise AssetValidationFailed(request_id)
-        for version_id in sorted(
-            {uuid.UUID(str(value)) for value in version_ids},
-            key=lambda value: value.int,
-        ):
-            try:
-                await lock_mcp_credential_closure(
-                    self.session,
-                    version_id,
-                    scope=AssetScope.SYSTEM,
-                    project_id=None,
-                )
-            except McpCredentialClosureInvalid:
-                raise AssetValidationFailed(request_id) from None
+        targets = tuple(
+            McpCredentialClosureTarget(
+                version_id=version_id,
+                scope=AssetScope.SYSTEM,
+                project_id=None,
+            )
+            for version_id in sorted(
+                {uuid.UUID(str(value)) for value in version_ids},
+                key=lambda value: value.int,
+            )
+        )
+        try:
+            await lock_mcp_credential_closures(self.session, targets)
+        except McpCredentialClosureInvalid:
+            raise AssetValidationFailed(request_id) from None

@@ -8,8 +8,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.projects.context import ProjectContext, resolve_project_context
 from app.shared_assets.contexts import SystemAssetGovernanceContext
@@ -87,6 +92,51 @@ async def _seed_system_admin(engine: AsyncEngine) -> SystemAssetGovernanceContex
             },
         )
     return SystemAssetGovernanceContext(user_id=user_id, request_id="req-system")
+
+
+async def _seed_project_member(
+    engine: AsyncEngine,
+    factory: async_sessionmaker,
+    *,
+    project_id: uuid.UUID,
+    label: str,
+    role: str,
+) -> ProjectContext:
+    user_id = uuid.uuid4()
+    membership_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """INSERT INTO users (id,email,system_role,created_at,needs_setup,token_version)
+                VALUES (:id,:email,'user',:now,false,0)"""
+            ),
+            {
+                "id": str(user_id),
+                "email": f"{label}-{user_id}@example.com",
+                "now": now,
+            },
+        )
+        await connection.execute(
+            text(
+                """INSERT INTO project_memberships
+                (id,project_id,user_id,role,status,version)
+                VALUES (:id,:project,:user,:role,'active',1)"""
+            ),
+            {
+                "id": membership_id,
+                "project": project_id,
+                "user": str(user_id),
+                "role": role,
+            },
+        )
+    async with factory() as session:
+        return await resolve_project_context(
+            session,
+            user_id,
+            project_id,
+            f"req-{label}",
+        )
 
 
 async def _seed_agent(
@@ -658,6 +708,20 @@ async def test_project_current_pointer_and_mcp_secrets_recheck_revocation(
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin = await _seed_project(engine, factory, label="materialize")
+    runner = await _seed_project_member(
+        engine,
+        factory,
+        project_id=admin.project_id,
+        label="materialize-runner",
+        role="runner",
+    )
+    viewer = await _seed_project_member(
+        engine,
+        factory,
+        project_id=admin.project_id,
+        label="materialize-viewer",
+        role="viewer",
+    )
     outsider = await _seed_project(engine, factory, label="materialize-other")
     skill_id, skill_versions = await _seed_skill(
         engine,
@@ -741,11 +805,18 @@ async def test_project_current_pointer_and_mcp_secrets_recheck_revocation(
         assert snapshot.version_id == approved.id
         assert snapshot.credential_grant_ids == tuple(grant.id for grant in approved.credential_grants)
         assert "short-lived-secret" not in repr(snapshot)
+        viewer_snapshot = await resolver.resolve_project_asset_snapshot(
+            viewer,
+            AssetSelection(AssetKind.MCP, asset.id),
+        )
+        assert viewer_snapshot.version_id == snapshot.version_id
 
         materialized = await resolver.materialize_mcp_secrets(admin, snapshot)
         assert materialized.by_slot["primary"]["env"]["ERP_TOKEN"] == "short-lived-secret"
         assert materialized.by_slot["secondary"]["headers"]["X_AUX_TOKEN"] == "secondary-secret"
         assert "short-lived-secret" not in repr(materialized)
+        runner_materialized = await resolver.materialize_mcp_secrets(runner, snapshot)
+        assert runner_materialized.by_slot["primary"]["env"]["ERP_TOKEN"] == "short-lived-secret"
 
         decrypt_calls = 0
         original_decrypt = resolver_module.decrypt_credential_payload
@@ -1213,4 +1284,414 @@ async def test_binding_enable_serializes_with_system_credential_revoke(
         assert binding_row is not None and binding_row.enabled is True
         assert credential_row is not None and credential_row.status == "revoked"
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_agent_two_mcp_closure_uses_global_credential_lock_order_with_bulk_approval(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.shared_assets.binding_service import BindingService
+    from app.shared_assets.credential_service import CreateCredential, CredentialService
+    from app.shared_assets.mcp_service import (
+        CreateMcpServer,
+        McpCredentialSlot,
+        McpDefinition,
+        McpService,
+    )
+    from app.shared_assets.resolver import ProjectAssetResolver
+    from deerflow.persistence.shared_assets import (
+        CredentialGrantRow,
+        CredentialRow,
+        McpServerRow,
+        McpServerVersionRow,
+    )
+
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin = await _seed_project(engine, factory, label="agent-two-mcp-lock-order")
+    system = await _seed_system_admin(engine)
+    keyring = CredentialKeyring(
+        active_key_id="agent-two-mcp-key",
+        _keys={"agent-two-mcp-key": b"g" * 32},
+    )
+    credentials = CredentialService(factory, keyring=keyring)
+    mcp = McpService(factory)
+    bindings = BindingService(factory)
+    resolver = ProjectAssetResolver(factory, keyring=keyring)
+    approval_task: asyncio.Task | None = None
+    resolver_task: asyncio.Task | None = None
+    release_approval = asyncio.Event()
+    try:
+        first_credential = await credentials.create(
+            system,
+            CreateCredential("agent-lock-a", "Agent Lock A", "token"),
+            {"env": {"SHARED_TOKEN": "agent-lock-secret-a"}},
+        )
+        second_credential = await credentials.create(
+            system,
+            CreateCredential("agent-lock-b", "Agent Lock B", "token"),
+            {"env": {"SHARED_TOKEN": "agent-lock-secret-b"}},
+        )
+        credential_low, credential_high = sorted(
+            (first_credential, second_credential),
+            key=lambda item: item.id.int,
+        )
+
+        async def publish_single_credential_mcp(
+            slug: str,
+            credential_version_id: uuid.UUID,
+        ):
+            asset = await mcp.create_asset(
+                system,
+                CreateMcpServer(slug, slug.replace("-", " ").title()),
+            )
+            draft = await mcp.create_version(
+                system,
+                asset.id,
+                McpDefinition(
+                    description=f"Single credential {slug}",
+                    transport="http",
+                    url=f"https://{slug}.example.test",
+                    credential_slots=(
+                        McpCredentialSlot(
+                            "primary",
+                            "Shared credential",
+                            {"env": ["SHARED_TOKEN"]},
+                        ),
+                    ),
+                ),
+                expected_asset_version=1,
+            )
+            published = await mcp.approve(
+                system,
+                asset.id,
+                draft.id,
+                {"primary": credential_version_id},
+                expected_asset_version=2,
+            )
+            return asset, published
+
+        high_asset, high_mcp = await publish_single_credential_mcp(
+            "agent-lock-high",
+            credential_high.current_version_id,
+        )
+        low_asset, low_mcp = await publish_single_credential_mcp(
+            "agent-lock-low",
+            credential_low.current_version_id,
+        )
+        await bindings.enable(
+            admin,
+            AssetSelection(AssetKind.MCP, high_asset.id, high_mcp.id),
+        )
+        await bindings.enable(
+            admin,
+            AssetSelection(AssetKind.MCP, low_asset.id, low_mcp.id),
+        )
+        agent_id, agent_versions = await _seed_agent(
+            engine,
+            owner_id=admin.user_id,
+            scope="project",
+            project_id=admin.project_id,
+            versions=1,
+            mcp_version_ids=(high_mcp.id, low_mcp.id),
+        )
+
+        approval_asset = await mcp.create_asset(
+            system,
+            CreateMcpServer("agent-lock-bulk", "Agent Lock Bulk"),
+        )
+        approval_version = await mcp.create_version(
+            system,
+            approval_asset.id,
+            McpDefinition(
+                description="Bulk approval lock-order competitor",
+                transport="http",
+                url="https://agent-lock-bulk.example.test",
+                credential_slots=(
+                    McpCredentialSlot(
+                        "first",
+                        "First shared credential",
+                        {"env": ["SHARED_TOKEN"]},
+                    ),
+                    McpCredentialSlot(
+                        "second",
+                        "Second shared credential",
+                        {"env": ["SHARED_TOKEN"]},
+                    ),
+                ),
+            ),
+            expected_asset_version=1,
+        )
+
+        approval_holds_low = asyncio.Event()
+        approval_attempts_high = asyncio.Event()
+        resolver_holds_high = asyncio.Event()
+        original_execute = AsyncSession.execute
+
+        def locks_credential(statement: object, credential_id: uuid.UUID) -> bool:
+            descriptions = getattr(statement, "column_descriptions", ())
+            if len(descriptions) != 1 or descriptions[0].get("entity") is not CredentialRow or getattr(statement, "_for_update_arg", None) is None:
+                return False
+            return credential_id in {value for value in statement.compile().params.values() if isinstance(value, uuid.UUID)}
+
+        async def instrument_credential_locks(
+            session: AsyncSession,
+            statement,
+            *args,
+            **kwargs,
+        ):
+            current = asyncio.current_task()
+            if current is approval_task and locks_credential(
+                statement,
+                credential_high.id,
+            ):
+                approval_attempts_high.set()
+            result = await original_execute(session, statement, *args, **kwargs)
+            if current is approval_task and locks_credential(
+                statement,
+                credential_low.id,
+            ):
+                approval_holds_low.set()
+                await release_approval.wait()
+            if current is resolver_task and locks_credential(
+                statement,
+                credential_high.id,
+            ):
+                resolver_holds_high.set()
+                await approval_attempts_high.wait()
+            return result
+
+        monkeypatch.setattr(AsyncSession, "execute", instrument_credential_locks)
+        approval_task = asyncio.create_task(
+            mcp.approve(
+                system,
+                approval_asset.id,
+                approval_version.id,
+                {
+                    "first": credential_low.current_version_id,
+                    "second": credential_high.current_version_id,
+                },
+                expected_asset_version=2,
+            )
+        )
+        await asyncio.wait_for(approval_holds_low.wait(), timeout=5)
+        resolver_task = asyncio.create_task(
+            resolver.resolve_project_asset_snapshot(
+                admin,
+                AssetSelection(AssetKind.AGENT, agent_id),
+            )
+        )
+        try:
+            await asyncio.wait_for(resolver_holds_high.wait(), timeout=0.75)
+        except TimeoutError:
+            pass
+        finally:
+            release_approval.set()
+
+        approval_result, agent_snapshot = await asyncio.wait_for(
+            asyncio.gather(approval_task, resolver_task),
+            timeout=10,
+        )
+        assert approval_result.workflow_status.value == "published"
+        assert agent_snapshot.version_id == agent_versions[0]
+        assert agent_snapshot.dependency_version_ids == (high_mcp.id, low_mcp.id)
+
+        async with factory() as session:
+            stored_asset = await session.get(McpServerRow, approval_asset.id)
+            stored_version = await session.get(
+                McpServerVersionRow,
+                approval_version.id,
+            )
+            stored_grants = tuple((await session.execute(select(CredentialGrantRow).where(CredentialGrantRow.mcp_server_version_id == approval_version.id))).scalars().all())
+        assert stored_asset is not None
+        assert stored_asset.current_published_version_id == approval_version.id
+        assert stored_version is not None
+        assert stored_version.workflow_status == "published"
+        assert len(stored_grants) == 2
+        assert all(grant.status == "active" for grant in stored_grants)
+    finally:
+        release_approval.set()
+        pending = [task for task in (approval_task, resolver_task) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_materializer_fails_closed_when_grant_is_repinned_after_reference_read(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import app.shared_assets.resolver as resolver_module
+    from app.shared_assets.credential_service import CreateCredential, CredentialService
+    from app.shared_assets.mcp_service import (
+        CreateMcpServer,
+        McpCredentialSlot,
+        McpDefinition,
+        McpService,
+    )
+    from app.shared_assets.resolver import ProjectAssetResolver
+    from deerflow.persistence.shared_assets import (
+        CredentialGrantRow,
+        CredentialVersionRow,
+    )
+
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin = await _seed_project(engine, factory, label="materialize-grant-repin")
+    marker = "grant-repin-plaintext-must-stay-hidden"
+    keyring = CredentialKeyring(
+        active_key_id="grant-repin-key",
+        _keys={"grant-repin-key": b"p" * 32},
+    )
+    credentials = CredentialService(factory, keyring=keyring)
+    mcp = McpService(factory)
+    resolver = ProjectAssetResolver(factory, keyring=keyring)
+    materialize_task: asyncio.Task | None = None
+    release_materializer = asyncio.Event()
+    try:
+        original_credential = await credentials.create(
+            admin,
+            CreateCredential("repin-original", "Repin Original", "token"),
+            {"env": {"REP_TOKEN": marker}},
+        )
+        replacement_credential = await credentials.create(
+            admin,
+            CreateCredential("repin-replacement", "Repin Replacement", "token"),
+            {"env": {"REP_TOKEN": "replacement-value"}},
+        )
+        asset = await mcp.create_asset(
+            admin,
+            CreateMcpServer("repin-mcp", "Repin MCP"),
+        )
+        draft = await mcp.create_version(
+            admin,
+            asset.id,
+            McpDefinition(
+                description="Grant re-pin materializer barrier",
+                transport="http",
+                url="https://repin.example.test",
+                credential_slots=(
+                    McpCredentialSlot(
+                        "primary",
+                        "Original slot",
+                        {"env": ["REP_TOKEN"]},
+                    ),
+                    McpCredentialSlot(
+                        "alternate",
+                        "Alternate slot",
+                        {"env": ["REP_TOKEN"]},
+                        required=False,
+                    ),
+                ),
+            ),
+            expected_asset_version=1,
+        )
+        await mcp.submit_approval(
+            admin,
+            asset.id,
+            draft.id,
+            expected_asset_version=2,
+        )
+        approved = await mcp.approve(
+            admin,
+            asset.id,
+            draft.id,
+            {"primary": original_credential.current_version_id},
+            expected_asset_version=3,
+        )
+        snapshot = await resolver.resolve_project_asset_snapshot(
+            admin,
+            AssetSelection(AssetKind.MCP, asset.id),
+        )
+        grant = approved.credential_grants[0]
+        slots_by_name = {slot.name: slot for slot in approved.credential_slots}
+
+        references_read = asyncio.Event()
+        original_execute = AsyncSession.execute
+        paused = False
+
+        def is_grant_reference_query(statement: object) -> bool:
+            descriptions = getattr(statement, "column_descriptions", ())
+            entities = tuple(item.get("entity") for item in descriptions)
+            return (
+                entities
+                == (
+                    CredentialGrantRow,
+                    CredentialGrantRow,
+                    CredentialGrantRow,
+                    CredentialVersionRow,
+                )
+                and getattr(statement, "_for_update_arg", None) is None
+                and approved.id in {value for value in statement.compile().params.values() if isinstance(value, uuid.UUID)}
+            )
+
+        async def pause_after_reference_read(
+            session: AsyncSession,
+            statement,
+            *args,
+            **kwargs,
+        ):
+            nonlocal paused
+            result = await original_execute(session, statement, *args, **kwargs)
+            if not paused and asyncio.current_task() is materialize_task and is_grant_reference_query(statement):
+                paused = True
+                references_read.set()
+                await release_materializer.wait()
+            return result
+
+        decrypt_calls = 0
+        original_decrypt = resolver_module.decrypt_credential_payload
+
+        def track_decrypt(*args, **kwargs):
+            nonlocal decrypt_calls
+            decrypt_calls += 1
+            return original_decrypt(*args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", pause_after_reference_read)
+        monkeypatch.setattr(
+            resolver_module,
+            "decrypt_credential_payload",
+            track_decrypt,
+        )
+        materialize_task = asyncio.create_task(resolver.materialize_mcp_secrets(admin, snapshot))
+        await asyncio.wait_for(references_read.wait(), timeout=5)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE credential_grants
+                    SET credential_slot_id=:slot, credential_version_id=:version
+                    WHERE id=:grant"""
+                ),
+                {
+                    "slot": slots_by_name["alternate"].id,
+                    "version": replacement_credential.current_version_id,
+                    "grant": grant.id,
+                },
+            )
+        release_materializer.set()
+
+        with pytest.raises(AssetResolutionUnavailable) as exc_info:
+            await asyncio.wait_for(materialize_task, timeout=10)
+        assert decrypt_calls == 0
+        assert marker not in str(exc_info.value)
+        assert marker not in repr(exc_info.value)
+        assert marker not in caplog.text
+        assert marker not in repr(snapshot)
+
+        async with factory() as session:
+            stored_grant = await session.get(CredentialGrantRow, grant.id)
+        assert stored_grant is not None
+        assert stored_grant.credential_slot_id == slots_by_name["alternate"].id
+        assert stored_grant.credential_version_id == replacement_credential.current_version_id
+    finally:
+        release_materializer.set()
+        if materialize_task is not None and not materialize_task.done():
+            materialize_task.cancel()
+            await asyncio.gather(materialize_task, return_exceptions=True)
         await engine.dispose()

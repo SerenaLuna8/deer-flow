@@ -904,17 +904,28 @@ suspended 则立即 fail closed。系统发布新 version 绝不自动移动项�
 锁定和重验精确 dependency/credential closure；dependency binding、asset 与 version 分行锁定，
 避免 joined nullable row lock 与不稳定锁序。项目资产只解析本项目
 `current_published_version_id`，system 资产只解析本项目 enabled binding 的 pinned version。
+Agent 含多个 MCP dependency 时必须先收集本事务全部 MCP version 的 slot/grant reference，
+再对 logical credential union 按 UUID 全局排序锁完，随后按
+`(credential UUID, semantic version UUID)` 锁 semantic version，最后稳定排序锁 active envelope
+与 grant 并逐 MCP 验证；禁止按 dependency ref 逐 MCP 获取 closure，避免与 MCP bulk approval 的
+全局 `C1→C2` 顺序形成 `C2→C1` 锁环。resolver 与 BindingRepository 复用同一个 batch closure，
+单 MCP 入口也只是该 batch primitive 的 adapter。
 snapshot 携带闭包全部验证完成后最后读取的 catalog generation、version UUID、checksum、dependency
 version UUID 和 grant UUID；MCP definition 只含无 secret 字段，不得包含 plaintext、ciphertext、
 nonce、key ID、storage locator 或 credential secret hash。普通 resolver 只锁定并确认 active envelope
 存在，不读取其 ciphertext/nonce/key ID，也不解密 secret。
 
 `materialize_mcp_secrets(context, resolved)` 必须显式接收可信 `ProjectContext`；打开 session 前拒绝
-错误 context/snapshot 类型，事务内先锁定并重验 project、membership status/version 与 capability。
+错误 context/snapshot 类型，并要求 `shared_assets.execute`；Viewer 即使具备 `shared_assets.read` 也
+必须在 session 创建前失败，Runner/Admin 才能 materialize。事务内先锁定并重验 project、membership
+status/version 与 capability。
 项目 MCP 必须属于 `context.project_id`；system MCP 必须重新锁定本项目 enabled exact binding，且仍
 指向 snapshot 的 version。随后按上述全局顺序锁定完整 credential closure，并从数据库锁定的
 version/slot 重建无 secret definition，与 snapshot definition 精确比较；不得只信任调用方携带的
-checksum、UUID 或 grant。retired semantic version 的既有 grant 可继续使用，membership/binding
+checksum、UUID 或 grant。materializer 不维护第二套 closure：必须复用共享 batch 返回的 locked
+slot/grant/credential/version/envelope material，在任何 decrypt 前同时校验 snapshot grant IDs 和
+locked grant 的 `credential_slot_id`/`credential_version_id` 是否仍与最初 reference 一致，因此
+reference 读取后的 grant 原地 re-pin 必须 fail closed。retired semantic version 的既有 grant 可继续使用，membership/binding
 失效、re-pin、错误项目、伪造 definition、revoke、suspend、grant 替换或缺失 required slot 均在
 解密前失败。解密边界把 asyncpg UUID 规范化为精确 `uuid.UUID` 以匹配 AES-GCM AAD；返回的短生命
 周期 `MaterializedMcpSecrets.by_slot` 使用 `repr=False`，不得写入 cache、日志、API、checkpoint 或
