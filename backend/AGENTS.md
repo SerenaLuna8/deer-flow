@@ -785,6 +785,18 @@ action、`request_id` 六类治理元数据；禁止记录 payload、diff、cred
 私有 Thread、run、file、Memory、automation 资源 ID。M6 可替换持久化 sink，但不得改变
 service 调用接口。
 
+**M3 Credential crypto 边界**：`app.shared_assets.keyring` 只从
+`DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID` 与 `DEER_FLOW_CREDENTIAL_KEYRING_JSON` 加载
+密钥；每个 base64 value 必须严格解码为 32 bytes，active key 必须存在。配置失败只返回
+稳定、无 secret 的错误，不记录 keyring JSON 或 key material。`app.shared_assets.crypto`
+使用 AES-256-GCM、12-byte 随机 nonce 和 canonical JSON；AAD 固定绑定 credential version
+UUID、`system|project` scope、project UUID 或 system sentinel，以及 payload schema version。
+明文只能包含结构化 `env`、`headers`、`oauth` 顶层字段且最大 64 KiB。未知 key ID、篡改、
+错误 AAD、非 canonical 明文或解密后 schema 失败统一为无细节的 decrypt failure，不尝试其他
+key。所有持有 key、nonce 或 ciphertext 的 dataclass repr 必须隐藏对应字段；日志、异常和
+API 均不得输出 keyring JSON、plaintext、ciphertext 或 nonce。Task 3 仅提供内存 crypto
+primitive；envelope 持久化、service、grant resolver 与 rotation CLI 由后续任务负责。
+
 **Platform and project roles**: `users.system_role` is restricted to
 `system_admin|user`; the legacy platform value `admin` is converted by revision 0005.
 Project authorization is independent and lives in `project_memberships.role` as
