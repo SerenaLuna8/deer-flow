@@ -899,23 +899,33 @@ expected version。新建、升级或重启时拒绝 archived/suspended system a
 精确 Skill/MCP binding closure 与 MCP grant；已存在 binding 所指 asset 后续 archived 仍可解析，
 suspended 则立即 fail closed。系统发布新 version 绝不自动移动项目 binding。
 
-`ProjectAssetResolver` 在同一事务内共享锁定可信 project/membership、binding、asset、version 和
-精确 dependency closure：项目资产只解析本项目 `current_published_version_id`，system 资产只解析
-本项目 enabled binding 的 pinned version。snapshot 携带 catalog generation、version UUID、
-checksum、dependency version UUID 和 grant UUID；MCP definition 只含无 secret 字段，不得包含
-plaintext、ciphertext、nonce、key ID、storage locator 或 credential secret hash。普通 resolver
-不读取 envelope。`materialize_mcp_secrets()` 只接受 `ResolvedMcpSnapshot`，按
-`project -> MCP asset -> MCP version/slot -> sorted credential -> sorted semantic version -> envelope -> grant`
-重新加锁和校验 scope/status/schema；retired semantic version 的既有 grant 可继续使用，revoke、
-suspend、grant 替换或缺失 required slot 立即失败。解密前必须把 asyncpg UUID 值规范化为精确
-`uuid.UUID` 以匹配 AES-GCM AAD；返回的短生命周期 `MaterializedMcpSecrets.by_slot` 使用
-`repr=False`，不得写入 cache、日志、API、checkpoint 或 run event。Skill/Agent snapshot 不允许
-materialize secret。
+`ProjectAssetResolver` 在同一事务内共享锁定可信 project/membership，并按
+`binding -> asset -> exact version -> slot -> sorted credential -> sorted semantic version -> active envelope -> grant`
+锁定和重验精确 dependency/credential closure；dependency binding、asset 与 version 分行锁定，
+避免 joined nullable row lock 与不稳定锁序。项目资产只解析本项目
+`current_published_version_id`，system 资产只解析本项目 enabled binding 的 pinned version。
+snapshot 携带闭包全部验证完成后最后读取的 catalog generation、version UUID、checksum、dependency
+version UUID 和 grant UUID；MCP definition 只含无 secret 字段，不得包含 plaintext、ciphertext、
+nonce、key ID、storage locator 或 credential secret hash。普通 resolver 只锁定并确认 active envelope
+存在，不读取其 ciphertext/nonce/key ID，也不解密 secret。
+
+`materialize_mcp_secrets(context, resolved)` 必须显式接收可信 `ProjectContext`；打开 session 前拒绝
+错误 context/snapshot 类型，事务内先锁定并重验 project、membership status/version 与 capability。
+项目 MCP 必须属于 `context.project_id`；system MCP 必须重新锁定本项目 enabled exact binding，且仍
+指向 snapshot 的 version。随后按上述全局顺序锁定完整 credential closure，并从数据库锁定的
+version/slot 重建无 secret definition，与 snapshot definition 精确比较；不得只信任调用方携带的
+checksum、UUID 或 grant。retired semantic version 的既有 grant 可继续使用，membership/binding
+失效、re-pin、错误项目、伪造 definition、revoke、suspend、grant 替换或缺失 required slot 均在
+解密前失败。解密边界把 asyncpg UUID 规范化为精确 `uuid.UUID` 以匹配 AES-GCM AAD；返回的短生命
+周期 `MaterializedMcpSecrets.by_slot` 使用 `repr=False`，不得写入 cache、日志、API、checkpoint 或
+run event。Skill/Agent snapshot 不允许 materialize secret。
 
 resolver-visible mutation 的 generation 由 `0007` PostgreSQL statement trigger 在业务事务内自动
 递增；现有 service 不得额外调用 `CatalogStateRepository.bump_generation()` 造成双增。该显式 helper
-只供未来没有 trigger 覆盖的 mutation 使用。resolver 在持有上述共享锁时读取 generation，cache
-消费者只能在数据库 generation 未变化的窗口复用 snapshot。
+只供未来没有 trigger 覆盖的 mutation 使用：合法空表读取为 generation `0`，首次 bump 使用
+PostgreSQL upsert 建立 singleton 并返回 `1`，后续并发 bump 单调递增。resolver 必须在 snapshot 与
+全部 closure 验证结束后最后读取 generation；cache 消费者只能在数据库 generation 未变化的窗口
+复用 snapshot。
 
 **Platform and project roles**: `users.system_role` is restricted to
 `system_admin|user`; the legacy platform value `admin` is converted by revision 0005.

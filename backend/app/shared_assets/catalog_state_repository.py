@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.shared_assets import AssetCatalogStateRow
@@ -19,12 +20,23 @@ class CatalogStateRepository:
         self.session = session
 
     async def read_generation(self, *, for_update: bool = False) -> int:
-        statement = select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1)
         if for_update:
-            statement = statement.with_for_update()
-        value = (await self.session.execute(statement)).scalar_one()
-        return int(value)
+            await self.session.execute(text("LOCK TABLE asset_catalog_state IN SHARE ROW EXCLUSIVE MODE"))
+        statement = select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1)
+        value = (await self.session.execute(statement)).scalar_one_or_none()
+        return 0 if value is None else int(value)
 
     async def bump_generation(self) -> int:
-        statement = update(AssetCatalogStateRow).where(AssetCatalogStateRow.id == 1).values(generation=AssetCatalogStateRow.generation + 1).returning(AssetCatalogStateRow.generation)
+        statement = (
+            insert(AssetCatalogStateRow)
+            .values(id=1, generation=1)
+            .on_conflict_do_update(
+                index_elements=[AssetCatalogStateRow.id],
+                set_={
+                    "generation": AssetCatalogStateRow.generation + 1,
+                    "updated_at": func.now(),
+                },
+            )
+            .returning(AssetCatalogStateRow.generation)
+        )
         return int((await self.session.execute(statement)).scalar_one())

@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
-from sqlalchemy import and_, exists, select
+from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,10 @@ from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.shared_assets.binding_repository import BindingRepository
 from app.shared_assets.catalog_state_repository import CatalogStateRepository
+from app.shared_assets.credential_closure import (
+    McpCredentialClosureInvalid,
+    lock_mcp_credential_closure,
+)
 from app.shared_assets.crypto import (
     CredentialDecryptFailed,
     EncryptedEnvelope,
@@ -43,7 +47,6 @@ from app.shared_assets.models import (
 )
 from app.shared_assets.skill_repository import SkillVersionRecord
 from app.shared_assets.skill_service import SkillService
-from deerflow.persistence.projects.model import ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
     AgentVersionMcpRefRow,
@@ -143,14 +146,15 @@ class ProjectAssetResolver:
                     repository = BindingRepository(session)
                     await repository.lock_project(context, read=True)
                     record = await self._resolve_record(session, repository, context, selection)
-                    generation = await CatalogStateRepository(session).read_generation()
-                    return await self._snapshot(
+                    snapshot = await self._snapshot(
                         session,
                         context,
                         selection.kind,
                         record,
-                        generation,
+                        0,
                     )
+                    generation = await CatalogStateRepository(session).read_generation()
+                    return replace(snapshot, catalog_generation=generation)
         except (AssetForbidden, AssetValidationFailed):
             raise
         except AssetResolutionUnavailable:
@@ -162,12 +166,22 @@ class ProjectAssetResolver:
 
     async def materialize_mcp_secrets(
         self,
+        context: ProjectContext,
         resolved: ResolvedMcpSnapshot,
     ) -> MaterializedMcpSecrets:
-        request_id = "internal-materialize"
+        request_id = getattr(context, "request_id", "unknown")
+        if not isinstance(context, ProjectContext):
+            raise AssetForbidden(request_id)
+        if Capability.SHARED_ASSETS_READ not in context.capabilities:
+            raise AssetForbidden(request_id)
         if (
             type(resolved) is not ResolvedMcpSnapshot
             or resolved.kind is not AssetKind.MCP
+            or not isinstance(resolved.scope, AssetScope)
+            or not isinstance(resolved.asset_id, uuid.UUID)
+            or not isinstance(resolved.version_id, uuid.UUID)
+            or not isinstance(resolved.checksum, str)
+            or not isinstance(resolved.definition, Mapping)
             or any(not isinstance(grant_id, uuid.UUID) for grant_id in resolved.credential_grant_ids)
             or len(set(resolved.credential_grant_ids)) != len(resolved.credential_grant_ids)
         ):
@@ -175,9 +189,16 @@ class ProjectAssetResolver:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    return await self._materialize(session, resolved, request_id)
+                    return await self._materialize(
+                        session,
+                        context,
+                        resolved,
+                        request_id,
+                    )
         except (AssetValidationFailed, AssetResolutionUnavailable):
             raise
+        except AssetNotFound:
+            raise AssetResolutionUnavailable(request_id) from None
         except (CredentialDecryptFailed, CredentialKeyringInvalid):
             raise AssetStorageUnavailable(request_id) from None
         except (DBAPIError, SATimeoutError):
@@ -422,7 +443,28 @@ class ProjectAssetResolver:
         )
         mcp_record = McpVersionRecord(record.version, slots, ())
         grant_ids = await self._usable_grant_ids(session, record, context.request_id)
-        definition = McpService._definition_from_record(mcp_record)
+        safe_definition = self._safe_mcp_definition(
+            mcp_record,
+            context.request_id,
+        )
+        return ResolvedMcpSnapshot(
+            kind=AssetKind.MCP,
+            scope=record.scope,
+            asset_id=record.asset.id,
+            version_id=record.version.id,
+            checksum=record.version.payload_checksum,
+            catalog_generation=generation,
+            dependency_version_ids=(),
+            definition=safe_definition,
+            credential_grant_ids=grant_ids,
+        )
+
+    @staticmethod
+    def _safe_mcp_definition(
+        record: McpVersionRecord,
+        request_id: str,
+    ) -> Mapping[str, object]:
+        definition = McpService._definition_from_record(record)
         safe_definition = _freeze(
             {
                 "description": definition.description,
@@ -448,18 +490,8 @@ class ProjectAssetResolver:
             }
         )
         if not isinstance(safe_definition, Mapping):
-            raise AssetResolutionUnavailable(context.request_id)
-        return ResolvedMcpSnapshot(
-            kind=AssetKind.MCP,
-            scope=record.scope,
-            asset_id=record.asset.id,
-            version_id=record.version.id,
-            checksum=record.version.payload_checksum,
-            catalog_generation=generation,
-            dependency_version_ids=(),
-            definition=safe_definition,
-            credential_grant_ids=grant_ids,
-        )
+            raise AssetResolutionUnavailable(request_id)
+        return safe_definition
 
     async def _assert_exact_dependencies(
         self,
@@ -468,7 +500,10 @@ class ProjectAssetResolver:
         kind: AssetKind,
         version_ids: Sequence[uuid.UUID],
     ) -> None:
-        for version_id in version_ids:
+        for version_id in sorted(
+            {uuid.UUID(str(value)) for value in version_ids},
+            key=lambda value: value.int,
+        ):
             await self._dependency_record(session, context, kind, version_id)
 
     async def _dependency_record(
@@ -479,50 +514,78 @@ class ProjectAssetResolver:
         version_id: uuid.UUID,
     ) -> _ResolvedRecord:
         asset_type, version_type, parent_column = _ASSET_TYPES[kind]
+        parent_id = (await session.execute(select(getattr(version_type, parent_column)).where(version_type.id == version_id))).scalar_one_or_none()
         project_statement = (
-            select(asset_type, version_type)
-            .join(version_type, getattr(version_type, parent_column) == asset_type.id)
+            select(asset_type)
             .where(
-                version_type.id == version_id,
-                version_type.workflow_status == "published",
+                asset_type.id == parent_id,
                 asset_type.scope == "project",
                 asset_type.project_id == context.project_id,
                 asset_type.status != "suspended",
             )
-            .with_for_update(read=True, of=[asset_type, version_type])
+            .with_for_update(read=True, of=asset_type)
         )
-        row = (await session.execute(project_statement)).one_or_none()
-        if row is not None:
-            return _ResolvedRecord(AssetScope.PROJECT, row[0], row[1])
-        binding_type, asset_column, binding_version_column = _BINDING_TYPES[kind]
-        system_statement = (
-            select(asset_type, version_type)
-            .join(version_type, getattr(version_type, parent_column) == asset_type.id)
-            .join(
-                binding_type,
-                and_(
-                    getattr(binding_type, asset_column) == asset_type.id,
-                    getattr(binding_type, binding_version_column) == version_type.id,
-                ),
+        project_asset = (await session.execute(project_statement)).scalar_one_or_none()
+        if project_asset is not None:
+            project_version = await self._lock_version(
+                session,
+                version_type,
+                parent_column,
+                uuid.UUID(str(project_asset.id)),
+                version_id,
+                context.request_id,
             )
+            self._assert_asset_state(
+                project_asset,
+                project_version,
+                context.request_id,
+            )
+            return _ResolvedRecord(
+                AssetScope.PROJECT,
+                project_asset,
+                project_version,
+            )
+        binding_type, asset_column, binding_version_column = _BINDING_TYPES[kind]
+        binding_statement = (
+            select(binding_type)
             .where(
-                version_type.id == version_id,
-                version_type.workflow_status == "published",
+                binding_type.project_id == context.project_id,
+                getattr(binding_type, binding_version_column) == version_id,
+                binding_type.enabled.is_(True),
+            )
+            .with_for_update(read=True, of=binding_type)
+        )
+        binding = (await session.execute(binding_statement)).scalar_one_or_none()
+        if binding is None:
+            raise AssetResolutionUnavailable(context.request_id)
+        asset_id = uuid.UUID(str(getattr(binding, asset_column)))
+        asset_statement = (
+            select(asset_type)
+            .where(
+                asset_type.id == asset_id,
                 asset_type.scope == "system",
                 asset_type.project_id.is_(None),
                 asset_type.status != "suspended",
-                binding_type.project_id == context.project_id,
-                binding_type.enabled.is_(True),
             )
-            .with_for_update(
-                read=True,
-                of=[binding_type, asset_type, version_type],
-            )
+            .with_for_update(read=True, of=asset_type)
         )
-        row = (await session.execute(system_statement)).one_or_none()
-        if row is None:
+        system_asset = (await session.execute(asset_statement)).scalar_one_or_none()
+        if system_asset is None:
             raise AssetResolutionUnavailable(context.request_id)
-        return _ResolvedRecord(AssetScope.SYSTEM, row[0], row[1])
+        system_version = await self._lock_version(
+            session,
+            version_type,
+            parent_column,
+            asset_id,
+            version_id,
+            context.request_id,
+        )
+        self._assert_asset_state(
+            system_asset,
+            system_version,
+            context.request_id,
+        )
+        return _ResolvedRecord(AssetScope.SYSTEM, system_asset, system_version)
 
     async def _mcp_record_for_version(
         self,
@@ -545,90 +608,49 @@ class ProjectAssetResolver:
     ) -> tuple[uuid.UUID, ...]:
         if not isinstance(record.version, McpServerVersionRow):
             raise AssetResolutionUnavailable(request_id)
-        active_envelope = exists(
-            select(1).where(
-                CredentialEnvelopeRow.credential_version_id == CredentialVersionRow.id,
-                CredentialEnvelopeRow.is_active.is_(True),
+        project_id = uuid.UUID(str(record.asset.project_id)) if record.scope is AssetScope.PROJECT and record.asset.project_id is not None else None
+        try:
+            closure = await lock_mcp_credential_closure(
+                session,
+                uuid.UUID(str(record.version.id)),
+                scope=record.scope,
+                project_id=project_id,
             )
-        )
-        rows = (
-            await session.execute(
-                select(
-                    McpCredentialSlotRow,
-                    CredentialGrantRow,
-                    CredentialRow.scope,
-                    CredentialRow.project_id,
-                    CredentialRow.status,
-                    CredentialVersionRow.status,
-                    active_envelope.label("has_envelope"),
-                )
-                .outerjoin(
-                    CredentialGrantRow,
-                    and_(
-                        CredentialGrantRow.mcp_server_version_id == McpCredentialSlotRow.mcp_server_version_id,
-                        CredentialGrantRow.credential_slot_id == McpCredentialSlotRow.id,
-                        CredentialGrantRow.status == "active",
-                    ),
-                )
-                .outerjoin(
-                    CredentialVersionRow,
-                    CredentialVersionRow.id == CredentialGrantRow.credential_version_id,
-                )
-                .outerjoin(
-                    CredentialRow,
-                    CredentialRow.id == CredentialVersionRow.credential_id,
-                )
-                .where(McpCredentialSlotRow.mcp_server_version_id == record.version.id)
-                .order_by(McpCredentialSlotRow.name, McpCredentialSlotRow.id)
-            )
-        ).all()
-        grant_ids: list[uuid.UUID] = []
-        for slot, grant, scope, project_id, credential_status, version_status, has_envelope in rows:
-            if grant is None:
-                if slot.required:
-                    raise AssetResolutionUnavailable(request_id)
-                continue
-            scope_matches = scope == record.scope.value and ((record.scope is AssetScope.SYSTEM and project_id is None) or (record.scope is AssetScope.PROJECT and project_id == record.asset.project_id))
-            if not scope_matches or credential_status != "active" or version_status not in {"active", "retired"} or not has_envelope:
-                raise AssetResolutionUnavailable(request_id)
-            grant_ids.append(grant.id)
-        return tuple(grant_ids)
+        except McpCredentialClosureInvalid:
+            raise AssetResolutionUnavailable(request_id) from None
+        return closure.grant_ids
 
     async def _materialize(
         self,
         session: AsyncSession,
+        context: ProjectContext,
         resolved: ResolvedMcpSnapshot,
         request_id: str,
     ) -> MaterializedMcpSecrets:
-        identity_statement = (
-            select(McpServerRow.scope, McpServerRow.project_id)
-            .join(
-                McpServerVersionRow,
-                McpServerVersionRow.mcp_server_id == McpServerRow.id,
+        repository = BindingRepository(session)
+        await repository.lock_project(context, read=True)
+        scope = resolved.scope
+        project_id = uuid.UUID(str(context.project_id)) if scope is AssetScope.PROJECT else None
+        if scope is AssetScope.SYSTEM:
+            binding = await repository.get_binding(
+                context,
+                AssetKind.MCP,
+                resolved.asset_id,
+                for_update=True,
+                read=True,
+                required=False,
             )
-            .where(
-                McpServerRow.id == resolved.asset_id,
-                McpServerVersionRow.id == resolved.version_id,
-            )
-        )
-        identity = (await session.execute(identity_statement)).one_or_none()
-        if identity is None:
-            raise AssetResolutionUnavailable(request_id)
-        scope = AssetScope(identity.scope)
-        project_id = uuid.UUID(str(identity.project_id)) if identity.project_id is not None else None
-        if scope is AssetScope.PROJECT:
-            project_statement = (
-                select(ProjectRow.id)
-                .where(
-                    ProjectRow.id == project_id,
-                    ProjectRow.status == "active",
-                    ProjectRow.is_suspended.is_(False),
-                )
-                .with_for_update(read=True, of=ProjectRow)
-            )
-            if (await session.execute(project_statement)).scalar_one_or_none() is None:
+            if binding is None or not binding.enabled or binding.mcp_server_version_id != resolved.version_id:
                 raise AssetResolutionUnavailable(request_id)
-        asset_statement = select(McpServerRow).where(McpServerRow.id == resolved.asset_id).with_for_update(read=True, of=McpServerRow)
+        asset_filters = [
+            McpServerRow.id == resolved.asset_id,
+            McpServerRow.scope == scope.value,
+        ]
+        if scope is AssetScope.PROJECT:
+            asset_filters.append(McpServerRow.project_id == context.project_id)
+        else:
+            asset_filters.append(McpServerRow.project_id.is_(None))
+        asset_statement = select(McpServerRow).where(*asset_filters).with_for_update(read=True, of=McpServerRow)
         asset = (await session.execute(asset_statement)).scalar_one_or_none()
         version_statement = (
             select(McpServerVersionRow)
@@ -639,7 +661,7 @@ class ProjectAssetResolver:
             .with_for_update(read=True, of=McpServerVersionRow)
         )
         version = (await session.execute(version_statement)).scalar_one_or_none()
-        if asset is None or version is None or asset.scope != resolved.scope.value or scope is not resolved.scope or asset.status == "suspended" or version.workflow_status != "published" or version.payload_checksum != resolved.checksum:
+        if asset is None or version is None or asset.status == "suspended" or version.workflow_status != "published" or version.payload_checksum != resolved.checksum:
             raise AssetResolutionUnavailable(request_id)
 
         slots = tuple(
@@ -651,6 +673,12 @@ class ProjectAssetResolver:
             .scalars()
             .all()
         )
+        locked_definition = self._safe_mcp_definition(
+            McpVersionRecord(version, slots, ()),
+            request_id,
+        )
+        if locked_definition != resolved.definition:
+            raise AssetResolutionUnavailable(request_id)
         slots_by_id = {slot.id: slot for slot in slots}
         references = (
             await session.execute(
@@ -786,6 +814,7 @@ async def resolve_project_asset_snapshot(
 
 
 async def materialize_mcp_secrets(
+    context: ProjectContext,
     resolved: ResolvedMcpSnapshot,
     *,
     session_factory: Callable[[], AsyncSession],
@@ -796,4 +825,4 @@ async def materialize_mcp_secrets(
     return await ProjectAssetResolver(
         session_factory,
         keyring=keyring,
-    ).materialize_mcp_secrets(resolved)
+    ).materialize_mcp_secrets(context, resolved)

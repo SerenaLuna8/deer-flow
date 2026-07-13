@@ -4,24 +4,23 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import and_, exists, select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext
+from app.shared_assets.credential_closure import (
+    McpCredentialClosureInvalid,
+    lock_mcp_credential_closure,
+)
 from app.shared_assets.errors import AssetForbidden, AssetNotFound, AssetValidationFailed
-from app.shared_assets.models import AssetKind, AssetSelection
+from app.shared_assets.models import AssetKind, AssetScope, AssetSelection
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
     AgentVersionMcpRefRow,
     AgentVersionRow,
     AgentVersionSkillRefRow,
-    CredentialEnvelopeRow,
-    CredentialGrantRow,
-    CredentialRow,
-    CredentialVersionRow,
-    McpCredentialSlotRow,
     McpServerRow,
     McpServerVersionRow,
     ProjectSystemAgentBindingRow,
@@ -254,8 +253,30 @@ class BindingRepository:
             return
         if selection.kind is not AssetKind.AGENT:
             return
-        skill_ids = tuple((await self.session.execute(select(AgentVersionSkillRefRow.skill_version_id).where(AgentVersionSkillRefRow.agent_version_id == selection.version_id))).scalars().all())
-        mcp_ids = tuple((await self.session.execute(select(AgentVersionMcpRefRow.mcp_server_version_id).where(AgentVersionMcpRefRow.agent_version_id == selection.version_id))).scalars().all())
+        skill_ids = tuple(
+            (
+                await self.session.execute(
+                    select(AgentVersionSkillRefRow.skill_version_id)
+                    .where(AgentVersionSkillRefRow.agent_version_id == selection.version_id)
+                    .order_by(AgentVersionSkillRefRow.skill_version_id)
+                    .with_for_update(read=True, of=AgentVersionSkillRefRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        mcp_ids = tuple(
+            (
+                await self.session.execute(
+                    select(AgentVersionMcpRefRow.mcp_server_version_id)
+                    .where(AgentVersionMcpRefRow.agent_version_id == selection.version_id)
+                    .order_by(AgentVersionMcpRefRow.mcp_server_version_id)
+                    .with_for_update(read=True, of=AgentVersionMcpRefRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
         if not await self._system_versions_are_bound(
             context,
             AssetKind.SKILL,
@@ -279,35 +300,54 @@ class BindingRepository:
         if not version_ids:
             return True
         project_id = self._project_id(context)
-        binding_type, _asset_column, version_column = _BINDING_TYPES[kind]
+        binding_type, asset_column, version_column = _BINDING_TYPES[kind]
         asset_type, version_type, parent_column = _TARGET_TYPES[kind]
-        rows = tuple(
-            (
+        for version_id in sorted(
+            {uuid.UUID(str(value)) for value in version_ids},
+            key=lambda value: value.int,
+        ):
+            binding = (
                 await self.session.execute(
-                    select(getattr(binding_type, version_column))
-                    .join(
-                        version_type,
-                        version_type.id == getattr(binding_type, version_column),
-                    )
-                    .join(
-                        asset_type,
-                        asset_type.id == getattr(version_type, parent_column),
-                    )
+                    select(binding_type)
                     .where(
                         binding_type.project_id == project_id,
+                        getattr(binding_type, version_column) == version_id,
                         binding_type.enabled.is_(True),
-                        getattr(binding_type, version_column).in_(version_ids),
-                        version_type.workflow_status == "published",
+                    )
+                    .with_for_update(read=True, of=binding_type)
+                )
+            ).scalar_one_or_none()
+            if binding is None:
+                return False
+            asset_id = uuid.UUID(str(getattr(binding, asset_column)))
+            asset = (
+                await self.session.execute(
+                    select(asset_type)
+                    .where(
+                        asset_type.id == asset_id,
                         asset_type.scope == "system",
                         asset_type.project_id.is_(None),
                         asset_type.status != "suspended",
                     )
+                    .with_for_update(read=True, of=asset_type)
                 )
-            )
-            .scalars()
-            .all()
-        )
-        return set(rows) == set(version_ids)
+            ).scalar_one_or_none()
+            if asset is None:
+                return False
+            version = (
+                await self.session.execute(
+                    select(version_type)
+                    .where(
+                        version_type.id == version_id,
+                        getattr(version_type, parent_column) == asset_id,
+                        version_type.workflow_status == "published",
+                    )
+                    .with_for_update(read=True, of=version_type)
+                )
+            ).scalar_one_or_none()
+            if version is None:
+                return False
+        return True
 
     async def _validate_mcp_versions(
         self,
@@ -335,59 +375,16 @@ class BindingRepository:
         )
         if set(version_rows) != set(version_ids):
             raise AssetValidationFailed(request_id)
-        slot_rows = (
-            await self.session.execute(
-                select(
-                    McpCredentialSlotRow.id,
-                    McpCredentialSlotRow.mcp_server_version_id,
-                    McpCredentialSlotRow.required,
-                    CredentialGrantRow.id,
-                    CredentialGrantRow.status,
-                    CredentialRow.scope,
-                    CredentialRow.project_id,
-                    CredentialRow.status,
-                    CredentialVersionRow.status,
-                    exists(
-                        select(1).where(
-                            CredentialEnvelopeRow.credential_version_id == CredentialVersionRow.id,
-                            CredentialEnvelopeRow.is_active.is_(True),
-                        )
-                    ).label("has_active_envelope"),
+        for version_id in sorted(
+            {uuid.UUID(str(value)) for value in version_ids},
+            key=lambda value: value.int,
+        ):
+            try:
+                await lock_mcp_credential_closure(
+                    self.session,
+                    version_id,
+                    scope=AssetScope.SYSTEM,
+                    project_id=None,
                 )
-                .outerjoin(
-                    CredentialGrantRow,
-                    and_(
-                        CredentialGrantRow.mcp_server_version_id == McpCredentialSlotRow.mcp_server_version_id,
-                        CredentialGrantRow.credential_slot_id == McpCredentialSlotRow.id,
-                        CredentialGrantRow.status == "active",
-                    ),
-                )
-                .outerjoin(
-                    CredentialVersionRow,
-                    CredentialVersionRow.id == CredentialGrantRow.credential_version_id,
-                )
-                .outerjoin(
-                    CredentialRow,
-                    CredentialRow.id == CredentialVersionRow.credential_id,
-                )
-                .where(McpCredentialSlotRow.mcp_server_version_id.in_(version_ids))
-            )
-        ).all()
-        for (
-            _slot_id,
-            _version_id,
-            required,
-            grant_id,
-            grant_status,
-            credential_scope,
-            credential_project_id,
-            credential_status,
-            version_status,
-            has_active_envelope,
-        ) in slot_rows:
-            if grant_id is None:
-                if required:
-                    raise AssetValidationFailed(request_id)
-                continue
-            if grant_status != "active" or credential_scope != "system" or credential_project_id is not None or credential_status != "active" or version_status not in {"active", "retired"} or not has_active_envelope:
-                raise AssetValidationFailed(request_id)
+            except McpCredentialClosureInvalid:
+                raise AssetValidationFailed(request_id) from None
