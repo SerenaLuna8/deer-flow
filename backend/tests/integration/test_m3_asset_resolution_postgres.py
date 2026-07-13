@@ -886,17 +886,27 @@ async def test_project_current_pointer_and_mcp_secrets_recheck_revocation(
             {"env": {"ERP_TOKEN": "replacement-secret"}},
             expected_credential_version=1,
         )
-        retired_materialized = await resolver.materialize_mcp_secrets(admin, snapshot)
+        with pytest.raises(AssetResolutionUnavailable):
+            await resolver.materialize_mcp_secrets(admin, snapshot)
+        assert decrypt_calls == 0
+        retired_snapshot = await resolver.resolve_project_asset_snapshot(
+            admin,
+            AssetSelection(AssetKind.MCP, asset.id),
+        )
+        retired_materialized = await resolver.materialize_mcp_secrets(
+            admin,
+            retired_snapshot,
+        )
         assert retired_materialized.by_slot["primary"]["env"]["ERP_TOKEN"] == "short-lived-secret"
 
         outcomes = await asyncio.gather(
-            resolver.materialize_mcp_secrets(admin, snapshot),
+            resolver.materialize_mcp_secrets(admin, retired_snapshot),
             credentials.revoke(admin, credential.id, expected_credential_version=2),
             return_exceptions=True,
         )
         assert isinstance(outcomes[0], (MaterializedMcpSecrets, AssetResolutionUnavailable))
         with pytest.raises(AssetResolutionUnavailable):
-            await resolver.materialize_mcp_secrets(admin, snapshot)
+            await resolver.materialize_mcp_secrets(admin, retired_snapshot)
     finally:
         await engine.dispose()
 
@@ -1522,7 +1532,7 @@ async def test_agent_two_mcp_closure_uses_global_credential_lock_order_with_bulk
 
 
 @pytest.mark.asyncio
-async def test_materializer_blocks_grant_repin_after_reference_read(
+async def test_materializer_rejects_stale_repin_and_blocks_current_repin_after_reference_read(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1655,6 +1665,31 @@ async def test_materializer_blocks_grant_repin_after_reference_read(
             decrypt_calls += 1
             return original_decrypt(*args, **kwargs)
 
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """SELECT id FROM mcp_version_credential_slots
+                    WHERE mcp_server_version_id=:mcp_version AND id=:slot
+                    ORDER BY name, id
+                    FOR KEY SHARE"""
+                ),
+                {
+                    "mcp_version": approved.id,
+                    "slot": slots_by_name["primary"].id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """UPDATE credential_grants
+                    SET credential_version_id=:version
+                    WHERE id=:grant"""
+                ),
+                {
+                    "version": replacement_credential.current_version_id,
+                    "grant": grant.id,
+                },
+            )
+
         async def repin_grant() -> None:
             repin_attempted.set()
             async with engine.begin() as connection:
@@ -1662,7 +1697,7 @@ async def test_materializer_blocks_grant_repin_after_reference_read(
                     text(
                         """SELECT id FROM mcp_version_credential_slots
                         WHERE id IN (:old_slot, :new_slot)
-                        ORDER BY id
+                        ORDER BY name, id
                         FOR KEY SHARE"""
                     ),
                     {
@@ -1690,7 +1725,24 @@ async def test_materializer_blocks_grant_repin_after_reference_read(
             "decrypt_credential_payload",
             track_decrypt,
         )
-        materialize_task = asyncio.create_task(resolver.materialize_mcp_secrets(admin, snapshot))
+        with pytest.raises(AssetResolutionUnavailable):
+            await resolver.materialize_mcp_secrets(admin, snapshot)
+        assert decrypt_calls == 0
+
+        current_snapshot = await resolver.resolve_project_asset_snapshot(
+            admin,
+            AssetSelection(AssetKind.MCP, asset.id),
+        )
+        assert current_snapshot.catalog_generation > snapshot.catalog_generation
+        assert current_snapshot.credential_grant_ids == snapshot.credential_grant_ids
+        current_materialized = await resolver.materialize_mcp_secrets(
+            admin,
+            current_snapshot,
+        )
+        assert current_materialized.by_slot["primary"]["env"]["REP_TOKEN"] == "replacement-value"
+        assert decrypt_calls == 1
+
+        materialize_task = asyncio.create_task(resolver.materialize_mcp_secrets(admin, current_snapshot))
         await asyncio.wait_for(references_read.wait(), timeout=5)
         repin_task = asyncio.create_task(repin_grant())
         await asyncio.wait_for(repin_attempted.wait(), timeout=5)
@@ -1702,16 +1754,16 @@ async def test_materializer_blocks_grant_repin_after_reference_read(
             pass
         else:
             committed_while_materializer_open = True
-        assert decrypt_calls == 0
+        assert decrypt_calls == 1
         release_materializer.set()
 
         materialized, _repinned = await asyncio.wait_for(
             asyncio.gather(materialize_task, repin_task),
             timeout=10,
         )
-        assert materialized.by_slot["primary"]["env"]["REP_TOKEN"] == marker
+        assert materialized.by_slot["primary"]["env"]["REP_TOKEN"] == "replacement-value"
         assert "alternate" not in materialized.by_slot
-        assert decrypt_calls == 1
+        assert decrypt_calls == 2
         assert not committed_while_materializer_open
         assert repin_committed.is_set()
 

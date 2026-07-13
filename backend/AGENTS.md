@@ -928,6 +928,10 @@ version/slot 重建无 secret definition，与 snapshot definition 精确比较�
 checksum、UUID 或 grant。materializer 不维护第二套 closure：必须复用共享 batch 返回的 locked
 slot/grant/credential/version/envelope material，在任何 decrypt 前同时校验 snapshot grant IDs 和
 locked grant 的 `credential_slot_id`/`credential_version_id` 是否仍与最初 reference 一致，因此
+snapshot 的 `catalog_generation` 还必须是非 bool 的非负整数；materializer 在完整 closure、definition
+与 grant IDs 校验结束后、加载 keyring 或执行任何 decrypt 前最后读取当前 catalog generation，并要求
+与 snapshot 严格相等，否则以零次解密 fail closed。调用方不能用相同 grant ID 或 checksum 绕过
+generation freshness；fresh resolve 后才可 materialize 新一代闭包。
 在锁取得前已经发生的 grant 原地 re-pin 必须 fail closed；合法 re-pin mutation 必须沿用 Task 6
 全局顺序，先按稳定顺序锁 old/new slot、再更新 grant，若 resolver/materializer 已持有 slot
 `FOR UPDATE` 则等待其稳定旧 closure 完成后再提交。绕过该顺序直接裸 `UPDATE` grant 不属于应用

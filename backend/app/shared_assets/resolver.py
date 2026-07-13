@@ -170,6 +170,8 @@ class ProjectAssetResolver:
             or not isinstance(resolved.asset_id, uuid.UUID)
             or not isinstance(resolved.version_id, uuid.UUID)
             or not isinstance(resolved.checksum, str)
+            or type(resolved.catalog_generation) is not int
+            or resolved.catalog_generation < 0
             or not isinstance(resolved.definition, Mapping)
             or any(not isinstance(grant_id, uuid.UUID) for grant_id in resolved.credential_grant_ids)
             or len(set(resolved.credential_grant_ids)) != len(resolved.credential_grant_ids)
@@ -697,6 +699,9 @@ class ProjectAssetResolver:
             request_id,
         )
         if locked_definition != resolved.definition or closure.grant_ids != resolved.credential_grant_ids:
+            raise AssetResolutionUnavailable(request_id)
+        current_generation = await CatalogStateRepository(session).read_generation()
+        if current_generation != resolved.catalog_generation:
             raise AssetResolutionUnavailable(request_id)
 
         try:

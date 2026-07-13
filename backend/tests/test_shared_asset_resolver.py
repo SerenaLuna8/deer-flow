@@ -91,6 +91,32 @@ async def test_materializer_rejects_duplicate_grant_references_before_database_a
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("catalog_generation", [True, False, -1, 1.0, "1", None])
+async def test_materializer_rejects_invalid_catalog_generation_before_database_access(
+    catalog_generation: object,
+) -> None:
+    from app.shared_assets.resolver import ProjectAssetResolver
+
+    snapshot = ResolvedMcpSnapshot(
+        kind=AssetKind.MCP,
+        scope=AssetScope.PROJECT,
+        asset_id=uuid.uuid4(),
+        version_id=uuid.uuid4(),
+        checksum="e" * 64,
+        catalog_generation=catalog_generation,  # type: ignore[arg-type]
+        dependency_version_ids=(),
+        definition={"transport": "http"},
+        credential_grant_ids=(),
+    )
+
+    with pytest.raises(AssetValidationFailed):
+        await ProjectAssetResolver(_must_not_open_session).materialize_mcp_secrets(
+            _context(),
+            snapshot,
+        )
+
+
+@pytest.mark.asyncio
 async def test_materializer_rejects_untrusted_context_before_database_access() -> None:
     from app.shared_assets.resolver import ProjectAssetResolver
 
