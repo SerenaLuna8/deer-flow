@@ -650,6 +650,42 @@ async def test_gateway_lifespan_installs_and_finally_clears_catalog_provider() -
 
 
 @pytest.mark.asyncio
+async def test_gateway_keeps_catalog_provider_installed_through_runtime_drain() -> None:
+    from contextlib import asynccontextmanager
+
+    from fastapi import FastAPI
+
+    from app.gateway import app as gateway_app
+    from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
+    from deerflow.assets.catalog import get_asset_catalog_provider
+
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def draining_runtime(_app, _startup_config):
+        assert isinstance(get_asset_catalog_provider(), PostgresAssetCatalogProvider)
+        events.append("runtime_enter")
+        try:
+            yield
+        finally:
+            events.append("runtime_drain")
+            assert isinstance(get_asset_catalog_provider(), PostgresAssetCatalogProvider)
+
+    with (
+        patch.object(gateway_app, "langgraph_runtime", draining_runtime),
+        patch(
+            "deerflow.persistence.engine.get_session_factory",
+            side_effect=AssertionError("session factory resolved before runtime initialization"),
+        ),
+    ):
+        async with gateway_app._gateway_runtime_lifespan(FastAPI(), object()):
+            events.append("body")
+
+    assert events == ["runtime_enter", "body", "runtime_drain"]
+    assert get_asset_catalog_provider() is None
+
+
+@pytest.mark.asyncio
 async def test_cutover_runtime_rejects_project_assets() -> None:
     from deerflow.assets.catalog import (
         AssetCatalogAgentSnapshot,

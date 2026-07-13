@@ -71,14 +71,30 @@ async def _asset_catalog_provider_lifespan(session_factory=None) -> AsyncGenerat
     from deerflow.assets.catalog import set_asset_catalog_provider
     from deerflow.persistence.engine import get_session_factory
 
-    resolved_session_factory = session_factory or get_session_factory()
-    if resolved_session_factory is None:
-        raise RuntimeError("PostgreSQL session factory is unavailable for the asset catalog")
+    if session_factory is None:
+
+        def resolved_session_factory():
+            current_factory = get_session_factory()
+            if current_factory is None:
+                raise RuntimeError("PostgreSQL session factory is unavailable for the asset catalog")
+            return current_factory()
+
+    else:
+        resolved_session_factory = session_factory
     set_asset_catalog_provider(PostgresAssetCatalogProvider(resolved_session_factory))
     try:
         yield
     finally:
         set_asset_catalog_provider(None)
+
+
+@asynccontextmanager
+async def _gateway_runtime_lifespan(app: FastAPI, startup_config) -> AsyncGenerator[None, None]:
+    """Keep the catalog provider alive until LangGraph finishes draining runs."""
+
+    async with _asset_catalog_provider_lifespan():
+        async with langgraph_runtime(app, startup_config):
+            yield
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
@@ -246,10 +262,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Upload staging file cleanup skipped", exc_info=True)
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
-    async with (
-        langgraph_runtime(app, startup_config),
-        _asset_catalog_provider_lifespan(),
-    ):
+    async with _gateway_runtime_lifespan(app, startup_config):
         logger.info("LangGraph runtime initialised")
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
