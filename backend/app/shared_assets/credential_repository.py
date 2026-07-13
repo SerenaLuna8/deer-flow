@@ -168,8 +168,7 @@ class CredentialRepository:
         self._require_system_actor(context)
         if context.project_id is None:
             raise AssetNotFound(context.request_id)
-        if for_update:
-            await self.lock_override_project(context)
+        await self.lock_override_project(context)
         statement = select(CredentialRow).where(
             CredentialRow.id == credential_id,
             CredentialRow.scope == "project",

@@ -139,3 +139,32 @@ def test_project_binding_route_uses_typed_selection_and_forbids_extra_input() ->
     assert response.json()["request_id"] == "req-project-assets"
     assert invalid.status_code == 422
     assert invalid.json()["detail"]["code"] == "asset_validation_failed"
+
+
+def test_project_asset_session_initialization_failure_uses_asset_503_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.persistence import engine as persistence_engine
+
+    def unavailable_factory():
+        raise RuntimeError("engine is not initialized")
+
+    monkeypatch.setattr(persistence_engine, "get_session_factory", unavailable_factory)
+    monkeypatch.setattr(project_assets, "get_current_trace_id", lambda: "req-asset-db")
+    app = FastAPI()
+    app.include_router(project_assets.project_router)
+    app.dependency_overrides[project_assets.authenticated_asset_identity] = lambda: (
+        uuid.uuid4(),
+        "req-asset-db",
+    )
+
+    response = TestClient(app).get(f"/api/projects/{PROJECT_ID}/agents")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {
+            "code": "asset_storage_unavailable",
+            "message": AssetStorageUnavailable.public_message,
+            "request_id": "req-asset-db",
+        }
+    }

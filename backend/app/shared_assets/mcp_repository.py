@@ -231,7 +231,7 @@ class McpRepository:
         self._require_system_actor(context)
         if context.project_id is None:
             raise AssetNotFound(context.request_id)
-        if for_update and lock_project:
+        if lock_project:
             await self.lock_override_project(context)
         statement = select(McpServerRow).where(
             McpServerRow.id == asset_id,

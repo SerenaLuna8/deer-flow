@@ -14,7 +14,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gateway.deps import get_current_user_from_request, project_session
+from app.gateway.deps import get_current_user_from_request
 from app.projects.context import ProjectContext, resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound
 from app.shared_assets import (
@@ -265,10 +265,22 @@ async def authenticated_asset_identity(
     return uuid.UUID(str(user.id)), get_current_trace_id() or generate_trace_id()
 
 
+async def asset_session():
+    from deerflow.persistence.engine import get_session_factory as resolve_session_factory
+
+    request_id = get_current_trace_id() or generate_trace_id()
+    try:
+        factory = resolve_session_factory()
+    except RuntimeError:
+        raise_asset_domain(AssetStorageUnavailable(request_id))
+    async with factory() as session:
+        yield session
+
+
 async def project_asset_context(
     project_id: uuid.UUID,
     identity: Annotated[tuple[uuid.UUID, str], Depends(authenticated_asset_identity)],
-    session: Annotated[AsyncSession, Depends(project_session)],
+    session: Annotated[AsyncSession, Depends(asset_session)],
 ) -> ProjectContext:
     user_id, request_id = identity
     try:

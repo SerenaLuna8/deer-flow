@@ -4,6 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,7 +17,9 @@ from app.projects.errors import ProjectNotFound
 from app.projects.repository import ProjectRepository
 from app.shared_assets.agent_service import AgentAssetView, AgentService, CreateAgent
 from app.shared_assets.contexts import SystemAssetGovernanceContext
-from app.shared_assets.credential_service import CredentialView
+from app.shared_assets.credential_service import CreateCredential, CredentialService, CredentialView
+from app.shared_assets.keyring import CredentialKeyring
+from app.shared_assets.mcp_service import CreateMcpServer, McpService
 from app.shared_assets.models import AgentPayload, AssetScope
 
 PROJECT_ID = uuid.uuid4()
@@ -187,6 +190,101 @@ async def test_system_admin_without_membership_governs_project_agent_in_postgres
             membership_count = await connection.scalar(
                 text("SELECT count(*) FROM project_memberships WHERE project_id=:project_id"),
                 {"project_id": PROJECT_ID},
+            )
+        assert membership_count == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_override_mcp_and_credential_get_fail_closed_when_project_is_unavailable(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    other_project_id = uuid.uuid4()
+    mcp_service = McpService(factory)
+    credential_service = CredentialService(
+        factory,
+        keyring=CredentialKeyring("router-test-key", {"router-test-key": b"r" * 32}),
+    )
+    actor = SystemAssetGovernanceContext(ADMIN_ID, "req-override-get", PROJECT_ID)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                    (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,:email,'system_admin',:now,false,0)"""
+                ),
+                {"id": str(ADMIN_ID), "email": "override-get@example.com", "now": NOW},
+            )
+            for project_id, slug in (
+                (PROJECT_ID, "override-get"),
+                (other_project_id, "override-get-other"),
+            ):
+                await connection.execute(
+                    text(
+                        """INSERT INTO projects
+                        (id,slug,display_name,description,icon,created_by_user_id)
+                        VALUES (:id,:slug,:name,'','folder',:user_id)"""
+                    ),
+                    {
+                        "id": project_id,
+                        "slug": slug,
+                        "name": slug,
+                        "user_id": str(ADMIN_ID),
+                    },
+                )
+
+        mcp = await mcp_service.create_asset(actor, CreateMcpServer("override-mcp", "Override MCP"))
+        credential = await credential_service.create(
+            actor,
+            CreateCredential("override-credential", "Override credential", "token"),
+            {"env": {"TOKEN": "never-return"}},
+        )
+
+        app = FastAPI()
+        app.include_router(admin_assets.admin_project_router)
+
+        async def override_actor(project_id: uuid.UUID):
+            return SystemAssetGovernanceContext(ADMIN_ID, "req-override-get", project_id)
+
+        app.dependency_overrides[admin_assets._admin_project_actor] = override_actor
+        app.dependency_overrides[admin_assets.get_mcp_service] = lambda: mcp_service
+        app.dependency_overrides[admin_assets.get_credential_service] = lambda: credential_service
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            mcp_path = f"/api/admin/projects/{PROJECT_ID}/assets/mcp-servers/{mcp.id}"
+            credential_path = f"/api/admin/projects/{PROJECT_ID}/assets/credentials/{credential.id}"
+            assert (await client.get(mcp_path)).status_code == 200
+            assert (await client.get(credential_path)).status_code == 200
+
+            cross_mcp = await client.get(f"/api/admin/projects/{other_project_id}/assets/mcp-servers/{mcp.id}")
+            cross_credential = await client.get(f"/api/admin/projects/{other_project_id}/assets/credentials/{credential.id}")
+            assert cross_mcp.status_code == cross_credential.status_code == 404
+
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("UPDATE projects SET is_suspended=true WHERE id=:id"),
+                    {"id": PROJECT_ID},
+                )
+            assert (await client.get(mcp_path)).status_code == 404
+            assert (await client.get(credential_path)).status_code == 404
+
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("UPDATE projects SET is_suspended=false,status='pending_deletion' WHERE id=:id"),
+                    {"id": PROJECT_ID},
+                )
+            assert (await client.get(mcp_path)).status_code == 404
+            assert (await client.get(credential_path)).status_code == 404
+
+        async with engine.connect() as connection:
+            membership_count = await connection.scalar(
+                text("SELECT count(*) FROM project_memberships"),
             )
         assert membership_count == 0
     finally:
