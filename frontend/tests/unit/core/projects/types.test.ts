@@ -57,6 +57,7 @@ describe("project contracts", () => {
       "shared_assets.read",
       "shared_assets.execute",
       "shared_assets.edit",
+      "shared_assets.manage_bindings",
       "mcp.credentials.approve",
       "private_work.create",
       "private_work.read_own",
