@@ -282,7 +282,7 @@ class McpDefinitionSlotResponse(_StrictModel):
 
 class McpDefinitionResponse(_StrictModel):
     description: str
-    transport: Literal["stdio", "http"]
+    transport: Literal["stdio", "sse", "http", "streamable_http"]
     command: str | None
     args: list[str]
     url: str | None

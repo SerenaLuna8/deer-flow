@@ -7,11 +7,12 @@ from base64 import b64encode
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.projects.context import ProjectContext, resolve_project_context
 from app.shared_assets.errors import AssetNotFound
+from deerflow.persistence.shared_assets import CredentialRow
 
 
 async def _seed_project(
@@ -110,6 +111,31 @@ async def _create_versioned_asset(kind: str, factory, context: ProjectContext):
     return service, asset.id
 
 
+async def _create_empty_asset(kind: str, factory, context: ProjectContext):
+    if kind == "mcp":
+        module = importlib.import_module("app.shared_assets.mcp_service")
+        service = module.McpService(factory)
+        asset = await service.create_asset(
+            context,
+            module.CreateMcpServer("empty-history-mcp", "Empty History MCP"),
+        )
+        return service, asset.id
+
+    module = importlib.import_module("app.shared_assets.credential_service")
+    service = module.CredentialService(factory)
+    row = CredentialRow(
+        scope="project",
+        project_id=context.project_id,
+        name="empty-history-credential",
+        display_name="Empty History Credential",
+        credential_type="token",
+        created_by_user_id=str(context.user_id),
+    )
+    async with factory() as session, session.begin():
+        session.add(row)
+    return service, row.id
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["mcp", "credential"])
 async def test_history_hides_cross_project_assets(
@@ -128,6 +154,41 @@ async def test_history_hides_cross_project_assets(
         with pytest.raises(AssetNotFound):
             await service.get_version_history(outsider, asset_id)
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["mcp", "credential"])
+async def test_authorized_parent_without_versions_returns_empty_history(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    _configure_keyring(monkeypatch)
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    context = await _seed_project(engine, factory, label=f"empty-history-{kind}")
+    statements: list[str] = []
+
+    def record_statement(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append(statement)
+
+    try:
+        service, asset_id = await _create_empty_asset(kind, factory, context)
+        event.listen(engine.sync_engine, "before_cursor_execute", record_statement)
+
+        assert await service.get_version_history(context, asset_id) == ()
+        assert len(statements) == 1
+        assert "LEFT OUTER JOIN" in statements[0].upper()
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_statement)
         await engine.dispose()
 
 
@@ -159,35 +220,16 @@ async def test_history_rechecks_project_context_in_scoped_version_query(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     context = await _seed_project(engine, factory, label=f"history-{kind}-expiry")
     service, asset_id = await _create_versioned_asset(kind, factory, context)
-    if kind == "mcp":
-        repository_module = importlib.import_module("app.shared_assets.mcp_repository")
-        repository_type = repository_module.McpRepository
-        method_name = "get_project_asset"
-    else:
-        repository_module = importlib.import_module("app.shared_assets.credential_repository")
-        repository_type = repository_module.CredentialRepository
-        method_name = "get_project_credential"
-    original = getattr(repository_type, method_name)
-    expired = False
-
-    async def expire_after_asset_check(repository, actor, requested_asset_id, **kwargs):
-        nonlocal expired
-        row = await original(repository, actor, requested_asset_id, **kwargs)
-        if not expired:
-            expired = True
-            async with engine.begin() as connection:
-                await connection.execute(
-                    text(expiry_sql),
-                    {
-                        "membership_id": context.membership_id,
-                        "project_id": context.project_id,
-                    },
-                )
-        return row
-
-    monkeypatch.setattr(repository_type, method_name, expire_after_asset_check)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(expiry_sql),
+            {
+                "membership_id": context.membership_id,
+                "project_id": context.project_id,
+            },
+        )
     try:
-        assert await service.get_version_history(context, asset_id) == ()
-        assert expired is True
+        with pytest.raises(AssetNotFound):
+            await service.get_version_history(context, asset_id)
     finally:
         await engine.dispose()

@@ -14,12 +14,23 @@ export const ASSET_WORKFLOW_STATUSES = [
   "published",
   "rejected",
 ] as const;
+export const SKILL_SCAN_DECISIONS = ["allow", "warn", "block"] as const;
+export const MCP_TRANSPORTS = [
+  "stdio",
+  "sse",
+  "http",
+  "streamable_http",
+] as const;
+export const CREDENTIAL_GRANT_STATUSES = ["active", "revoked"] as const;
 
 export const assetKindSchema = z.enum(ASSET_KINDS);
 export const assetListKindSchema = z.enum(ASSET_LIST_KINDS);
 export const assetScopeSchema = z.enum(["system", "project"]);
 export const assetStatusSchema = z.enum(ASSET_STATUSES);
 export const assetWorkflowStatusSchema = z.enum(ASSET_WORKFLOW_STATUSES);
+export const skillScanDecisionSchema = z.enum(SKILL_SCAN_DECISIONS);
+export const mcpTransportSchema = z.enum(MCP_TRANSPORTS);
+export const credentialGrantStatusSchema = z.enum(CREDENTIAL_GRANT_STATUSES);
 export const assetIdSchema = z.string().uuid();
 export const assetCapabilitiesSchema = z.array(z.string().min(1));
 
@@ -139,7 +150,7 @@ export const skillVersionSchema = z
     frontmatter: safeJsonObjectSchema,
     compatibility: z.string().nullable(),
     secret_requirements: z.array(skillSecretRequirementSchema),
-    scan_decision: z.string().min(1),
+    scan_decision: skillScanDecisionSchema,
     scan_rule_ids: z.array(z.string()),
     scan_summary: safeJsonObjectSchema,
     file_views: z.array(skillFileViewSchema),
@@ -163,7 +174,7 @@ const mcpDefinitionSlotSchema = z
   .object({
     name: z.string().min(1),
     purpose: z.string(),
-    payload_schema: safeJsonObjectSchema,
+    payload_schema: stringListMapSchema,
     required: z.boolean(),
   })
   .strict();
@@ -173,7 +184,7 @@ const credentialGrantSchema = z
     mcp_server_version_id: assetIdSchema,
     credential_slot_id: assetIdSchema,
     credential_version_id: assetIdSchema,
-    status: z.string().min(1),
+    status: credentialGrantStatusSchema,
     version: z.number().int().positive(),
     created_by_user_id: z.string().min(1),
     created_at: z.string().datetime({ offset: true }),
@@ -182,7 +193,7 @@ const credentialGrantSchema = z
 const mcpDefinitionSchema = z
   .object({
     description: z.string(),
-    transport: z.string().min(1),
+    transport: mcpTransportSchema,
     command: z.string().nullable(),
     args: z.array(z.string()),
     url: z.string().nullable(),
@@ -388,7 +399,7 @@ export const skillVersionInputSchema = z
 export const mcpVersionInputSchema = z
   .object({
     description: z.string().default(""),
-    transport: z.string().min(1).default("stdio"),
+    transport: mcpTransportSchema.default("stdio"),
     command: z.string().nullable().default(null),
     args: z.array(z.string()).default([]),
     url: z.string().nullable().default(null),

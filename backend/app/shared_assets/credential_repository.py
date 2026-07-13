@@ -249,19 +249,21 @@ class CredentialRepository:
         credential_id: uuid.UUID,
     ) -> tuple[CredentialVersionRow, ...]:
         self._require_project_actor(context)
-        await self.get_project_credential(context, credential_id)
         statement = (
-            select(CredentialVersionRow)
-            .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
+            select(CredentialRow.id, CredentialVersionRow)
+            .outerjoin(
+                CredentialVersionRow,
+                CredentialVersionRow.credential_id == CredentialRow.id,
+            )
             .where(
-                CredentialVersionRow.credential_id == credential_id,
+                CredentialRow.id == credential_id,
                 CredentialRow.scope == "project",
                 CredentialRow.project_id == context.project_id,
                 self._project_context_exists(context),
             )
             .order_by(CredentialVersionRow.version_number.desc())
         )
-        return await self._version_history(statement)
+        return await self._version_history(statement, context.request_id)
 
     async def get_override_version_history(
         self,
@@ -269,18 +271,29 @@ class CredentialRepository:
         credential_id: uuid.UUID,
     ) -> tuple[CredentialVersionRow, ...]:
         self._require_system_actor(context)
-        await self.get_override_credential(context, credential_id)
+        if context.project_id is None:
+            raise AssetNotFound(context.request_id)
         statement = (
-            select(CredentialVersionRow)
-            .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
+            select(CredentialRow.id, CredentialVersionRow)
+            .outerjoin(
+                CredentialVersionRow,
+                CredentialVersionRow.credential_id == CredentialRow.id,
+            )
             .where(
-                CredentialVersionRow.credential_id == credential_id,
+                CredentialRow.id == credential_id,
                 CredentialRow.scope == "project",
                 CredentialRow.project_id == context.project_id,
+                exists(
+                    select(1).where(
+                        ProjectRow.id == context.project_id,
+                        ProjectRow.status == "active",
+                        ProjectRow.is_suspended.is_(False),
+                    )
+                ),
             )
             .order_by(CredentialVersionRow.version_number.desc())
         )
-        return await self._version_history(statement)
+        return await self._version_history(statement, context.request_id)
 
     async def get_system_version_history(
         self,
@@ -288,24 +301,32 @@ class CredentialRepository:
         credential_id: uuid.UUID,
     ) -> tuple[CredentialVersionRow, ...]:
         self._require_system_actor(context)
-        await self.get_system_credential(context, credential_id)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         statement = (
-            select(CredentialVersionRow)
-            .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
+            select(CredentialRow.id, CredentialVersionRow)
+            .outerjoin(
+                CredentialVersionRow,
+                CredentialVersionRow.credential_id == CredentialRow.id,
+            )
             .where(
-                CredentialVersionRow.credential_id == credential_id,
+                CredentialRow.id == credential_id,
                 CredentialRow.scope == "system",
                 CredentialRow.project_id.is_(None),
             )
             .order_by(CredentialVersionRow.version_number.desc())
         )
-        return await self._version_history(statement)
+        return await self._version_history(statement, context.request_id)
 
     async def _version_history(
         self,
         statement,
+        request_id: str,
     ) -> tuple[CredentialVersionRow, ...]:
-        return tuple((await self.session.execute(statement)).scalars().all())
+        scoped_rows = tuple((await self.session.execute(statement)).all())
+        if not scoped_rows:
+            raise AssetNotFound(request_id)
+        return tuple(row[1] for row in scoped_rows if row[1] is not None)
 
     async def lock_project_credential_version(
         self,

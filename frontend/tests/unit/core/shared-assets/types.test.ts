@@ -8,8 +8,10 @@ import {
   createCredentialInputSchema,
   credentialVersionSchema,
   credentialMetadataSchema,
+  mcpVersionSchema,
   mcpVersionInputSchema,
   skillVersionInputSchema,
+  skillVersionSchema,
   systemBindingSchema,
   versionHistoryResponseSchema,
   versionResponseSchema,
@@ -167,6 +169,146 @@ describe("shared asset contracts", () => {
     });
     expect(input.payload.env?.TOKEN).toBe("write-only");
     expect(input).not.toHaveProperty("ciphertext");
+  });
+
+  test("rejects invalid Skill and MCP wire enums and definition slot schemas", () => {
+    const skillVersion = {
+      id: VERSION_ID,
+      skill_id: ASSET_ID,
+      version_number: 1,
+      workflow_status: "published",
+      description: "Skill",
+      frontmatter: {},
+      compatibility: null,
+      secret_requirements: [],
+      scan_decision: "allow",
+      scan_rule_ids: [],
+      scan_summary: {},
+      file_views: [],
+      supersedes_version_id: null,
+      payload_checksum: "a".repeat(64),
+      created_by_user_id: "user-1",
+      created_at: "2026-07-14T00:00:00Z",
+    };
+    expect(skillVersionSchema.parse(skillVersion).scan_decision).toBe("allow");
+    expect(() =>
+      skillVersionSchema.parse({ ...skillVersion, scan_decision: "permit" }),
+    ).toThrow();
+
+    const mcpVersion = {
+      id: VERSION_ID,
+      mcp_server_id: ASSET_ID,
+      version_number: 1,
+      workflow_status: "published",
+      definition: {
+        description: "MCP",
+        transport: "streamable_http",
+        command: null,
+        args: [],
+        url: "https://mcp.example.test",
+        env: {},
+        headers: {},
+        oauth: {},
+        routing: {},
+        tool_overrides: {},
+        timeout_seconds: 30,
+        credential_slots: [
+          {
+            name: "primary",
+            purpose: "Authentication",
+            payload_schema: { env: ["TOKEN"] },
+            required: true,
+          },
+        ],
+      },
+      credential_slots: [],
+      credential_grants: [
+        {
+          id: "44444444-4444-4444-8444-444444444444",
+          mcp_server_version_id: VERSION_ID,
+          credential_slot_id: "55555555-5555-4555-8555-555555555555",
+          credential_version_id: "66666666-6666-4666-8666-666666666666",
+          status: "active",
+          version: 1,
+          created_by_user_id: "user-1",
+          created_at: "2026-07-14T00:00:00Z",
+        },
+      ],
+      supersedes_version_id: null,
+      payload_checksum: "b".repeat(64),
+      submitted_at: null,
+      reviewed_at: null,
+      reviewed_by_user_id: null,
+      created_by_user_id: "user-1",
+      created_at: "2026-07-14T00:00:00Z",
+    };
+    expect(mcpVersionSchema.parse(mcpVersion).definition.transport).toBe(
+      "streamable_http",
+    );
+    expect(() =>
+      mcpVersionSchema.parse({
+        ...mcpVersion,
+        definition: { ...mcpVersion.definition, transport: "websocket" },
+      }),
+    ).toThrow();
+    expect(() =>
+      mcpVersionSchema.parse({
+        ...mcpVersion,
+        definition: {
+          ...mcpVersion.definition,
+          credential_slots: [
+            {
+              ...mcpVersion.definition.credential_slots[0],
+              payload_schema: { env: "TOKEN" },
+            },
+          ],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      mcpVersionSchema.parse({
+        ...mcpVersion,
+        credential_grants: [
+          { ...mcpVersion.credential_grants[0], status: "pending" },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  test.each(["stdio", "sse", "http", "streamable_http"])(
+    "accepts supported MCP authoring transport %s",
+    (transport) => {
+      expect(
+        mcpVersionInputSchema.parse({
+          transport,
+          credential_slots: [
+            {
+              name: "primary",
+              payload_schema: { env: ["TOKEN"] },
+            },
+          ],
+          expected_asset_version: 1,
+        }).transport,
+      ).toBe(transport);
+    },
+  );
+
+  test("rejects unsupported MCP authoring transport and malformed slot schema", () => {
+    expect(() =>
+      mcpVersionInputSchema.parse({
+        transport: "websocket",
+        expected_asset_version: 1,
+      }),
+    ).toThrow();
+    expect(() =>
+      mcpVersionInputSchema.parse({
+        transport: "http",
+        credential_slots: [
+          { name: "primary", payload_schema: { env: "TOKEN" } },
+        ],
+        expected_asset_version: 1,
+      }),
+    ).toThrow();
   });
 
   test("strictly parses system binding metadata", () => {

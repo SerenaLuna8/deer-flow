@@ -442,19 +442,21 @@ class McpRepository:
         asset_id: uuid.UUID,
     ) -> tuple[McpVersionRecord, ...]:
         self._require_project_actor(context)
-        await self.get_project_asset(context, asset_id)
         statement = (
-            select(McpServerVersionRow)
-            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            select(McpServerRow.id, McpServerVersionRow)
+            .outerjoin(
+                McpServerVersionRow,
+                McpServerVersionRow.mcp_server_id == McpServerRow.id,
+            )
             .where(
-                McpServerVersionRow.mcp_server_id == asset_id,
+                McpServerRow.id == asset_id,
                 McpServerRow.scope == "project",
                 McpServerRow.project_id == context.project_id,
                 self._project_context_exists(context),
             )
             .order_by(McpServerVersionRow.version_number.desc())
         )
-        return await self._history(statement)
+        return await self._history(statement, context.request_id)
 
     async def get_override_version_history(
         self,
@@ -462,18 +464,29 @@ class McpRepository:
         asset_id: uuid.UUID,
     ) -> tuple[McpVersionRecord, ...]:
         self._require_system_actor(context)
-        await self.get_override_asset(context, asset_id)
+        if context.project_id is None:
+            raise AssetNotFound(context.request_id)
         statement = (
-            select(McpServerVersionRow)
-            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            select(McpServerRow.id, McpServerVersionRow)
+            .outerjoin(
+                McpServerVersionRow,
+                McpServerVersionRow.mcp_server_id == McpServerRow.id,
+            )
             .where(
-                McpServerVersionRow.mcp_server_id == asset_id,
+                McpServerRow.id == asset_id,
                 McpServerRow.scope == "project",
                 McpServerRow.project_id == context.project_id,
+                exists(
+                    select(1).where(
+                        ProjectRow.id == context.project_id,
+                        ProjectRow.status == "active",
+                        ProjectRow.is_suspended.is_(False),
+                    )
+                ),
             )
             .order_by(McpServerVersionRow.version_number.desc())
         )
-        return await self._history(statement)
+        return await self._history(statement, context.request_id)
 
     async def get_system_version_history(
         self,
@@ -481,21 +494,32 @@ class McpRepository:
         asset_id: uuid.UUID,
     ) -> tuple[McpVersionRecord, ...]:
         self._require_system_actor(context)
-        await self.get_system_asset(context, asset_id)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
         statement = (
-            select(McpServerVersionRow)
-            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            select(McpServerRow.id, McpServerVersionRow)
+            .outerjoin(
+                McpServerVersionRow,
+                McpServerVersionRow.mcp_server_id == McpServerRow.id,
+            )
             .where(
-                McpServerVersionRow.mcp_server_id == asset_id,
+                McpServerRow.id == asset_id,
                 McpServerRow.scope == "system",
                 McpServerRow.project_id.is_(None),
             )
             .order_by(McpServerVersionRow.version_number.desc())
         )
-        return await self._history(statement)
+        return await self._history(statement, context.request_id)
 
-    async def _history(self, statement) -> tuple[McpVersionRecord, ...]:
-        rows = tuple((await self.session.execute(statement)).scalars().all())
+    async def _history(
+        self,
+        statement,
+        request_id: str,
+    ) -> tuple[McpVersionRecord, ...]:
+        scoped_rows = tuple((await self.session.execute(statement)).all())
+        if not scoped_rows:
+            raise AssetNotFound(request_id)
+        rows = tuple(row[1] for row in scoped_rows if row[1] is not None)
         records = []
         for row in rows:
             records.append(await self._record(row, for_update=False))

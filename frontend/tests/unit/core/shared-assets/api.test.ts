@@ -331,7 +331,7 @@ describe("shared asset api", () => {
     };
     const mcpInput = {
       description: "GitHub",
-      transport: "stdio",
+      transport: "stdio" as const,
       command: "github-mcp",
       args: [],
       url: null,
