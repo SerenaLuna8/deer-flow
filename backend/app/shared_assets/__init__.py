@@ -1,5 +1,12 @@
 from app.shared_assets.agent_service import AgentAssetView, AgentService, AgentVersionView, CreateAgent
 from app.shared_assets.contexts import SystemAssetGovernanceContext, resolve_asset_actor
+from app.shared_assets.credential_service import (
+    CreateCredential,
+    CredentialGrantView,
+    CredentialService,
+    CredentialVersionView,
+    CredentialView,
+)
 from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
@@ -9,6 +16,15 @@ from app.shared_assets.errors import (
     SharedAssetError,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
+from app.shared_assets.mcp_service import (
+    CreateMcpServer,
+    McpAssetView,
+    McpCredentialSlot,
+    McpCredentialSlotView,
+    McpDefinition,
+    McpService,
+    McpVersionView,
+)
 from app.shared_assets.models import (
     AgentPayload,
     AssetKind,
@@ -45,7 +61,19 @@ __all__ = [
     "AssetStorageUnavailable",
     "AssetValidationFailed",
     "CreateAgent",
+    "CreateCredential",
+    "CreateMcpServer",
     "CreateSkill",
+    "CredentialGrantView",
+    "CredentialService",
+    "CredentialVersionView",
+    "CredentialView",
+    "McpAssetView",
+    "McpCredentialSlot",
+    "McpCredentialSlotView",
+    "McpDefinition",
+    "McpService",
+    "McpVersionView",
     "ResolvedAgentSnapshot",
     "ResolvedAssetSnapshot",
     "ResolvedMcpSnapshot",

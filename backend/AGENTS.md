@@ -845,6 +845,27 @@ key。所有持有 key、nonce 或 ciphertext 的 dataclass repr 必须隐藏对
 API 均不得输出 keyring JSON、plaintext、ciphertext 或 nonce。Task 3 仅提供内存 crypto
 primitive；envelope 持久化、service、grant resolver 与 rotation CLI 由后续任务负责。
 
+**M3 MCP 与 Credential domain**：`app.shared_assets.mcp_repository`、
+`credential_repository` 的项目公开方法只接受可信 `ProjectContext`，并在每次查询中同时固定
+active project、membership version、scope 与 project ID；`SystemAssetGovernanceContext`
+分别承载 system 治理或显式 project override，不能伪装成项目成员。MCP version 只保存
+无 secret 的 transport、command、args、URL、非敏感 env/header、OAuth 协议元数据、routing、
+tool override 与 credential slot schema；env/header/OAuth 及嵌套配置中识别出的敏感字段在打开
+session 前稳定拒绝，绝不写回全局 `extensions_config.json`。项目无 slot MCP 允许 Admin/Editor
+直接发布；credential MCP 必须先进入 `pending_approval`，再由项目 Admin 或 system override
+批准；system MCP 可由 system admin 从 draft 直接完成同一事务。审批锁序固定为
+`project -> MCP asset -> MCP version/slot -> credential -> credential version -> grant`，scope、
+project、slot schema、active 状态与 optimistic asset version 任一不符都以安全的
+404/409/422 返回。
+
+`CredentialService.create/replace/revoke` 通过 Task 3 AES-GCM primitive 保存 active envelope；
+replace 锁定逻辑 credential 后创建新的语义 version 与 envelope、retire 旧 version 并移动
+current pointer，但不移动既有 grant。retired version 不能创建新 grant，既有 grant 在逻辑
+credential 仍 active 时继续有效；revoke 不可逆，并把逻辑 credential 与所有 semantic
+version 置为 revoked，使旧 grant 立即不可用。所有 credential/MCP API view 均为 frozen
+安全视图，不包含 plaintext、ciphertext、nonce、key ID 或 secret hash；已知唯一竞争映射为
+409，未知数据库或 crypto/keyring 故障只返回无底层细节的 503。
+
 **Platform and project roles**: `users.system_role` is restricted to
 `system_admin|user`; the legacy platform value `admin` is converted by revision 0005.
 Project authorization is independent and lives in `project_memberships.role` as
