@@ -323,6 +323,10 @@ binding。`system_admin` 使用 `/api/admin/assets/*` 管理系统资产，或�
 Credential API 只返回名称、类型、状态、版本和时间等脱敏元数据。plaintext、ciphertext、nonce、
 key ID、storage locator 与 secret hash 永远不会出现在 HTTP 响应中。
 
+完成 catalog cutover 后，系统 Agent、Skill 与 MCP 的运行时和旧版 GET 接口只读取 PostgreSQL
+已发布版本；旧文件即使仍存在也不会回退使用。旧版文件写接口统一返回
+`409 ASSET_CATALOG_CUTOVER`，请改用 `/admin/assets` 管理系统资产。
+
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 > [!IMPORTANT]

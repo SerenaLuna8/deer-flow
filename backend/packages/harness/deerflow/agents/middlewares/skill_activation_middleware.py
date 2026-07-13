@@ -24,7 +24,7 @@ from deerflow.runtime.secret_context import (
     extract_request_secrets,
 )
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
-from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
+from deerflow.skills.storage import get_catalog_skills_if_cutover, get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
 from deerflow.utils.messages import get_original_user_content_text, is_real_user_message
@@ -125,7 +125,9 @@ class SkillActivationMiddleware(AgentMiddleware):
             return None
 
         storage = self._storage()
-        skills = storage.load_skills(enabled_only=False)
+        skills = get_catalog_skills_if_cutover(self._app_config)
+        if skills is None:
+            skills = storage.load_skills(enabled_only=False)
         skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
         if skill is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not installed.")
@@ -393,7 +395,9 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         """
         try:
             storage = self._storage()
-            skills = storage.load_skills(enabled_only=False)
+            skills = get_catalog_skills_if_cutover(self._app_config)
+            if skills is None:
+                skills = storage.load_skills(enabled_only=False)
             container_root = storage.get_container_root()
         except Exception:
             logger.exception("Failed to load skills while resolving secret bindings")

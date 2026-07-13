@@ -6,13 +6,19 @@ Mirrors the pattern used by ``deerflow/sandbox/sandbox_provider.py``.
 from __future__ import annotations
 
 import logging
+import os
+import re
+import shutil
+import tempfile
 import threading
+import uuid
 from collections import OrderedDict
+from pathlib import Path, PurePosixPath
 
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
-from deerflow.skills.types import SkillCategory
+from deerflow.skills.types import SecretRequirement, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +37,130 @@ _MAX_USER_SCOPED_STORAGES = 64
 # ``_MAX_USER_SCOPED_STORAGES``.
 _user_scoped_storages: OrderedDict[str, UserScopedSkillStorage] = OrderedDict()
 _user_scoped_storage_lock = threading.Lock()
+_catalog_skill_materialization_lock = threading.Lock()
+_CATALOG_SKILL_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+
+
+def _catalog_skill_path(path: str):
+    from deerflow.assets.catalog import AssetCatalogUnavailable
+
+    relative = PurePosixPath(path)
+    if not isinstance(path, str) or not path or "\\" in path or relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise AssetCatalogUnavailable("system skill snapshot path is invalid")
+    return relative
+
+
+def _reject_catalog_symlink(path: Path) -> None:
+    from deerflow.assets.catalog import AssetCatalogUnavailable
+
+    if path.is_symlink():
+        raise AssetCatalogUnavailable("system skill materialization root is invalid")
+
+
+def get_catalog_skills_if_cutover(app_config=None) -> list[Skill] | None:
+    """Return PostgreSQL system skills after cutover, otherwise ``None``.
+
+    The adapter constructs only immutable skill metadata. Snapshot bytes stay
+    inside the provider result and are never read from a legacy file path.
+    """
+
+    from deerflow.assets.catalog import (
+        AssetCatalogSkillSnapshot,
+        AssetCatalogUnavailable,
+        get_asset_catalog_provider,
+        require_system_asset,
+        run_asset_catalog_lookup,
+    )
+
+    provider = get_asset_catalog_provider()
+    if provider is None or not run_asset_catalog_lookup(provider, "is_cutover_enabled"):
+        return None
+    snapshots = run_asset_catalog_lookup(provider, "list_system_skills")
+    if not isinstance(snapshots, tuple):
+        raise AssetCatalogUnavailable("system skill catalog is invalid")
+    if not snapshots:
+        raise AssetCatalogUnavailable("published system skill catalog is empty")
+    for snapshot in snapshots:
+        if not isinstance(snapshot, AssetCatalogSkillSnapshot):
+            raise AssetCatalogUnavailable("system skill snapshot is invalid")
+        require_system_asset(snapshot)
+        if not _CATALOG_SKILL_SLUG.fullmatch(snapshot.slug):
+            raise AssetCatalogUnavailable("system skill snapshot slug is invalid")
+        if not snapshot.files or not any(file.path == "SKILL.md" for file in snapshot.files):
+            raise AssetCatalogUnavailable("system skill snapshot is invalid")
+        for file in snapshot.files:
+            _catalog_skill_path(file.path)
+    generations = {snapshot.generation for snapshot in snapshots if isinstance(snapshot, AssetCatalogSkillSnapshot)}
+    if len(generations) != 1:
+        raise AssetCatalogUnavailable("system skill catalog generation is invalid")
+    generation = generations.pop()
+    if type(generation) is not int or generation < 0:
+        raise AssetCatalogUnavailable("system skill catalog generation is invalid")
+
+    if app_config is None:
+        from deerflow.config import get_app_config
+
+        app_config = get_app_config()
+    skills_root = app_config.skills.get_skills_path()
+    custom_root = skills_root / "custom"
+    managed_root = custom_root / ".asset-catalog"
+    generation_root = managed_root / str(generation)
+
+    with _catalog_skill_materialization_lock:
+        _reject_catalog_symlink(skills_root)
+        _reject_catalog_symlink(custom_root)
+        _reject_catalog_symlink(managed_root)
+        custom_root.mkdir(parents=True, exist_ok=True)
+        managed_root.mkdir(exist_ok=True)
+        staging_root = Path(tempfile.mkdtemp(prefix=f".{generation}.staging-", dir=managed_root))
+        try:
+            for snapshot in snapshots:
+                skill_root = staging_root / snapshot.slug
+                for file in snapshot.files:
+                    relative = _catalog_skill_path(file.path)
+                    target = skill_root.joinpath(*relative.parts)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(file.content)
+            previous_root = managed_root / f".{generation}.previous-{uuid.uuid4().hex}"
+            if generation_root.exists():
+                _reject_catalog_symlink(generation_root)
+                os.replace(generation_root, previous_root)
+            os.replace(staging_root, generation_root)
+            if previous_root.exists():
+                shutil.rmtree(previous_root)
+            for child in managed_root.iterdir():
+                if child != generation_root:
+                    _reject_catalog_symlink(child)
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+        finally:
+            if staging_root.exists():
+                shutil.rmtree(staging_root)
+
+    skills: list[Skill] = []
+    for snapshot in snapshots:
+        if not isinstance(snapshot, AssetCatalogSkillSnapshot):
+            raise AssetCatalogUnavailable("system skill snapshot is invalid")
+        require_system_asset(snapshot)
+        if not any(file.path == "SKILL.md" for file in snapshot.files):
+            raise AssetCatalogUnavailable("system skill snapshot is invalid")
+        skill_dir = generation_root / snapshot.slug
+        skills.append(
+            Skill(
+                name=snapshot.slug,
+                description=snapshot.description,
+                license=None,
+                skill_dir=skill_dir,
+                skill_file=skill_dir / "SKILL.md",
+                relative_path=Path(".asset-catalog") / str(generation) / snapshot.slug,
+                category=SkillCategory.PUBLIC,
+                enabled=True,
+                required_secrets=tuple(SecretRequirement(name=name) for name in snapshot.secret_requirements),
+            )
+        )
+    return skills
 
 
 def get_or_new_skill_storage(**kwargs) -> SkillStorage:
@@ -197,6 +327,7 @@ __all__ = [
     "UserScopedSkillStorage",
     "get_or_new_skill_storage",
     "get_or_new_user_skill_storage",
+    "get_catalog_skills_if_cutover",
     "user_should_see_legacy_skills",
     "reset_skill_storage",
     "reset_user_skill_storage",

@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.deps import require_admin_user
+from app.gateway.routers.asset_catalog_compat import is_catalog_cutover_enabled, reject_legacy_asset_mutation_after_cutover
+from deerflow.assets.catalog import get_asset_catalog_provider, require_system_asset
 from deerflow.config.extensions_config import ExtensionsConfig, McpRoutingConfig, McpToolOverride, get_extensions_config, reload_extensions_config
 from deerflow.mcp.cache import reset_mcp_tools_cache
 
@@ -324,6 +326,32 @@ async def get_mcp_configuration(request: Request) -> McpConfigResponse:
     """
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
 
+    if await is_catalog_cutover_enabled():
+        provider = get_asset_catalog_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail="System asset catalog is unavailable")
+        snapshots = await provider.list_system_mcp()
+        servers: dict[str, McpServerConfigResponse] = {}
+        for snapshot in snapshots:
+            require_system_asset(snapshot)
+            definition = snapshot.definition
+            server = McpServerConfigResponse(
+                enabled=True,
+                type=str(definition.get("transport", "stdio")),
+                command=definition.get("command") if isinstance(definition.get("command"), str) else None,
+                args=list(definition.get("args", ())),
+                env=dict(definition.get("env", {})),
+                url=definition.get("url") if isinstance(definition.get("url"), str) else None,
+                headers=dict(definition.get("headers", {})),
+                oauth=McpOAuthConfigResponse(**dict(definition.get("oauth", {}))) if definition.get("oauth") else None,
+                description=str(definition.get("description", "")),
+                routing=McpRoutingConfig(**dict(definition.get("routing", {}))),
+                tools={name: McpToolOverride(**value) for name, value in dict(definition.get("tool_overrides", {})).items()},
+                tool_call_timeout=definition.get("timeout_seconds") if isinstance(definition.get("timeout_seconds"), (int, float)) else None,
+            )
+            servers[snapshot.slug] = _mask_server_config(server)
+        return McpConfigResponse(mcp_servers=servers)
+
     config = get_extensions_config()
 
     servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in config.mcp_servers.items()}
@@ -391,6 +419,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
     """
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        await reject_legacy_asset_mutation_after_cutover()
         _validate_mcp_update_request(body)
 
         # Get the current config path (or determine where to save it)

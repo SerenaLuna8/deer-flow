@@ -44,3 +44,9 @@ def test_harness_does_not_import_app():
                 violations.append(f"  {rel}:{lineno}  imports {module}")
 
     assert not violations, "Harness layer must not import from app layer:\n" + "\n".join(violations)
+
+
+def test_asset_catalog_protocol_is_owned_by_harness() -> None:
+    from deerflow.assets.catalog import AssetCatalogProvider
+
+    assert AssetCatalogProvider.__module__ == "deerflow.assets.catalog"

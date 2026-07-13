@@ -145,6 +145,21 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
         return _compute_agent_factory_supports_app_config(agent_factory)
 
 
+async def _call_agent_factory_off_loop(
+    agent_factory: Any,
+    config: Any,
+    app_config: AppConfig | None,
+) -> Any:
+    """Build a synchronous graph without blocking the Gateway event loop."""
+
+    def _build() -> Any:
+        if app_config is not None and _agent_factory_supports_app_config(agent_factory):
+            return agent_factory(config=config, app_config=app_config)
+        return agent_factory(config=config)
+
+    return await asyncio.to_thread(_build)
+
+
 class _SubagentEventBuffer:
     """Buffer subagent ``task_*`` step events and flush them in one locked batch (#3779).
 
@@ -373,10 +388,11 @@ async def run_agent(
             continuation_config["configurable"] = configurable
             return RunnableConfig(**continuation_config)
 
-        if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            agent = agent_factory(config=initial_runnable_config, app_config=ctx.app_config)
-        else:
-            agent = agent_factory(config=initial_runnable_config)
+        agent = await _call_agent_factory_off_loop(
+            agent_factory,
+            initial_runnable_config,
+            ctx.app_config,
+        )
 
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the

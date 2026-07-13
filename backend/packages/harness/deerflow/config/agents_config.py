@@ -223,6 +223,28 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
         return None
 
     name = validate_agent_name(name)
+    from deerflow.assets.catalog import (
+        AssetCatalogAgentSnapshot,
+        get_asset_catalog_provider,
+        require_system_asset,
+        run_asset_catalog_lookup,
+    )
+
+    provider = get_asset_catalog_provider()
+    if provider is not None and run_asset_catalog_lookup(provider, "is_cutover_enabled"):
+        snapshot = run_asset_catalog_lookup(provider, "get_system_agent", name)
+        if not isinstance(snapshot, AssetCatalogAgentSnapshot):
+            from deerflow.assets.catalog import AssetCatalogUnavailable
+
+            raise AssetCatalogUnavailable("system agent snapshot is invalid")
+        require_system_asset(snapshot)
+        return AgentConfig(
+            name=snapshot.slug,
+            description=snapshot.description,
+            model=snapshot.model_ref or None,
+            tool_groups=list(snapshot.tool_groups),
+            skills=list(snapshot.skill_slugs),
+        )
     agent_dir = resolve_agent_dir(name, user_id=user_id)
     config_file = agent_dir / "config.yaml"
 
@@ -264,6 +286,21 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
         The SOUL.md content as a string, or None if the file does not exist.
     """
     if agent_name:
+        from deerflow.assets.catalog import (
+            AssetCatalogAgentSnapshot,
+            AssetCatalogUnavailable,
+            get_asset_catalog_provider,
+            require_system_asset,
+            run_asset_catalog_lookup,
+        )
+
+        provider = get_asset_catalog_provider()
+        if provider is not None and run_asset_catalog_lookup(provider, "is_cutover_enabled"):
+            snapshot = run_asset_catalog_lookup(provider, "get_system_agent", agent_name)
+            if not isinstance(snapshot, AssetCatalogAgentSnapshot):
+                raise AssetCatalogUnavailable("system agent snapshot is invalid")
+            require_system_asset(snapshot)
+            return snapshot.soul.strip() or None
         agent_dir = resolve_agent_dir(agent_name, user_id=user_id)
     else:
         agent_dir = get_paths().base_dir
@@ -288,6 +325,35 @@ def list_custom_agents(*, user_id: str | None = None) -> list[AgentConfig]:
     Returns:
         List of AgentConfig for each valid agent directory found.
     """
+    from deerflow.assets.catalog import (
+        AssetCatalogAgentSnapshot,
+        AssetCatalogUnavailable,
+        get_asset_catalog_provider,
+        require_system_asset,
+        run_asset_catalog_lookup,
+    )
+
+    provider = get_asset_catalog_provider()
+    if provider is not None and run_asset_catalog_lookup(provider, "is_cutover_enabled"):
+        snapshots = run_asset_catalog_lookup(provider, "list_system_agents")
+        if not isinstance(snapshots, tuple):
+            raise AssetCatalogUnavailable("system agent catalog is invalid")
+        agents: list[AgentConfig] = []
+        for snapshot in snapshots:
+            if not isinstance(snapshot, AssetCatalogAgentSnapshot):
+                raise AssetCatalogUnavailable("system agent snapshot is invalid")
+            require_system_asset(snapshot)
+            agents.append(
+                AgentConfig(
+                    name=snapshot.slug,
+                    description=snapshot.description,
+                    model=snapshot.model_ref or None,
+                    tool_groups=list(snapshot.tool_groups),
+                    skills=list(snapshot.skill_slugs),
+                )
+            )
+        return agents
+
     paths = get_paths()
     effective_user = user_id or get_effective_user_id()
 

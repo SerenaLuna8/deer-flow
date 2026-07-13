@@ -53,7 +53,7 @@ def _is_cache_stale() -> bool:
     return False
 
 
-async def initialize_mcp_tools() -> list[BaseTool]:
+async def initialize_mcp_tools(*, asset_context: object | None = None) -> list[BaseTool]:
     """Initialize and cache MCP tools.
 
     This should be called once at application startup.
@@ -62,6 +62,11 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         List of LangChain tools from all enabled MCP servers.
     """
     global _mcp_tools_cache, _cache_initialized, _config_mtime
+
+    if asset_context is not None:
+        from deerflow.mcp.tools import get_mcp_tools
+
+        return await get_mcp_tools(asset_context=asset_context)
 
     async with _initialization_lock:
         if _cache_initialized:
@@ -79,7 +84,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         return _mcp_tools_cache
 
 
-def get_cached_mcp_tools() -> list[BaseTool]:
+def get_cached_mcp_tools(*, asset_context: object | None = None) -> list[BaseTool]:
     """Get cached MCP tools with lazy initialization.
 
     If tools are not initialized, automatically initializes them.
@@ -93,6 +98,37 @@ def get_cached_mcp_tools() -> list[BaseTool]:
         List of cached MCP tools.
     """
     global _cache_initialized
+
+    from deerflow.assets.catalog import AssetCatalogUnavailable, get_asset_catalog_provider
+
+    provider = get_asset_catalog_provider()
+    if provider is not None and provider.run_sync("is_cutover_enabled"):
+
+        async def _load_catalog_tools() -> list[BaseTool]:
+            from deerflow.mcp.tools import get_mcp_tools
+
+            return await get_mcp_tools(asset_context=asset_context)
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(_load_catalog_tools())
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, _load_catalog_tools())
+            return future.result()
+
+    if asset_context is not None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(initialize_mcp_tools(asset_context=asset_context))
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, initialize_mcp_tools(asset_context=asset_context))
+            return future.result()
 
     # Check if cache is stale due to config file changes
     if _is_cache_stale():
@@ -115,13 +151,19 @@ def get_cached_mcp_tools() -> list[BaseTool]:
             else:
                 # If no loop is running, we can use the current loop
                 loop.run_until_complete(initialize_mcp_tools())
+        except AssetCatalogUnavailable:
+            raise
         except RuntimeError:
             # No event loop exists, create one
             try:
                 asyncio.run(initialize_mcp_tools())
+            except AssetCatalogUnavailable:
+                raise
             except Exception:
                 logger.exception("Failed to lazy-initialize MCP tools")
                 return []
+        except AssetCatalogUnavailable:
+            raise
         except Exception:
             logger.exception("Failed to lazy-initialize MCP tools")
             return []

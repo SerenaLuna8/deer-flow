@@ -63,6 +63,24 @@ logger = logging.getLogger(__name__)
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
 
 
+@asynccontextmanager
+async def _asset_catalog_provider_lifespan(session_factory=None) -> AsyncGenerator[None, None]:
+    """Install the app-owned provider and always clear the harness registry."""
+
+    from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
+    from deerflow.assets.catalog import set_asset_catalog_provider
+    from deerflow.persistence.engine import get_session_factory
+
+    resolved_session_factory = session_factory or get_session_factory()
+    if resolved_session_factory is None:
+        raise RuntimeError("PostgreSQL session factory is unavailable for the asset catalog")
+    set_asset_catalog_provider(PostgresAssetCatalogProvider(resolved_session_factory))
+    try:
+        yield
+    finally:
+        set_asset_catalog_provider(None)
+
+
 async def _ensure_admin_user(app: FastAPI) -> None:
     """Startup hook: handle first boot and migrate orphan threads otherwise.
 
@@ -228,7 +246,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Upload staging file cleanup skipped", exc_info=True)
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
-    async with langgraph_runtime(app, startup_config):
+    async with (
+        langgraph_runtime(app, startup_config),
+        _asset_catalog_provider_lifespan(),
+    ):
         logger.info("LangGraph runtime initialised")
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.

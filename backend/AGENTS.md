@@ -961,6 +961,24 @@ PostgreSQL upsert 建立 singleton 并返回 `1`，后续并发 bump 单调递�
 全部 closure 验证结束后最后读取 generation；cache 消费者只能在数据库 generation 未变化的窗口
 复用 snapshot。
 
+**M3 system asset runtime cutover**：harness 只依赖
+`deerflow.assets.catalog.AssetCatalogProvider` 的安全 snapshot protocol，不得反向导入
+`app.*`；Gateway lifespan 在自己的 event loop 安装 `PostgresAssetCatalogProvider`，退出时必须
+清空 registry。`asset_catalog_state.cutover_at` 之前保留 legacy file loader；marker 之后 Agent、
+Skill、MCP runtime 与 legacy GET 只读取 PostgreSQL published system snapshot，空 catalog、项目
+snapshot、坏 checksum/归档或数据库不可用都 fail closed，绝不回退文件。每次 lookup 先读取
+generation，变化时整体清空 Agent/Skill/MCP cache；同步 Agent/Skill loader 与工作线程中的 MCP
+初始化都必须桥接回 provider owning loop，禁止 asyncpg pool 跨 event loop。
+
+Skill bytes 复用 Task 7 `_verified_archive_files` 校验后，原子物化到 gitignored 的
+`skills/custom/.asset-catalog/<generation>/`；slug、POSIX/Windows 路径与 symlink 均需拒绝越界，
+逻辑 category 仍为只读 `PUBLIC`。MCP 的无 secret definition 可进入短生命期安全配置；Task 7
+materializer 只接受可信 `ProjectContext`；env/header 按 transport 合并合法 connection key，OAuth
+只在局部 token manager 中换成 HTTP/SSE `Authorization` header，绝不能把未知 `oauth` key 传给
+adapter。明文不得进入 `ExtensionsConfig`、全局 MCP cache、日志、checkpoint 或文件。
+cutover 后 legacy Agent/Skill/MCP 文件写 API 在任何 IO 前统一返回
+`409 ASSET_CATALOG_CUTOVER` 并引导 `/admin/assets`；legacy custom Skill 读取不再暴露文件内容。
+
 **Platform and project roles**: `users.system_role` is restricted to
 `system_admin|user`; the legacy platform value `admin` is converted by revision 0005.
 Project authorization is independent and lives in `project_memberships.role` as

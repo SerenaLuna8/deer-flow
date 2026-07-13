@@ -9,7 +9,9 @@ from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
+from app.gateway.routers.asset_catalog_compat import is_catalog_cutover_enabled, reject_legacy_asset_mutation_after_cutover
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_user_skills_system_prompt_cache_async
+from deerflow.assets.catalog import get_asset_catalog_provider, require_system_asset
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.runtime.user_context import get_effective_user_id
@@ -179,6 +181,25 @@ def _get_user_skill_storage(config: AppConfig) -> SkillStorage:
     description="Retrieve a list of all available skills from both public and custom directories.",
 )
 async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResponse:
+    if await is_catalog_cutover_enabled():
+        provider = get_asset_catalog_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail="System asset catalog is unavailable")
+        snapshots = await provider.list_system_skills()
+        return SkillsListResponse(
+            skills=[
+                SkillResponse(
+                    name=snapshot.slug,
+                    description=snapshot.description,
+                    license=None,
+                    category=SkillCategory.PUBLIC,
+                    enabled=True,
+                    editable=False,
+                )
+                for snapshot in snapshots
+                if require_system_asset(snapshot)
+            ]
+        )
     try:
         # Use user-scoped storage: loads public (global) + custom (user-level + fallback)
         skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
@@ -196,6 +217,7 @@ async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResp
 )
 async def install_skill(request: Request, body: SkillInstallRequest, config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    await reject_legacy_asset_mutation_after_cutover()
     try:
         skill_file_path = resolve_thread_virtual_path(body.thread_id, body.path)
         result = await _get_user_skill_storage(config).ainstall_skill_from_archive(skill_file_path)
@@ -234,6 +256,8 @@ async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsL
     The frontend should use ``list_skills`` to display all available
     skills including legacy ones.
     """
+    if await is_catalog_cutover_enabled():
+        return SkillsListResponse(skills=[])
     try:
         skills = [skill for skill in _get_user_skill_storage(config).load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
@@ -245,6 +269,8 @@ async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsL
 @router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")
 async def get_custom_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    if await is_catalog_cutover_enabled():
+        raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
     return await _read_custom_skill_response(skill_name, config)
 
 
@@ -267,6 +293,7 @@ async def _read_custom_skill_response(skill_name: str, config: AppConfig) -> Cus
 @router.put("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Edit Custom Skill")
 async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    await reject_legacy_asset_mutation_after_cutover()
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = _get_user_skill_storage(config)
@@ -306,6 +333,7 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
 @router.delete("/skills/custom/{skill_name}", summary="Delete Custom Skill")
 async def delete_custom_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> dict[str, bool]:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    await reject_legacy_asset_mutation_after_cutover()
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = _get_user_skill_storage(config)
@@ -335,6 +363,8 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
 @router.get("/skills/custom/{skill_name}/history", response_model=CustomSkillHistoryResponse, summary="Get Custom Skill History")
 async def get_custom_skill_history(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillHistoryResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    if await is_catalog_cutover_enabled():
+        raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = _get_user_skill_storage(config)
@@ -351,6 +381,7 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
 @router.post("/skills/custom/{skill_name}/rollback", response_model=CustomSkillContentResponse, summary="Rollback Custom Skill")
 async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    await reject_legacy_asset_mutation_after_cutover()
     try:
         storage = _get_user_skill_storage(config)
         if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
@@ -410,6 +441,24 @@ async def get_skill_content(
 ) -> SkillContentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     normalized_name = skill_name.replace("\r\n", "").replace("\n", "")
+    if await is_catalog_cutover_enabled():
+        provider = get_asset_catalog_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail="System asset catalog is unavailable")
+        snapshots = await provider.list_system_skills()
+        snapshot = next(
+            (candidate for candidate in snapshots if require_system_asset(candidate) and candidate.slug == normalized_name),
+            None,
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{normalized_name}' not found")
+        skill_file = next((file for file in snapshot.files if file.path == SKILL_MD_FILE), None)
+        if skill_file is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{normalized_name}' content not found")
+        try:
+            return SkillContentResponse(content=skill_file.content.decode("utf-8"))
+        except UnicodeError as exc:
+            raise HTTPException(status_code=500, detail="Failed to read skill content") from exc
     storage = _get_user_skill_storage(config)
     try:
         content = await asyncio.to_thread(
@@ -447,6 +496,26 @@ async def get_skill_content(
     description="Retrieve detailed information about a specific skill by its name.",
 )
 async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) -> SkillResponse:
+    if await is_catalog_cutover_enabled():
+        provider = get_asset_catalog_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail="System asset catalog is unavailable")
+        normalized_name = skill_name.replace("\r\n", "").replace("\n", "")
+        snapshots = await provider.list_system_skills()
+        snapshot = next(
+            (candidate for candidate in snapshots if require_system_asset(candidate) and candidate.slug == normalized_name),
+            None,
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{normalized_name}' not found")
+        return SkillResponse(
+            name=snapshot.slug,
+            description=snapshot.description,
+            license=None,
+            category=SkillCategory.PUBLIC,
+            enabled=True,
+            editable=False,
+        )
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
@@ -475,6 +544,7 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
     # (there is no per-user skill state). Guard it as admin-only like the other
     # global config writes, matching the MCP router.
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    await reject_legacy_asset_mutation_after_cutover()
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = _get_user_skill_storage(config)

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
+from deerflow.skills.storage import get_catalog_skills_if_cutover, get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents import get_available_subagent_names
 from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_section
@@ -39,6 +39,9 @@ _enabled_skills_refresh_event = threading.Event()
 
 
 def _load_enabled_skills_sync() -> list[Skill]:
+    catalog_skills = get_catalog_skills_if_cutover()
+    if catalog_skills is not None:
+        return catalog_skills
     return list(get_or_new_skill_storage().load_skills(enabled_only=True))
 
 
@@ -152,6 +155,10 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
     to load public + user-level custom skills. Otherwise falls back to the
     global storage (public + global custom fallback).
     """
+    catalog_skills = get_catalog_skills_if_cutover(app_config)
+    if catalog_skills is not None:
+        return catalog_skills
+
     if app_config is None:
         return _get_enabled_skills()
 

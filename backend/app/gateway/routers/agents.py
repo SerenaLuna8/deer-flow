@@ -9,6 +9,8 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.gateway.routers.asset_catalog_compat import is_catalog_cutover_enabled, reject_legacy_asset_mutation_after_cutover
+from deerflow.assets.catalog import get_asset_catalog_provider, require_system_asset
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul, preserve_non_managed_fields
 from deerflow.config.paths import get_paths
@@ -118,6 +120,26 @@ async def list_agents() -> AgentsListResponse:
     """
     _require_agents_api_enabled()
 
+    if await is_catalog_cutover_enabled():
+        provider = get_asset_catalog_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail="System asset catalog is unavailable")
+        snapshots = await provider.list_system_agents()
+        return AgentsListResponse(
+            agents=[
+                AgentResponse(
+                    name=snapshot.slug,
+                    description=snapshot.description,
+                    model=snapshot.model_ref,
+                    tool_groups=list(snapshot.tool_groups),
+                    skills=list(snapshot.skill_slugs),
+                    soul=snapshot.soul,
+                )
+                for snapshot in snapshots
+                if require_system_asset(snapshot)
+            ]
+        )
+
     user_id = get_effective_user_id()
     try:
         agents = list_custom_agents(user_id=user_id)
@@ -147,6 +169,13 @@ async def check_agent_name(name: str) -> dict:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
+    if await is_catalog_cutover_enabled():
+        provider = get_asset_catalog_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail="System asset catalog is unavailable")
+        snapshots = await provider.list_system_agents()
+        available = all(snapshot.slug.casefold() != normalized.casefold() for snapshot in snapshots if require_system_asset(snapshot))
+        return {"available": available, "name": normalized, "managed_at": "/admin/assets"}
     user_id = get_effective_user_id()
     paths = get_paths()
     # Treat the name as taken if either the per-user path or the legacy shared
@@ -177,6 +206,19 @@ async def get_agent(name: str) -> AgentResponse:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
+    if await is_catalog_cutover_enabled():
+        provider = get_asset_catalog_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail="System asset catalog is unavailable")
+        snapshot = require_system_asset(await provider.get_system_agent(name))
+        return AgentResponse(
+            name=snapshot.slug,
+            description=snapshot.description,
+            model=snapshot.model_ref,
+            tool_groups=list(snapshot.tool_groups),
+            skills=list(snapshot.skill_slugs),
+            soul=snapshot.soul,
+        )
     user_id = get_effective_user_id()
 
     try:
@@ -209,6 +251,7 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         HTTPException: 409 if agent already exists, 422 if name is invalid.
     """
     _require_agents_api_enabled()
+    await reject_legacy_asset_mutation_after_cutover()
     _validate_agent_name(request.name)
     normalized_name = _normalize_agent_name(request.name)
     user_id = get_effective_user_id()
@@ -290,6 +333,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         HTTPException: 404 if agent not found.
     """
     _require_agents_api_enabled()
+    await reject_legacy_asset_mutation_after_cutover()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
@@ -449,6 +493,7 @@ async def delete_agent(name: str) -> None:
             shared copy exists (suggesting the migration script).
     """
     _require_agents_api_enabled()
+    await reject_legacy_asset_mutation_after_cutover()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()

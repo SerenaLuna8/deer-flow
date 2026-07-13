@@ -48,6 +48,7 @@ def get_available_tools(
     subagent_enabled: bool = False,
     *,
     app_config: AppConfig | None = None,
+    asset_context: object | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -110,30 +111,22 @@ def get_available_tools(
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
-    # Get cached MCP tools if enabled
-    # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when loading MCP tools.
+    # The MCP runtime loader owns pre-cutover file behavior. This layer must
+    # not probe ExtensionsConfig because cutover is provider-only.
     mcp_tools = []
     if include_mcp:
         try:
-            from deerflow.config.extensions_config import ExtensionsConfig
+            from deerflow.assets.catalog import AssetCatalogUnavailable
             from deerflow.mcp.cache import get_cached_mcp_tools
 
-            extensions_config = ExtensionsConfig.from_file()
-            if extensions_config.get_enabled_mcp_servers():
-                mcp_tools = get_cached_mcp_tools()
-                if mcp_tools:
-                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
+            mcp_tools = get_cached_mcp_tools(asset_context=asset_context)
+            if mcp_tools:
+                logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 
-                    # Tag MCP-sourced tools so deferred-tool assembly (done at
-                    # the agent construction site, AFTER tool-policy filtering)
-                    # can identify them. No ContextVar / registry is built here;
-                    # the deferred catalog + tool_search tool are assembled per
-                    # agent from the policy-filtered tool list.
-                    for t in mcp_tools:
-                        tag_mcp_tool(t)
+                for t in mcp_tools:
+                    tag_mcp_tool(t)
+        except AssetCatalogUnavailable:
+            raise
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
         except Exception as e:
