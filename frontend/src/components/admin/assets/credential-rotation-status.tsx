@@ -22,7 +22,7 @@ export function CredentialRotationStatusCard({
             )}
           </div>
           <div>
-            <h2 className="font-semibold">Credential envelope 轮换状态</h2>
+            <h2 className="font-semibold">Credential 加密信封轮换状态</h2>
             <p className="text-muted-foreground mt-1 text-sm">
               当前 {status.current} / 共 {status.eligible_total} 个有效版本
             </p>

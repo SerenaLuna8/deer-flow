@@ -124,7 +124,7 @@ export function CreateAssetDialog({
   );
 }
 
-function AgentVersionFields() {
+export function AgentVersionFields() {
   return (
     <>
       <label className="grid gap-2 text-sm">
@@ -132,30 +132,30 @@ function AgentVersionFields() {
         <Textarea name="description" />
       </label>
       <label className="grid gap-2 text-sm">
-        Soul
+        角色设定（Soul）
         <Textarea name="soul" />
       </label>
       <label className="grid gap-2 text-sm">
-        Model reference
+        模型引用
         <Input name="model_ref" />
       </label>
       <label className="grid gap-2 text-sm">
-        Tool groups（逗号或换行分隔）
+        工具组（逗号或换行分隔）
         <Textarea name="tool_groups" />
       </label>
       <label className="grid gap-2 text-sm">
-        Skill version IDs（逗号或换行分隔）
+        Skill 版本 ID（逗号或换行分隔）
         <Textarea name="skill_version_ids" />
       </label>
       <label className="grid gap-2 text-sm">
-        MCP version IDs（逗号或换行分隔）
+        MCP 版本 ID（逗号或换行分隔）
         <Textarea name="mcp_version_ids" />
       </label>
     </>
   );
 }
 
-function SkillVersionFields() {
+export function SkillVersionFields() {
   return (
     <>
       <label className="grid gap-2 text-sm">
@@ -163,7 +163,7 @@ function SkillVersionFields() {
         <Input name="path" required defaultValue="SKILL.md" />
       </label>
       <label className="grid gap-2 text-sm">
-        Media type
+        媒体类型
         <Input name="media_type" required defaultValue="text/markdown" />
       </label>
       <label className="grid gap-2 text-sm">
@@ -174,7 +174,7 @@ function SkillVersionFields() {
   );
 }
 
-function McpVersionFields() {
+export function McpVersionFields() {
   return (
     <>
       <label className="grid gap-2 text-sm">
@@ -182,20 +182,20 @@ function McpVersionFields() {
         <Textarea name="description" />
       </label>
       <label className="grid gap-2 text-sm">
-        Transport
+        传输方式
         <select
           name="transport"
           defaultValue="stdio"
           className="border-input bg-background h-9 rounded-md border px-3 text-sm"
         >
-          <option value="stdio">stdio</option>
-          <option value="sse">sse</option>
-          <option value="http">http</option>
-          <option value="streamable_http">streamable_http</option>
+          <option value="stdio">标准输入输出（stdio）</option>
+          <option value="sse">服务器推送（sse）</option>
+          <option value="http">HTTP</option>
+          <option value="streamable_http">流式 HTTP</option>
         </select>
       </label>
       <label className="grid gap-2 text-sm">
-        Command
+        命令
         <Input name="command" />
       </label>
       <label className="grid gap-2 text-sm">
@@ -211,12 +211,12 @@ function McpVersionFields() {
         <Input name="timeout_seconds" type="number" min={1} defaultValue={30} />
       </label>
       <div className="border-border/70 space-y-3 rounded-lg border p-3">
-        <p className="text-sm font-medium">Credential slot（可选）</p>
+        <p className="text-sm font-medium">Credential 槽位（可选）</p>
         <p className="text-muted-foreground text-xs">
-          创建 slot 后，本版本只能通过 submit/approve 流程发布。
+          创建槽位后，本版本只能通过提交和批准流程发布。
         </p>
         <label className="grid gap-2 text-sm">
-          Slot 名称
+          槽位名称
           <Input name="slot_name" />
         </label>
         <label className="grid gap-2 text-sm">
@@ -224,15 +224,15 @@ function McpVersionFields() {
           <Input name="slot_purpose" />
         </label>
         <label className="grid gap-2 text-sm">
-          Payload 分组
+          凭据字段分组
           <select
             name="slot_group"
             defaultValue="headers"
             className="border-input bg-background h-9 rounded-md border px-3 text-sm"
           >
-            <option value="headers">headers</option>
-            <option value="env">env</option>
-            <option value="oauth">oauth</option>
+            <option value="headers">请求头（headers）</option>
+            <option value="env">环境变量（env）</option>
+            <option value="oauth">OAuth</option>
           </select>
         </label>
         <label className="grid gap-2 text-sm">
@@ -447,15 +447,15 @@ export function CredentialSecretDialog({
             </>
           )}
           <label className="grid gap-2 text-sm">
-            Payload 分组
+            凭据字段分组
             <select
               name="payload_group"
               defaultValue="env"
               className="border-input bg-background h-9 rounded-md border px-3 text-sm"
             >
-              <option value="env">env</option>
-              <option value="headers">headers</option>
-              <option value="oauth">oauth</option>
+              <option value="env">环境变量（env）</option>
+              <option value="headers">请求头（headers）</option>
+              <option value="oauth">OAuth</option>
             </select>
           </label>
           <label className="grid gap-2 text-sm">

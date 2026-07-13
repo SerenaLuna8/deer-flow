@@ -2,7 +2,12 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, test, rs } from "@rstest/core";
-import { createElement } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  createElement,
+  type ComponentType,
+  type PropsWithChildren,
+} from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 rs.mock("next/navigation", () => ({
@@ -15,12 +20,20 @@ rs.mock("next/navigation", () => ({
       destination,
     });
   }),
+  usePathname: () => "/admin/assets/agents",
+  useRouter: () => ({ push: rs.fn() }),
 }));
 rs.mock("@/core/auth/server", () => ({ getServerSideUser: rs.fn() }));
 rs.mock("@/core/static-mode", () => ({ isStaticWebsiteOnly: () => false }));
 
 import AdminLayout from "@/app/admin/layout";
 import {
+  AgentVersionFields,
+  McpVersionFields,
+  SkillVersionFields,
+} from "@/components/admin/assets/admin-asset-dialogs";
+import {
+  AdminAssetPage,
   CredentialWriteError,
   CredentialMetadataCard,
   adminAssetErrorMessage,
@@ -29,8 +42,9 @@ import {
 } from "@/components/admin/assets/admin-asset-page";
 import { AdminAssetsNavigation } from "@/components/admin/assets/admin-assets-shell";
 import { AssetVersionDiff } from "@/components/assets/asset-version-diff";
+import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
-import { SharedAssetApiError } from "@/core/shared-assets";
+import { sharedAssetKeys, SharedAssetApiError } from "@/core/shared-assets";
 
 describe("admin asset access and credential safety", () => {
   test("server layout returns 404 for an authenticated ordinary user", async () => {
@@ -76,6 +90,62 @@ describe("admin asset access and credential safety", () => {
     ]) {
       expect(html).toContain(`href="${href}"`);
       expect(html).toContain(label);
+    }
+  });
+
+  test("does not construct an asset query while the auth user is null", () => {
+    const queryClient = new QueryClient();
+    const accountKey = rs.spyOn(sharedAssetKeys, "account");
+    const TestAuthProvider = AuthProvider as ComponentType<
+      PropsWithChildren<{ initialUser: null }>
+    >;
+
+    expect(() =>
+      renderToStaticMarkup(
+        createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          createElement(
+            TestAuthProvider,
+            { initialUser: null },
+            createElement(AdminAssetPage, { kind: "agents" }),
+          ),
+        ),
+      ),
+    ).not.toThrow();
+    expect(accountKey).not.toHaveBeenCalled();
+
+    accountKey.mockRestore();
+  });
+
+  test("authoring fields use Chinese labels for ordinary UI terms", () => {
+    const html = [AgentVersionFields, SkillVersionFields, McpVersionFields]
+      .map((Fields) => renderToStaticMarkup(createElement(Fields)))
+      .join("\n");
+
+    for (const label of [
+      "模型引用",
+      "工具组",
+      "Skill 版本 ID",
+      "媒体类型",
+      "传输方式",
+      "命令",
+      "Credential 槽位",
+      "凭据字段分组",
+    ]) {
+      expect(html).toContain(label);
+    }
+    for (const english of [
+      "Model reference",
+      "Tool groups",
+      "Skill version IDs",
+      "Media type",
+      "Transport",
+      "Command",
+      "Credential slot",
+      "Payload 分组",
+    ]) {
+      expect(html).not.toContain(english);
     }
   });
 
@@ -231,11 +301,36 @@ describe("admin asset access and credential safety", () => {
     );
 
     expect(html).toContain("new-payload-checksum");
+    expect(html).toContain("载荷校验和");
     expect(html).toContain("SKILL.md");
     expect(html).toContain("new-checksum");
     expect(html).not.toContain("plaintext");
     expect(html).not.toContain("ciphertext");
     expect(html).not.toContain("复制密钥");
+    expect(html).not.toContain("Payload checksum");
+  });
+
+  test("credential diff translates payload metadata labels", () => {
+    const html = renderToStaticMarkup(
+      createElement(AssetVersionDiff, {
+        current: {
+          id: "11111111-1111-4111-8111-111111111111",
+          credential_id: "22222222-2222-4222-8222-222222222222",
+          version_number: 1,
+          status: "active",
+          payload_schema_version: 1,
+          payload_schema: { env: ["TOKEN"] },
+          supersedes_version_id: null,
+          created_by_user_id: "admin",
+          created_at: "2026-07-13T08:00:00+00:00",
+        },
+      }),
+    );
+
+    expect(html).toContain("载荷结构版本");
+    expect(html).toContain("载荷字段");
+    expect(html).not.toContain("Payload schema version");
+    expect(html).not.toContain("Payload fields");
   });
 
   test("maps API failures to safe Chinese public messages", () => {

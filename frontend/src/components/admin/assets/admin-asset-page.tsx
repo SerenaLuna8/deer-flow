@@ -77,7 +77,7 @@ const PAGE_META = {
   },
   "mcp-servers": {
     title: "系统 MCP",
-    description: "维护 MCP 定义，并对 Credential slot 执行强制审批。",
+    description: "维护 MCP 定义，并对 Credential 槽位执行强制审批。",
     label: "MCP",
     icon: NetworkIcon,
   },
@@ -574,9 +574,13 @@ function MutableAssetList({
   );
 }
 
-export function AdminAssetPage({ kind }: { kind: AssetListKind }) {
-  const { user } = useAuth();
-  const accountId = user?.id ?? "";
+function AuthenticatedAdminAssetPage({
+  accountId,
+  kind,
+}: {
+  accountId: string;
+  kind: AssetListKind;
+}) {
   const query = useAdminAssets(accountId, kind);
   const meta = PAGE_META[kind];
   const Icon = meta.icon;
@@ -624,4 +628,14 @@ export function AdminAssetPage({ kind }: { kind: AssetListKind }) {
       )}
     </main>
   );
+}
+
+export function AdminAssetPage({ kind }: { kind: AssetListKind }) {
+  const { user } = useAuth();
+
+  if (user === null) {
+    return null;
+  }
+
+  return <AuthenticatedAdminAssetPage accountId={user.id} kind={kind} />;
 }

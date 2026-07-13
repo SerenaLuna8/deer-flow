@@ -104,6 +104,13 @@ async function json(route: Route, body: unknown, status = 200) {
 }
 
 async function mockAdminAssets(page: Page) {
+  const mcpWorkflowRequests: {
+    submit: { expected_asset_version: number } | null;
+    approve: {
+      credential_versions: Record<string, string>;
+      expected_asset_version: number;
+    } | null;
+  } = { submit: null, approve: null };
   let agentState = structuredClone(agent);
   let agents = [agentState];
   let agentVersions: AgentVersion[] = [];
@@ -350,7 +357,27 @@ async function mockAdminAssets(page: Page) {
       ) &&
       method === "POST"
     ) {
+      mcpWorkflowRequests.submit = request.postDataJSON() as {
+        expected_asset_version: number;
+      };
+      if (
+        mcpWorkflowRequests.submit.expected_asset_version !== mcpState.version
+      ) {
+        await json(
+          route,
+          {
+            detail: {
+              code: "asset_conflict",
+              message: "Asset state conflict",
+              request_id: "request-submit-conflict",
+            },
+          },
+          409,
+        );
+        return;
+      }
       workflowStatus = "pending_approval";
+      mcpState = { ...mcpState, version: mcpState.version + 1 };
       await json(route, {
         data: {
           ...mcpVersion,
@@ -367,7 +394,32 @@ async function mockAdminAssets(page: Page) {
       ) &&
       method === "POST"
     ) {
+      mcpWorkflowRequests.approve = request.postDataJSON() as {
+        credential_versions: Record<string, string>;
+        expected_asset_version: number;
+      };
+      if (
+        mcpWorkflowRequests.approve.expected_asset_version !== mcpState.version
+      ) {
+        await json(
+          route,
+          {
+            detail: {
+              code: "asset_conflict",
+              message: "Asset state conflict",
+              request_id: "request-approve-conflict",
+            },
+          },
+          409,
+        );
+        return;
+      }
       workflowStatus = "published";
+      mcpState = {
+        ...mcpState,
+        version: mcpState.version + 1,
+        current_published_version_id: MCP_VERSION_ID,
+      };
       await json(route, {
         data: {
           ...mcpVersion,
@@ -510,12 +562,14 @@ async function mockAdminAssets(page: Page) {
       404,
     );
   });
+
+  return mcpWorkflowRequests;
 }
 
 test("system admin creates an asset and MCP credential slots require approval", async ({
   page,
 }) => {
-  await mockAdminAssets(page);
+  const mcpWorkflowRequests = await mockAdminAssets(page);
 
   await page.goto("/admin/assets");
   await expect(page).toHaveURL(/\/admin\/assets\/agents$/);
@@ -546,13 +600,20 @@ test("system admin creates an asset and MCP credential slots require approval", 
   await mcpCard.getByRole("button", { name: "批准并发布" }).click();
   const approveDialog = page.getByRole("dialog", { name: "批准 MCP 版本" });
   await approveDialog
-    .getByLabel("github-token Credential version ID")
+    .getByLabel("github-token Credential 版本 ID")
     .fill("20000000-0000-4000-8000-000000000005");
   await approveDialog.getByRole("button", { name: "批准并发布" }).click();
   await expect(mcpCard.getByText("已发布", { exact: true })).toBeVisible();
   await expect(mcpCard.getByRole("button", { name: "发布版本" })).toHaveCount(
     0,
   );
+  expect(mcpWorkflowRequests.submit).toEqual({ expected_asset_version: 1 });
+  expect(mcpWorkflowRequests.approve).toEqual({
+    credential_versions: {
+      "github-token": "20000000-0000-4000-8000-000000000005",
+    },
+    expected_asset_version: 2,
+  });
 
   await page.getByRole("link", { name: "Credential" }).first().click();
   await expect(
@@ -572,8 +633,8 @@ test("system admin authors and publishes every asset kind and manages credential
   await agentCard.getByRole("button", { name: "创建新版本" }).click();
   const agentDialog = page.getByRole("dialog", { name: "创建 Agent 版本" });
   await agentDialog.getByLabel("描述").fill("Writer agent");
-  await agentDialog.getByLabel("Soul").fill("Write clearly");
-  await agentDialog.getByLabel("Model reference").fill("default");
+  await agentDialog.getByLabel("角色设定（Soul）").fill("Write clearly");
+  await agentDialog.getByLabel("模型引用").fill("default");
   await agentDialog.getByRole("button", { name: "创建版本" }).click();
   await expect(
     agentCard.getByRole("button", { name: "发布版本" }),

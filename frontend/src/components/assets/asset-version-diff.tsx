@@ -17,7 +17,7 @@ function list(items: readonly string[]): string {
 
 function describe(version: AssetVersion): Record<string, string> {
   const common = {
-    "Payload checksum": value(
+    载荷校验和: value(
       "payload_checksum" in version ? version.payload_checksum : undefined,
     ),
   };
@@ -25,11 +25,11 @@ function describe(version: AssetVersion): Record<string, string> {
     return {
       ...common,
       描述: value(version.description),
-      Soul: value(version.soul),
-      Model: value(version.model_ref),
-      "Tool groups": list(version.tool_groups),
-      "Skill versions": list(version.skill_version_ids),
-      "MCP versions": list(version.mcp_version_ids),
+      "角色设定（Soul）": value(version.soul),
+      模型: value(version.model_ref),
+      工具组: list(version.tool_groups),
+      "Skill 版本": list(version.skill_version_ids),
+      "MCP 版本": list(version.mcp_version_ids),
     };
   }
   if ("skill_id" in version) {
@@ -45,7 +45,7 @@ function describe(version: AssetVersion): Record<string, string> {
             `${file.path} · ${file.size_bytes} B · ${file.media_type} · ${file.sha256}`,
         )
         .join("\n"),
-      Secret要求: version.secret_requirements
+      凭据要求: version.secret_requirements
         .map((item) => `${item.name}${item.optional ? "（可选）" : "（必需）"}`)
         .join("、"),
     };
@@ -54,12 +54,12 @@ function describe(version: AssetVersion): Record<string, string> {
     return {
       ...common,
       描述: value(version.definition.description),
-      Transport: version.definition.transport,
-      Command: value(version.definition.command),
+      传输方式: version.definition.transport,
+      命令: value(version.definition.command),
       URL: value(version.definition.url),
       参数: list(version.definition.args),
       超时: `${version.definition.timeout_seconds} 秒`,
-      "Credential slots": version.credential_slots
+      "Credential 槽位": version.credential_slots
         .map(
           (slot) =>
             `${slot.name}${slot.required ? "（必需）" : "（可选）"} · ${slot.purpose || "无说明"}`,
@@ -69,8 +69,8 @@ function describe(version: AssetVersion): Record<string, string> {
   }
   return {
     状态: version.status,
-    "Payload schema version": String(version.payload_schema_version),
-    "Payload fields": Object.entries(version.payload_schema)
+    载荷结构版本: String(version.payload_schema_version),
+    载荷字段: Object.entries(version.payload_schema)
       .map(([group, fields]) => `${group}: ${fields.join("、")}`)
       .join("\n"),
   };

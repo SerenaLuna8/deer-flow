@@ -135,7 +135,7 @@ export function AssetVersionHistory({
           <DialogHeader>
             <DialogTitle>批准 MCP 版本</DialogTitle>
             <DialogDescription>
-              为每个必需 Credential slot 绑定已存在的 Credential version
+              为每个必需 Credential 槽位绑定已存在的 Credential 版本
               ID。批准成功后版本才会发布。
             </DialogDescription>
           </DialogHeader>
@@ -162,7 +162,7 @@ export function AssetVersionHistory({
             >
               {approvalVersion.credential_slots.map((slot) => (
                 <label key={slot.id} className="grid gap-2 text-sm">
-                  {slot.name} Credential version ID
+                  {slot.name} Credential 版本 ID
                   <Input
                     name={`slot:${slot.name}`}
                     required={slot.required}
