@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -72,6 +73,17 @@ _SENSITIVE_COMPACT_FRAGMENTS = (
     "password",
     "privatekey",
     "refreshtoken",
+)
+_SENSITIVE_CLI_OPTIONS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "client_secret",
+        "password",
+        "private_key",
+        "refresh_token",
+        "token",
+    }
 )
 _SENSITIVE_VALUE = re.compile(
     r"(?:\b(?:basic|bearer)\s+\S+|\b(?:access[_-]?key|access[_-]?token|api[_-]?key|client[_-]?secret|password|passwd|private[_-]?key|refresh[_-]?token|token)\s*[:=]\s*\S+|-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----)",
@@ -629,6 +641,8 @@ class McpService:
             routing = cls._copy_json_mapping(definition.routing)
             tool_overrides = cls._copy_json_mapping(definition.tool_overrides)
             slots = tuple(cls._validate_slot(slot) for slot in definition.credential_slots)
+            if cls._contains_sensitive_cli_option(args) or (command is not None and cls._contains_sensitive_cli_option(shlex.split(command))):
+                raise ValueError
             if (
                 not isinstance(description, str)
                 or len(description) > 20_000
@@ -745,6 +759,13 @@ class McpService:
         if isinstance(value, (list, tuple)):
             return any(cls._contains_sensitive_value(nested) for nested in value)
         return isinstance(value, str) and (bool(_SENSITIVE_VALUE.search(value)) or cls._contains_sensitive_url(value))
+
+    @staticmethod
+    def _contains_sensitive_cli_option(tokens: tuple[str, ...] | list[str]) -> bool:
+        for token in tokens:
+            if token.startswith("--") and _normalized_key(token[2:].split("=", maxsplit=1)[0]) in _SENSITIVE_CLI_OPTIONS:
+                return True
+        return False
 
     @classmethod
     def _contains_sensitive_url(cls, value: str) -> bool:

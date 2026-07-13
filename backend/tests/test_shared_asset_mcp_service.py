@@ -274,6 +274,94 @@ async def test_mcp_definition_field_complete_secret_scan_runs_before_storage(
     assert secret_value not in caplog.text
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(("--api-key", "args-api-key-marker"), id="api-key"),
+        pytest.param(("--token", "args-token-marker"), id="token"),
+        pytest.param(("--access-token", "args-access-token-marker"), id="access-token"),
+        pytest.param(("--refresh-token", "args-refresh-token-marker"), id="refresh-token"),
+        pytest.param(("--client-secret", "args-client-secret-marker"), id="client-secret"),
+        pytest.param(("--password", "args-password-marker"), id="password"),
+        pytest.param(("--private-key", "args-private-key-marker"), id="private-key"),
+    ],
+)
+async def test_mcp_definition_rejects_separated_secret_carrier_args_before_storage(
+    args: tuple[str, ...],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("secret definition must not open storage")
+
+    marker = args[1]
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service_module.McpService(ExplodingFactory()).create_version(
+            _context(),
+            uuid.uuid4(),
+            service_module.McpDefinition(transport="stdio", command="mcp", args=args),
+            expected_asset_version=1,
+        )
+    assert marker not in str(exc_info.value)
+    assert marker not in repr(exc_info.value)
+    assert marker not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_definition_rejects_separated_secret_carrier_command_before_storage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("secret definition must not open storage")
+
+    command = "mcp --client-secret command-secret-marker"
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service_module.McpService(ExplodingFactory()).create_version(
+            _context(),
+            uuid.uuid4(),
+            service_module.McpDefinition(transport="stdio", command=command),
+            expected_asset_version=1,
+        )
+    assert command not in str(exc_info.value)
+    assert command not in repr(exc_info.value)
+    assert command not in caplog.text
+    assert "command-secret-marker" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_definition_rejects_secret_carrier_option_without_inspecting_next_arg() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    observed: list[str] = []
+
+    class ObservedSecret(str):
+        def __len__(self) -> int:
+            observed.append("length")
+            return super().__len__()
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("secret definition must not open storage")
+
+    with pytest.raises(AssetValidationFailed):
+        await service_module.McpService(ExplodingFactory()).create_version(
+            _context(),
+            uuid.uuid4(),
+            service_module.McpDefinition(
+                transport="stdio",
+                command="mcp",
+                args=("--api-key", ObservedSecret("uninspected-secret-marker")),
+            ),
+            expected_asset_version=1,
+        )
+    assert observed == []
+
+
 @pytest.mark.parametrize(
     "definition",
     [
@@ -297,6 +385,23 @@ async def test_mcp_definition_field_complete_secret_scan_runs_before_storage(
                 "env": {"AUTH_MODE": "oauth", "LOG_LEVEL": "info"},
             },
             id="ordinary-command-args-env",
+        ),
+        pytest.param(
+            {
+                "description": "Local command with ordinary controls",
+                "transport": "stdio",
+                "command": "mcp --port 8080 --auth-mode oauth",
+            },
+            id="ordinary-command-controls",
+        ),
+        pytest.param(
+            {
+                "description": "Local args with ordinary controls",
+                "transport": "stdio",
+                "command": "mcp",
+                "args": ("--port", "8080", "--auth-mode", "oauth"),
+            },
+            id="ordinary-args-controls",
         ),
         pytest.param(
             {

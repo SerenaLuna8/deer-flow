@@ -855,7 +855,11 @@ URL、env/header、OAuth、routing、tool override 的全部可持久化字符�
 无分隔 canonical form（如 `CLIENTSECRET`、`PRIVATEKEY`、`APIKEY`、`ACCESSTOKEN`）扫描，header
 另外把 `X-Auth` 等 auth carrier 视为敏感 key，URL 结构化拒绝 userinfo 与 sensitive query。
 递归 value scan 拒绝 Bearer/Basic authorization、`--api-key=...`/secret assignment 与
-private-key PEM 等明确 marker；credential slot payload schema 中的 secret 名称是 grant contract，
+private-key PEM 等明确 marker；CLI scan 对 `args` token 与安全 `shlex` 拆分后的 command token
+检查 secret carrier option，`--api-key`、`--token`、`--access-token`、`--refresh-token`、
+`--client-secret`、`--password`、`--private-key` 无论使用分离 value 或 assignment form 都拒绝，
+且 option 自身即触发而不读取或记录后续 value；`--port 8080`、`--auth-mode oauth` 等普通控制项
+继续合法。credential slot payload schema 中的 secret 名称是 grant contract，
 不是 secret value，不能套用 definition key denylist。这些检查稳定 422，异常、repr 与日志不包含
 命中的值或完整敏感 URL；绝不写回全局 `extensions_config.json`。项目无 slot MCP 允许 Admin/Editor
 直接发布；credential MCP 必须先进入 `pending_approval`，再由项目 Admin 或 system override
