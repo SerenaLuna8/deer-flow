@@ -34,6 +34,12 @@ check-db:
 migrate-sqlite:
 	PYTHONPATH=. uv run python scripts/migrate_sqlite_to_postgres.py $(ARGS)
 
+migrate-assets:
+	PYTHONPATH=. uv run python scripts/migrate_assets.py $(ARGS)
+
+rotate-credentials:
+	PYTHONPATH=. uv run python scripts/rotate_credentials.py $(ARGS)
+
 detect-blocking-io:
 	@PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python ../scripts/detect_blocking_io_static.py --output ../.deer-flow/blocking-io-findings.json
 
