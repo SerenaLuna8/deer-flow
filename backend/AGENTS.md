@@ -814,7 +814,9 @@ NFC + casefold identity 拒绝大小写、NFC/NFD 重复和文件/ancestor alias
 `..`、Windows drive、symlink、executable media type 与 ELF/PE/Mach-O fat32/fat64 magic。
 每个 path segment 还必须跨 Windows host 安全：拒绝 trailing dot/space、colon/NTFS ADS、Win32
 非法字符、control char，以及带 extension/大小写变体的 CON/PRN/AUX/NUL/COM1-9/LPT1-9；
-不能依赖 host tempfile 的 alias 行为。根目录必须有 `SKILL.md`，总未压缩大小上限为 100 MiB。
+Win32 设备名比较还必须覆盖 COM¹-³/LPT¹-³，但不能为此改变普通 Unicode path 的 NFC
+canonicalization。不能依赖 host tempfile 的 alias 行为。根目录必须有 `SKILL.md`，总未压缩大小
+上限为 100 MiB。
 每个文件保存 SHA-256，version checksum 由按路径
 排序的 normalized path、file SHA 和 size 生成，和调用方输入顺序无关。创建与发布均在 worker
 thread 中复用现有 frontmatter validator、Skill parser 和强制启用的 SkillScan；任何

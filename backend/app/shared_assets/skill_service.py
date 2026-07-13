@@ -56,6 +56,12 @@ _WIN32_RESERVED_BASENAMES = frozenset(
         "nul",
         *(f"com{index}" for index in range(1, 10)),
         *(f"lpt{index}" for index in range(1, 10)),
+        "com¹",
+        "com²",
+        "com³",
+        "lpt¹",
+        "lpt²",
+        "lpt³",
     }
 )
 _EXECUTABLE_MEDIA_TYPES = frozenset(

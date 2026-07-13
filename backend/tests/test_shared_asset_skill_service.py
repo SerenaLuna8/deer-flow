@@ -220,8 +220,14 @@ def test_rejects_win32_trailing_dot_alias_before_materializing() -> None:
         "nul.bin",
         "COM1",
         "devices/com9.log",
+        "COM\N{SUPERSCRIPT ONE}",
+        "com\N{SUPERSCRIPT TWO}.txt",
+        "devices/CoM\N{SUPERSCRIPT THREE}.bin",
         "LPT1",
         "devices/lpt9.txt",
+        "LPT\N{SUPERSCRIPT ONE}",
+        "lpt\N{SUPERSCRIPT TWO}.txt",
+        "devices/LPT\N{SUPERSCRIPT THREE}.log",
     ],
 )
 def test_rejects_each_unsafe_win32_path_segment(path: str) -> None:
@@ -245,6 +251,8 @@ def test_allows_non_reserved_win32_name_prefixes() -> None:
             SkillArchiveFile("devices/COM10.txt", b"safe"),
             SkillArchiveFile("devices/LPT0.txt", b"safe"),
             SkillArchiveFile("devices/CONSOLE.txt", b"safe"),
+            SkillArchiveFile("devices/COM\N{SUPERSCRIPT FOUR}.txt", b"safe"),
+            SkillArchiveFile("assets/r\N{LATIN SMALL LETTER E WITH ACUTE}sum\N{LATIN SMALL LETTER E WITH ACUTE}\N{SUPERSCRIPT TWO}.txt", b"safe"),
         ),
         request_id="req-win-safe",
     )
@@ -254,6 +262,8 @@ def test_allows_non_reserved_win32_name_prefixes() -> None:
         "devices/COM10.txt",
         "devices/LPT0.txt",
         "devices/CONSOLE.txt",
+        "devices/COM\N{SUPERSCRIPT FOUR}.txt",
+        "assets/r\N{LATIN SMALL LETTER E WITH ACUTE}sum\N{LATIN SMALL LETTER E WITH ACUTE}\N{SUPERSCRIPT TWO}.txt",
     }
 
 

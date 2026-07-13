@@ -210,6 +210,18 @@ Task 5 unit 与受影响 parser/validation/SkillScan regression：
 142 passed in 0.53s
 ```
 
+## Final Task 5 review follow-up
+
+最终 P1 指出 Win32 reserved device-name comparison 还包括 COM¹/COM²/COM³ 与
+LPT¹/LPT²/LPT³：
+
+- RED：新增根目录、子目录、大小写与 extension 变体后，六个上标设备名均被接受，输出
+  `6 failed, 23 passed`；COM⁴ 与普通 Unicode path compatibility cases 已通过。
+- GREEN：仅把六个 Win32 上标 device basename 加入 reserved-name comparison；没有使用 NFKC，
+  也没有改变普通 Unicode path 的 NFC canonicalization。新增边界集输出 `29 passed`。
+- 最终 focused Win32/POSIX 输出 `40 passed`；Task 5 unit 输出 `74 passed`；changed-file
+  `ruff check` 与 `ruff format --check` 全部通过。
+
 ## Concerns
 
 - Per task scope, the full backend suite was not run; evidence covers Task 5 unit/integration, Task 1 schema,
