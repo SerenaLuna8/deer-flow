@@ -248,30 +248,63 @@ class CredentialRepository:
         context: ProjectContext,
         credential_id: uuid.UUID,
     ) -> tuple[CredentialVersionRow, ...]:
+        self._require_project_actor(context)
         await self.get_project_credential(context, credential_id)
-        return await self._version_history(credential_id)
+        statement = (
+            select(CredentialVersionRow)
+            .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
+            .where(
+                CredentialVersionRow.credential_id == credential_id,
+                CredentialRow.scope == "project",
+                CredentialRow.project_id == context.project_id,
+                self._project_context_exists(context),
+            )
+            .order_by(CredentialVersionRow.version_number.desc())
+        )
+        return await self._version_history(statement)
 
     async def get_override_version_history(
         self,
         context: SystemAssetGovernanceContext,
         credential_id: uuid.UUID,
     ) -> tuple[CredentialVersionRow, ...]:
+        self._require_system_actor(context)
         await self.get_override_credential(context, credential_id)
-        return await self._version_history(credential_id)
+        statement = (
+            select(CredentialVersionRow)
+            .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
+            .where(
+                CredentialVersionRow.credential_id == credential_id,
+                CredentialRow.scope == "project",
+                CredentialRow.project_id == context.project_id,
+            )
+            .order_by(CredentialVersionRow.version_number.desc())
+        )
+        return await self._version_history(statement)
 
     async def get_system_version_history(
         self,
         context: SystemAssetGovernanceContext,
         credential_id: uuid.UUID,
     ) -> tuple[CredentialVersionRow, ...]:
+        self._require_system_actor(context)
         await self.get_system_credential(context, credential_id)
-        return await self._version_history(credential_id)
+        statement = (
+            select(CredentialVersionRow)
+            .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
+            .where(
+                CredentialVersionRow.credential_id == credential_id,
+                CredentialRow.scope == "system",
+                CredentialRow.project_id.is_(None),
+            )
+            .order_by(CredentialVersionRow.version_number.desc())
+        )
+        return await self._version_history(statement)
 
     async def _version_history(
         self,
-        credential_id: uuid.UUID,
+        statement,
     ) -> tuple[CredentialVersionRow, ...]:
-        statement = select(CredentialVersionRow).where(CredentialVersionRow.credential_id == credential_id).order_by(CredentialVersionRow.version_number.desc())
         return tuple((await self.session.execute(statement)).scalars().all())
 
     async def lock_project_credential_version(

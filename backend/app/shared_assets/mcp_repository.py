@@ -441,28 +441,65 @@ class McpRepository:
         context: ProjectContext,
         asset_id: uuid.UUID,
     ) -> tuple[McpVersionRecord, ...]:
+        self._require_project_actor(context)
         await self.get_project_asset(context, asset_id)
-        return await self._history(select(McpServerVersionRow).where(McpServerVersionRow.mcp_server_id == asset_id).order_by(McpServerVersionRow.version_number.desc()))
+        statement = (
+            select(McpServerVersionRow)
+            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            .where(
+                McpServerVersionRow.mcp_server_id == asset_id,
+                McpServerRow.scope == "project",
+                McpServerRow.project_id == context.project_id,
+                self._project_context_exists(context),
+            )
+            .order_by(McpServerVersionRow.version_number.desc())
+        )
+        return await self._history(statement)
 
     async def get_override_version_history(
         self,
         context: SystemAssetGovernanceContext,
         asset_id: uuid.UUID,
     ) -> tuple[McpVersionRecord, ...]:
+        self._require_system_actor(context)
         await self.get_override_asset(context, asset_id)
-        return await self._history(select(McpServerVersionRow).where(McpServerVersionRow.mcp_server_id == asset_id).order_by(McpServerVersionRow.version_number.desc()))
+        statement = (
+            select(McpServerVersionRow)
+            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            .where(
+                McpServerVersionRow.mcp_server_id == asset_id,
+                McpServerRow.scope == "project",
+                McpServerRow.project_id == context.project_id,
+            )
+            .order_by(McpServerVersionRow.version_number.desc())
+        )
+        return await self._history(statement)
 
     async def get_system_version_history(
         self,
         context: SystemAssetGovernanceContext,
         asset_id: uuid.UUID,
     ) -> tuple[McpVersionRecord, ...]:
+        self._require_system_actor(context)
         await self.get_system_asset(context, asset_id)
-        return await self._history(select(McpServerVersionRow).where(McpServerVersionRow.mcp_server_id == asset_id).order_by(McpServerVersionRow.version_number.desc()))
+        statement = (
+            select(McpServerVersionRow)
+            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            .where(
+                McpServerVersionRow.mcp_server_id == asset_id,
+                McpServerRow.scope == "system",
+                McpServerRow.project_id.is_(None),
+            )
+            .order_by(McpServerVersionRow.version_number.desc())
+        )
+        return await self._history(statement)
 
     async def _history(self, statement) -> tuple[McpVersionRecord, ...]:
         rows = tuple((await self.session.execute(statement)).scalars().all())
-        return tuple([await self._record(row, for_update=False) for row in rows])
+        records = []
+        for row in rows:
+            records.append(await self._record(row, for_update=False))
+        return tuple(records)
 
     async def _record(
         self,

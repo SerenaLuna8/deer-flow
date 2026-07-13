@@ -5,7 +5,7 @@ import binascii
 import uuid
 from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated, Any, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
@@ -40,6 +40,7 @@ from app.shared_assets import (
     SharedAssetError,
     SkillArchiveFile,
     SkillService,
+    WorkflowStatus,
 )
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
@@ -224,13 +225,161 @@ class CredentialRevokeRequest(_StrictModel):
     expected_credential_version: int = Field(ge=1)
 
 
-class VersionResponse(_StrictModel):
-    data: dict[str, Any]
+class AgentVersionItemResponse(_StrictModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    version_number: int
+    workflow_status: WorkflowStatus
+    description: str
+    soul: str
+    model_ref: str
+    tool_groups: list[str]
+    skill_version_ids: list[uuid.UUID]
+    mcp_version_ids: list[uuid.UUID]
+    supersedes_version_id: uuid.UUID | None
+    payload_checksum: str
+    created_by_user_id: str
+    created_at: datetime
+
+
+class SkillSecretRequirementResponse(_StrictModel):
+    name: str
+    optional: bool
+
+
+class SkillFileResponse(_StrictModel):
+    path: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+
+
+class SkillVersionItemResponse(_StrictModel):
+    id: uuid.UUID
+    skill_id: uuid.UUID
+    version_number: int
+    workflow_status: WorkflowStatus
+    description: str
+    frontmatter: dict[str, Any]
+    compatibility: str | None
+    secret_requirements: list[SkillSecretRequirementResponse]
+    scan_decision: Literal["allow", "warn", "block"]
+    scan_rule_ids: list[str]
+    scan_summary: dict[str, Any]
+    file_views: list[SkillFileResponse]
+    supersedes_version_id: uuid.UUID | None
+    payload_checksum: str
+    created_by_user_id: str
+    created_at: datetime
+
+
+class McpDefinitionSlotResponse(_StrictModel):
+    name: str
+    purpose: str
+    payload_schema: dict[str, list[str]]
+    required: bool
+
+
+class McpDefinitionResponse(_StrictModel):
+    description: str
+    transport: Literal["stdio", "http"]
+    command: str | None
+    args: list[str]
+    url: str | None
+    env: dict[str, str]
+    headers: dict[str, str]
+    oauth: dict[str, Any]
+    routing: dict[str, Any]
+    tool_overrides: dict[str, Any]
+    timeout_seconds: int
+    credential_slots: list[McpDefinitionSlotResponse]
+
+
+class McpCredentialSlotResponse(_StrictModel):
+    id: uuid.UUID
+    name: str
+    purpose: str
+    payload_schema: dict[str, list[str]]
+    required: bool
+
+
+class CredentialGrantResponse(_StrictModel):
+    id: uuid.UUID
+    mcp_server_version_id: uuid.UUID
+    credential_slot_id: uuid.UUID
+    credential_version_id: uuid.UUID
+    status: Literal["active", "revoked"]
+    version: int
+    created_by_user_id: str
+    created_at: datetime
+
+
+class McpVersionItemResponse(_StrictModel):
+    id: uuid.UUID
+    mcp_server_id: uuid.UUID
+    version_number: int
+    workflow_status: WorkflowStatus
+    definition: McpDefinitionResponse
+    credential_slots: list[McpCredentialSlotResponse]
+    credential_grants: list[CredentialGrantResponse]
+    supersedes_version_id: uuid.UUID | None
+    payload_checksum: str
+    submitted_at: datetime | None
+    reviewed_at: datetime | None
+    reviewed_by_user_id: str | None
+    created_by_user_id: str
+    created_at: datetime
+
+
+class CredentialVersionItemResponse(_StrictModel):
+    id: uuid.UUID
+    credential_id: uuid.UUID
+    version_number: int
+    status: Literal["active", "retired", "revoked"]
+    payload_schema_version: int
+    payload_schema: dict[str, list[str]]
+    supersedes_version_id: uuid.UUID | None
+    created_by_user_id: str
+    created_at: datetime
+
+
+class AgentVersionResponse(_StrictModel):
+    data: AgentVersionItemResponse
     request_id: str
 
 
-class VersionHistoryResponse(_StrictModel):
-    data: list[dict[str, Any]]
+class SkillVersionResponse(_StrictModel):
+    data: SkillVersionItemResponse
+    request_id: str
+
+
+class McpVersionResponse(_StrictModel):
+    data: McpVersionItemResponse
+    request_id: str
+
+
+class CredentialVersionResponse(_StrictModel):
+    data: CredentialVersionItemResponse
+    request_id: str
+
+
+class AgentVersionHistoryResponse(_StrictModel):
+    data: list[AgentVersionItemResponse]
+    request_id: str
+
+
+class SkillVersionHistoryResponse(_StrictModel):
+    data: list[SkillVersionItemResponse]
+    request_id: str
+
+
+class McpVersionHistoryResponse(_StrictModel):
+    data: list[McpVersionItemResponse]
+    request_id: str
+
+
+class CredentialVersionHistoryResponse(_StrictModel):
+    data: list[CredentialVersionItemResponse]
     request_id: str
 
 
@@ -356,20 +505,29 @@ async def _list_assets(context: ProjectContext, service) -> ScopedAssetListRespo
         raise_asset_domain(exc)
 
 
-async def _asset_call(actor, operation, *, version: bool = False):
+async def _asset_call(actor, operation):
     try:
         result = await operation()
-        if version:
-            return VersionResponse(data=jsonable_encoder(result), request_id=actor.request_id)
         return AssetMutationResponse(item=_asset_item(result), request_id=actor.request_id)
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 
 
-async def _version_history(actor, operation) -> VersionHistoryResponse:
+async def _version_call(actor, operation, response_model: type[_StrictModel]):
+    try:
+        result = await operation()
+        return response_model(
+            data=jsonable_encoder(result),
+            request_id=actor.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+async def _version_history(actor, operation, response_model: type[_StrictModel]):
     try:
         versions = await operation()
-        return VersionHistoryResponse(
+        return response_model(
             data=[jsonable_encoder(version) for version in versions],
             request_id=actor.request_id,
         )
@@ -432,13 +590,13 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
             tuple(body.skill_version_ids),
             tuple(body.mcp_version_ids),
         )
-        return await _asset_call(actor, lambda: service.create_version(actor, asset_id, payload, expected_asset_version=body.expected_asset_version), version=True)
+        return await _version_call(actor, lambda: service.create_version(actor, asset_id, payload, expected_asset_version=body.expected_asset_version), AgentVersionResponse)
 
     async def get_agent_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
-        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id))
+        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), AgentVersionHistoryResponse)
 
     async def publish_agent(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
-        return await _asset_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), version=True)
+        return await _version_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), AgentVersionResponse)
 
     async def create_skill(body: CreateAssetRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         return await _asset_call(actor, lambda: service.create_asset(actor, CreateSkill(body.slug, body.display_name)))
@@ -448,13 +606,13 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
 
     async def create_skill_version(asset_id: uuid.UUID, body: SkillVersionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         files = _decode_skill_files(body, actor.request_id)
-        return await _asset_call(actor, lambda: service.create_version_from_archive(actor, asset_id, files, expected_asset_version=body.expected_asset_version), version=True)
+        return await _version_call(actor, lambda: service.create_version_from_archive(actor, asset_id, files, expected_asset_version=body.expected_asset_version), SkillVersionResponse)
 
     async def get_skill_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
-        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id))
+        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), SkillVersionHistoryResponse)
 
     async def publish_skill(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
-        return await _asset_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), version=True)
+        return await _version_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), SkillVersionResponse)
 
     async def create_mcp(body: CreateAssetRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _asset_call(actor, lambda: service.create_asset(actor, CreateMcpServer(body.slug, body.display_name)))
@@ -463,19 +621,19 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
         return await _asset_call(actor, lambda: service.get(actor, asset_id))
 
     async def create_mcp_version(asset_id: uuid.UUID, body: McpVersionRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
-        return await _asset_call(actor, lambda: service.create_version(actor, asset_id, _mcp_definition(body), expected_asset_version=body.expected_asset_version), version=True)
+        return await _version_call(actor, lambda: service.create_version(actor, asset_id, _mcp_definition(body), expected_asset_version=body.expected_asset_version), McpVersionResponse)
 
     async def get_mcp_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
-        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id))
+        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), McpVersionHistoryResponse)
 
     async def publish_mcp(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
-        return await _asset_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), version=True)
+        return await _version_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), McpVersionResponse)
 
     async def submit_mcp(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
-        return await _asset_call(actor, lambda: service.submit_approval(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), version=True)
+        return await _version_call(actor, lambda: service.submit_approval(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), McpVersionResponse)
 
     async def approve_mcp(asset_id: uuid.UUID, version_id: uuid.UUID, body: McpApproveRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
-        return await _asset_call(actor, lambda: service.approve(actor, asset_id, version_id, body.credential_versions, expected_asset_version=body.expected_asset_version), version=True)
+        return await _version_call(actor, lambda: service.approve(actor, asset_id, version_id, body.credential_versions, expected_asset_version=body.expected_asset_version), McpVersionResponse)
 
     def add_status_routes(segment: str, service_dependency):
         async def change(asset_id: uuid.UUID, action: str, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(service_dependency)):
@@ -500,10 +658,10 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
             raise_asset_domain(exc)
 
     async def get_credential_versions(credential_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        return await _version_history(actor, lambda: service.get_version_history(actor, credential_id))
+        return await _version_history(actor, lambda: service.get_version_history(actor, credential_id), CredentialVersionHistoryResponse)
 
     async def replace_credential(credential_id: uuid.UUID, body: CredentialReplaceRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        return await _asset_call(actor, lambda: service.replace(actor, credential_id, body.payload, expected_credential_version=body.expected_credential_version), version=True)
+        return await _version_call(actor, lambda: service.replace(actor, credential_id, body.payload, expected_credential_version=body.expected_credential_version), CredentialVersionResponse)
 
     async def revoke_credential(credential_id: uuid.UUID, body: CredentialRevokeRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
         try:
@@ -515,25 +673,25 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
     for path, endpoint, methods, response_model, code in (
         ("/agents", create_agent, ["POST"], AssetMutationResponse, 201),
         ("/agents/{asset_id}", get_agent, ["GET"], AssetMutationResponse, 200),
-        ("/agents/{asset_id}/versions", get_agent_versions, ["GET"], VersionHistoryResponse, 200),
-        ("/agents/{asset_id}/versions", create_agent_version, ["POST"], VersionResponse, 201),
-        ("/agents/{asset_id}/versions/{version_id}/publish", publish_agent, ["POST"], VersionResponse, 200),
+        ("/agents/{asset_id}/versions", get_agent_versions, ["GET"], AgentVersionHistoryResponse, 200),
+        ("/agents/{asset_id}/versions", create_agent_version, ["POST"], AgentVersionResponse, 201),
+        ("/agents/{asset_id}/versions/{version_id}/publish", publish_agent, ["POST"], AgentVersionResponse, 200),
         ("/skills", create_skill, ["POST"], AssetMutationResponse, 201),
         ("/skills/{asset_id}", get_skill, ["GET"], AssetMutationResponse, 200),
-        ("/skills/{asset_id}/versions", get_skill_versions, ["GET"], VersionHistoryResponse, 200),
-        ("/skills/{asset_id}/versions", create_skill_version, ["POST"], VersionResponse, 201),
-        ("/skills/{asset_id}/versions/{version_id}/publish", publish_skill, ["POST"], VersionResponse, 200),
+        ("/skills/{asset_id}/versions", get_skill_versions, ["GET"], SkillVersionHistoryResponse, 200),
+        ("/skills/{asset_id}/versions", create_skill_version, ["POST"], SkillVersionResponse, 201),
+        ("/skills/{asset_id}/versions/{version_id}/publish", publish_skill, ["POST"], SkillVersionResponse, 200),
         ("/mcp-servers", create_mcp, ["POST"], AssetMutationResponse, 201),
         ("/mcp-servers/{asset_id}", get_mcp, ["GET"], AssetMutationResponse, 200),
-        ("/mcp-servers/{asset_id}/versions", get_mcp_versions, ["GET"], VersionHistoryResponse, 200),
-        ("/mcp-servers/{asset_id}/versions", create_mcp_version, ["POST"], VersionResponse, 201),
-        ("/mcp-servers/{asset_id}/versions/{version_id}/publish", publish_mcp, ["POST"], VersionResponse, 200),
-        ("/mcp-servers/{asset_id}/versions/{version_id}/submit-approval", submit_mcp, ["POST"], VersionResponse, 200),
-        ("/mcp-servers/{asset_id}/versions/{version_id}/approve", approve_mcp, ["POST"], VersionResponse, 200),
+        ("/mcp-servers/{asset_id}/versions", get_mcp_versions, ["GET"], McpVersionHistoryResponse, 200),
+        ("/mcp-servers/{asset_id}/versions", create_mcp_version, ["POST"], McpVersionResponse, 201),
+        ("/mcp-servers/{asset_id}/versions/{version_id}/publish", publish_mcp, ["POST"], McpVersionResponse, 200),
+        ("/mcp-servers/{asset_id}/versions/{version_id}/submit-approval", submit_mcp, ["POST"], McpVersionResponse, 200),
+        ("/mcp-servers/{asset_id}/versions/{version_id}/approve", approve_mcp, ["POST"], McpVersionResponse, 200),
         ("/credentials", create_credential, ["POST"], CredentialMutationResponse, 201),
         ("/credentials/{credential_id}", get_credential, ["GET"], CredentialMutationResponse, 200),
-        ("/credentials/{credential_id}/versions", get_credential_versions, ["GET"], VersionHistoryResponse, 200),
-        ("/credentials/{credential_id}/replace", replace_credential, ["POST"], VersionResponse, 200),
+        ("/credentials/{credential_id}/versions", get_credential_versions, ["GET"], CredentialVersionHistoryResponse, 200),
+        ("/credentials/{credential_id}/replace", replace_credential, ["POST"], CredentialVersionResponse, 200),
         ("/credentials/{credential_id}/revoke", revoke_credential, ["POST"], CredentialMutationResponse, 200),
     ):
         router.add_api_route(path, endpoint, methods=methods, response_model=response_model, status_code=code)
