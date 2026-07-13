@@ -17,6 +17,7 @@ import {
   createAssetInputSchema,
   createCredentialInputSchema,
   credentialMutationResponseSchema,
+  credentialRotationStatusSchema,
   credentialVersionHistoryResponseSchema,
   credentialVersionResponseSchema,
   disableSystemBindingInputSchema,
@@ -44,6 +45,7 @@ import {
   type CreateAssetInput,
   type CreateCredentialInput,
   type CredentialMutationResponse,
+  type CredentialRotationStatus,
   type DisableSystemBindingInput,
   type EnableSystemBindingInput,
   type ExpectedAssetVersionInput,
@@ -275,6 +277,16 @@ export async function listAdminAssets(
     return parseResponse(response, adminCredentialListSchema);
   }
   return parseResponse(response, adminAssetListSchema);
+}
+
+export async function getAdminCredentialRotationStatus(
+  signal?: AbortSignal,
+): Promise<CredentialRotationStatus> {
+  const response = await request(
+    `${adminAssetUrl("credentials")}/rotation-status`,
+    { signal },
+  );
+  return parseResponse(response, credentialRotationStatusSchema);
 }
 
 export async function createProjectAsset(

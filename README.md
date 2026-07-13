@@ -323,6 +323,12 @@ binding。`system_admin` 使用 `/api/admin/assets/*` 管理系统资产，或�
 Credential API 只返回名称、类型、状态、版本和时间等脱敏元数据。plaintext、ciphertext、nonce、
 key ID、storage locator 与 secret hash 永远不会出现在 HTTP 响应中。
 
+平台管理员可从 `/admin/assets` 进入独立的系统资产管理区，管理 Agent、Skill、MCP 与
+Credential 的创建、版本、发布和生命周期。含 Credential slot 的 MCP 版本只能经过
+submit/approve 流程发布；Credential 页面不提供明文查看或复制，并显示与 rotation CLI
+相同 eligibility 口径的 envelope 聚合状态。该状态接口只返回 eligible/current/pending 数量
+与状态，不暴露 key ID 或 envelope 存储字段。
+
 完成 catalog cutover 后，系统 Agent、Skill 与 MCP 的运行时和旧版 GET 接口只读取 PostgreSQL
 已发布版本；旧文件即使仍存在也不会回退使用。旧版文件写接口统一返回
 `409 ASSET_CATALOG_CUTOVER`，请改用 `/admin/assets` 管理系统资产。

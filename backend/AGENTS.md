@@ -797,6 +797,10 @@ active project，不创建或伪造 membership，也不能进入 `ProjectReposit
 映射为 404/403/409/422/503。credential 响应仅包含名称、类型、状态、版本与时间元数据，永不返回
 plaintext、ciphertext、nonce、key ID、storage locator 或 secret hash。平台 override 的治理事件由
 service 在成功事务后写入 `SharedAssetGovernanceEventSink`，router 不接触 payload 或 secret。
+`GET /api/admin/assets/credentials/rotation-status` 必须在动态 credential ID route 之前注册，只允许
+`system_admin`。它按 rotation CLI 的 eligibility（active logical credential、non-revoked semantic
+version、active envelope）统计 active key 已覆盖与待轮换数量，严格响应只含
+`eligible_total/current/pending/status`，不得返回 key ID 或 envelope 存储字段。
 
 **M3 Agent domain**：`app.shared_assets.agent_repository.AgentRepository` 不提供裸
 `project_id` 的项目资产接口；每个 project 读写都接收可信 `ProjectContext`，并在 SQL 中

@@ -18,6 +18,7 @@ import {
   createProjectCredential,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
+  getAdminCredentialRotationStatus,
   listAdminAssetVersions,
   listAdminAssets,
   listProjectAssetVersions,
@@ -36,6 +37,7 @@ import {
 import {
   adminAssetKey,
   adminAssetVersionsKey,
+  adminCredentialRotationStatusKey,
   projectAssetKey,
   projectAssetVersionsKey,
 } from "./query-keys";
@@ -48,6 +50,7 @@ import type {
   AssetListKind,
   CreateAssetInput,
   CreateCredentialInput,
+  CredentialRotationStatus,
   DisableSystemBindingInput,
   EnableSystemBindingInput,
   ExpectedAssetVersionInput,
@@ -131,6 +134,13 @@ export function useAdminAssets(accountId: string, kind: AssetListKind) {
       kind === "credentials"
         ? listAdminAssets(kind, signal)
         : listAdminAssets(kind, signal),
+  });
+}
+
+export function useAdminCredentialRotationStatus(accountId: string) {
+  return useQuery<CredentialRotationStatus>({
+    queryKey: adminCredentialRotationStatusKey(accountId),
+    queryFn: ({ signal }) => getAdminCredentialRotationStatus(signal),
   });
 }
 

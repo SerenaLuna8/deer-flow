@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -83,6 +84,37 @@ def test_credential_response_never_contains_envelope_fields() -> None:
     body = response.json()
     assert not ({"plaintext", "ciphertext", "nonce", "key_id", "storage_locator", "secret_hash"} & _recursive_keys(body))
     assert set(body) == {"items", "request_id"}
+
+
+def test_non_system_admin_cannot_access_credential_rotation_status() -> None:
+    response = _client("user", credential_service=AsyncMock()).get("/api/admin/assets/credentials/rotation-status")
+
+    assert response.status_code == 403
+
+
+def test_credential_rotation_status_is_static_and_secret_safe() -> None:
+    service = AsyncMock()
+    service.rotation_status.return_value = SimpleNamespace(
+        eligible_total=7,
+        current=5,
+        pending=2,
+        status="pending",
+    )
+
+    response = _client("system_admin", credential_service=service).get("/api/admin/assets/credentials/rotation-status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "eligible_total": 7,
+        "current": 5,
+        "pending": 2,
+        "status": "pending",
+    }
+    assert not ({"plaintext", "ciphertext", "nonce", "key_id", "storage_locator", "secret_hash"} & _recursive_keys(response.json()))
+    service.rotation_status.assert_awaited_once()
+    actor = service.rotation_status.await_args.args[0]
+    assert actor.user_id == ADMIN_ID
+    assert actor.project_id is None
 
 
 def test_system_admin_override_uses_governance_context_without_membership() -> None:

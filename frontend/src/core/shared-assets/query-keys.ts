@@ -50,6 +50,13 @@ export function adminAssetVersionsKey(
   ] as const;
 }
 
+export function adminCredentialRotationStatusKey(accountId: string) {
+  return [
+    ...adminAssetKey(accountId, "credentials"),
+    "rotation-status",
+  ] as const;
+}
+
 export function projectAssetVersionsKey(
   accountId: string,
   projectId: string,

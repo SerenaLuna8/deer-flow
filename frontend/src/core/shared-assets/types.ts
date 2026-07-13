@@ -298,6 +298,20 @@ export const credentialMetadataSchema = z
   })
   .strict();
 
+export const credentialRotationStatusSchema = z
+  .object({
+    eligible_total: z.number().int().nonnegative(),
+    current: z.number().int().nonnegative(),
+    pending: z.number().int().nonnegative(),
+    status: z.enum(["current", "pending"]),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.current + value.pending === value.eligible_total &&
+      (value.status === "pending" ? value.pending > 0 : value.pending === 0),
+  );
+
 export const systemBindingSchema = z
   .object({
     project_id: assetIdSchema,
@@ -492,6 +506,9 @@ export type VersionHistoryResponse = z.infer<
   typeof versionHistoryResponseSchema
 >;
 export type CredentialMetadata = z.infer<typeof credentialMetadataSchema>;
+export type CredentialRotationStatus = z.infer<
+  typeof credentialRotationStatusSchema
+>;
 export type SystemBinding = z.infer<typeof systemBindingSchema>;
 export type ProjectAssetList = z.infer<typeof projectAssetListSchema>;
 export type ProjectCredentialList = z.infer<typeof projectCredentialListSchema>;

@@ -46,7 +46,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace` (multi-project workspace; `/workspace/projects` redirects here), `/projects/[project_slug]` (independent project home), `/workspace/chats/[thread_id]` (legacy chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace` (multi-project workspace; `/workspace/projects` redirects here), `/projects/[project_slug]` (independent project home), `/admin/assets/{agents,skills,mcp,credentials}` (server-gated system asset administration), `/workspace/chats/[thread_id]` (legacy chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
@@ -59,6 +59,14 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 Platform authorization uses `system_role: "system_admin" | "user"`. The project-level
 role name `admin` is a separate membership concept and must not be accepted as a
 platform role in frontend schemas or admin-only UI gates.
+
+`/admin/assets` 的 server layout 是平台管理的真实 gate：未登录保留目标跳转登录，普通用户
+返回 404，静态 demo 不暴露入口。Agent、Skill、MCP 的管理动作使用 account-scoped TanStack
+keys；含 Credential slot 的 MCP 不显示 direct publish，只能 submit/approve。Credential
+create/replace 的 secret-bearing variables 不得进入 QueryCache 或 MutationCache，因此 UI 使用
+imperative authenticated API、只保存 pending 与安全公共错误，并在提交后立即清空表单。
+Credential response、版本 diff 与轮换状态都不得展示 key ID、nonce、ciphertext、storage locator
+或 secret hash；轮换状态只接受 strict eligible/current/pending/status 聚合 contract。
 
 Project server state lives under `src/core/projects/`. Its Zod contracts are strict and
 capabilities always come from the Gateway response; UI code must never infer capabilities

@@ -243,6 +243,38 @@ class CredentialRepository:
         statement = select(CredentialRow).where(CredentialRow.scope == "system", CredentialRow.project_id.is_(None)).order_by(CredentialRow.created_at, CredentialRow.id)
         return tuple((await self.session.execute(statement)).scalars().all())
 
+    async def rotation_status(
+        self,
+        context: SystemAssetGovernanceContext,
+        *,
+        active_key_id: str,
+    ) -> tuple[int, int]:
+        """Return eligible and already-current envelope counts without key metadata."""
+
+        self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetForbidden(context.request_id)
+        eligible = func.count(CredentialEnvelopeRow.id)
+        current = func.count(CredentialEnvelopeRow.id).filter(CredentialEnvelopeRow.key_id == active_key_id)
+        statement = (
+            select(eligible, current)
+            .select_from(CredentialVersionRow)
+            .join(
+                CredentialRow,
+                CredentialRow.id == CredentialVersionRow.credential_id,
+            )
+            .join(
+                CredentialEnvelopeRow,
+                (CredentialEnvelopeRow.credential_version_id == CredentialVersionRow.id) & CredentialEnvelopeRow.is_active.is_(True),
+            )
+            .where(
+                CredentialVersionRow.status != "revoked",
+                CredentialRow.status == "active",
+            )
+        )
+        eligible_total, current_total = (await self.session.execute(statement)).one()
+        return int(eligible_total), int(current_total)
+
     async def get_project_version_history(
         self,
         context: ProjectContext,

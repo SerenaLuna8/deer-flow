@@ -107,6 +107,14 @@ class CredentialGrantView:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class CredentialRotationStatus:
+    eligible_total: int
+    current: int
+    pending: int
+    status: str
+
+
 class CredentialService:
     def __init__(
         self,
@@ -306,6 +314,32 @@ class CredentialService:
             return tuple(self._version_view(row) for row in rows)
 
         return await self._execute(actor, operation)
+
+    async def rotation_status(
+        self,
+        actor: SystemAssetGovernanceContext,
+    ) -> CredentialRotationStatus:
+        if not isinstance(actor, SystemAssetGovernanceContext) or actor.project_id is not None:
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        try:
+            keyring = self._keyring or CredentialKeyring.from_environment()
+        except CredentialKeyringInvalid:
+            raise AssetStorageUnavailable(actor.request_id) from None
+
+        async def operation(repository: CredentialRepository) -> tuple[int, int]:
+            return await repository.rotation_status(
+                actor,
+                active_key_id=keyring.active_key_id,
+            )
+
+        eligible_total, current = await self._execute(actor, operation)
+        pending = eligible_total - current
+        return CredentialRotationStatus(
+            eligible_total=eligible_total,
+            current=current,
+            pending=pending,
+            status="pending" if pending else "current",
+        )
 
     async def _execute(
         self,

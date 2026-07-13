@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Request
 
@@ -51,6 +51,13 @@ class AdminAssetListResponse(_StrictModel):
 class AdminCredentialListResponse(_StrictModel):
     items: list[CredentialItemResponse]
     request_id: str
+
+
+class CredentialRotationStatusResponse(_StrictModel):
+    eligible_total: int
+    current: int
+    pending: int
+    status: Literal["current", "pending"]
 
 
 async def _admin_actor(
@@ -133,6 +140,21 @@ async def list_system_credentials(
     service: Annotated[CredentialService, Depends(get_credential_service)],
 ):
     return await _list_credentials(actor, service)
+
+
+@admin_router.get(
+    "/credentials/rotation-status",
+    response_model=CredentialRotationStatusResponse,
+)
+async def get_system_credential_rotation_status(
+    actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_actor)],
+    service: Annotated[CredentialService, Depends(get_credential_service)],
+):
+    try:
+        view = await service.rotation_status(actor)
+        return CredentialRotationStatusResponse(**vars(view))
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
 
 
 @admin_project_router.get("/agents", response_model=AdminAssetListResponse)

@@ -156,3 +156,8 @@ These apply repo-wide; module guides own the module-specific detail.
   全量 scope/dependency 预检和认证加密 backup/脱敏 ledger，四类 probe 全通过才写 cutover marker。
   `rotate-credentials` 要求目标 key 已是 active key，使用 gap-safe `SKIP LOCKED` 分批重扫；cursor 只作
   审计 checkpoint，tamper 回滚当前批。真实测试只准使用随机 `deerflow_test_*`，绝不连接业务库。
+- **M3 平台资产管理** — `/admin/assets` 由 server layout 强制限制为 `system_admin`，普通用户返回
+  404。Credential create/replace 使用 imperative authenticated API，不得把 secret-bearing input
+  放入 TanStack Query/Mutation cache；MCP Credential slot 只能走 submit/approve。轮换状态 GET
+  使用 rotation CLI 相同 eligibility，只返回 eligible/current/pending 聚合与状态，不返回 key ID、
+  nonce、ciphertext 或 storage locator。
