@@ -833,6 +833,17 @@ class MigrationResult:
     run_id: uuid.UUID | None = None
 
 
+@dataclass(frozen=True)
+class _DependencyCandidate:
+    kind: str
+    source_key: str | None
+    slug: str
+    scope: str
+    project_id: uuid.UUID | None
+    version_id: uuid.UUID
+    active: bool
+
+
 class AssetMigrationRunner:
     def __init__(
         self,
@@ -936,6 +947,7 @@ class AssetMigrationRunner:
             version_number = int((await session.execute(select(func.coalesce(func.max(SkillVersionRow.version_number), 0) + 1).where(SkillVersionRow.skill_id == asset.id))).scalar_one())
             supersedes = asset.current_published_version_id
         version = SkillVersionRow(
+            id=self._planned_version_id(item),
             skill_id=asset.id,
             version_number=version_number,
             workflow_status="draft",
@@ -971,73 +983,18 @@ class AssetMigrationRunner:
         await session.flush()
         return 1, 0
 
-    async def _resolve_dependency_version(
-        self,
-        session,
-        item: InventoryItem,
-        kind: str,
-        slug: str,
-    ) -> uuid.UUID:
-        if kind == "skill":
-            asset_model, version_model = SkillRow, SkillVersionRow
-            asset_fk = SkillVersionRow.skill_id
-        else:
-            asset_model, version_model = McpServerRow, McpServerVersionRow
-            asset_fk = McpServerVersionRow.mcp_server_id
-        allowed = [asset_model.scope == "system"]
-        if item.scope == "project":
-            allowed.append((asset_model.scope == "project") & (asset_model.project_id == item.project_id))
-        rows = tuple(
-            (
-                await session.execute(
-                    select(version_model.id)
-                    .join(asset_model, asset_model.id == asset_fk)
-                    .where(
-                        func.lower(asset_model.slug) == slug.casefold(),
-                        asset_model.status == "active",
-                        version_model.id == asset_model.current_published_version_id,
-                        version_model.workflow_status == "published",
-                        *([] if len(allowed) == 0 else [allowed[0] if len(allowed) == 1 else allowed[0] | allowed[1]]),
-                    )
-                )
-            ).scalars()
-        )
-        if len(rows) != 1:
-            raise AssetMigrationError("agent dependency is missing or ambiguous")
-        return uuid.UUID(str(rows[0]))
-
-    async def _agent_payload(self, session, item: InventoryItem) -> AgentPayload:
+    @staticmethod
+    def _planned_version_id(item: InventoryItem) -> uuid.UUID:
         try:
+            return uuid.UUID(str(item.payload["_planned_version_id"]))
+        except (KeyError, TypeError, ValueError):
+            raise AssetMigrationError("migration dependency version was not frozen") from None
 
-            async def selected_slugs(kind: str) -> tuple[str, ...]:
-                configured = item.payload.get(f"{kind}_slugs")
-                if configured is not None:
-                    return tuple(configured)
-                asset_model = SkillRow if kind == "skill" else McpServerRow
-                allowed = [asset_model.scope == "system"]
-                if item.scope == "project":
-                    allowed.append((asset_model.scope == "project") & (asset_model.project_id == item.project_id))
-                scope_filter = allowed[0] if len(allowed) == 1 else allowed[0] | allowed[1]
-                return tuple(
-                    (
-                        await session.execute(
-                            select(asset_model.slug)
-                            .where(
-                                asset_model.status == "active",
-                                asset_model.current_published_version_id.is_not(None),
-                                scope_filter,
-                            )
-                            .order_by(asset_model.scope, asset_model.slug)
-                        )
-                    ).scalars()
-                )
-
-            skill_slugs = await selected_slugs("skill")
-            mcp_slugs = await selected_slugs("mcp")
-            if any(not isinstance(value, str) for value in (*skill_slugs, *mcp_slugs)):
-                raise ValueError
-            skill_ids = tuple([await self._resolve_dependency_version(session, item, "skill", slug) for slug in skill_slugs])
-            mcp_ids = tuple([await self._resolve_dependency_version(session, item, "mcp", slug) for slug in mcp_slugs])
+    @staticmethod
+    def _agent_payload(item: InventoryItem) -> AgentPayload:
+        try:
+            skill_ids = tuple(uuid.UUID(str(value)) for value in item.payload["_frozen_skill_version_ids"])
+            mcp_ids = tuple(uuid.UUID(str(value)) for value in item.payload["_frozen_mcp_version_ids"])
             return AgentPayload(
                 description=str(item.payload.get("description") or ""),
                 soul=str(item.payload["soul"]),
@@ -1049,8 +1006,122 @@ class AssetMigrationRunner:
         except (KeyError, TypeError, ValueError):
             raise AssetMigrationError("agent source validation failed") from None
 
+    async def _freeze_planned_dependency(
+        self,
+        session,
+        item: InventoryItem,
+    ) -> tuple[InventoryItem, _DependencyCandidate]:
+        if item.kind == "skill":
+            asset_model, version_model, parent_column = SkillRow, SkillVersionRow, SkillVersionRow.skill_id
+        else:
+            asset_model, version_model, parent_column = McpServerRow, McpServerVersionRow, McpServerVersionRow.mcp_server_id
+        asset = (await session.execute(select(asset_model).where(asset_model.source_key == item.source_key))).scalar_one_or_none()
+        if asset is not None and (asset.scope != item.scope or asset.project_id != item.project_id or asset.slug.casefold() != item.slug.casefold()):
+            raise AssetMigrationError("source_key conflicts with an existing asset")
+        imported_rows = ()
+        if asset is not None:
+            imported_rows = tuple(
+                (
+                    await session.execute(
+                        select(version_model).where(
+                            parent_column == asset.id,
+                            version_model.payload_checksum == item.checksum,
+                            version_model.review_note == f"migration-source:{item.checksum}",
+                        )
+                    )
+                ).scalars()
+            )
+        if len(imported_rows) > 1:
+            raise AssetMigrationError("imported dependency version is ambiguous")
+        imported = imported_rows[0] if imported_rows else None
+        if imported is not None and imported.workflow_status not in {"draft", "published"}:
+            raise AssetMigrationError("imported dependency version cannot be published")
+        version_id = uuid.UUID(str(imported.id)) if imported is not None else uuid.uuid4()
+        payload = dict(item.payload)
+        payload["_planned_version_id"] = version_id
+        frozen = replace(item, payload=payload)
+        active = (asset is None or asset.status == "active") if item.kind == "skill" else str(item.payload.get("asset_status") or "active") == "active"
+        return frozen, _DependencyCandidate(
+            kind=item.kind,
+            source_key=item.source_key,
+            slug=item.slug,
+            scope=item.scope,
+            project_id=item.project_id,
+            version_id=version_id,
+            active=active,
+        )
+
+    async def _existing_dependency_candidates(
+        self,
+        session,
+        planned_source_keys: Mapping[str, set[str]],
+    ) -> tuple[_DependencyCandidate, ...]:
+        candidates: list[_DependencyCandidate] = []
+        for kind, asset_model, version_model in (
+            ("skill", SkillRow, SkillVersionRow),
+            ("mcp", McpServerRow, McpServerVersionRow),
+        ):
+            rows = (
+                await session.execute(
+                    select(
+                        asset_model.source_key,
+                        asset_model.slug,
+                        asset_model.scope,
+                        asset_model.project_id,
+                        version_model.id,
+                    )
+                    .join(version_model, version_model.id == asset_model.current_published_version_id)
+                    .where(
+                        asset_model.status == "active",
+                        version_model.workflow_status == "published",
+                    )
+                )
+            ).all()
+            candidates.extend(
+                _DependencyCandidate(
+                    kind=kind,
+                    source_key=row.source_key,
+                    slug=row.slug,
+                    scope=row.scope,
+                    project_id=row.project_id,
+                    version_id=uuid.UUID(str(row.id)),
+                    active=True,
+                )
+                for row in rows
+                if row.source_key not in planned_source_keys[kind]
+            )
+        return tuple(candidates)
+
+    @staticmethod
+    def _freeze_agent_dependencies(
+        item: InventoryItem,
+        kind: str,
+        candidates: Sequence[_DependencyCandidate],
+    ) -> tuple[uuid.UUID, ...]:
+        visible = tuple(
+            candidate for candidate in candidates if candidate.kind == kind and candidate.active and (candidate.scope == "system" or (item.scope == "project" and candidate.scope == "project" and candidate.project_id == item.project_id))
+        )
+        configured = item.payload.get(f"{kind}_slugs")
+        if configured is None:
+            selected = sorted(visible, key=lambda candidate: (candidate.scope, candidate.slug.casefold(), candidate.source_key or ""))
+            slugs = [candidate.slug.casefold() for candidate in selected]
+            if len(slugs) != len(set(slugs)):
+                raise AssetMigrationError("agent dependency is missing or ambiguous")
+            return tuple(candidate.version_id for candidate in selected)
+        if not isinstance(configured, (list, tuple)) or any(not isinstance(slug, str) for slug in configured):
+            raise AssetMigrationError("agent source validation failed")
+        resolved: list[uuid.UUID] = []
+        for slug in configured:
+            matches = [candidate for candidate in visible if candidate.slug.casefold() == slug.casefold()]
+            if len(matches) != 1:
+                raise AssetMigrationError("agent dependency is missing or ambiguous")
+            resolved.append(matches[0].version_id)
+        if len(resolved) != len(set(resolved)):
+            raise AssetMigrationError("agent dependency is missing or ambiguous")
+        return tuple(resolved)
+
     async def _preflight_inventory(self, inventory: Sequence[InventoryItem]) -> tuple[InventoryItem, ...]:
-        """Freeze every actor/project mapping before the first catalog write."""
+        """Freeze scopes and the complete dependency graph before the first write."""
 
         effective: list[InventoryItem] = []
         async with self.session_factory() as session:
@@ -1059,29 +1130,29 @@ class AssetMigrationRunner:
                     actor_id = await self._validate_scope(session, item)
                     effective.append(item if item.owner_user_id == actor_id else replace(item, owner_user_id=actor_id))
 
-                planned = tuple(effective)
-                for item in planned:
+                frozen: list[InventoryItem] = []
+                planned_candidates: list[_DependencyCandidate] = []
+                planned_source_keys = {"skill": set(), "mcp": set()}
+                for item in effective:
+                    if item.kind in planned_source_keys:
+                        frozen_item, candidate = await self._freeze_planned_dependency(session, item)
+                        frozen.append(frozen_item)
+                        planned_candidates.append(candidate)
+                        planned_source_keys[item.kind].add(item.source_key)
+                    else:
+                        frozen.append(item)
+                existing_candidates = await self._existing_dependency_candidates(session, planned_source_keys)
+                candidates = (*existing_candidates, *planned_candidates)
+                result: list[InventoryItem] = []
+                for item in frozen:
                     if item.kind != "agent":
+                        result.append(item)
                         continue
-                    for kind in ("skill", "mcp"):
-                        configured = item.payload.get(f"{kind}_slugs")
-                        if configured is None:
-                            continue
-                        if not isinstance(configured, (list, tuple)) or any(not isinstance(slug, str) for slug in configured):
-                            raise AssetMigrationError("agent source validation failed")
-                        for slug in configured:
-                            planned_matches = [
-                                candidate
-                                for candidate in planned
-                                if candidate.kind == kind
-                                and candidate.slug.casefold() == slug.casefold()
-                                and (candidate.scope == "system" or (item.scope == "project" and candidate.scope == "project" and candidate.project_id == item.project_id))
-                            ]
-                            if len(planned_matches) > 1:
-                                raise AssetMigrationError("agent dependency is missing or ambiguous")
-                            if not planned_matches:
-                                await self._resolve_dependency_version(session, item, kind, slug)
-        return tuple(effective)
+                    payload = dict(item.payload)
+                    payload["_frozen_skill_version_ids"] = self._freeze_agent_dependencies(item, "skill", candidates)
+                    payload["_frozen_mcp_version_ids"] = self._freeze_agent_dependencies(item, "mcp", candidates)
+                    result.append(replace(item, payload=payload))
+        return tuple(result)
 
     async def _migrate_agent(self, session, item: InventoryItem) -> tuple[int, int]:
         asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == item.source_key).with_for_update(of=AgentRow))).scalar_one_or_none()
@@ -1105,7 +1176,7 @@ class AssetMigrationRunner:
                     asset.version += 1
                 await session.flush()
                 return 0, 1
-        payload = await self._agent_payload(session, item)
+        payload = self._agent_payload(item)
         checksum = AgentService._payload_checksum(payload)
         if asset is None:
             asset = AgentRow(
@@ -1381,6 +1452,7 @@ class AssetMigrationRunner:
             number = int((await session.execute(select(func.coalesce(func.max(McpServerVersionRow.version_number), 0) + 1).where(McpServerVersionRow.mcp_server_id == asset.id))).scalar_one())
             supersedes = asset.current_published_version_id
         version = McpServerVersionRow(
+            id=self._planned_version_id(item),
             mcp_server_id=asset.id,
             version_number=number,
             workflow_status="draft",

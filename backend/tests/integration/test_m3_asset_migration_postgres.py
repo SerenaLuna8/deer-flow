@@ -149,6 +149,68 @@ async def test_all_scope_mappings_preflight_before_any_asset_write(
 
 
 @pytest.mark.asyncio
+async def test_all_visible_agent_dependencies_fail_ambiguity_before_any_asset_write(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    actor_id = str(uuid.uuid4())
+    project_id = uuid.uuid4()
+    repo = tmp_path / "repo"
+    data_root = tmp_path / "data"
+    system_skill = repo / "skills/public/shared/SKILL.md"
+    project_skill = data_root / f"users/{actor_id}/skills/custom/shared/SKILL.md"
+    project_agent = data_root / f"users/{actor_id}/agents/project-agent"
+    system_skill.parent.mkdir(parents=True)
+    project_skill.parent.mkdir(parents=True)
+    project_agent.mkdir(parents=True)
+    system_skill.write_text("---\nname: shared\ndescription: system\n---\nsystem\n", encoding="utf-8")
+    project_skill.write_text("---\nname: shared\ndescription: project\n---\nproject\n", encoding="utf-8")
+    (project_agent / "config.yaml").write_text("name: Project Agent\n", encoding="utf-8")
+    (project_agent / "SOUL.md").write_text("Use all visible dependencies.", encoding="utf-8")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """INSERT INTO users (id,email,system_role,created_at,needs_setup,token_version)
+                VALUES (:id,:email,'system_admin',:now,false,0)"""
+            ),
+            {"id": actor_id, "email": f"all-visible-{actor_id}@example.com", "now": datetime.now(UTC)},
+        )
+        await connection.execute(
+            text(
+                """INSERT INTO projects (id,slug,display_name,created_by_user_id)
+                VALUES (:id,:slug,'All Visible',:owner_id)"""
+            ),
+            {"id": project_id, "slug": f"all-visible-{project_id}", "owner_id": actor_id},
+        )
+        await connection.execute(
+            text(
+                """INSERT INTO project_memberships (id,project_id,user_id,role)
+                VALUES (:id,:project_id,:user_id,'admin')"""
+            ),
+            {"id": uuid.uuid4(), "project_id": project_id, "user_id": actor_id},
+        )
+    inventory = build_inventory(
+        SourceLayout(repo_root=repo, data_root=data_root),
+        OwnerMap({actor_id: project_id}, system_actor=actor_id),
+    )
+    assert len(inventory) == 3
+    agent = next(item for item in inventory if item.kind == "agent")
+    assert agent.payload["skill_slugs"] is None
+    runner = AssetMigrationRunner(factory, backup_root=tmp_path / "migrations")
+
+    with pytest.raises(AssetMigrationError, match="agent dependency is missing or ambiguous"):
+        await runner.run(inventory, execute=True, batch_size=1)
+
+    async with factory() as session:
+        counts = {model.__tablename__: int((await session.execute(select(func.count()).select_from(model))).scalar_one()) for model in (AgentRow, AgentVersionRow, SkillRow, SkillVersionRow, McpServerRow, McpServerVersionRow)}
+    assert counts == {name: 0 for name in counts}
+    assert not (tmp_path / "migrations").exists()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_system_agent_mcp_skill_and_secret_migrate_as_one_validated_catalog(
     migrated_postgres_database_url: str,
     tmp_path: Path,
