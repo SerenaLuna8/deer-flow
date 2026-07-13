@@ -71,8 +71,11 @@ git diff --check  # no output
 - `backend/app/shared_assets/skill_service.py`
 - `backend/app/shared_assets/__init__.py`
 - `backend/packages/harness/deerflow/skills/validation.py`
+- `backend/packages/harness/deerflow/skills/skillscan/__init__.py`
+- `backend/packages/harness/deerflow/skills/skillscan/orchestrator.py`
 - `backend/tests/test_shared_asset_skill_service.py`
 - `backend/tests/integration/test_m3_skill_assets_postgres.py`
+- `backend/tests/test_skillscan_native.py`
 - `backend/AGENTS.md`
 - `.superpowers/sdd/task-5-report.md`
 
@@ -81,17 +84,19 @@ git diff --check  # no output
 - Project repository public methods do not accept a bare project ID. Every project SQL path fixes trusted
   membership ID/project/user/version/status plus active project state; wrong scope, stale context,
   cross-project and absent rows all return `AssetNotFound`.
-- Input collection is copied before the first database await. Paths normalize to sorted POSIX relative paths;
-  absolute/drive/traversal/NUL/trailing separator, duplicate, file/ancestor collision, symlink and executable
-  media types are rejected. Root `SKILL.md` and the inclusive 100 MiB boundary are tested.
+- Input collection is copied before the first database await. Paths normalize to sorted NFC POSIX relative paths;
+  an NFC + casefold identity rejects host-filesystem aliases and ancestor collisions before materialization.
+  Absolute/drive/traversal/NUL/trailing separator, duplicate, symlink and executable media types are rejected.
+  Root `SKILL.md` and the inclusive 100 MiB boundary are tested.
 - Every file row persists content, media type, size and SHA-256. Version checksum contains only sorted normalized
   path, file SHA and size, so file ordering cannot alter identity.
 - Preview/create/publish perform file-system parser/validator/scan work through `asyncio.to_thread`. M3 shared
-  assets force the existing SkillScan on even if the legacy global kill switch is disabled; CRITICAL or scanner
-  exceptions fail closed. Persistence contains only allow/warn, rule IDs and severity counts, never evidence.
-- `required-secrets` accepts only canonical string names or `{name, optional}`. The service compares raw
-  declarations with parser output to reject invalid/dropped/duplicate entries, stores canonical metadata only,
-  and creates no credential or grant.
+  assets force the existing SkillScan on even if the legacy global kill switch is disabled; CRITICAL findings,
+  scanner exceptions and non-empty analyzer/read errors fail closed. Persistence contains only allow/warn, rule
+  IDs and severity counts, never evidence.
+- Before invoking the existing parser or validator, a no-log raw frontmatter preflight rejects non-string keys
+  and malformed `required-secrets` / `secrets-autonomous`. Only canonical name/optional metadata persists; no
+  secret value, credential or grant is created.
 - Publish locks the asset/version, checks optimistic asset version and draft workflow, reloads current child rows,
   verifies path/hash/size/media/total, reparses/rescans, then compares checksum and canonical metadata before the
   workflow transition and current pointer update. PostgreSQL triggers protect published parent/child immutability.
@@ -103,6 +108,64 @@ git diff --check  # no output
 - Existing validator allowlist now includes `required-secrets` and `secrets-autonomous`, matching fields already
   supported by the existing parser; parser/validation regressions pass.
 
+## Formal Task 5 review follow-up
+
+正式 reviewer 返回的 6 个 finding 均逐项验证为当前代码的真实问题，并分别完成 RED→GREEN：
+
+1. **Host temporary-filesystem aliases**
+   - RED：大小写 alias、NFC/NFD alias 与大小写 ancestor collision 共 `3 failed`；Linux 上字面路径
+     不冲突，但 macOS case-insensitive / normalization filesystem 可在 scan 前覆盖文件。
+   - GREEN：存储路径先转 NFC，并以 NFC + casefold POSIX identity 检测重复与 ancestor；聚焦
+     `4 passed`，包含原 order-stable checksum regression。
+
+2. **SkillScan analyzer/read errors**
+   - RED：monkeypatch `_scan_text_file` 抛错时 preview 仍 allow；新增完整结果 API 的 harness test
+     首先因 import 不存在而 RED。
+   - GREEN：新增 `enforce_static_scan_result()` 返回完整 `ScanResult`；旧
+     `enforce_static_scan()` 继续返回 findings list。M3 对任意 `scanner_errors` 返回稳定 422；新旧
+     API 聚焦 `4 passed`。
+
+3. **Executable Mach-O magic coverage**
+   - RED：application/octet-stream 的 32-bit little-endian `CE FA ED FE` 与 little-endian fat
+     `BE BA FE CA` 两项未拦截，输出 `2 failed, 6 passed`。
+   - GREEN：补齐完整 4-byte Mach-O 判定表并保留 ELF/PE 检测，覆盖两种 endian 的 32/64-bit
+     与 fat magic；连同 archive/nested archive regression 为 `10 passed`。
+
+4. **Raw secret parser-log leak**
+   - RED：非法 required-secret name 出现在 parser warning；malformed `secrets-autonomous` 被 warning
+     后静默转换且未返回 422。
+   - GREEN：parser/validator 前先无日志检查 raw YAML key 与 secret-control shape/name/optional；
+     caplog、exception 均不含 raw value。显式 `null` control 也经额外 RED→GREEN 固定拒绝。
+
+5. **Event-loop blocking after DB load**
+   - RED：真实 PostgreSQL publish/load 参数化 heartbeat 均在主线程 SHA gate 超时，`2 failed`。
+   - GREEN：publish reconstruction 与 load reconstruction + 两次 checksum hash 全部包装在
+     `asyncio.to_thread`。测试用 `threading.Event` 确定性 gate：只有 event-loop heartbeat 能释放
+     hash，且断言每次 SHA thread ID 都不等于主线程；输出 `2 passed`。静态 blocking-I/O detector
+     对 `skill_service.py` 输出 `No static blocking IO event-loop risk findings`。
+
+6. **Non-string YAML key**
+   - RED：`true: x` 进入现有 validator 后在 join/sort 抛裸 `TypeError`。
+   - GREEN：同一 raw preflight 在 parser/validator 前拒绝非字符串 top-level key，稳定映射为
+     request-scoped `AssetValidationFailed`。
+
+复审修复后的最终 PostgreSQL gate：
+
+```text
+.......................................................................  [100%]
+71 passed in 22.24s
+```
+
+受影响 harness parser/validation/SkillScan、installer、manage tool、custom router、blocking-I/O 与
+Task 5 unit focused suite：
+
+```text
+........................................................................ [ 34%]
+........................................................................ [ 68%]
+...................................................................      [100%]
+211 passed, 1 warning in 4.31s
+```
+
 ## Concerns
 
 - Per task scope, the full backend suite was not run; evidence covers Task 5 unit/integration, Task 1 schema,
@@ -111,3 +174,5 @@ git diff --check  # no output
   those remain later milestone work.
 - SkillScan warning log behavior remains owned by the reused harness component. Durable shared-asset rows store
   only redacted decision/rule/severity metadata as required.
+- 211-test harness focused suite 有 1 条既有 Starlette/httpx deprecation warning；无 test failure，且与
+  本次 SkillScan API 和 Task 5 变更无关。

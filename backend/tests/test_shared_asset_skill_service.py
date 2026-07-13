@@ -4,6 +4,7 @@ import dataclasses
 import hashlib
 import importlib
 import inspect
+import logging
 import uuid
 from types import SimpleNamespace
 
@@ -134,6 +135,54 @@ async def test_rejects_duplicate_symlink_executable_and_missing_manifest(
         await service.preview_archive(_editor_context(), files)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "magic",
+    [
+        b"\x7fELF\x02\x01\x01\x00",
+        b"MZ\x90\x00\x03\x00\x00\x00",
+        b"\xfe\xed\xfa\xce\x00\x00\x00\x00",
+        b"\xce\xfa\xed\xfe\x00\x00\x00\x00",
+        b"\xfe\xed\xfa\xcf\x00\x00\x00\x00",
+        b"\xcf\xfa\xed\xfe\x00\x00\x00\x00",
+        b"\xca\xfe\xba\xbe\x00\x00\x00\x00",
+        b"\xbe\xba\xfe\xca\x00\x00\x00\x00",
+    ],
+)
+async def test_rejects_all_executable_magics_with_octet_stream_media_type(magic: bytes) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    service = service_module.SkillService(lambda: None)
+
+    with pytest.raises(AssetValidationFailed):
+        await service.preview_archive(
+            _editor_context(),
+            _files(SkillArchiveFile("bin/tool", magic, "application/octet-stream")),
+        )
+
+
+@pytest.mark.parametrize(
+    ("first_path", "second_path"),
+    [
+        ("scripts/run.py", "scripts/RUN.py"),
+        ("assets/caf\N{LATIN SMALL LETTER E WITH ACUTE}.txt", "assets/cafe\N{COMBINING ACUTE ACCENT}.txt"),
+        ("Assets", "assets/payload.txt"),
+    ],
+)
+def test_rejects_host_filesystem_aliases_before_materializing(
+    first_path: str,
+    second_path: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    files = (
+        SkillArchiveFile("SKILL.md", _manifest(), "text/markdown"),
+        SkillArchiveFile(first_path, b"exec('malicious')\n", "text/x-python"),
+        SkillArchiveFile(second_path, b"print('safe')\n", "text/x-python"),
+    )
+
+    with pytest.raises(AssetValidationFailed):
+        service_module.normalize_skill_files(files, request_id="req-alias")
+
+
 def test_skill_archive_enforces_100_mib_total_boundary() -> None:
     service_module = importlib.import_module("app.shared_assets.skill_service")
     manifest = _manifest()
@@ -191,6 +240,24 @@ async def test_frontmatter_and_existing_static_scan_allow_warn_and_block(
 
 
 @pytest.mark.asyncio
+async def test_static_scanner_errors_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    scanner_module = importlib.import_module("deerflow.skills.skillscan.orchestrator")
+    service = service_module.SkillService(lambda: None)
+
+    def broken_text_analyzer(_path: str, _text: str):
+        raise RuntimeError("analyzer unavailable")
+
+    monkeypatch.setattr(scanner_module, "_scan_text_file", broken_text_analyzer)
+
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service.preview_archive(_editor_context(), _files())
+    assert exc_info.value.request_id == "req-skill-unit"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "declaration",
     [
@@ -213,6 +280,59 @@ async def test_noncanonical_secret_requirements_are_rejected_instead_of_persiste
             (SkillArchiveFile("SKILL.md", manifest, "text/markdown"),),
         )
     assert exc_info.value.request_id == "req-skill-unit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("control", ["required-secrets", "secrets-autonomous"])
+async def test_invalid_secret_controls_fail_closed_without_logging_raw_values(
+    control: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    service = service_module.SkillService(lambda: None)
+    raw_value = "raw-" + "super-secret"
+    declaration = f"required-secrets:\n  - API_TOKEN={raw_value}\n" if control == "required-secrets" else f"secrets-autonomous: {raw_value}\n"
+    caplog.set_level(logging.WARNING)
+
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service.preview_archive(
+            _editor_context(),
+            (SkillArchiveFile("SKILL.md", _manifest(declaration), "text/markdown"),),
+        )
+
+    assert exc_info.value.request_id == "req-skill-unit"
+    assert raw_value not in caplog.text
+    assert raw_value not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_non_string_frontmatter_key_is_stable_validation_error() -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    service = service_module.SkillService(lambda: None)
+    manifest = _manifest("true: x\n")
+
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service.preview_archive(
+            _editor_context(),
+            (SkillArchiveFile("SKILL.md", manifest, "text/markdown"),),
+        )
+    assert exc_info.value.request_id == "req-skill-unit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "declaration",
+    ["required-secrets: null\n", "secrets-autonomous: null\n"],
+)
+async def test_present_secret_control_must_have_canonical_type(declaration: str) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    service = service_module.SkillService(lambda: None)
+
+    with pytest.raises(AssetValidationFailed):
+        await service.preview_archive(
+            _editor_context(),
+            (SkillArchiveFile("SKILL.md", _manifest(declaration), "text/markdown"),),
+        )
 
 
 @pytest.mark.asyncio

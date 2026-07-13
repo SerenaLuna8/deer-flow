@@ -8,7 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.skills.security_scanner import scan_skill_content
-from deerflow.skills.skillscan import StaticScanBlockedError, enforce_static_scan, scan_archive_preflight, scan_skill_dir
+from deerflow.skills.skillscan import (
+    StaticScanBlockedError,
+    enforce_static_scan,
+    enforce_static_scan_result,
+    scan_archive_preflight,
+    scan_skill_dir,
+)
 
 _FINDING_FIELDS = {"rule_id", "severity", "file", "line", "message", "remediation", "evidence"}
 
@@ -116,6 +122,27 @@ def test_skill_scan_enabled_false_skips_native_findings(tmp_path: Path) -> None:
     app_config = SimpleNamespace(skill_scan=SimpleNamespace(enabled=False))
 
     assert enforce_static_scan(skill_dir, skill_name="demo-skill", app_config=app_config) == []
+
+
+def test_enforced_scan_result_exposes_analyzer_errors_without_breaking_legacy_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.skills.skillscan import orchestrator
+
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+
+    def broken_text_analyzer(_path: str, _text: str):
+        raise RuntimeError("analyzer unavailable")
+
+    monkeypatch.setattr(orchestrator, "_scan_text_file", broken_text_analyzer)
+
+    result = enforce_static_scan_result(skill_dir, skill_name="demo-skill")
+
+    assert result["findings"] == []
+    assert len(result["scanner_errors"]) == 1
+    assert enforce_static_scan(skill_dir, skill_name="demo-skill") == []
 
 
 def test_python_subprocess_without_shell_warns(tmp_path: Path) -> None:

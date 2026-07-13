@@ -4,8 +4,10 @@ import asyncio
 import dataclasses
 import hashlib
 import importlib
+import threading
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select, text
@@ -402,6 +404,79 @@ async def test_loading_snapshot_holds_asset_lock_against_concurrent_suspend(
         finally:
             release.set()
         assert await asyncio.wait_for(load_task, timeout=2) == _archive()
+    finally:
+        release.set()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["publish", "load"])
+async def test_skill_snapshot_hashing_yields_to_event_loop(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(engine, factory, label=f"skill-offload-{operation}")
+    service = service_module.SkillService(factory)
+    entered = threading.Event()
+    release = threading.Event()
+    hash_threads: list[int] = []
+    main_thread_id = threading.get_ident()
+    real_sha256 = service_module.hashlib.sha256
+
+    def gated_sha256(data=b""):
+        hash_threads.append(threading.get_ident())
+        if not entered.is_set():
+            entered.set()
+            if not release.wait(timeout=0.5):
+                raise RuntimeError("hashing blocked the event loop")
+        return real_sha256(data)
+
+    async def heartbeat() -> None:
+        while not entered.is_set():
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        release.set()
+
+    try:
+        asset = await service.create_asset(
+            editor,
+            service_module.CreateSkill(f"offload-{operation}", f"Offload {operation}"),
+        )
+        draft = await service.create_version_from_archive(
+            editor,
+            asset.id,
+            _archive(),
+            expected_asset_version=1,
+        )
+        version = draft
+        if operation == "load":
+            version = await service.publish(editor, asset.id, draft.id, expected_asset_version=2)
+
+        monkeypatch.setattr(
+            service_module,
+            "hashlib",
+            SimpleNamespace(sha256=gated_sha256),
+        )
+        if operation == "publish":
+            snapshot_operation = service.publish(
+                editor,
+                asset.id,
+                draft.id,
+                expected_asset_version=2,
+            )
+        else:
+            snapshot_operation = service.load_version_files(editor, asset.id, version.id)
+
+        await asyncio.wait_for(
+            asyncio.gather(snapshot_operation, heartbeat()),
+            timeout=2,
+        )
+        assert hash_threads
+        assert all(thread_id != main_thread_id for thread_id in hash_threads)
     finally:
         release.set()
         await engine.dispose()

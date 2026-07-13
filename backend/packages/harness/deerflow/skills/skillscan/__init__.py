@@ -11,6 +11,7 @@ from deerflow.skills.skillscan.models import (
 from deerflow.skills.skillscan.orchestrator import (
     RULES,
     enforce_static_scan,
+    enforce_static_scan_result,
     format_static_findings,
     scan_archive_preflight,
     scan_skill_dir,
@@ -26,6 +27,7 @@ __all__ = [
     "StaticScanBlockedError",
     "StaticScannerError",
     "enforce_static_scan",
+    "enforce_static_scan_result",
     "format_static_findings",
     "scan_archive_preflight",
     "scan_skill_dir",

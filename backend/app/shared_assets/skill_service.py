@@ -6,6 +6,7 @@ import json
 import posixpath
 import re
 import tempfile
+import unicodedata
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -33,12 +34,17 @@ from app.shared_assets.models import AssetScope, SkillArchiveFile, WorkflowStatu
 from app.shared_assets.skill_repository import SkillRepository, SkillVersionRecord
 from deerflow.persistence.shared_assets import SkillRow, SkillVersionFileRow, SkillVersionRow
 from deerflow.skills.parser import parse_skill_file
-from deerflow.skills.skillscan import StaticScanBlockedError, StaticScannerError, enforce_static_scan
+from deerflow.skills.skillscan import (
+    StaticScanBlockedError,
+    StaticScannerError,
+    enforce_static_scan_result,
+)
 from deerflow.skills.types import SkillCategory
 from deerflow.skills.validation import _validate_skill_frontmatter
 
 MAX_SKILL_ARCHIVE_BYTES = 100 * 1024 * 1024
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_ENV_VAR_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _SYMLINK_MEDIA_TYPES = frozenset({"application/symlink", "application/x-symlink", "inode/symlink"})
 _EXECUTABLE_MEDIA_TYPES = frozenset(
@@ -166,7 +172,7 @@ def _validate_archive_file(item: SkillArchiveFile, request_id: str) -> SkillArch
     if not raw_path or "\x00" in raw_path or raw_path.endswith(("/", "\\")) or windows_path.drive or windows_path.is_absolute() or posix_path.startswith("/") or ".." in PurePosixPath(posix_path).parts:
         raise AssetValidationFailed(request_id)
 
-    normalized_path = posixpath.normpath(posix_path).removeprefix("./")
+    normalized_path = unicodedata.normalize("NFC", posixpath.normpath(posix_path).removeprefix("./"))
     if not normalized_path or normalized_path == "." or len(normalized_path) > 1024:
         raise AssetValidationFailed(request_id)
 
@@ -190,9 +196,12 @@ def normalize_skill_files(
     paths = {item.path for item in normalized}
     if len(paths) != len(normalized):
         raise AssetValidationFailed(request_id)
-    for path in paths:
-        parts = PurePosixPath(path).parts
-        if any(PurePosixPath(*parts[:index]).as_posix() in paths for index in range(1, len(parts))):
+    filesystem_identities = {unicodedata.normalize("NFC", path.casefold()): path for path in paths}
+    if len(filesystem_identities) != len(paths):
+        raise AssetValidationFailed(request_id)
+    for identity in filesystem_identities:
+        parts = PurePosixPath(identity).parts
+        if any(PurePosixPath(*parts[:index]).as_posix() in filesystem_identities for index in range(1, len(parts))):
             raise AssetValidationFailed(request_id)
     if sum(len(item.content) for item in normalized) > MAX_SKILL_ARCHIVE_BYTES:
         raise AssetValidationFailed(request_id)
@@ -230,6 +239,49 @@ def _snapshot_checksum(file_views: Sequence[SkillFileView]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _preflight_skill_frontmatter(
+    skill_file: Path,
+    request_id: str,
+) -> tuple[dict[str, object], tuple[tuple[str, bool], ...]]:
+    manifest_text = skill_file.read_text(encoding="utf-8")
+    match = _FRONTMATTER_PATTERN.match(manifest_text)
+    if match is None:
+        raise AssetValidationFailed(request_id)
+    frontmatter = yaml.safe_load(match.group(1))
+    if not isinstance(frontmatter, dict) or any(not isinstance(key, str) for key in frontmatter):
+        raise AssetValidationFailed(request_id)
+
+    raw_requirements = frontmatter.get("required-secrets")
+    canonical_requirements: list[tuple[str, bool]] = []
+    if "required-secrets" in frontmatter:
+        if not isinstance(raw_requirements, list):
+            raise AssetValidationFailed(request_id)
+        for item in raw_requirements:
+            if isinstance(item, str):
+                name = item.strip()
+                optional = False
+            elif isinstance(item, dict) and all(isinstance(key, str) for key in item):
+                if not set(item).issubset({"name", "optional"}):
+                    raise AssetValidationFailed(request_id)
+                raw_name = item.get("name")
+                optional = item.get("optional", False)
+                if not isinstance(raw_name, str) or not isinstance(optional, bool):
+                    raise AssetValidationFailed(request_id)
+                name = raw_name.strip()
+            else:
+                raise AssetValidationFailed(request_id)
+            if _ENV_VAR_NAME_PATTERN.fullmatch(name) is None:
+                raise AssetValidationFailed(request_id)
+            canonical_requirements.append((name, optional))
+    if len({name for name, _ in canonical_requirements}) != len(canonical_requirements):
+        raise AssetValidationFailed(request_id)
+
+    secrets_autonomous = frontmatter.get("secrets-autonomous")
+    if "secrets-autonomous" in frontmatter and not isinstance(secrets_autonomous, bool):
+        raise AssetValidationFailed(request_id)
+    return frontmatter, tuple(canonical_requirements)
+
+
 def _analyze_skill_files(
     files: tuple[SkillArchiveFile, ...],
     request_id: str,
@@ -242,6 +294,10 @@ def _analyze_skill_files(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(item.content)
 
+            frontmatter, canonical_requirements = _preflight_skill_frontmatter(
+                root / "SKILL.md",
+                request_id,
+            )
             valid, _, _ = _validate_skill_frontmatter(root)
             if not valid:
                 raise AssetValidationFailed(request_id)
@@ -249,34 +305,8 @@ def _analyze_skill_files(
             if parsed is None:
                 raise AssetValidationFailed(request_id)
 
-            manifest_text = (root / "SKILL.md").read_text(encoding="utf-8")
-            match = _FRONTMATTER_PATTERN.match(manifest_text)
-            if match is None:
-                raise AssetValidationFailed(request_id)
-            frontmatter = yaml.safe_load(match.group(1))
-            if not isinstance(frontmatter, dict) or any(not isinstance(key, str) for key in frontmatter):
-                raise AssetValidationFailed(request_id)
-            raw_requirements = frontmatter.get("required-secrets")
-            canonical_requirements: list[tuple[str, bool]] = []
-            if raw_requirements is not None:
-                if not isinstance(raw_requirements, list):
-                    raise AssetValidationFailed(request_id)
-                for item in raw_requirements:
-                    if isinstance(item, str):
-                        canonical_requirements.append((item.strip(), False))
-                        continue
-                    if not isinstance(item, dict) or any(not isinstance(key, str) for key in item):
-                        raise AssetValidationFailed(request_id)
-                    if not set(item).issubset({"name", "optional"}):
-                        raise AssetValidationFailed(request_id)
-                    name = item.get("name")
-                    optional = item.get("optional", False)
-                    if not isinstance(name, str) or not isinstance(optional, bool):
-                        raise AssetValidationFailed(request_id)
-                    canonical_requirements.append((name.strip(), optional))
-
             parsed_requirements = tuple((requirement.name, requirement.optional) for requirement in parsed.required_secrets)
-            if tuple(canonical_requirements) != parsed_requirements:
+            if canonical_requirements != parsed_requirements:
                 raise AssetValidationFailed(request_id)
 
             requirement_views = tuple(SkillSecretRequirementView(name=requirement.name, optional=requirement.optional) for requirement in parsed.required_secrets)
@@ -292,11 +322,14 @@ def _analyze_skill_files(
             except (TypeError, ValueError, RecursionError):
                 raise AssetValidationFailed(request_id) from None
 
-            findings = enforce_static_scan(
+            scan_result = enforce_static_scan_result(
                 root,
                 skill_name=parsed.name,
                 app_config=_M3_SKILL_SCAN_CONFIG,
             )
+            if scan_result["scanner_errors"]:
+                raise AssetValidationFailed(request_id)
+            findings = scan_result["findings"]
     except AssetValidationFailed:
         raise
     except (OSError, UnicodeError, yaml.YAMLError, StaticScanBlockedError, StaticScannerError, ValueError):
@@ -434,7 +467,11 @@ class SkillService:
             record = await self._get_version(repository, actor, asset_id, version_id, for_update=True)
             if record.row.workflow_status != WorkflowStatus.DRAFT.value:
                 raise AssetConflict(actor.request_id)
-            files = self._archive_files(record, actor.request_id)
+            files = await asyncio.to_thread(
+                self._archive_files,
+                record,
+                actor.request_id,
+            )
             current = await asyncio.to_thread(_analyze_skill_files, files, actor.request_id)
             expected_requirements = [{"name": requirement.name, "optional": requirement.optional} for requirement in current.secret_requirements]
             if (
@@ -532,10 +569,11 @@ class SkillService:
                 record = await repository.load_system_version(actor, asset_id, version_id)
             else:
                 raise AssetForbidden("unknown")
-            files = self._archive_files(record, actor.request_id)
-            if _snapshot_checksum(_file_views(files)) != record.row.payload_checksum:
-                raise AssetValidationFailed(actor.request_id)
-            return files
+            return await asyncio.to_thread(
+                self._verified_archive_files,
+                record,
+                actor.request_id,
+            )
 
         return await self._execute(actor, operation)
 
@@ -645,6 +683,16 @@ class SkillService:
         if normalized != snapshot:
             raise AssetValidationFailed(request_id)
         return normalized
+
+    @staticmethod
+    def _verified_archive_files(
+        record: SkillVersionRecord,
+        request_id: str,
+    ) -> tuple[SkillArchiveFile, ...]:
+        files = SkillService._archive_files(record, request_id)
+        if _snapshot_checksum(_file_views(files)) != record.row.payload_checksum:
+            raise AssetValidationFailed(request_id)
+        return files
 
     @staticmethod
     def _asset_view(row: SkillRow) -> SkillAssetView:

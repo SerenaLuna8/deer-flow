@@ -3,9 +3,10 @@
 ``scan_archive_preflight()`` and ``scan_skill_dir()`` are synchronous pure
 functions of their inputs; async callers must dispatch them off the event
 loop. Policy is one code constant — ``CRITICAL`` blocks, everything else is a
-warning — applied by ``enforce_static_scan()``, which also honours the
-``skill_scan.enabled`` kill switch. Rule specs live next to the analyzers
-that match them so a rule is authored, read, and tested in one place.
+warning — applied by ``enforce_static_scan()`` and
+``enforce_static_scan_result()``, which also honour the ``skill_scan.enabled``
+kill switch. Rule specs live next to the analyzers that match them so a rule is
+authored, read, and tested in one place.
 """
 
 from __future__ import annotations
@@ -141,14 +142,14 @@ def format_static_findings(findings: list[SecurityFinding]) -> str:
     return "; ".join(parts)
 
 
-def enforce_static_scan(
+def enforce_static_scan_result(
     skill_dir: Path,
     *,
     skill_name: str | None = None,
     app_config: Any | None = None,
-) -> list[SecurityFinding]:
+) -> ScanResult:
     if not skill_scan_enabled(app_config):
-        return []
+        return {"findings": [], "blocked": False, "scanner_errors": []}
 
     result = scan_skill_dir(Path(skill_dir))
     blocked = [finding for finding in result["findings"] if finding["severity"] == _BLOCK_SEVERITY]
@@ -163,7 +164,26 @@ def enforce_static_scan(
     warnings = [finding for finding in result["findings"] if finding["severity"] != _BLOCK_SEVERITY]
     if warnings:
         logger.warning("SkillScan warning findings for %s: %s", skill_name or skill_dir, format_static_findings(warnings))
-    return [dict(finding) for finding in result["findings"]]  # type: ignore[misc]
+    return {
+        "findings": [dict(finding) for finding in result["findings"]],  # type: ignore[misc]
+        "blocked": result["blocked"],
+        "scanner_errors": list(result["scanner_errors"]),
+    }
+
+
+def enforce_static_scan(
+    skill_dir: Path,
+    *,
+    skill_name: str | None = None,
+    app_config: Any | None = None,
+) -> list[SecurityFinding]:
+    """Backward-compatible findings-only enforcement API."""
+
+    return enforce_static_scan_result(
+        skill_dir,
+        skill_name=skill_name,
+        app_config=app_config,
+    )["findings"]
 
 
 def scan_archive_preflight(archive_path: Path) -> ScanResult:
@@ -571,7 +591,15 @@ def _looks_like_archive(file_bytes: bytes) -> bool:
 
 
 def _is_executable_binary(prefix: bytes) -> bool:
-    return prefix.startswith(b"\x7fELF") or prefix.startswith(b"MZ") or prefix.startswith((b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe"))
+    mach_o_magics = (
+        b"\xfe\xed\xfa\xce",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+    )
+    return prefix.startswith(b"\x7fELF") or prefix.startswith(b"MZ") or prefix.startswith(mach_o_magics)
 
 
 def _binary_magic_evidence(prefix: bytes) -> str:
