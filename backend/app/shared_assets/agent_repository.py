@@ -285,7 +285,7 @@ class AgentRepository:
         row = (await self.session.execute(statement)).scalar_one_or_none()
         if row is None:
             raise AssetNotFound(context.request_id)
-        skill_ids, mcp_ids = await self._load_refs((row.id,))
+        skill_ids, mcp_ids = await self._load_refs((row.id,), for_update=for_update)
         return AgentVersionRecord(row, skill_ids.get(row.id, ()), mcp_ids.get(row.id, ()))
 
     async def get_system_version(
@@ -312,11 +312,12 @@ class AgentRepository:
         row = (await self.session.execute(statement)).scalar_one_or_none()
         if row is None:
             raise AssetNotFound(context.request_id)
-        skill_ids, mcp_ids = await self._load_refs((row.id,))
+        skill_ids, mcp_ids = await self._load_refs((row.id,), for_update=for_update)
         return AgentVersionRecord(row, skill_ids.get(row.id, ()), mcp_ids.get(row.id, ()))
 
     async def list_project_visible(self, context: ProjectContext) -> tuple[AgentRow, ...]:
         self._require_project_actor(context)
+        await self._lock_project_context(context)
         project_statement = select(AgentRow).where(
             AgentRow.scope == "project",
             AgentRow.project_id == context.project_id,
@@ -404,6 +405,8 @@ class AgentRepository:
     async def _load_refs(
         self,
         version_ids: Sequence[uuid.UUID],
+        *,
+        for_update: bool = False,
     ) -> tuple[dict[uuid.UUID, tuple[uuid.UUID, ...]], dict[uuid.UUID, tuple[uuid.UUID, ...]]]:
         skill_statement = (
             select(
@@ -421,6 +424,9 @@ class AgentRepository:
             .where(AgentVersionMcpRefRow.agent_version_id.in_(version_ids))
             .order_by(AgentVersionMcpRefRow.agent_version_id, AgentVersionMcpRefRow.sort_order)
         )
+        if for_update:
+            skill_statement = skill_statement.with_for_update(of=AgentVersionSkillRefRow)
+            mcp_statement = mcp_statement.with_for_update(of=AgentVersionMcpRefRow)
         skill_map: dict[uuid.UUID, list[uuid.UUID]] = {}
         for version_id, dependency_id in (await self.session.execute(skill_statement)).all():
             skill_map.setdefault(version_id, []).append(dependency_id)

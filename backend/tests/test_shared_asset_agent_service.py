@@ -6,11 +6,13 @@ import inspect
 import uuid
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from app.shared_assets.errors import AssetValidationFailed
+from app.shared_assets.errors import AssetConflict, AssetStorageUnavailable, AssetValidationFailed
+from app.shared_assets.models import AgentPayload
 
 
 def _editor_context() -> ProjectContext:
@@ -69,3 +71,74 @@ async def test_invalid_agent_command_is_rejected_before_storage_is_opened() -> N
             service_module.CreateAgent(slug="Not Valid", display_name="Analyst"),
         )
     assert exc_info.value.request_id == "req-agent-unit"
+
+
+@pytest.mark.asyncio
+async def test_oversized_agent_model_ref_is_rejected_before_storage_is_opened() -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+
+    class ExplodingSessionFactory:
+        def __call__(self):
+            raise AssertionError("invalid input must not open a database session")
+
+    payload = AgentPayload(
+        description="",
+        soul="Stay within the schema.",
+        model_ref="m" * 256,
+        tool_groups=(),
+        skill_version_ids=(),
+        mcp_version_ids=(),
+    )
+    service = service_module.AgentService(ExplodingSessionFactory())
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service.create_version(
+            _editor_context(),
+            uuid.uuid4(),
+            payload,
+            expected_asset_version=1,
+        )
+    assert exc_info.value.request_id == "req-agent-unit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("constraint_name", "error_type"),
+    [
+        ("uq_agents_project_slug", AssetConflict),
+        ("uq_agent_versions_asset_number", AssetConflict),
+        ("ck_agent_versions_checksum", AssetStorageUnavailable),
+        (None, AssetStorageUnavailable),
+    ],
+)
+async def test_agent_integrity_errors_only_map_known_business_conflicts_to_409(
+    constraint_name: str | None,
+    error_type: type[Exception],
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+
+    class EmptySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        def begin(self):
+            return self
+
+    class ConstraintViolation(Exception):
+        def __init__(self, name: str | None):
+            self.constraint_name = name
+
+    async def fail_with_integrity_error(_repository):
+        raise IntegrityError(
+            "sensitive SQL must not escape",
+            {"secret": "hidden"},
+            ConstraintViolation(constraint_name),
+        )
+
+    service = service_module.AgentService(EmptySession)
+    with pytest.raises(error_type) as exc_info:
+        await service._execute(_editor_context(), fail_with_integrity_error)
+    assert "sensitive SQL" not in str(exc_info.value)
+    assert "hidden" not in str(exc_info.value)

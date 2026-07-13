@@ -43,8 +43,8 @@ $ cd backend && UV_CACHE_DIR=/tmp/deer-flow-uv-cache \
   tests/test_shared_asset_agent_service.py \
   tests/integration/test_m3_agent_assets_postgres.py \
   tests/test_m3_shared_assets_schema_postgres.py -q
-.............................                                            [100%]
-29 passed in 19.15s
+.....................................                                    [100%]
+37 passed in 21.67s
 ```
 
 Changed-file Ruff 与格式：
@@ -62,6 +62,49 @@ $ cd backend && UV_CACHE_DIR=/tmp/deer-flow-uv-cache uv run ruff format --check 
   tests/integration/test_m3_agent_assets_postgres.py
 5 files already formatted
 ```
+
+## Formal Task 4 review follow-up
+
+正式 reviewer 返回 3 个 Important finding 与 1 个并发测试证明力缺口后，逐项按 TDD 修复：
+
+1. **List trusted-context transaction lock**
+   - RED：stale membership version 未抛 `AssetNotFound`；membership 更新可在 project/system
+     两条 list 查询之间成功提交。两个真实 PostgreSQL 测试输出 `2 failed in 1.68s`。
+   - GREEN：`list_project_visible()` 在查询前调用 `_lock_project_context()`，用同一事务共享锁定
+     active project 与 membership ID/project/user/status/version。复跑 `2 passed in 1.91s`；stale
+     context 固定 404，并发 invalidation 在 `250ms` lock timeout 后失败，列表仍返回完整集合。
+
+2. **Publish canonical checksum rebuild**
+   - 测试构造先确认 Task 1 schema 禁止 child-row `UPDATE`；改用 draft 允许的
+     `DELETE agent_version_skill_refs` + `INSERT` 替换同项目 published Skill ref。
+   - RED：替换后的 dependency closure 仍合法，publish 未抛 422，输出
+     `Failed: DID NOT RAISE AssetValidationFailed`。
+   - GREEN：publish 对锁定 AgentVersion 的当前 Skill/MCP refs 取行锁，在 closure 重验后从 row
+     与 refs 重建 canonical `AgentPayload`，checksum 不同固定 422 且事务不移动 pointer。复跑
+     `1 passed in 0.97s`。
+
+3. **Pre-session length validation and IntegrityError classification**
+   - RED：256 字符 `model_ref` 打开 session；未知 checksum constraint 与无 constraint-name 的
+     IntegrityError 均被错误映射为 409。聚焦输出 `3 failed, 2 passed in 0.25s`。
+   - GREEN：`model_ref` 在 `_validate_payload()` 限制为 255 字符；只有 project/system Agent slug
+     unique index 与 Agent version-number unique constraint 映射 409，其余 Integrity/DBAPI failure
+     均无 SQL/params 细节地映射 503。复跑 `5 passed in 0.21s`。
+
+4. **Real concurrent publish barrier**
+   - 首次 barrier 测试因 hook 也覆盖后续 archive 而超时 RED；将作用域限制到前两个 publish 的
+     `get_project_asset(..., for_update=True)` 锁入口。
+   - GREEN：两个不同 asyncio task 都进入同一锁竞争边界后 barrier 才释放，真实 PostgreSQL
+     仍证明一个 publish 成功、一个 `AssetConflict`，输出 `1 passed in 1.01s`。
+
+修复完成后的最终门禁为 Task 4 unit/integration 加 Task 1 schema regression：
+
+```text
+.....................................                                    [100%]
+37 passed in 21.67s
+```
+
+Changed-file Ruff 最终输出 `All checks passed!` 与 `5 files already formatted`；
+`git diff --check` 无输出。
 
 ## Changed files
 

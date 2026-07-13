@@ -790,16 +790,21 @@ service 调用接口。
 同时固定 `agents.scope='project'`、`agents.project_id=context.project_id` 与 active、未过期
 membership/project scope。错误 scope、跨项目、陈旧 membership 和不存在统一为
 `AssetNotFound`。system Agent 读写使用独立 `SystemAssetGovernanceContext`，项目 context
-不能调用 system 写路径。`AgentService` 在一个事务内锁逻辑 Agent、校验
+不能调用 system 写路径。project `list_visible` 在整个列表事务内先共享锁定并校验 project 与
+membership 的 ID/user/version/status，陈旧 context 返回 404，且 membership 不能在 project
+与 system 两条可见性查询之间失效。`AgentService` 在一个事务内锁逻辑 Agent、校验
 `expected_asset_version`、重验 workflow 与依赖 closure、发布 version 并移动
 `current_published_version_id`；因此并发 publish 只有一个成功，其他调用稳定返回
-`AssetConflict`。version 创建会在第一次数据库 await 前把 payload collection 复制为不可变
+`AssetConflict`。publish 在 closure 重验后从锁定的 Agent version 与当前 dependency refs
+重建 canonical payload 并校验创建时 checksum，draft refs 漂移固定返回 422。version 创建会在第一次数据库 await 前把 payload collection 复制为不可变
 tuple snapshot，后续 checksum、dependency refs 与返回 view 始终使用同一份已校验内容。system Agent 只接受 active system published Skill/MCP version；project
 Agent 只接受同项目 active published version，或本项目 enabled binding 固定的 active system
 published version。archived dependency 仅保留既有 published version 的历史固定引用，不能
 供新 version；suspended dependency 立即不能通过 create/publish closure。Agent version
 payload 与 dependency refs 离开 draft 后继续由 PostgreSQL trigger 保证不可变；archive 与
 suspend 使用相同 optimistic asset version，其中 suspend 的项目路径限定为 Admin capability。
+所有 schema-bound 用户输入在打开 session 前完成长度校验；IntegrityError 只有明确的 Agent
+slug/version unique constraint 映射为 409，未知约束与存储错误统一为无 SQL 细节的 503。
 
 **M3 Credential crypto 边界**：`app.shared_assets.keyring` 只从
 `DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID` 与 `DEER_FLOW_CREDENTIAL_KEYRING_JSON` 加载

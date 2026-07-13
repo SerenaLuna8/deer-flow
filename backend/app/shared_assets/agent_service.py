@@ -28,8 +28,27 @@ from app.shared_assets.models import AgentPayload, AssetScope, WorkflowStatus
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
 
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_CONFLICT_CONSTRAINTS = frozenset(
+    {
+        "uq_agents_project_slug",
+        "uq_agents_system_slug",
+        "uq_agent_versions_asset_number",
+    }
+)
 _Actor = ProjectContext | SystemAssetGovernanceContext
 _T = TypeVar("_T")
+
+
+def _constraint_name(exc: BaseException) -> str | None:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = getattr(current, "constraint_name", None)
+        if isinstance(name, str):
+            return name
+        current = getattr(current, "orig", None) or getattr(current, "__cause__", None)
+    return None
 
 
 @dataclass(frozen=True)
@@ -176,6 +195,16 @@ class AgentService:
                 record.skill_version_ids,
                 record.mcp_version_ids,
             )
+            current_payload = AgentPayload(
+                description=record.row.description,
+                soul=record.row.soul,
+                model_ref=record.row.model_ref,
+                tool_groups=tuple(record.row.tool_groups),
+                skill_version_ids=record.skill_version_ids,
+                mcp_version_ids=record.mcp_version_ids,
+            )
+            if self._payload_checksum(current_payload) != record.row.payload_checksum:
+                raise AssetValidationFailed(actor.request_id)
             record.row.workflow_status = WorkflowStatus.PUBLISHED.value
             asset.current_published_version_id = record.row.id
             asset.version += 1
@@ -287,8 +316,10 @@ class AgentService:
                     return await operation(AgentRepository(session))
         except SharedAssetError:
             raise
-        except IntegrityError:
-            raise AssetConflict(actor.request_id) from None
+        except IntegrityError as exc:
+            if _constraint_name(exc) in _CONFLICT_CONSTRAINTS:
+                raise AssetConflict(actor.request_id) from None
+            raise AssetStorageUnavailable(actor.request_id) from None
         except DBAPIError:
             raise AssetStorageUnavailable(actor.request_id) from None
 
@@ -360,7 +391,7 @@ class AgentService:
             )
         except TypeError:
             raise AssetValidationFailed(request_id) from None
-        if not normalized.soul.strip() or not normalized.model_ref.strip():
+        if not normalized.soul.strip() or not normalized.model_ref.strip() or len(normalized.model_ref) > 255:
             raise AssetValidationFailed(request_id)
         if any(not isinstance(group, str) or not group.strip() for group in normalized.tool_groups):
             raise AssetValidationFailed(request_id)

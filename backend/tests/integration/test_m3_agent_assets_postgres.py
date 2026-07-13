@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.projects.context import ProjectContext, resolve_project_context
 from app.shared_assets.contexts import SystemAssetGovernanceContext
@@ -492,6 +492,7 @@ async def test_agent_dependency_closure_enforces_scope_binding_and_dependency_st
 @pytest.mark.asyncio
 async def test_agent_publish_is_optimistic_and_lifecycle_is_scope_authorized(
     migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service_module = importlib.import_module("app.shared_assets.agent_service")
     repository_module = importlib.import_module("app.shared_assets.agent_repository")
@@ -504,6 +505,31 @@ async def test_agent_publish_is_optimistic_and_lifecycle_is_scope_authorized(
     try:
         asset = await service.create_asset(editor, service_module.CreateAgent("race", "Race"))
         draft = await service.create_version(editor, asset.id, _payload(), expected_asset_version=1)
+        publish_ready = asyncio.Barrier(2)
+        ready_tasks: set[asyncio.Task] = set()
+        racing_asset_locks_remaining = 2
+        original_get_project_asset = repository_module.AgentRepository.get_project_asset
+
+        async def race_from_the_same_lock_boundary(repository, context, asset_id, *, for_update=False):
+            nonlocal racing_asset_locks_remaining
+            if asset_id == asset.id and for_update and racing_asset_locks_remaining:
+                racing_asset_locks_remaining -= 1
+                current_task = asyncio.current_task()
+                assert current_task is not None
+                ready_tasks.add(current_task)
+                await asyncio.wait_for(publish_ready.wait(), timeout=2)
+            return await original_get_project_asset(
+                repository,
+                context,
+                asset_id,
+                for_update=for_update,
+            )
+
+        monkeypatch.setattr(
+            repository_module.AgentRepository,
+            "get_project_asset",
+            race_from_the_same_lock_boundary,
+        )
 
         async def publish_once():
             return await service_module.AgentService(factory).publish(
@@ -514,6 +540,7 @@ async def test_agent_publish_is_optimistic_and_lifecycle_is_scope_authorized(
             )
 
         results = await asyncio.gather(publish_once(), publish_once(), return_exceptions=True)
+        assert len(ready_tasks) == 2
         assert sum(not isinstance(result, Exception) for result in results) == 1
         assert sum(isinstance(result, AssetConflict) for result in results) == 1
         assert (await service.get(editor, asset.id)).version == 3
@@ -543,6 +570,78 @@ async def test_agent_publish_is_optimistic_and_lifecycle_is_scope_authorized(
                     )
         with pytest.raises(AssetNotFound):
             await service.get(editor, system_asset.id)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_agent_publish_rejects_draft_dependency_checksum_drift(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(engine, factory, label="checksum-drift")
+    _, original_skill_version = await _seed_dependency(
+        engine,
+        kind="skill",
+        scope="project",
+        project_id=editor.project_id,
+        user_id=editor.user_id,
+    )
+    _, replacement_skill_version = await _seed_dependency(
+        engine,
+        kind="skill",
+        scope="project",
+        project_id=editor.project_id,
+        user_id=editor.user_id,
+    )
+    service = service_module.AgentService(factory)
+    try:
+        asset = await service.create_asset(
+            editor,
+            service_module.CreateAgent("checksum-drift", "Checksum Drift"),
+        )
+        draft = await service.create_version(
+            editor,
+            asset.id,
+            _payload(skill_version_ids=(original_skill_version,)),
+            expected_asset_version=1,
+        )
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """DELETE FROM agent_version_skill_refs
+                    WHERE agent_version_id=:version AND skill_version_id=:original"""
+                ),
+                {
+                    "version": draft.id,
+                    "original": original_skill_version,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO agent_version_skill_refs
+                    (agent_version_id,skill_version_id,sort_order)
+                    VALUES (:version,:replacement,0)"""
+                ),
+                {"version": draft.id, "replacement": replacement_skill_version},
+            )
+
+        with pytest.raises(AssetValidationFailed):
+            await service.publish(
+                editor,
+                asset.id,
+                draft.id,
+                expected_asset_version=2,
+            )
+
+        unchanged_asset = await service.get(editor, asset.id)
+        unchanged_version = (await service.get_version_history(editor, asset.id))[0]
+        assert unchanged_asset.version == 2
+        assert unchanged_asset.current_published_version_id is None
+        assert unchanged_version.workflow_status is WorkflowStatus.DRAFT
+        assert unchanged_version.skill_version_ids == (replacement_skill_version,)
     finally:
         await engine.dispose()
 
@@ -578,6 +677,121 @@ async def test_project_agent_mutation_lock_pins_trusted_context_until_transactio
         completed = await service.create_version(editor, asset.id, _payload(), expected_asset_version=1)
         assert completed.agent_id == asset.id
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_list_project_agents_rejects_stale_membership_version(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(engine, factory, label="list-stale")
+    service = service_module.AgentService(factory)
+    try:
+        await service.create_asset(editor, service_module.CreateAgent("visible", "Visible"))
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE project_memberships SET version=version+1 WHERE id=:membership"),
+                {"membership": editor.membership_id},
+            )
+
+        with pytest.raises(AssetNotFound):
+            await service.list_visible(editor)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_list_project_agents_pins_context_across_both_visibility_queries(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(engine, factory, label="list-lock")
+    system = await _seed_system_admin(engine)
+    service = service_module.AgentService(factory)
+    first_agent_query_ready = asyncio.Event()
+    release_list_query = asyncio.Event()
+
+    class CoordinatedListSession(AsyncSession):
+        async def execute(self, statement, *args, **kwargs):
+            result = await super().execute(statement, *args, **kwargs)
+            sql = str(statement)
+            if not self.info.get("agent_list_paused") and "FROM agents" in sql:
+                self.info["agent_list_paused"] = True
+                first_agent_query_ready.set()
+                await release_list_query.wait()
+            return result
+
+    coordinated_factory = async_sessionmaker(
+        engine,
+        class_=CoordinatedListSession,
+        expire_on_commit=False,
+    )
+    list_task: asyncio.Task | None = None
+    try:
+        project_agent = await service.create_asset(
+            editor,
+            service_module.CreateAgent("project-visible", "Project Visible"),
+        )
+        system_agent = await service.create_asset(
+            system,
+            service_module.CreateAgent("system-visible", "System Visible"),
+        )
+        system_draft = await service.create_version(
+            system,
+            system_agent.id,
+            _payload(),
+            expected_asset_version=1,
+        )
+        system_published = await service.publish(
+            system,
+            system_agent.id,
+            system_draft.id,
+            expected_asset_version=2,
+        )
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO project_system_agent_bindings
+                    (project_id,system_agent_id,agent_version_id,created_by_user_id,updated_by_user_id)
+                    VALUES (:project,:agent,:version,:user,:user)"""
+                ),
+                {
+                    "project": editor.project_id,
+                    "agent": system_agent.id,
+                    "version": system_published.id,
+                    "user": str(editor.user_id),
+                },
+            )
+
+        list_task = asyncio.create_task(service_module.AgentService(coordinated_factory).list_visible(editor))
+        await asyncio.wait_for(first_agent_query_ready.wait(), timeout=2)
+
+        invalidation_error: DBAPIError | None = None
+        try:
+            async with factory() as invalidation_session:
+                async with invalidation_session.begin():
+                    await invalidation_session.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                    await invalidation_session.execute(
+                        text("UPDATE project_memberships SET version=version+1 WHERE id=:membership"),
+                        {"membership": editor.membership_id},
+                    )
+        except DBAPIError as exc:
+            invalidation_error = exc
+        finally:
+            release_list_query.set()
+
+        visible = await list_task
+        assert isinstance(invalidation_error, DBAPIError)
+        assert {row.id for row in visible} == {project_agent.id, system_agent.id}
+    finally:
+        release_list_query.set()
+        if list_task is not None and not list_task.done():
+            await list_task
         await engine.dispose()
 
 
