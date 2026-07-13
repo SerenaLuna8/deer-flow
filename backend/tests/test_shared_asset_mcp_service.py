@@ -362,6 +362,112 @@ async def test_mcp_definition_rejects_secret_carrier_option_without_inspecting_n
     assert observed == []
 
 
+def test_mcp_sensitive_cli_option_delegates_to_shared_key_taxonomy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    inspected: list[str] = []
+
+    def fake_sensitive_key(value: str) -> bool:
+        inspected.append(value)
+        return value == "future_carrier"
+
+    monkeypatch.setattr(
+        service_module.McpService,
+        "_sensitive_key",
+        staticmethod(fake_sensitive_key),
+    )
+
+    assert service_module.McpService._is_sensitive_cli_option("--future-carrier=marker") is True
+    assert inspected == ["future_carrier"]
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        "APIKEY",
+        "api_key",
+        "api-key",
+        "ApiKey",
+        "CLIENTSECRET",
+        "client_secret",
+        "client-secret",
+        "ClientSecret",
+        "ACCESSTOKEN",
+        "access_token",
+        "access-token",
+        "AccessToken",
+        "PRIVATEKEY",
+        "private_key",
+        "private-key",
+        "PrivateKey",
+        "secret",
+        "passwd",
+        "access-key",
+        "auth",
+        "authorization",
+        "cookie",
+        "credential",
+    ],
+)
+def test_mcp_sensitive_cli_option_normalizes_shared_taxonomy_variants(carrier: str) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    assert service_module.McpService._sensitive_key(carrier) is True
+    for token in (
+        carrier,
+        f"-{carrier}",
+        f"--{carrier}",
+        f"--{carrier}=taxonomy-assignment-marker",
+        f"--{carrier.replace('-', '_').swapcase()}",
+    ):
+        assert service_module.McpService._is_sensitive_cli_option(token) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        "APIKEY",
+        "CLIENTSECRET",
+        "ACCESSTOKEN",
+        "PRIVATEKEY",
+        "secret",
+        "passwd",
+        "access-key",
+        "auth",
+        "authorization",
+        "cookie",
+        "credential",
+    ],
+)
+async def test_mcp_definition_rejects_compact_or_undashed_secret_carrier_before_storage(
+    carrier: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("secret definition must not open storage")
+
+    marker = f"{carrier.lower()}-undashed-marker"
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service_module.McpService(ExplodingFactory()).create_version(
+            _context(),
+            uuid.uuid4(),
+            service_module.McpDefinition(
+                transport="stdio",
+                command="mcp",
+                args=(carrier, marker),
+            ),
+            expected_asset_version=1,
+        )
+    assert marker not in str(exc_info.value)
+    assert marker not in repr(exc_info.value)
+    assert marker not in caplog.text
+
+
 @pytest.mark.parametrize(
     "definition",
     [
@@ -399,7 +505,16 @@ async def test_mcp_definition_rejects_secret_carrier_option_without_inspecting_n
                 "description": "Local args with ordinary controls",
                 "transport": "stdio",
                 "command": "mcp",
-                "args": ("--port", "8080", "--auth-mode", "oauth"),
+                "args": (
+                    "--port",
+                    "8080",
+                    "--auth-mode",
+                    "oauth",
+                    "--authentication_mode",
+                    "oauth",
+                    "--OAUTH-MODE",
+                    "public",
+                ),
             },
             id="ordinary-args-controls",
         ),

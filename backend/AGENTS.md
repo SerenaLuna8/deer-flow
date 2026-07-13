@@ -856,10 +856,13 @@ URL、env/header、OAuth、routing、tool override 的全部可持久化字符�
 另外把 `X-Auth` 等 auth carrier 视为敏感 key，URL 结构化拒绝 userinfo 与 sensitive query。
 递归 value scan 拒绝 Bearer/Basic authorization、`--api-key=...`/secret assignment 与
 private-key PEM 等明确 marker；CLI scan 对 `args` token 与安全 `shlex` 拆分后的 command token
-检查 secret carrier option，`--api-key`、`--token`、`--access-token`、`--refresh-token`、
-`--client-secret`、`--password`、`--private-key` 无论使用分离 value 或 assignment form 都拒绝，
-且 option 自身即触发而不读取或记录后续 value；`--port 8080`、`--auth-mode oauth` 等普通控制项
-继续合法。credential slot payload schema 中的 secret 名称是 grant contract，
+先移除 leading dashes 与 assignment，再复用 definition key 的同一套 canonical + compact taxonomy，
+不维护独立 carrier 列表。`APIKEY`、`CLIENTSECRET`、`ACCESSTOKEN`、`PRIVATEKEY` 以及 secret、auth、
+authorization、cookie、credential、password/passwd、access key/token 等 option 无论大小写、
+underscore/dash、是否带 dash、分离 value 或 assignment form 都在 storage 前拒绝；option 自身即触发，
+不读取或记录后续 value。`auth_mode`、`authentication_mode`、`oauth_mode` 是明确的安全 control
+allowlist，`--port 8080` 与 OAuth protocol field-name metadata 也继续合法。credential slot payload
+schema 中的 secret 名称是 grant contract，
 不是 secret value，不能套用 definition key denylist。这些检查稳定 422，异常、repr 与日志不包含
 命中的值或完整敏感 URL；绝不写回全局 `extensions_config.json`。项目无 slot MCP 允许 Admin/Editor
 直接发布；credential MCP 必须先进入 `pending_approval`，再由项目 Admin 或 system override

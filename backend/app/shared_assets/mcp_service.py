@@ -60,9 +60,10 @@ _OAUTH_FIELDS = frozenset(
     }
 )
 _SENSITIVE_KEY = re.compile(
-    r"(^|_)(api_key|apikey|access_key|private_key|client_secret|refresh_token|secret|token|password|passwd|credential|credentials|authorization|bearer|cookie)(_|$)",
+    r"(^|_)(api_key|apikey|access_key|private_key|client_secret|refresh_token|secret|token|password|passwd|credential|credentials|auth|authorization|bearer|cookie)(_|$)",
     re.IGNORECASE,
 )
+_SAFE_CONTROL_KEYS = frozenset({"auth_mode", "authentication_mode", "oauth_mode"})
 _SENSITIVE_COMPACT_FRAGMENTS = (
     "accesskey",
     "accesstoken",
@@ -73,17 +74,6 @@ _SENSITIVE_COMPACT_FRAGMENTS = (
     "password",
     "privatekey",
     "refreshtoken",
-)
-_SENSITIVE_CLI_OPTIONS = frozenset(
-    {
-        "access_token",
-        "api_key",
-        "client_secret",
-        "password",
-        "private_key",
-        "refresh_token",
-        "token",
-    }
 )
 _SENSITIVE_VALUE = re.compile(
     r"(?:\b(?:basic|bearer)\s+\S+|\b(?:access[_-]?key|access[_-]?token|api[_-]?key|client[_-]?secret|password|passwd|private[_-]?key|refresh[_-]?token|token)\s*[:=]\s*\S+|-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----)",
@@ -736,6 +726,8 @@ class McpService:
     @staticmethod
     def _sensitive_key(value: str) -> bool:
         normalized = _normalized_key(value)
+        if normalized in _SAFE_CONTROL_KEYS:
+            return False
         compact = normalized.replace("_", "")
         return bool(_SENSITIVE_KEY.search(normalized)) or any(fragment in compact for fragment in _SENSITIVE_COMPACT_FRAGMENTS)
 
@@ -760,12 +752,14 @@ class McpService:
             return any(cls._contains_sensitive_value(nested) for nested in value)
         return isinstance(value, str) and (bool(_SENSITIVE_VALUE.search(value)) or cls._contains_sensitive_url(value))
 
-    @staticmethod
-    def _contains_sensitive_cli_option(tokens: tuple[str, ...] | list[str]) -> bool:
-        for token in tokens:
-            if token.startswith("--") and _normalized_key(token[2:].split("=", maxsplit=1)[0]) in _SENSITIVE_CLI_OPTIONS:
-                return True
-        return False
+    @classmethod
+    def _is_sensitive_cli_option(cls, token: str) -> bool:
+        option_name = _normalized_key(re.split(r"[:=]", token.lstrip("-"), maxsplit=1)[0])
+        return bool(option_name) and cls._sensitive_key(option_name)
+
+    @classmethod
+    def _contains_sensitive_cli_option(cls, tokens: tuple[str, ...] | list[str]) -> bool:
+        return any(cls._is_sensitive_cli_option(token) for token in tokens)
 
     @classmethod
     def _contains_sensitive_url(cls, value: str) -> bool:
