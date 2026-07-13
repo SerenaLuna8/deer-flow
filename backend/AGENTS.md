@@ -785,6 +785,22 @@ action、`request_id` 六类治理元数据；禁止记录 payload、diff、cred
 私有 Thread、run、file、Memory、automation 资源 ID。M6 可替换持久化 sink，但不得改变
 service 调用接口。
 
+**M3 Agent domain**：`app.shared_assets.agent_repository.AgentRepository` 不提供裸
+`project_id` 的项目资产接口；每个 project 读写都接收可信 `ProjectContext`，并在 SQL 中
+同时固定 `agents.scope='project'`、`agents.project_id=context.project_id` 与 active、未过期
+membership/project scope。错误 scope、跨项目、陈旧 membership 和不存在统一为
+`AssetNotFound`。system Agent 读写使用独立 `SystemAssetGovernanceContext`，项目 context
+不能调用 system 写路径。`AgentService` 在一个事务内锁逻辑 Agent、校验
+`expected_asset_version`、重验 workflow 与依赖 closure、发布 version 并移动
+`current_published_version_id`；因此并发 publish 只有一个成功，其他调用稳定返回
+`AssetConflict`。version 创建会在第一次数据库 await 前把 payload collection 复制为不可变
+tuple snapshot，后续 checksum、dependency refs 与返回 view 始终使用同一份已校验内容。system Agent 只接受 active system published Skill/MCP version；project
+Agent 只接受同项目 active published version，或本项目 enabled binding 固定的 active system
+published version。archived dependency 仅保留既有 published version 的历史固定引用，不能
+供新 version；suspended dependency 立即不能通过 create/publish closure。Agent version
+payload 与 dependency refs 离开 draft 后继续由 PostgreSQL trigger 保证不可变；archive 与
+suspend 使用相同 optimistic asset version，其中 suspend 的项目路径限定为 Admin capability。
+
 **M3 Credential crypto 边界**：`app.shared_assets.keyring` 只从
 `DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID` 与 `DEER_FLOW_CREDENTIAL_KEYRING_JSON` 加载
 密钥；每个 base64 value 必须严格解码为 32 bytes，active key 必须存在。配置失败只返回

@@ -1,3 +1,4 @@
+from app.shared_assets.agent_service import AgentAssetView, AgentService, AgentVersionView, CreateAgent
 from app.shared_assets.contexts import SystemAssetGovernanceContext, resolve_asset_actor
 from app.shared_assets.errors import (
     AssetConflict,
@@ -23,6 +24,9 @@ from app.shared_assets.models import (
 
 __all__ = [
     "AgentPayload",
+    "AgentAssetView",
+    "AgentService",
+    "AgentVersionView",
     "AssetConflict",
     "AssetForbidden",
     "AssetKind",
@@ -31,6 +35,7 @@ __all__ = [
     "AssetSelection",
     "AssetStorageUnavailable",
     "AssetValidationFailed",
+    "CreateAgent",
     "ResolvedAgentSnapshot",
     "ResolvedAssetSnapshot",
     "ResolvedMcpSnapshot",
