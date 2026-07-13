@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import TypeVar
 
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.capabilities import Capability
@@ -289,7 +290,7 @@ class CredentialService:
             if _constraint_name(exc) in _CONFLICT_CONSTRAINTS:
                 raise AssetConflict(actor.request_id) from None
             raise AssetStorageUnavailable(actor.request_id) from None
-        except DBAPIError:
+        except (DBAPIError, SATimeoutError):
             raise AssetStorageUnavailable(actor.request_id) from None
 
     @staticmethod

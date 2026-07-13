@@ -6,6 +6,8 @@ import inspect
 import uuid
 
 import pytest
+from sqlalchemy.exc import InvalidRequestError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
@@ -51,12 +53,15 @@ def test_mcp_service_exposes_frozen_contracts_and_scoped_repository() -> None:
     ):
         assert dataclasses.is_dataclass(value_type)
         assert value_type.__dataclass_params__.frozen is True
+    assert "payload_checksum" in {field.name for field in dataclasses.fields(service_module.McpVersionView)}
 
     for name, method in inspect.getmembers(repository_module.McpRepository, predicate=inspect.isfunction):
         if not name.startswith("_"):
             assert "project_id" not in inspect.signature(method).parameters, name
     project_get = inspect.signature(repository_module.McpRepository.get_project_asset)
     assert list(project_get.parameters) == ["self", "context", "asset_id", "for_update"]
+    approve = inspect.signature(service_module.McpService.approve)
+    assert list(approve.parameters)[4] == "credential_versions"
 
 
 @pytest.mark.asyncio
@@ -89,6 +94,52 @@ async def test_mcp_definition_rejects_secret_fields_before_storage(
     assert exc_info.value.request_id == "req-mcp-unit"
     assert "never-log-me" not in str(exc_info.value)
     assert "never-log-me" not in repr(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("definition", "secret_value"),
+    [
+        ({"transport": "stdio", "command": "uvx", "env": {"CLIENTSECRET": "client-value"}}, "client-value"),
+        ({"transport": "stdio", "command": "uvx", "env": {"PRIVATEKEY": "private-value"}}, "private-value"),
+        ({"transport": "stdio", "command": "uvx", "env": {"APIKEY": "api-value"}}, "api-value"),
+        ({"transport": "stdio", "command": "uvx", "env": {"ACCESSTOKEN": "access-value"}}, "access-value"),
+        ({"transport": "stdio", "command": "uvx", "env": {"PUBLIC_SETTING": "Bearer bearer-value"}}, "bearer-value"),
+        ({"transport": "http", "url": "https://mcp.test", "headers": {"X-Mode": "Basic basic-value"}}, "basic-value"),
+        ({"transport": "http", "url": "https://mcp.test", "routing": {"auth": "client_secret=client-value"}}, "client-value"),
+        ({"transport": "http", "url": "https://mcp.test", "routing": {"auth": ["password=password-value"]}}, "password-value"),
+        ({"transport": "http", "url": "https://mcp.test", "tool_overrides": {"auth": {"value": "token=token-value"}}}, "token-value"),
+        (
+            {
+                "transport": "http",
+                "url": "https://mcp.test",
+                "tool_overrides": {"auth": "-----BEGIN PRIVATE KEY-----\nprivate-value"},
+            },
+            "private-value",
+        ),
+    ],
+)
+async def test_mcp_definition_rejects_compact_keys_and_recursive_secret_values_before_storage(
+    definition: dict[str, object],
+    secret_value: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("secret definition must not open storage")
+
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service_module.McpService(ExplodingFactory()).create_version(
+            _context(),
+            uuid.uuid4(),
+            service_module.McpDefinition(**definition),
+            expected_asset_version=1,
+        )
+    assert secret_value not in str(exc_info.value)
+    assert secret_value not in repr(exc_info.value)
+    assert secret_value not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -136,9 +187,53 @@ async def test_editor_cannot_approve_credential_mcp_before_storage() -> None:
             _context(ProjectRole.EDITOR),
             uuid.uuid4(),
             uuid.uuid4(),
-            uuid.uuid4(),
+            {"primary": uuid.uuid4()},
             expected_asset_version=3,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "credential_versions",
+    [
+        {"": uuid.uuid4()},
+        {"primary": "not-a-uuid"},
+        [("primary", uuid.uuid4())],
+    ],
+)
+async def test_mcp_approval_rejects_invalid_slot_mapping_before_storage(
+    credential_versions: object,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("invalid slot mapping must not open storage")
+
+    with pytest.raises(AssetValidationFailed):
+        await service_module.McpService(ExplodingFactory()).approve(
+            _context(ProjectRole.ADMIN),
+            uuid.uuid4(),
+            uuid.uuid4(),
+            credential_versions,
+            expected_asset_version=3,
+        )
+
+
+def test_mcp_approval_copies_slot_mapping_before_async_storage() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    original_id = uuid.uuid4()
+    caller_mapping = {"primary": original_id}
+
+    normalized = service_module.McpService._validate_credential_bindings(
+        _context(ProjectRole.ADMIN),
+        caller_mapping,
+    )
+    caller_mapping["primary"] = uuid.uuid4()
+
+    assert normalized == {"primary": original_id}
+    with pytest.raises(TypeError):
+        normalized["primary"] = uuid.uuid4()
 
 
 @pytest.mark.parametrize(
@@ -174,3 +269,33 @@ def test_mcp_definition_accepts_nonsecret_oauth_protocol_metadata() -> None:
 
     normalized = service_module.McpService._validate_definition(_context(), definition)
     assert normalized.oauth["token_url"] == "https://identity.example.test/oauth/token"
+
+
+@pytest.mark.asyncio
+async def test_mcp_pool_timeout_is_mapped_to_safe_storage_unavailable() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class TimeoutFactory:
+        def __call__(self):
+            raise SATimeoutError("postgresql://admin:never-log-me@db.example.test/app")
+
+    with pytest.raises(service_module.AssetStorageUnavailable) as exc_info:
+        await service_module.McpService(TimeoutFactory()).get(_context(), uuid.uuid4())
+    assert exc_info.value.__cause__ is None
+    assert "never-log-me" not in str(exc_info.value)
+    assert "never-log-me" not in repr(exc_info.value)
+    assert "postgresql" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_mcp_programming_session_error_is_not_mapped_to_503() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    programming_error = InvalidRequestError("programming failure")
+
+    class InvalidFactory:
+        def __call__(self):
+            raise programming_error
+
+    with pytest.raises(InvalidRequestError) as exc_info:
+        await service_module.McpService(InvalidFactory()).get(_context(), uuid.uuid4())
+    assert exc_info.value is programming_error

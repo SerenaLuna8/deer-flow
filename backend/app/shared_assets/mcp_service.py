@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import TypeVar
 
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.capabilities import Capability
@@ -29,7 +30,12 @@ from app.shared_assets.errors import (
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
 from app.shared_assets.mcp_repository import GrantState, McpRepository, McpVersionRecord
 from app.shared_assets.models import AssetScope, WorkflowStatus
-from deerflow.persistence.shared_assets import McpCredentialSlotRow, McpServerRow, McpServerVersionRow
+from deerflow.persistence.shared_assets import (
+    CredentialVersionRow,
+    McpCredentialSlotRow,
+    McpServerRow,
+    McpServerVersionRow,
+)
 
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _SLOT_PATTERN = re.compile(r"[a-z][a-z0-9._-]{0,62}\Z")
@@ -53,6 +59,21 @@ _OAUTH_FIELDS = frozenset(
 )
 _SENSITIVE_KEY = re.compile(
     r"(^|_)(api_key|apikey|access_key|private_key|client_secret|refresh_token|secret|token|password|passwd|credential|credentials|authorization|bearer|cookie)(_|$)",
+    re.IGNORECASE,
+)
+_SENSITIVE_COMPACT_FRAGMENTS = (
+    "accesskey",
+    "accesstoken",
+    "apikey",
+    "authorization",
+    "clientsecret",
+    "credential",
+    "password",
+    "privatekey",
+    "refreshtoken",
+)
+_SENSITIVE_VALUE = re.compile(
+    r"(?:\b(?:basic|bearer)\s+\S+|\b(?:access[_-]?token|client[_-]?secret|password|passwd|refresh[_-]?token|token)\s*[:=]\s*\S+|-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----)",
     re.IGNORECASE,
 )
 _CONFLICT_CONSTRAINTS = frozenset(
@@ -283,11 +304,12 @@ class McpService:
         actor: _Actor,
         asset_id: uuid.UUID,
         version_id: uuid.UUID,
-        credential_version_id: uuid.UUID,
+        credential_versions: Mapping[str, uuid.UUID],
         *,
         expected_asset_version: int,
     ) -> McpVersionView:
         self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
+        credential_versions = self._validate_credential_bindings(actor, credential_versions)
 
         async def operation(repository: McpRepository) -> McpVersionView:
             credentials = CredentialRepository(repository.session)
@@ -306,15 +328,23 @@ class McpService:
             expected_status = {WorkflowStatus.DRAFT.value, WorkflowStatus.PENDING_APPROVAL.value} if isinstance(actor, SystemAssetGovernanceContext) else {WorkflowStatus.PENDING_APPROVAL.value}
             if record.row.workflow_status not in expected_status:
                 raise AssetConflict(actor.request_id)
-            try:
-                locked = await self._lock_credential_version(credentials, actor, credential_version_id)
-            except AssetNotFound:
-                raise AssetValidationFailed(actor.request_id) from None
-            self._validate_credential(actor, asset, record, locked)
+            slots_by_name = {slot.name: slot for slot in record.slots}
+            if set(credential_versions).difference(slots_by_name) or any(slot.required and slot.name not in credential_versions for slot in record.slots):
+                raise AssetValidationFailed(actor.request_id)
+            bindings: list[tuple[McpCredentialSlotRow, CredentialVersionRow]] = []
+            for slot in record.slots:
+                credential_version_id = credential_versions.get(slot.name)
+                if credential_version_id is None:
+                    continue
+                try:
+                    locked = await self._lock_credential_version(credentials, actor, credential_version_id)
+                except AssetNotFound:
+                    raise AssetValidationFailed(actor.request_id) from None
+                self._validate_slot_credential(actor, asset, slot, locked)
+                bindings.append((slot, locked.version))
             grants = await repository.create_grants(
                 record.row,
-                record.slots,
-                locked.version,
+                bindings,
                 user_id=actor.user_id,
                 request_id=actor.request_id,
             )
@@ -438,7 +468,7 @@ class McpService:
             if _constraint_name(exc) in _CONFLICT_CONSTRAINTS:
                 raise AssetConflict(actor.request_id) from None
             raise AssetStorageUnavailable(actor.request_id) from None
-        except DBAPIError:
+        except (DBAPIError, SATimeoutError):
             raise AssetStorageUnavailable(actor.request_id) from None
 
     @staticmethod
@@ -509,10 +539,10 @@ class McpService:
         raise AssetForbidden("unknown")
 
     @staticmethod
-    def _validate_credential(
+    def _validate_slot_credential(
         actor: _Actor,
         asset: McpServerRow,
-        record: McpVersionRecord,
+        slot: McpCredentialSlotRow,
         locked: LockedCredentialVersion,
     ) -> None:
         credential = locked.credential
@@ -520,10 +550,24 @@ class McpService:
         if credential.scope != asset.scope or credential.project_id != asset.project_id or credential.status != "active" or version.status != "active":
             raise AssetValidationFailed(actor.request_id)
         expected_schema = {key: tuple(values) for key, values in version.payload_schema.items()}
-        for slot in record.slots:
-            slot_schema = {key: tuple(values) for key, values in slot.payload_schema.items()}
-            if slot_schema != expected_schema:
-                raise AssetValidationFailed(actor.request_id)
+        slot_schema = {key: tuple(values) for key, values in slot.payload_schema.items()}
+        if slot_schema != expected_schema:
+            raise AssetValidationFailed(actor.request_id)
+
+    @staticmethod
+    def _validate_credential_bindings(
+        actor: _Actor,
+        credential_versions: object,
+    ) -> Mapping[str, uuid.UUID]:
+        request_id = getattr(actor, "request_id", "unknown")
+        if not isinstance(credential_versions, Mapping):
+            raise AssetValidationFailed(request_id)
+        normalized: dict[str, uuid.UUID] = {}
+        for slot_name, credential_version_id in credential_versions.items():
+            if not isinstance(slot_name, str) or _SLOT_PATTERN.fullmatch(slot_name) is None or not isinstance(credential_version_id, uuid.UUID):
+                raise AssetValidationFailed(request_id)
+            normalized[slot_name] = credential_version_id
+        return MappingProxyType(normalized)
 
     @staticmethod
     def _validate_create(actor: _Actor, command: CreateMcpServer) -> CreateMcpServer:
@@ -571,9 +615,17 @@ class McpService:
                     raise ValueError
             elif not url or command is not None or args:
                 raise ValueError
-            if any(cls._sensitive_key(key) for key in env) or any(cls._sensitive_key(key) for key in headers):
+            if any(cls._sensitive_key(key) for key in env) or any(cls._sensitive_key(key) for key in headers) or cls._contains_sensitive_value(env) or cls._contains_sensitive_value(headers):
                 raise ValueError
-            if not set(oauth).issubset(_OAUTH_FIELDS) or cls._contains_sensitive_key(oauth.get("extra_token_params", {})) or cls._contains_sensitive_key(routing) or cls._contains_sensitive_key(tool_overrides):
+            if (
+                not set(oauth).issubset(_OAUTH_FIELDS)
+                or cls._contains_sensitive_key(oauth.get("extra_token_params", {}))
+                or cls._contains_sensitive_key(routing)
+                or cls._contains_sensitive_key(tool_overrides)
+                or cls._contains_sensitive_value(oauth)
+                or cls._contains_sensitive_value(routing)
+                or cls._contains_sensitive_value(tool_overrides)
+            ):
                 raise ValueError
             return McpDefinition(
                 description=description,
@@ -625,7 +677,9 @@ class McpService:
 
     @staticmethod
     def _sensitive_key(value: str) -> bool:
-        return bool(_SENSITIVE_KEY.search(_normalized_key(value)))
+        normalized = _normalized_key(value)
+        compact = normalized.replace("_", "")
+        return bool(_SENSITIVE_KEY.search(normalized)) or any(fragment in compact for fragment in _SENSITIVE_COMPACT_FRAGMENTS)
 
     @classmethod
     def _contains_sensitive_key(cls, value: object) -> bool:
@@ -634,6 +688,14 @@ class McpService:
         if isinstance(value, list):
             return any(cls._contains_sensitive_key(nested) for nested in value)
         return False
+
+    @classmethod
+    def _contains_sensitive_value(cls, value: object) -> bool:
+        if isinstance(value, Mapping):
+            return any(cls._contains_sensitive_value(nested) for nested in value.values())
+        if isinstance(value, list):
+            return any(cls._contains_sensitive_value(nested) for nested in value)
+        return isinstance(value, str) and bool(_SENSITIVE_VALUE.search(value))
 
     @staticmethod
     def _scope(actor: _Actor) -> tuple[AssetScope, uuid.UUID | None]:

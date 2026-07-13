@@ -8,7 +8,8 @@ import uuid
 from base64 import b64encode
 
 import pytest
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
@@ -52,6 +53,7 @@ def test_credential_service_exposes_only_frozen_api_safe_views() -> None:
         assert view_type.__dataclass_params__.frozen is True
         fields = {field.name for field in dataclasses.fields(view_type)}
         assert fields.isdisjoint({"ciphertext", "nonce", "key_id", "secret_hash", "plaintext", "payload"})
+        assert all("hash" not in field_name.lower() for field_name in fields)
 
     public_methods = inspect.getmembers(repository_module.CredentialRepository, predicate=inspect.isfunction)
     for name, method in public_methods:
@@ -144,3 +146,33 @@ async def test_credential_integrity_errors_are_mapped_without_sql_or_secret(
         await service._execute(_context(), fail)
     assert "sensitive SQL" not in str(exc_info.value)
     assert "never-log-me" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_credential_pool_timeout_is_mapped_to_safe_storage_unavailable() -> None:
+    service_module = importlib.import_module("app.shared_assets.credential_service")
+
+    class TimeoutFactory:
+        def __call__(self):
+            raise SATimeoutError("postgresql://admin:never-log-me@db.example.test/app")
+
+    with pytest.raises(AssetStorageUnavailable) as exc_info:
+        await service_module.CredentialService(TimeoutFactory()).get(_context(), uuid.uuid4())
+    assert exc_info.value.__cause__ is None
+    assert "never-log-me" not in str(exc_info.value)
+    assert "never-log-me" not in repr(exc_info.value)
+    assert "postgresql" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_credential_programming_session_error_is_not_mapped_to_503() -> None:
+    service_module = importlib.import_module("app.shared_assets.credential_service")
+    programming_error = InvalidRequestError("programming failure")
+
+    class InvalidFactory:
+        def __call__(self):
+            raise programming_error
+
+    with pytest.raises(InvalidRequestError) as exc_info:
+        await service_module.CredentialService(InvalidFactory()).get(_context(), uuid.uuid4())
+    assert exc_info.value is programming_error

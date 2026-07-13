@@ -386,13 +386,12 @@ class McpRepository:
     async def create_grants(
         self,
         version: McpServerVersionRow,
-        slots: Sequence[McpCredentialSlotRow],
-        credential_version: CredentialVersionRow,
+        bindings: Sequence[tuple[McpCredentialSlotRow, CredentialVersionRow]],
         *,
         user_id: uuid.UUID,
         request_id: str,
     ) -> tuple[CredentialGrantRow, ...]:
-        slot_ids = tuple(slot.id for slot in slots)
+        slot_ids = tuple(slot.id for slot, _credential_version in bindings)
         if not slot_ids:
             return ()
         # Grants are always the final lock in the approval order.
@@ -415,7 +414,7 @@ class McpRepository:
                 credential_version_id=credential_version.id,
                 created_by_user_id=str(user_id),
             )
-            for slot in slots
+            for slot, credential_version in bindings
         )
         self.session.add_all(grants)
         await self.session.flush()
