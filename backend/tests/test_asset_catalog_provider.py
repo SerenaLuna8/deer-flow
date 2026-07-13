@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import uuid
 from dataclasses import fields
 
@@ -106,6 +107,47 @@ def _snapshots(generation: int):
             credential_grant_ids=(),
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_older_generation_writer_cannot_overwrite_newer_cache() -> None:
+    from app.shared_assets.catalog_provider import (
+        AssetCatalogUnavailable,
+        PostgresAssetCatalogProvider,
+    )
+
+    provider = PostgresAssetCatalogProvider.for_test(generation=1, cutover=True)
+    old_mcp = _snapshots(1)[2]
+    new_mcp = _snapshots(2)[2]
+    provider._prepare_cache(1, True)
+
+    release_old_writer = threading.Barrier(2)
+    old_writer_errors: list[BaseException] = []
+    new_writer_errors: list[BaseException] = []
+
+    def write_old_generation() -> None:
+        release_old_writer.wait()
+        try:
+            provider._store("mcp", (old_mcp,), expected_generation=1)
+        except BaseException as exc:  # pragma: no branch - asserted below
+            old_writer_errors.append(exc)
+
+    old_writer = threading.Thread(target=write_old_generation)
+    old_writer.start()
+    provider._prepare_cache(2, True)
+    try:
+        provider._store("mcp", (new_mcp,), expected_generation=2)
+    except BaseException as exc:  # pragma: no branch - asserted below
+        new_writer_errors.append(exc)
+    finally:
+        release_old_writer.wait()
+    old_writer.join(timeout=1)
+
+    assert not old_writer.is_alive()
+    assert new_writer_errors == []
+    assert len(old_writer_errors) == 1
+    assert isinstance(old_writer_errors[0], AssetCatalogUnavailable)
+    assert provider._cached("mcp") == (new_mcp,)
 
 
 @pytest.mark.asyncio
@@ -246,3 +288,182 @@ async def test_provider_reuses_task7_verified_skill_archive(monkeypatch) -> None
 
     assert len(verified_calls) == 1
     assert snapshots[0].files[0].content == b"verified"
+
+
+@pytest.mark.asyncio
+async def test_catalog_sql_selects_only_active_assets() -> None:
+    from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
+
+    class _EmptyResult:
+        def all(self):
+            return []
+
+    class _CapturingSession:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return _EmptyResult()
+
+    for kind, loader, table_name in (
+        ("agent", PostgresAssetCatalogProvider._load_agents, "agents"),
+        ("skill", PostgresAssetCatalogProvider._load_skills, "skills"),
+        ("mcp", PostgresAssetCatalogProvider._load_mcp, "mcp_servers"),
+    ):
+        session = _CapturingSession()
+        assert await loader(session, 1) == ()  # type: ignore[arg-type]
+        statement = str(session.statements[0])
+        assert f"{table_name}.status =" in statement, kind
+        assert f"{table_name}.status !=" not in statement, kind
+
+
+class _CatalogResult:
+    def __init__(self, values):
+        self._values = values
+
+    def all(self):
+        return self._values
+
+    def scalars(self):
+        return self
+
+
+class _CatalogSession:
+    def __init__(self, *results):
+        self._results = iter(results)
+
+    async def execute(self, _statement):
+        return _CatalogResult(next(self._results))
+
+
+@pytest.mark.asyncio
+async def test_agent_catalog_rejects_corrupt_payload_checksum() -> None:
+    from app.shared_assets.catalog_provider import (
+        AssetCatalogUnavailable,
+        PostgresAssetCatalogProvider,
+    )
+    from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
+
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    asset = AgentRow(
+        id=asset_id,
+        scope="system",
+        project_id=None,
+        slug="corrupt-agent",
+        display_name="Corrupt agent",
+        status="active",
+        current_published_version_id=version_id,
+        created_by_user_id="system",
+    )
+    version = AgentVersionRow(
+        id=version_id,
+        agent_id=asset_id,
+        version_number=1,
+        workflow_status="published",
+        description="description",
+        soul="soul",
+        model_ref="default",
+        tool_groups=["search"],
+        payload_checksum="f" * 64,
+        created_by_user_id="system",
+    )
+    session = _CatalogSession([(asset, version)], [], [], [], [])
+
+    with pytest.raises(AssetCatalogUnavailable, match="agent catalog is invalid"):
+        await PostgresAssetCatalogProvider._load_agents(session, 1)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_agent_catalog_rejects_archived_row_if_backend_returns_it() -> None:
+    from app.shared_assets.agent_service import AgentService
+    from app.shared_assets.catalog_provider import (
+        AssetCatalogUnavailable,
+        PostgresAssetCatalogProvider,
+    )
+    from app.shared_assets.models import AgentPayload
+    from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
+
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    payload = AgentPayload("description", "soul", "default", (), (), ())
+    asset = AgentRow(
+        id=asset_id,
+        scope="system",
+        project_id=None,
+        slug="archived-agent",
+        display_name="Archived agent",
+        status="archived",
+        current_published_version_id=version_id,
+        created_by_user_id="system",
+    )
+    version = AgentVersionRow(
+        id=version_id,
+        agent_id=asset_id,
+        version_number=1,
+        workflow_status="published",
+        description=payload.description,
+        soul=payload.soul,
+        model_ref=payload.model_ref,
+        tool_groups=[],
+        payload_checksum=AgentService._payload_checksum(payload),
+        created_by_user_id="system",
+    )
+
+    with pytest.raises(AssetCatalogUnavailable, match="agent catalog is invalid"):
+        await PostgresAssetCatalogProvider._load_agents(  # type: ignore[arg-type]
+            _CatalogSession([(asset, version)]),
+            1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_mcp_catalog_rejects_corrupt_payload_checksum(monkeypatch) -> None:
+    from app.shared_assets.catalog_provider import (
+        AssetCatalogUnavailable,
+        PostgresAssetCatalogProvider,
+    )
+    from app.shared_assets.credential_closure import LockedMcpCredentialClosure
+    from deerflow.persistence.shared_assets import McpServerRow, McpServerVersionRow
+
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    asset = McpServerRow(
+        id=asset_id,
+        scope="system",
+        project_id=None,
+        slug="corrupt-mcp",
+        display_name="Corrupt MCP",
+        status="active",
+        current_published_version_id=version_id,
+        created_by_user_id="system",
+    )
+    version = McpServerVersionRow(
+        id=version_id,
+        mcp_server_id=asset_id,
+        version_number=1,
+        workflow_status="published",
+        description="description",
+        transport="stdio",
+        command="mcp-command",
+        args=[],
+        url=None,
+        non_secret_env={},
+        non_secret_headers={},
+        oauth_metadata={},
+        routing={},
+        tool_overrides={},
+        timeout_seconds=30,
+        payload_checksum="f" * 64,
+        created_by_user_id="system",
+    )
+
+    async def _closure(_session, _targets):
+        return {version_id: LockedMcpCredentialClosure((), ())}
+
+    monkeypatch.setattr("app.shared_assets.catalog_provider.lock_mcp_credential_closures", _closure)
+    session = _CatalogSession([(asset, version)])
+
+    with pytest.raises(AssetCatalogUnavailable, match="MCP catalog is invalid"):
+        await PostgresAssetCatalogProvider._load_mcp(session, 1)  # type: ignore[arg-type]

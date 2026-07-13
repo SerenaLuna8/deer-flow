@@ -360,7 +360,13 @@ async def task_tool(
     }
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
-    tools = get_available_tools(**available_tools_kwargs)
+    from deerflow.assets.catalog import trusted_asset_context
+
+    raw_asset_context = parent_context.get("project_context") or parent_context.get("asset_context")
+    asset_context = trusted_asset_context(raw_asset_context)
+    if asset_context is not None:
+        available_tools_kwargs["asset_context"] = asset_context
+    tools = await asyncio.to_thread(get_available_tools, **available_tools_kwargs)
 
     # Create executor
     executor_kwargs = {

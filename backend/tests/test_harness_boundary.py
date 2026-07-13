@@ -50,3 +50,12 @@ def test_asset_catalog_protocol_is_owned_by_harness() -> None:
     from deerflow.assets.catalog import AssetCatalogProvider
 
     assert AssetCatalogProvider.__module__ == "deerflow.assets.catalog"
+
+
+def test_trusted_asset_context_rejects_client_shaped_values() -> None:
+    from deerflow.assets.catalog import trusted_asset_context
+
+    opaque = object()
+    assert trusted_asset_context(opaque) is opaque
+    for value in (None, {}, {"project_id": "forged"}, [], (), "forged", 1, True):
+        assert trusted_asset_context(value) is None

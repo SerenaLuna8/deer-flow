@@ -37,6 +37,13 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
 from deerflow.agents.thread_state import ThreadState
+from deerflow.assets.catalog import (
+    AssetCatalogUnavailable,
+    get_asset_catalog_provider,
+    reject_legacy_asset_mutation_after_cutover,
+    run_asset_catalog_lookup,
+    trusted_asset_context,
+)
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
@@ -144,6 +151,7 @@ class DeerFlowClient:
         available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
         environment: str | None = None,
+        asset_context: object | None = None,
     ):
         """Initialize the client.
 
@@ -167,6 +175,9 @@ class DeerFlowClient:
                 ``DEER_FLOW_ENV`` or ``ENVIRONMENT`` env vars. Pass an
                 explicit value for programmatic callers that do not want
                 env-var coupling.
+            asset_context: Opaque trusted context supplied by an internal
+                caller for project-scoped credential materialization. Client
+                dictionaries are not accepted as authorization context.
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -184,6 +195,9 @@ class DeerFlowClient:
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
         self._environment = environment
+        self._asset_context = trusted_asset_context(asset_context)
+        if asset_context is not None and self._asset_context is None:
+            raise AssetCatalogUnavailable("trusted asset context must be an opaque internal object")
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -319,12 +333,18 @@ class DeerFlowClient:
         self._agent_config_key = key
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
-    @staticmethod
-    def _get_tools(*, model_name: str | None, subagent_enabled: bool):
+    def _get_tools(self, *, model_name: str | None, subagent_enabled: bool):
         """Lazy import to avoid circular dependency at module level."""
         from deerflow.tools import get_available_tools
 
-        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        provider = get_asset_catalog_provider()
+        if provider is not None and self._asset_context is None and bool(run_asset_catalog_lookup(provider, "is_cutover_enabled")):
+            raise AssetCatalogUnavailable("trusted asset context is required when the asset catalog provider is enabled")
+        return get_available_tools(
+            model_name=model_name,
+            subagent_enabled=subagent_enabled,
+            asset_context=self._asset_context,
+        )
 
     @staticmethod
     def _serialize_tool_calls(tool_calls) -> list[dict]:
@@ -1106,6 +1126,7 @@ class DeerFlowClient:
         Raises:
             OSError: If the config file cannot be written.
         """
+        reject_legacy_asset_mutation_after_cutover()
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
             raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
@@ -1163,6 +1184,7 @@ class DeerFlowClient:
             ValueError: If the skill is not found.
             OSError: If the config file cannot be written.
         """
+        reject_legacy_asset_mutation_after_cutover()
         storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
         skills = storage.load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == name), None)
@@ -1256,6 +1278,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
+        reject_legacy_asset_mutation_after_cutover()
         return get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config).install_skill_from_archive(skill_path)
 
     # ------------------------------------------------------------------

@@ -398,6 +398,9 @@ M3 只测试该接口，不从项目页面创建运行。M4 在创建 run snapsh
 - cutover marker 生效后不读取仓库 Agent、Skill 或 MCP 文件作为 fallback。
 
 legacy 运行兼容不代表项目运行完成。项目页面不提供 run CTA，项目私有 CTA 继续禁用。
+M3 adapter 不从客户端字典或 project ID 合成 `ProjectContext`；secret materialization 只能透传应用内部
+解析出的真实不可变 context。contextless 或 client-shaped context 必须 fail closed，M4 才负责把该
+context 接入项目私有 run 生命周期。
 
 ## 13. Frontend 信息架构
 

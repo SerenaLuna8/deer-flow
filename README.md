@@ -326,6 +326,9 @@ key ID、storage locator 与 secret hash 永远不会出现在 HTTP 响应中。
 完成 catalog cutover 后，系统 Agent、Skill 与 MCP 的运行时和旧版 GET 接口只读取 PostgreSQL
 已发布版本；旧文件即使仍存在也不会回退使用。旧版文件写接口统一返回
 `409 ASSET_CATALOG_CUTOVER`，请改用 `/admin/assets` 管理系统资产。
+M3 的兼容运行不会构造项目运行身份：credential materialization 只接受应用内部解析出的真实、
+不可变 `ProjectContext`。嵌入式 client 在 cutover 后必须显式接收该 opaque context；缺少 context
+或客户端传入的字典都会 fail closed。把项目 context 接入项目私有 run 生命周期属于 M4。
 
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 

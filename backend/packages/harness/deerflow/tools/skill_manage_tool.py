@@ -14,6 +14,7 @@ from weakref import WeakValueDictionary
 from langchain.tools import tool
 
 from deerflow.agents.lead_agent.prompt import refresh_user_skills_system_prompt_cache_async
+from deerflow.assets.catalog import areject_legacy_asset_mutation_after_cutover
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -131,6 +132,8 @@ async def _skill_manage_impl(
         replace: Replacement text for patch.
         expected_count: Optional expected number of replacements for patch.
     """
+    await areject_legacy_asset_mutation_after_cutover()
+
     name = SkillStorage.validate_skill_name(name)
     user_id = resolve_runtime_user_id(runtime)
     lock = _get_lock(user_id, name)

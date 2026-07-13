@@ -3,6 +3,8 @@
 import asyncio
 import importlib
 import inspect
+import threading
+import uuid
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -100,6 +102,78 @@ def _task_tool_message(result: str | Command) -> ToolMessage:
     message = messages[0]
     assert isinstance(message, ToolMessage)
     return message
+
+
+@pytest.mark.asyncio
+async def test_task_tool_builds_catalog_tools_off_provider_owner_loop(monkeypatch):
+    from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
+    from deerflow.assets.catalog import (
+        AssetCatalogMcpSnapshot,
+        AssetCatalogScope,
+        set_asset_catalog_provider,
+    )
+
+    snapshot = AssetCatalogMcpSnapshot(
+        slug="subagent-mcp",
+        scope=AssetCatalogScope.SYSTEM,
+        asset_id=uuid.uuid4(),
+        version_id=uuid.uuid4(),
+        generation=1,
+        checksum="c" * 64,
+        definition={"transport": "stdio", "command": "noop"},
+        credential_grant_ids=(),
+    )
+    provider = PostgresAssetCatalogProvider.for_test(
+        generation=1,
+        cutover=True,
+        mcp=(snapshot,),
+    )
+    set_asset_catalog_provider(provider)
+    owner_thread = threading.get_ident()
+    trusted_context = object()
+    runtime = _make_runtime()
+    runtime.context["project_context"] = trusted_context
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, _prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    def get_available_tools(**kwargs):
+        captured["tool_thread"] = threading.get_ident()
+        captured["tools_kwargs"] = kwargs
+        provider.run_sync("list_system_mcp")
+        return []
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _task_id: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    try:
+        result = await task_tool_module.task_tool.coroutine(
+            runtime=runtime,
+            description="catalog task",
+            prompt="inspect",
+            subagent_type="general-purpose",
+            tool_call_id="tc-catalog",
+        )
+    finally:
+        set_asset_catalog_provider(None)
+
+    assert _task_tool_message(result).content == "Task Succeeded. Result: done"
+    assert captured["tool_thread"] != owner_thread
+    assert captured["tools_kwargs"]["asset_context"] is trusted_context
 
 
 def test_task_result_command_derives_content_from_status_payload():

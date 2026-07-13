@@ -21,6 +21,15 @@ def _set_skills_cache_state(*, skills=None, active=False, version=0):
         prompt_module._enabled_skills_refresh_event.clear()
 
 
+def test_lead_agent_accepts_only_opaque_runtime_asset_context() -> None:
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+
+    opaque = object()
+    assert lead_agent_module._trusted_runtime_asset_context({"project_context": opaque}) is opaque
+    assert lead_agent_module._trusted_runtime_asset_context({"asset_context": opaque}) is opaque
+    assert lead_agent_module._trusted_runtime_asset_context({"project_context": {"project_id": "forged"}}) is None
+
+
 def test_build_self_update_section_empty_for_default_agent():
     assert prompt_module._build_self_update_section(None) == ""
 

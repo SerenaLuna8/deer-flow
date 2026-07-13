@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from deerflow.assets.catalog import get_asset_catalog_provider
+from deerflow.assets.catalog import (
+    ASSET_CATALOG_CUTOVER_CODE,
+    ASSET_CATALOG_CUTOVER_MESSAGE,
+    AssetCatalogUnavailable,
+    areject_legacy_asset_mutation_after_cutover,
+    get_asset_catalog_provider,
+)
 
 CUTOVER_DETAIL = {
-    "code": "ASSET_CATALOG_CUTOVER",
-    "message": "System assets are managed through /admin/assets after catalog cutover.",
+    "code": ASSET_CATALOG_CUTOVER_CODE,
+    "message": ASSET_CATALOG_CUTOVER_MESSAGE,
 }
 
 
@@ -22,8 +28,12 @@ async def is_catalog_cutover_enabled() -> bool:
 
 
 async def reject_legacy_asset_mutation_after_cutover() -> None:
-    if await is_catalog_cutover_enabled():
-        raise cutover_conflict()
+    try:
+        await areject_legacy_asset_mutation_after_cutover()
+    except AssetCatalogUnavailable as exc:
+        if ASSET_CATALOG_CUTOVER_CODE not in str(exc):
+            raise
+        raise cutover_conflict() from None
 
 
 __all__ = [

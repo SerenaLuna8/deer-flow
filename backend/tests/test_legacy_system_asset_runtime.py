@@ -856,3 +856,162 @@ async def test_mcp_compat_get_uses_safe_provider_and_put_rejects_before_config(m
         await mcp.update_mcp_configuration(request, mcp.McpConfigUpdateRequest(mcp_servers={}))
     assert getattr(raised.value, "status_code", None) == 409
     assert getattr(raised.value, "detail", None) == CUTOVER_DETAIL
+
+
+def test_setup_agent_tool_rejects_cutover_before_file_access(monkeypatch) -> None:
+    from deerflow.assets.catalog import AssetCatalogUnavailable, set_asset_catalog_provider
+    from deerflow.tools.builtins import setup_agent_tool
+
+    set_asset_catalog_provider(_AgentProvider(cutover=True))
+    monkeypatch.setattr(
+        setup_agent_tool,
+        "get_paths",
+        lambda: (_ for _ in ()).throw(AssertionError("file access")),
+    )
+    runtime = SimpleNamespace(context={"agent_name": "test"}, tool_call_id="call-1")
+
+    with pytest.raises(AssetCatalogUnavailable, match="ASSET_CATALOG_CUTOVER"):
+        setup_agent_tool.setup_agent.func(soul="soul", description="description", runtime=runtime)
+
+
+def test_update_agent_tool_rejects_cutover_before_config_or_file_access(monkeypatch) -> None:
+    from deerflow.assets.catalog import AssetCatalogUnavailable, set_asset_catalog_provider
+    from deerflow.tools.builtins import update_agent_tool
+
+    set_asset_catalog_provider(_AgentProvider(cutover=True))
+    monkeypatch.setattr(
+        update_agent_tool,
+        "get_app_config",
+        lambda: (_ for _ in ()).throw(AssertionError("config access")),
+    )
+    monkeypatch.setattr(
+        update_agent_tool,
+        "get_paths",
+        lambda: (_ for _ in ()).throw(AssertionError("file access")),
+    )
+    runtime = SimpleNamespace(
+        context={"agent_name": "test", "user_id": "user-1"},
+        tool_call_id="call-1",
+    )
+
+    with pytest.raises(AssetCatalogUnavailable, match="ASSET_CATALOG_CUTOVER"):
+        update_agent_tool.update_agent.func(runtime=runtime, soul="new soul")
+
+
+@pytest.mark.parametrize(
+    "method,args,kwargs",
+    [
+        ("update_mcp_config", ({},), {}),
+        ("update_skill", ("skill",), {"enabled": False}),
+        ("install_skill", ("missing.skill",), {}),
+    ],
+)
+def test_deerflow_client_mutations_reject_cutover_before_io(
+    monkeypatch,
+    method: str,
+    args: tuple,
+    kwargs: dict,
+) -> None:
+    import deerflow.client as client_module
+    from deerflow.assets.catalog import AssetCatalogUnavailable, set_asset_catalog_provider
+    from deerflow.client import DeerFlowClient
+
+    set_asset_catalog_provider(_AgentProvider(cutover=True))
+    monkeypatch.setattr(
+        client_module.ExtensionsConfig,
+        "resolve_config_path",
+        lambda: (_ for _ in ()).throw(AssertionError("config access")),
+    )
+    monkeypatch.setattr(
+        client_module,
+        "get_or_new_user_skill_storage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("storage access")),
+    )
+    client = DeerFlowClient.__new__(DeerFlowClient)
+
+    with pytest.raises(AssetCatalogUnavailable, match="ASSET_CATALOG_CUTOVER"):
+        getattr(client, method)(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_skill_manage_tool_rejects_cutover_before_storage_access(monkeypatch) -> None:
+    from deerflow.assets.catalog import AssetCatalogUnavailable, set_asset_catalog_provider
+    from deerflow.tools import skill_manage_tool
+
+    set_asset_catalog_provider(_AgentProvider(cutover=True))
+    monkeypatch.setattr(
+        skill_manage_tool,
+        "get_or_new_user_skill_storage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("storage access")),
+    )
+    runtime = SimpleNamespace(
+        context={"user_id": "user-1", "thread_id": "thread-1"},
+        tool_call_id="call-1",
+    )
+
+    with pytest.raises(AssetCatalogUnavailable, match="ASSET_CATALOG_CUTOVER"):
+        await skill_manage_tool._skill_manage_impl(
+            runtime=runtime,
+            action="create",
+            name="new-skill",
+            content="---\nname: new-skill\ndescription: test\n---\n",
+        )
+
+
+@pytest.mark.parametrize("asset_context", [None, {"project_id": "forged"}])
+def test_deerflow_client_requires_explicit_trusted_asset_context_when_provider_enabled(
+    monkeypatch,
+    asset_context,
+) -> None:
+    from deerflow.assets.catalog import AssetCatalogUnavailable, set_asset_catalog_provider
+    from deerflow.client import DeerFlowClient
+
+    set_asset_catalog_provider(_AgentProvider(cutover=True))
+    monkeypatch.setattr("deerflow.client.get_app_config", lambda: MagicMock())
+    available_tools = MagicMock(side_effect=AssertionError("tool loading must fail closed"))
+    monkeypatch.setattr("deerflow.tools.get_available_tools", available_tools)
+
+    with pytest.raises(AssetCatalogUnavailable, match="trusted asset context"):
+        client = DeerFlowClient(asset_context=asset_context)
+        client._get_tools(model_name=None, subagent_enabled=False)
+
+    available_tools.assert_not_called()
+
+
+def test_deerflow_client_forwards_explicit_opaque_asset_context(monkeypatch) -> None:
+    from deerflow.assets.catalog import set_asset_catalog_provider
+    from deerflow.client import DeerFlowClient
+
+    context = object()
+    set_asset_catalog_provider(_AgentProvider(cutover=True))
+    monkeypatch.setattr("deerflow.client.get_app_config", lambda: MagicMock())
+    available_tools = MagicMock(return_value=[])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", available_tools)
+
+    client = DeerFlowClient(asset_context=context)
+
+    assert client._get_tools(model_name="model", subagent_enabled=False) == []
+    available_tools.assert_called_once_with(
+        model_name="model",
+        subagent_enabled=False,
+        asset_context=context,
+    )
+
+
+def test_deerflow_client_contextless_tools_remain_compatible_before_cutover(monkeypatch) -> None:
+    from deerflow.assets.catalog import set_asset_catalog_provider
+    from deerflow.client import DeerFlowClient
+
+    set_asset_catalog_provider(_AgentProvider(cutover=False))
+    monkeypatch.setattr("deerflow.client.get_app_config", lambda: MagicMock())
+    available_tools = MagicMock(return_value=[])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", available_tools)
+
+    client = DeerFlowClient()
+
+    assert client._get_tools(model_name=None, subagent_enabled=False) == []
+    available_tools.assert_called_once_with(
+        model_name=None,
+        subagent_enabled=False,
+        asset_context=None,
+    )

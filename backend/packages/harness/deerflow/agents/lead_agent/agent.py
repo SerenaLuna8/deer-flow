@@ -39,6 +39,7 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
+from deerflow.assets.catalog import trusted_asset_context
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.models import create_chat_model
@@ -67,6 +68,12 @@ def _get_runtime_config(config: RunnableConfig) -> dict:
     if isinstance(context, dict):
         cfg.update(context)
     return cfg
+
+
+def _trusted_runtime_asset_context(config: dict) -> object | None:
+    """Select only an opaque app-supplied context; never trust client dicts."""
+
+    return trusted_asset_context(config.get("project_context") or config.get("asset_context"))
 
 
 def _resolve_model_name(requested_model_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
@@ -500,7 +507,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             model_name=model_name,
             subagent_enabled=subagent_enabled,
             app_config=resolved_app_config,
-            asset_context=cfg.get("project_context") or cfg.get("asset_context"),
+            asset_context=_trusted_runtime_asset_context(cfg),
         ) + [setup_agent]
         filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
         if non_interactive:
@@ -568,7 +575,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         groups=agent_config.tool_groups if agent_config else None,
         subagent_enabled=subagent_enabled,
         app_config=resolved_app_config,
-        asset_context=cfg.get("project_context") or cfg.get("asset_context"),
+        asset_context=_trusted_runtime_asset_context(cfg),
     )
     filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
     if non_interactive:

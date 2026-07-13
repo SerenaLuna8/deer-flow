@@ -15,6 +15,7 @@ from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
+from app.shared_assets.agent_service import AgentService
 from app.shared_assets.credential_closure import (
     McpCredentialClosureInvalid,
     McpCredentialClosureTarget,
@@ -22,7 +23,9 @@ from app.shared_assets.credential_closure import (
 )
 from app.shared_assets.errors import AssetValidationFailed, SharedAssetError
 from app.shared_assets.keyring import CredentialKeyringInvalid
-from app.shared_assets.models import AssetKind, AssetScope, ResolvedMcpSnapshot
+from app.shared_assets.mcp_repository import McpVersionRecord
+from app.shared_assets.mcp_service import McpService
+from app.shared_assets.models import AgentPayload, AssetKind, AssetScope, ResolvedMcpSnapshot
 from app.shared_assets.resolver import materialize_mcp_secrets as materialize_resolved_mcp_secrets
 from app.shared_assets.skill_repository import SkillVersionRecord
 from app.shared_assets.skill_service import SkillService
@@ -265,7 +268,7 @@ class PostgresAssetCatalogProvider:
                     final_generation, final_cutover = await self._read_state(session)
                     if not final_cutover or final_generation != generation:
                         raise AssetCatalogUnavailable("system asset catalog changed during lookup")
-                    self._store(kind, loaded)
+                    self._store(kind, loaded, expected_generation=generation)
                     return loaded
         except AssetCatalogUnavailable:
             raise
@@ -301,8 +304,16 @@ class PostgresAssetCatalogProvider:
         with self._cache_lock:
             return {"agent": self._agents, "skill": self._skills, "mcp": self._mcp}[kind]
 
-    def _store(self, kind: str, snapshots: SnapshotTuple) -> None:
+    def _store(
+        self,
+        kind: str,
+        snapshots: SnapshotTuple,
+        *,
+        expected_generation: int,
+    ) -> None:
         with self._cache_lock:
+            if self._generation != expected_generation:
+                raise AssetCatalogUnavailable("system asset catalog changed during lookup")
             if kind == "agent":
                 self._agents = snapshots
             elif kind == "skill":
@@ -323,7 +334,7 @@ class PostgresAssetCatalogProvider:
         }[kind]
         self._test_load_counts[kind] += 1
         self._validate_loaded(loaded, generation)
-        self._store(kind, loaded)
+        self._store(kind, loaded, expected_generation=generation)
         return loaded
 
     @staticmethod
@@ -351,7 +362,7 @@ class PostgresAssetCatalogProvider:
                 .where(
                     AgentRow.scope == "system",
                     AgentRow.project_id.is_(None),
-                    AgentRow.status != "suspended",
+                    AgentRow.status == "active",
                     AgentVersionRow.workflow_status == "published",
                 )
                 .order_by(AgentRow.slug)
@@ -359,6 +370,8 @@ class PostgresAssetCatalogProvider:
         ).all()
         snapshots: list[AssetCatalogAgentSnapshot] = []
         for asset, version in rows:
+            if asset.status != "active":
+                raise AssetCatalogUnavailable("system agent catalog is invalid")
             raw_skill_ids = tuple((await session.execute(select(AgentVersionSkillRefRow.skill_version_id).where(AgentVersionSkillRefRow.agent_version_id == version.id).order_by(AgentVersionSkillRefRow.sort_order))).scalars().all())
             skill_rows = (
                 await session.execute(
@@ -369,7 +382,7 @@ class PostgresAssetCatalogProvider:
                         AgentVersionSkillRefRow.agent_version_id == version.id,
                         SkillRow.scope == "system",
                         SkillRow.project_id.is_(None),
-                        SkillRow.status != "suspended",
+                        SkillRow.status == "active",
                         SkillVersionRow.workflow_status == "published",
                     )
                     .order_by(AgentVersionSkillRefRow.sort_order)
@@ -385,7 +398,7 @@ class PostgresAssetCatalogProvider:
                         AgentVersionMcpRefRow.agent_version_id == version.id,
                         McpServerRow.scope == "system",
                         McpServerRow.project_id.is_(None),
-                        McpServerRow.status != "suspended",
+                        McpServerRow.status == "active",
                         McpServerVersionRow.workflow_status == "published",
                     )
                     .order_by(AgentVersionMcpRefRow.sort_order)
@@ -393,6 +406,16 @@ class PostgresAssetCatalogProvider:
             ).all()
             if raw_skill_ids != tuple(row[0] for row in skill_rows) or raw_mcp_ids != tuple(row[0] for row in mcp_rows):
                 raise AssetCatalogUnavailable("system agent dependency catalog is invalid")
+            payload = AgentPayload(
+                description=version.description,
+                soul=version.soul,
+                model_ref=version.model_ref,
+                tool_groups=tuple(version.tool_groups),
+                skill_version_ids=tuple(uuid.UUID(str(row[0])) for row in skill_rows),
+                mcp_version_ids=tuple(uuid.UUID(str(row[0])) for row in mcp_rows),
+            )
+            if AgentService._payload_checksum(payload) != version.payload_checksum:
+                raise AssetCatalogUnavailable("system agent catalog is invalid")
             snapshots.append(
                 AssetCatalogAgentSnapshot(
                     slug=asset.slug,
@@ -404,9 +427,9 @@ class PostgresAssetCatalogProvider:
                     description=version.description,
                     soul=version.soul,
                     model_ref=version.model_ref,
-                    tool_groups=tuple(version.tool_groups),
-                    skill_version_ids=tuple(uuid.UUID(str(row[0])) for row in skill_rows),
-                    mcp_version_ids=tuple(uuid.UUID(str(row[0])) for row in mcp_rows),
+                    tool_groups=payload.tool_groups,
+                    skill_version_ids=payload.skill_version_ids,
+                    mcp_version_ids=payload.mcp_version_ids,
                     skill_slugs=tuple(str(row[1]) for row in skill_rows),
                     mcp_slugs=tuple(str(row[1]) for row in mcp_rows),
                 )
@@ -422,7 +445,7 @@ class PostgresAssetCatalogProvider:
                 .where(
                     SkillRow.scope == "system",
                     SkillRow.project_id.is_(None),
-                    SkillRow.status != "suspended",
+                    SkillRow.status == "active",
                     SkillVersionRow.workflow_status == "published",
                 )
                 .order_by(SkillRow.slug)
@@ -430,6 +453,8 @@ class PostgresAssetCatalogProvider:
         ).all()
         snapshots: list[AssetCatalogSkillSnapshot] = []
         for asset, version in rows:
+            if asset.status != "active":
+                raise AssetCatalogUnavailable("system skill catalog is invalid")
             files = tuple((await session.execute(select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == version.id).order_by(SkillVersionFileRow.path))).scalars().all())
             try:
                 verified_files = await asyncio.to_thread(
@@ -473,7 +498,7 @@ class PostgresAssetCatalogProvider:
                 .where(
                     McpServerRow.scope == "system",
                     McpServerRow.project_id.is_(None),
-                    McpServerRow.status != "suspended",
+                    McpServerRow.status == "active",
                     McpServerVersionRow.workflow_status == "published",
                 )
                 .order_by(McpServerRow.slug)
@@ -483,20 +508,26 @@ class PostgresAssetCatalogProvider:
         closures = await lock_mcp_credential_closures(session, targets) if targets else {}
         snapshots: list[AssetCatalogMcpSnapshot] = []
         for asset, version in rows:
+            if asset.status != "active":
+                raise AssetCatalogUnavailable("system MCP catalog is invalid")
             closure = closures[uuid.UUID(str(version.id))]
+            record = McpVersionRecord(version, closure.slots, closure.grants)
+            canonical_definition = McpService._definition_from_record(record)
+            if McpService._checksum(canonical_definition) != version.payload_checksum:
+                raise AssetCatalogUnavailable("system MCP catalog is invalid")
             definition = _freeze(
                 {
-                    "description": version.description,
-                    "transport": version.transport,
-                    "command": version.command,
-                    "args": tuple(version.args),
-                    "url": version.url,
-                    "env": version.non_secret_env,
-                    "headers": version.non_secret_headers,
-                    "oauth": version.oauth_metadata,
-                    "routing": version.routing,
-                    "tool_overrides": version.tool_overrides,
-                    "timeout_seconds": version.timeout_seconds,
+                    "description": canonical_definition.description,
+                    "transport": canonical_definition.transport,
+                    "command": canonical_definition.command,
+                    "args": canonical_definition.args,
+                    "url": canonical_definition.url,
+                    "env": canonical_definition.env,
+                    "headers": canonical_definition.headers,
+                    "oauth": canonical_definition.oauth,
+                    "routing": canonical_definition.routing,
+                    "tool_overrides": canonical_definition.tool_overrides,
+                    "timeout_seconds": canonical_definition.timeout_seconds,
                     "credential_slots": tuple(
                         {
                             "name": slot.name,
@@ -504,7 +535,7 @@ class PostgresAssetCatalogProvider:
                             "payload_schema": slot.payload_schema,
                             "required": slot.required,
                         }
-                        for slot in closure.slots
+                        for slot in canonical_definition.credential_slots
                     ),
                 }
             )

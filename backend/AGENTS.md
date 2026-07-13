@@ -978,6 +978,10 @@ materializer 只接受可信 `ProjectContext`；env/header 按 transport 合并�
 adapter。明文不得进入 `ExtensionsConfig`、全局 MCP cache、日志、checkpoint 或文件。
 cutover 后 legacy Agent/Skill/MCP 文件写 API 在任何 IO 前统一返回
 `409 ASSET_CATALOG_CUTOVER` 并引导 `/admin/assets`；legacy custom Skill 读取不再暴露文件内容。
+M3 runtime adapter 不得从 client 字典、project ID 或其他请求字段合成 `ProjectContext`。MCP secret
+materialization 只接受 app 内部已经解析出的真实 opaque `ProjectContext`；lead/subagent 只透传该
+对象，嵌入式 `DeerFlowClient` 在 cutover 后缺少该对象或收到 client-shaped dict 必须在 tool loading
+前 fail closed。把真实 project context 注入项目私有 Thread/run 生命周期是 M4 工作，不属于本适配器。
 
 **Platform and project roles**: `users.system_role` is restricted to
 `system_admin|user`; the legacy platform value `admin` is converted by revision 0005.
