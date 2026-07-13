@@ -33,6 +33,7 @@ def test_capability_enum_and_role_matrix_are_exact_and_complete() -> None:
         "shared_assets.read",
         "shared_assets.execute",
         "shared_assets.edit",
+        "shared_assets.manage_bindings",
         "mcp.credentials.approve",
         "private_work.create",
         "private_work.read_own",
@@ -65,6 +66,7 @@ def test_capability_enum_and_role_matrix_are_exact_and_complete() -> None:
     admin_only = {
         Capability.PROJECT_UPDATE,
         Capability.PROJECT_MEMBERS_MANAGE,
+        Capability.SHARED_ASSETS_MANAGE_BINDINGS,
         Capability.MCP_CREDENTIALS_APPROVE,
         Capability.PROJECT_AUDIT_READ,
         Capability.PROJECT_USAGE_READ,
@@ -72,6 +74,14 @@ def test_capability_enum_and_role_matrix_are_exact_and_complete() -> None:
     }
     for capability in admin_only:
         assert {role for role in ProjectRole if capability in capabilities_for(role)} == {ProjectRole.ADMIN}
+
+
+def test_only_admin_manages_system_bindings_and_credentials() -> None:
+    assert Capability.SHARED_ASSETS_MANAGE_BINDINGS in capabilities_for(ProjectRole.ADMIN)
+    assert Capability.MCP_CREDENTIALS_APPROVE in capabilities_for(ProjectRole.ADMIN)
+    for role in (ProjectRole.EDITOR, ProjectRole.RUNNER, ProjectRole.VIEWER):
+        assert Capability.SHARED_ASSETS_MANAGE_BINDINGS not in capabilities_for(role)
+        assert Capability.MCP_CREDENTIALS_APPROVE not in capabilities_for(role)
 
 
 def test_project_context_is_frozen_and_require_raises_stable_safe_error() -> None:

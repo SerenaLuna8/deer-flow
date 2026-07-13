@@ -773,6 +773,18 @@ metadata `create_all` 时执行，legacy bootstrap 的 baseline selective `creat
 M3 DDL。`0007` downgrade 仅允许所有 M3 表（包括状态行）均为空时执行，任一表有数据必须在
 任何 schema 变更前拒绝。
 
+**M3 共享资产应用授权与 domain contract**：`app.shared_assets` 定义 `system|project`
+scope、`agent|skill|mcp` kind、四态 workflow、不可变选择与 typed resolved snapshot。
+项目调用方继续使用 `ProjectContext.require()`；只有认证域 UUID 用户且
+`system_role=system_admin` 才能通过 `resolve_asset_actor()` 获得独立的
+`SystemAssetGovernanceContext`，该 context 不能伪装成项目 membership context。
+`shared_assets.manage_bindings` 与 `mcp.credentials.approve` 仅授予项目 Admin，Editor 仍保留
+`shared_assets.edit`。共享资产错误固定为 404/403/409/422/503 且实例只保存公共 code 所需的
+类型和 `request_id`。平台 override 的默认治理 sink 只记录 actor、project、asset、version、
+action、`request_id` 六类治理元数据；禁止记录 payload、diff、credential metadata 或任何
+私有 Thread、run、file、Memory、automation 资源 ID。M6 可替换持久化 sink，但不得改变
+service 调用接口。
+
 **Platform and project roles**: `users.system_role` is restricted to
 `system_admin|user`; the legacy platform value `admin` is converted by revision 0005.
 Project authorization is independent and lives in `project_memberships.role` as
