@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TypeVar
+from urllib.parse import parse_qsl, urlsplit
 
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
@@ -73,9 +74,10 @@ _SENSITIVE_COMPACT_FRAGMENTS = (
     "refreshtoken",
 )
 _SENSITIVE_VALUE = re.compile(
-    r"(?:\b(?:basic|bearer)\s+\S+|\b(?:access[_-]?token|client[_-]?secret|password|passwd|refresh[_-]?token|token)\s*[:=]\s*\S+|-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----)",
+    r"(?:\b(?:basic|bearer)\s+\S+|\b(?:access[_-]?key|access[_-]?token|api[_-]?key|client[_-]?secret|password|passwd|private[_-]?key|refresh[_-]?token|token)\s*[:=]\s*\S+|-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----)",
     re.IGNORECASE,
 )
+_URL_CANDIDATE = re.compile(r"(?:https?|wss?)://[^\s\"'<>]+", re.IGNORECASE)
 _CONFLICT_CONSTRAINTS = frozenset(
     {
         "uq_mcp_servers_project_slug",
@@ -331,15 +333,22 @@ class McpService:
             slots_by_name = {slot.name: slot for slot in record.slots}
             if set(credential_versions).difference(slots_by_name) or any(slot.required and slot.name not in credential_versions for slot in record.slots):
                 raise AssetValidationFailed(actor.request_id)
+            try:
+                locked_versions = await self._lock_credential_versions(
+                    credentials,
+                    actor,
+                    tuple(credential_versions.values()),
+                )
+            except AssetNotFound:
+                raise AssetValidationFailed(actor.request_id) from None
             bindings: list[tuple[McpCredentialSlotRow, CredentialVersionRow]] = []
             for slot in record.slots:
                 credential_version_id = credential_versions.get(slot.name)
                 if credential_version_id is None:
                     continue
-                try:
-                    locked = await self._lock_credential_version(credentials, actor, credential_version_id)
-                except AssetNotFound:
-                    raise AssetValidationFailed(actor.request_id) from None
+                locked = locked_versions.get(credential_version_id)
+                if locked is None:
+                    raise AssetValidationFailed(actor.request_id)
                 self._validate_slot_credential(actor, asset, slot, locked)
                 bindings.append((slot, locked.version))
             grants = await repository.create_grants(
@@ -539,6 +548,29 @@ class McpService:
         raise AssetForbidden("unknown")
 
     @staticmethod
+    async def _lock_credential_versions(
+        repository: CredentialRepository,
+        actor: _Actor,
+        credential_version_ids: tuple[uuid.UUID, ...],
+    ) -> dict[uuid.UUID, LockedCredentialVersion]:
+        if isinstance(actor, ProjectContext):
+            return await repository.lock_project_credential_versions(
+                actor,
+                credential_version_ids,
+            )
+        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
+            return await repository.lock_override_credential_versions(
+                actor,
+                credential_version_ids,
+            )
+        if isinstance(actor, SystemAssetGovernanceContext):
+            return await repository.lock_system_credential_versions(
+                actor,
+                credential_version_ids,
+            )
+        raise AssetForbidden("unknown")
+
+    @staticmethod
     def _validate_slot_credential(
         actor: _Actor,
         asset: McpServerRow,
@@ -615,7 +647,19 @@ class McpService:
                     raise ValueError
             elif not url or command is not None or args:
                 raise ValueError
-            if any(cls._sensitive_key(key) for key in env) or any(cls._sensitive_key(key) for key in headers) or cls._contains_sensitive_value(env) or cls._contains_sensitive_value(headers):
+            persistent_strings = (
+                description,
+                command,
+                args,
+                url,
+                env,
+                headers,
+                oauth,
+                routing,
+                tool_overrides,
+                tuple(slot.purpose for slot in slots),
+            )
+            if any(cls._sensitive_key(key) for key in env) or any(cls._sensitive_header_key(key) for key in headers) or cls._contains_sensitive_value(persistent_strings):
                 raise ValueError
             if (
                 not set(oauth).issubset(_OAUTH_FIELDS)
@@ -682,10 +726,15 @@ class McpService:
         return bool(_SENSITIVE_KEY.search(normalized)) or any(fragment in compact for fragment in _SENSITIVE_COMPACT_FRAGMENTS)
 
     @classmethod
+    def _sensitive_header_key(cls, value: str) -> bool:
+        normalized = _normalized_key(value)
+        return cls._sensitive_key(value) or "auth" in normalized.split("_")
+
+    @classmethod
     def _contains_sensitive_key(cls, value: object) -> bool:
         if isinstance(value, Mapping):
             return any(cls._sensitive_key(str(key)) or cls._contains_sensitive_key(nested) for key, nested in value.items())
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
             return any(cls._contains_sensitive_key(nested) for nested in value)
         return False
 
@@ -693,9 +742,22 @@ class McpService:
     def _contains_sensitive_value(cls, value: object) -> bool:
         if isinstance(value, Mapping):
             return any(cls._contains_sensitive_value(nested) for nested in value.values())
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
             return any(cls._contains_sensitive_value(nested) for nested in value)
-        return isinstance(value, str) and bool(_SENSITIVE_VALUE.search(value))
+        return isinstance(value, str) and (bool(_SENSITIVE_VALUE.search(value)) or cls._contains_sensitive_url(value))
+
+    @classmethod
+    def _contains_sensitive_url(cls, value: str) -> bool:
+        for candidate in _URL_CANDIDATE.findall(value):
+            parsed = urlsplit(candidate.rstrip("),.;]"))
+            if parsed.username is not None or parsed.password is not None:
+                return True
+            for key, query_value in parse_qsl(parsed.query, keep_blank_values=True):
+                if cls._sensitive_key(key) or bool(_SENSITIVE_VALUE.search(query_value)):
+                    return True
+            if bool(_SENSITIVE_VALUE.search(parsed.fragment)):
+                return True
+        return False
 
     @staticmethod
     def _scope(actor: _Actor) -> tuple[AssetScope, uuid.UUID | None]:

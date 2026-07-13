@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext
@@ -272,6 +274,129 @@ class CredentialRepository:
             raise AssetNotFound(context.request_id)
         version = await self._lock_version(credential, credential_version_id, context.request_id)
         return LockedCredentialVersion(credential, version)
+
+    async def lock_project_credential_versions(
+        self,
+        context: ProjectContext,
+        credential_version_ids: Sequence[uuid.UUID],
+    ) -> dict[uuid.UUID, LockedCredentialVersion]:
+        self._require_project_actor(context)
+        await self.lock_project(context)
+        return await self._lock_credential_versions_globally(
+            credential_version_ids,
+            scope="project",
+            project_id=context.project_id,
+            context_filter=self._project_context_exists(context),
+            request_id=context.request_id,
+        )
+
+    async def lock_override_credential_versions(
+        self,
+        context: SystemAssetGovernanceContext,
+        credential_version_ids: Sequence[uuid.UUID],
+    ) -> dict[uuid.UUID, LockedCredentialVersion]:
+        self._require_system_actor(context)
+        if context.project_id is None:
+            raise AssetNotFound(context.request_id)
+        await self.lock_override_project(context)
+        return await self._lock_credential_versions_globally(
+            credential_version_ids,
+            scope="project",
+            project_id=context.project_id,
+            context_filter=None,
+            request_id=context.request_id,
+        )
+
+    async def lock_system_credential_versions(
+        self,
+        context: SystemAssetGovernanceContext,
+        credential_version_ids: Sequence[uuid.UUID],
+    ) -> dict[uuid.UUID, LockedCredentialVersion]:
+        self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
+        return await self._lock_credential_versions_globally(
+            credential_version_ids,
+            scope="system",
+            project_id=None,
+            context_filter=None,
+            request_id=context.request_id,
+        )
+
+    async def _lock_credential_versions_globally(
+        self,
+        credential_version_ids: Sequence[uuid.UUID],
+        *,
+        scope: str,
+        project_id: uuid.UUID | None,
+        context_filter: ColumnElement[bool] | None,
+        request_id: str,
+    ) -> dict[uuid.UUID, LockedCredentialVersion]:
+        version_ids = tuple(
+            sorted(
+                {uuid.UUID(str(version_id)) for version_id in credential_version_ids},
+                key=lambda value: value.int,
+            )
+        )
+        if not version_ids:
+            return {}
+        scope_filters = [CredentialRow.scope == scope]
+        if project_id is None:
+            scope_filters.append(CredentialRow.project_id.is_(None))
+        else:
+            scope_filters.append(CredentialRow.project_id == project_id)
+        if context_filter is not None:
+            scope_filters.append(context_filter)
+
+        reference_statement = (
+            select(CredentialVersionRow.id, CredentialVersionRow.credential_id)
+            .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
+            .where(
+                CredentialVersionRow.id.in_(version_ids),
+                *scope_filters,
+            )
+        )
+        references = {uuid.UUID(str(version_id)): uuid.UUID(str(credential_id)) for version_id, credential_id in (await self.session.execute(reference_statement)).all()}
+        if set(references) != set(version_ids):
+            raise AssetNotFound(request_id)
+
+        credentials: dict[uuid.UUID, CredentialRow] = {}
+        for credential_id in sorted(set(references.values()), key=lambda value: value.int):
+            credential_statement = (
+                select(CredentialRow)
+                .where(
+                    CredentialRow.id == credential_id,
+                    *scope_filters,
+                )
+                .with_for_update(of=CredentialRow)
+            )
+            credential = (await self.session.execute(credential_statement)).scalar_one_or_none()
+            if credential is None:
+                raise AssetNotFound(request_id)
+            credentials[credential_id] = credential
+
+        locked: dict[uuid.UUID, LockedCredentialVersion] = {}
+        ordered_versions = sorted(
+            references.items(),
+            key=lambda item: (item[1].int, item[0].int),
+        )
+        for version_id, credential_id in ordered_versions:
+            version_statement = (
+                select(CredentialVersionRow)
+                .where(
+                    CredentialVersionRow.id == version_id,
+                    CredentialVersionRow.credential_id == credential_id,
+                )
+                .with_for_update(of=CredentialVersionRow)
+            )
+            version = (await self.session.execute(version_statement)).scalar_one_or_none()
+            if version is None:
+                raise AssetNotFound(request_id)
+            locked[version_id] = LockedCredentialVersion(
+                credentials[credential_id],
+                version,
+            )
+        return locked
 
     async def _lock_version(
         self,

@@ -144,6 +144,200 @@ async def test_mcp_definition_rejects_compact_keys_and_recursive_secret_values_b
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("definition", "secret_value"),
+    [
+        pytest.param(
+            {
+                "description": "connect with password=description-marker",
+                "transport": "http",
+                "url": "https://mcp.test",
+            },
+            "description-marker",
+            id="description-assignment",
+        ),
+        pytest.param(
+            {
+                "transport": "stdio",
+                "command": "mcp --client-secret=command-marker",
+            },
+            "command-marker",
+            id="command-option",
+        ),
+        pytest.param(
+            {
+                "transport": "stdio",
+                "command": "mcp",
+                "args": ("--verbose", "--api-key=args-marker"),
+            },
+            "args-marker",
+            id="args-option",
+        ),
+        pytest.param(
+            {
+                "transport": "http",
+                "url": "https://mcp.test/tools?api%5Fkey=query-marker",
+            },
+            "query-marker",
+            id="url-sensitive-query",
+        ),
+        pytest.param(
+            {
+                "transport": "http",
+                "url": "https://public:userinfo-marker@mcp.test/tools",
+            },
+            "userinfo-marker",
+            id="url-userinfo",
+        ),
+        pytest.param(
+            {
+                "transport": "stdio",
+                "command": "mcp",
+                "env": {"CLIENTSECRET": "env-key-marker"},
+            },
+            "env-key-marker",
+            id="env-key",
+        ),
+        pytest.param(
+            {
+                "transport": "stdio",
+                "command": "mcp",
+                "env": {"PUBLIC_SETTING": "Bearer env-value-marker"},
+            },
+            "env-value-marker",
+            id="env-value",
+        ),
+        pytest.param(
+            {
+                "transport": "http",
+                "url": "https://mcp.test",
+                "headers": {"X-Auth": "header-key-marker"},
+            },
+            "header-key-marker",
+            id="header-auth-carrier",
+        ),
+        pytest.param(
+            {
+                "transport": "http",
+                "url": "https://mcp.test",
+                "oauth": {
+                    "enabled": True,
+                    "extra_token_params": {"resource": "client_secret=oauth-marker"},
+                },
+            },
+            "oauth-marker",
+            id="oauth-recursive-value",
+        ),
+        pytest.param(
+            {
+                "transport": "http",
+                "url": "https://mcp.test",
+                "routing": {
+                    "fallback": "https://route.test/api?access%5Ftoken=routing-marker",
+                },
+            },
+            "routing-marker",
+            id="routing-url-query",
+        ),
+        pytest.param(
+            {
+                "transport": "http",
+                "url": "https://mcp.test",
+                "tool_overrides": {
+                    "search": {"argument": "--private-key=override-marker"},
+                },
+            },
+            "override-marker",
+            id="tool-override-option",
+        ),
+    ],
+)
+async def test_mcp_definition_field_complete_secret_scan_runs_before_storage(
+    definition: dict[str, object],
+    secret_value: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("secret definition must not open storage")
+
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service_module.McpService(ExplodingFactory()).create_version(
+            _context(),
+            uuid.uuid4(),
+            service_module.McpDefinition(**definition),
+            expected_asset_version=1,
+        )
+    assert secret_value not in str(exc_info.value)
+    assert secret_value not in repr(exc_info.value)
+    assert secret_value not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        pytest.param(
+            {
+                "description": "Ordinary passwordless issue tracker",
+                "transport": "http",
+                "url": "https://mcp.test/tools?mode=read",
+            },
+            id="ordinary-description-url",
+        ),
+        pytest.param(
+            {
+                "description": "Local command with public endpoint",
+                "transport": "stdio",
+                "command": "/usr/local/bin/mcp",
+                "args": (
+                    "--verbose",
+                    "--endpoint=https://api.example.test/v1?mode=read",
+                ),
+                "env": {"AUTH_MODE": "oauth", "LOG_LEVEL": "info"},
+            },
+            id="ordinary-command-args-env",
+        ),
+        pytest.param(
+            {
+                "description": "Remote tools",
+                "transport": "http",
+                "url": "https://mcp.test/tools",
+                "headers": {"X-Request-ID": "public-request", "Accept": "application/json"},
+                "oauth": {
+                    "enabled": True,
+                    "token_url": "https://identity.example.test/oauth/token",
+                    "grant_type": "client_credentials",
+                    "client_id": "public-client",
+                    "token_field": "access_token",
+                },
+                "routing": {
+                    "strategy": "round_robin",
+                    "fallback": "https://route.test/api?mode=read",
+                },
+                "tool_overrides": {
+                    "search": {"enabled": True, "description": "ordinary public search"},
+                },
+            },
+            id="ordinary-oauth-routing-overrides",
+        ),
+    ],
+)
+def test_mcp_definition_field_complete_scan_allows_nonsecret_metadata(
+    definition: dict[str, object],
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    normalized = service_module.McpService._validate_definition(
+        _context(),
+        service_module.McpDefinition(**definition),
+    )
+
+    assert normalized.description == definition["description"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "schema",
     [
         {},

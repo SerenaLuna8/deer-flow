@@ -850,19 +850,25 @@ primitive；envelope 持久化、service、grant resolver 与 rotation CLI 由�
 active project、membership version、scope 与 project ID；`SystemAssetGovernanceContext`
 分别承载 system 治理或显式 project override，不能伪装成项目成员。MCP version 只保存
 无 secret 的 transport、command、args、URL、非敏感 env/header、OAuth 协议元数据、routing、
-tool override 与 credential slot schema；env/header/OAuth 及嵌套配置的 key 会同时按分隔词和
-无分隔 canonical form（如 `CLIENTSECRET`、`PRIVATEKEY`、`APIKEY`、`ACCESSTOKEN`）扫描，value
-会递归拒绝 Bearer/Basic authorization、secret assignment 与 private-key PEM 等明确 marker。
-这些检查在打开 session 前稳定 422，异常、repr 与日志不包含命中的值；绝不写回全局
-`extensions_config.json`。项目无 slot MCP 允许 Admin/Editor
+tool override 与 credential slot schema。打开 session 前必须扫描 description、command、args、
+URL、env/header、OAuth、routing、tool override 的全部可持久化字符串；key 同时按分隔词和
+无分隔 canonical form（如 `CLIENTSECRET`、`PRIVATEKEY`、`APIKEY`、`ACCESSTOKEN`）扫描，header
+另外把 `X-Auth` 等 auth carrier 视为敏感 key，URL 结构化拒绝 userinfo 与 sensitive query。
+递归 value scan 拒绝 Bearer/Basic authorization、`--api-key=...`/secret assignment 与
+private-key PEM 等明确 marker；credential slot payload schema 中的 secret 名称是 grant contract，
+不是 secret value，不能套用 definition key denylist。这些检查稳定 422，异常、repr 与日志不包含
+命中的值或完整敏感 URL；绝不写回全局 `extensions_config.json`。项目无 slot MCP 允许 Admin/Editor
 直接发布；credential MCP 必须先进入 `pending_approval`，再由项目 Admin 或 system override
 批准；system MCP 可由 system admin 从 draft 直接完成同一事务。审批锁序固定为
-`project -> MCP asset -> MCP version/slot -> credential -> credential version -> grant`，scope、
-project、slot schema、active 状态与 optimistic asset version 任一不符都以安全的
+`project -> MCP asset -> MCP version/slot -> all logical credentials -> all credential versions -> grant`：
+先解析全部 provided semantic version 的 immutable logical credential 引用，按 credential UUID
+全局排序并锁完所有 logical rows，之后才按 `(credential UUID, credential version UUID)` 排序锁
+semantic rows；禁止按 slot 做 `credential -> version` 交错锁。scope、project、slot schema、active
+状态与 optimistic asset version 任一不符都以安全的
 404/409/422 返回。审批核心参数是可由 JSON object 表示的
 `slot_name -> credential_version_id` mapping：service 在 session 前复制并校验 mapping，所有
-required slot 必须提供、optional slot 可以省略、unknown slot 拒绝；每个 provided slot 独立锁定
-并校验 credential scope/status/schema，只为 provided slot 创建 grant。单 slot 调用也必须显式
+required slot 必须提供、optional slot 可以省略、unknown slot 拒绝；bulk lock 完成后每个
+provided slot 独立重验 credential scope/status/schema，只为 provided slot 创建 grant。单 slot 调用也必须显式
 传 `{"primary": version_id}`，不能把一个 credential 暗中复制到全部 slot。
 
 `CredentialService.create/replace/revoke` 通过 Task 3 AES-GCM primitive 保存 active envelope；

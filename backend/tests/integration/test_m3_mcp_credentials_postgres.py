@@ -649,6 +649,216 @@ async def test_mcp_definition_rows_reject_draft_checksum_drift(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_system_multi_slot_approvals_use_one_global_credential_lock_order(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_keyring(monkeypatch)
+    mcp_module = importlib.import_module("app.shared_assets.mcp_service")
+    credential_module = importlib.import_module("app.shared_assets.credential_service")
+    repository_module = importlib.import_module("app.shared_assets.credential_repository")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    system = await _seed_system_admin(engine)
+    mcp_service = mcp_module.McpService(factory)
+    credential_service = credential_module.CredentialService(factory)
+    try:
+        credential_a = await credential_service.create(
+            system,
+            credential_module.CreateCredential("system-a", "System A", "token"),
+            {"env": {"SYSTEM_TOKEN": "system-secret-a"}},
+        )
+        credential_b = await credential_service.create(
+            system,
+            credential_module.CreateCredential("system-b", "System B", "token"),
+            {"env": {"SYSTEM_TOKEN": "system-secret-b"}},
+        )
+        definition = mcp_module.McpDefinition(
+            description="Two interchangeable system credentials",
+            transport="http",
+            url="https://mcp.example.test",
+            credential_slots=(
+                mcp_module.McpCredentialSlot(
+                    "first",
+                    "First system credential",
+                    {"env": ["SYSTEM_TOKEN"]},
+                ),
+                mcp_module.McpCredentialSlot(
+                    "second",
+                    "Second system credential",
+                    {"env": ["SYSTEM_TOKEN"]},
+                ),
+            ),
+        )
+        asset_one = await mcp_service.create_asset(
+            system,
+            mcp_module.CreateMcpServer("system-one", "System One"),
+        )
+        version_one = await mcp_service.create_version(
+            system,
+            asset_one.id,
+            definition,
+            expected_asset_version=1,
+        )
+        asset_two = await mcp_service.create_asset(
+            system,
+            mcp_module.CreateMcpServer("system-two", "System Two"),
+        )
+        version_two = await mcp_service.create_version(
+            system,
+            asset_two.id,
+            definition,
+            expected_asset_version=1,
+        )
+
+        original_single = repository_module.CredentialRepository.lock_system_credential_version
+        original_bulk = getattr(
+            repository_module.CredentialRepository,
+            "lock_system_credential_versions",
+            None,
+        )
+        ready_count = 0
+        ready_tasks: set[asyncio.Task] = set()
+        both_ready = asyncio.Event()
+        release = asyncio.Event()
+
+        async def mark_ready_once() -> None:
+            nonlocal ready_count
+            task = asyncio.current_task()
+            assert task is not None
+            if task in ready_tasks:
+                return
+            ready_tasks.add(task)
+            ready_count += 1
+            if ready_count == 2:
+                both_ready.set()
+            await release.wait()
+
+        async def wait_after_first_singular_lock(
+            repository,
+            context,
+            credential_version_id,
+        ):
+            locked = await original_single(
+                repository,
+                context,
+                credential_version_id,
+            )
+            await mark_ready_once()
+            return locked
+
+        async def wait_before_bulk_lock(
+            repository,
+            context,
+            credential_version_ids,
+        ):
+            await mark_ready_once()
+            assert original_bulk is not None
+            return await original_bulk(
+                repository,
+                context,
+                credential_version_ids,
+            )
+
+        monkeypatch.setattr(
+            repository_module.CredentialRepository,
+            "lock_system_credential_version",
+            wait_after_first_singular_lock,
+        )
+        monkeypatch.setattr(
+            repository_module.CredentialRepository,
+            "lock_system_credential_versions",
+            wait_before_bulk_lock,
+            raising=False,
+        )
+        tasks = [
+            asyncio.create_task(
+                mcp_service.approve(
+                    system,
+                    asset_one.id,
+                    version_one.id,
+                    {
+                        "first": credential_a.current_version_id,
+                        "second": credential_b.current_version_id,
+                    },
+                    expected_asset_version=2,
+                )
+            ),
+            asyncio.create_task(
+                mcp_service.approve(
+                    system,
+                    asset_two.id,
+                    version_two.id,
+                    {
+                        "first": credential_b.current_version_id,
+                        "second": credential_a.current_version_id,
+                    },
+                    expected_asset_version=2,
+                )
+            ),
+        ]
+        try:
+            await asyncio.wait_for(both_ready.wait(), timeout=5)
+        except BaseException:
+            release.set()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        release.set()
+        results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=10,
+        )
+        assert ready_count == 2
+        assert all(not isinstance(result, Exception) for result in results)
+
+        expected_bindings = (
+            {
+                "first": credential_a.current_version_id,
+                "second": credential_b.current_version_id,
+            },
+            {
+                "first": credential_b.current_version_id,
+                "second": credential_a.current_version_id,
+            },
+        )
+        for result, expected in zip(results, expected_bindings, strict=True):
+            assert result.workflow_status is WorkflowStatus.PUBLISHED
+            slot_names = {slot.id: slot.name for slot in result.credential_slots}
+            actual = {slot_names[grant.credential_slot_id]: grant.credential_version_id for grant in result.credential_grants}
+            assert actual == expected
+
+        async with factory() as session:
+            stored_assets = [await session.get(McpServerRow, asset_id) for asset_id in (asset_one.id, asset_two.id)]
+            stored_versions = [await session.get(McpServerVersionRow, version_id) for version_id in (version_one.id, version_two.id)]
+            stored_grants = (
+                (
+                    await session.execute(
+                        select(CredentialGrantRow)
+                        .where(CredentialGrantRow.mcp_server_version_id.in_([version_one.id, version_two.id]))
+                        .order_by(
+                            CredentialGrantRow.mcp_server_version_id,
+                            CredentialGrantRow.credential_slot_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert all(asset is not None and asset.version == 3 for asset in stored_assets)
+        assert [asset.current_published_version_id for asset in stored_assets] == [
+            version_one.id,
+            version_two.id,
+        ]
+        assert all(version is not None and version.workflow_status == WorkflowStatus.PUBLISHED.value and version.reviewed_at is not None for version in stored_versions)
+        assert len(stored_grants) == 4
+        assert all(grant.status == "active" for grant in stored_grants)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_mcp_approval_has_one_stable_conflict(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
