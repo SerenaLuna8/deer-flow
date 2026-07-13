@@ -69,7 +69,7 @@ class CredentialKeyring:
                     raise ValueError
                 keys[key_id] = key
             return cls(active_key_id=active_key_id, _keys=keys)
-        except (binascii.Error, json.JSONDecodeError, TypeError, ValueError):
+        except (binascii.Error, json.JSONDecodeError, RecursionError, TypeError, ValueError):
             raise CredentialKeyringInvalid() from None
 
     @property

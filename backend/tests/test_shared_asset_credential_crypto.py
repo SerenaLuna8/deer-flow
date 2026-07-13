@@ -66,7 +66,11 @@ def test_tamper_and_wrong_aad_fail_without_secret_in_error(
     _configure_keyring(monkeypatch)
     keyring = CredentialKeyring.from_environment()
     envelope = encrypt_credential_payload(PAYLOAD, AssetScope.PROJECT, PROJECT_ID, VERSION_ID, keyring)
-    tampered = dataclasses.replace(envelope, ciphertext=envelope.ciphertext[:-1] + b"0")
+    tampered = dataclasses.replace(
+        envelope,
+        ciphertext=envelope.ciphertext[:-1] + bytes([envelope.ciphertext[-1] ^ 1]),
+    )
+    assert tampered.ciphertext != envelope.ciphertext
 
     attempts = (
         (envelope, scope, project_id, version_id),
@@ -179,6 +183,21 @@ def test_keyring_rejects_duplicate_key_ids(monkeypatch: pytest.MonkeyPatch) -> N
 
     with pytest.raises(CredentialKeyringInvalid, match="^Credential keyring configuration invalid$"):
         CredentialKeyring.from_environment()
+
+
+def test_keyring_normalizes_deep_json_recursion_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret_value = "deep-secret-value"
+    raw_keyring = '{"k1":' + "[" * 10_000 + f'"{secret_value}"' + "]" * 10_000 + "}"
+    monkeypatch.setenv("DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID", "k1")
+    monkeypatch.setenv("DEER_FLOW_CREDENTIAL_KEYRING_JSON", raw_keyring)
+
+    with pytest.raises(CredentialKeyringInvalid) as error:
+        CredentialKeyring.from_environment()
+
+    assert str(error.value) == "Credential keyring configuration invalid"
+    assert error.value.__dict__ == {}
+    assert secret_value not in str(error.value)
+    assert raw_keyring not in str(error.value)
 
 
 @pytest.mark.parametrize(
