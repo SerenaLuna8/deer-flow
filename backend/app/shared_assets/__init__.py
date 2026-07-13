@@ -1,4 +1,5 @@
 from app.shared_assets.agent_service import AgentAssetView, AgentService, AgentVersionView, CreateAgent
+from app.shared_assets.binding_service import BindingService, SystemAssetBinding
 from app.shared_assets.contexts import SystemAssetGovernanceContext, resolve_asset_actor
 from app.shared_assets.credential_service import (
     CreateCredential,
@@ -11,6 +12,7 @@ from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
     AssetNotFound,
+    AssetResolutionUnavailable,
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
@@ -37,6 +39,12 @@ from app.shared_assets.models import (
     SkillArchiveFile,
     WorkflowStatus,
 )
+from app.shared_assets.resolver import (
+    MaterializedMcpSecrets,
+    ProjectAssetResolver,
+    materialize_mcp_secrets,
+    resolve_project_asset_snapshot,
+)
 from app.shared_assets.skill_service import (
     CreateSkill,
     SkillArchivePreview,
@@ -56,10 +64,12 @@ __all__ = [
     "AssetForbidden",
     "AssetKind",
     "AssetNotFound",
+    "AssetResolutionUnavailable",
     "AssetScope",
     "AssetSelection",
     "AssetStorageUnavailable",
     "AssetValidationFailed",
+    "BindingService",
     "CreateAgent",
     "CreateCredential",
     "CreateMcpServer",
@@ -74,6 +84,8 @@ __all__ = [
     "McpDefinition",
     "McpService",
     "McpVersionView",
+    "MaterializedMcpSecrets",
+    "ProjectAssetResolver",
     "ResolvedAgentSnapshot",
     "ResolvedAssetSnapshot",
     "ResolvedMcpSnapshot",
@@ -88,6 +100,9 @@ __all__ = [
     "SkillService",
     "SkillVersionView",
     "SystemAssetGovernanceContext",
+    "SystemAssetBinding",
     "WorkflowStatus",
     "resolve_asset_actor",
+    "materialize_mcp_secrets",
+    "resolve_project_asset_snapshot",
 ]

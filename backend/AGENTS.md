@@ -889,6 +889,34 @@ version 置为 revoked，使旧 grant 立即不可用。Credential API view 均�
 crypto/keyring 等 availability 故障只返回无连接 URL 或底层细节的 503，编程型
 `InvalidRequestError` 等异常不得被宽泛吞成 503。
 
+**M3 binding 与 resolver**：`BindingService` 只接受可信 `ProjectContext` 或带明确
+`project_id` 的 `SystemAssetGovernanceContext`。项目成员必须具有
+`shared_assets.manage_bindings`（仅 Admin）；锁序固定为
+`project -> binding -> system asset -> exact published version`。binding 永久保留一行，
+`enable/upgrade/rollback/disable` 都使用 optimistic binding version；upgrade 只能移动到更高
+`version_number`，rollback 只能移动到更低版本，disabled binding 重新 enable 也必须携带当前
+expected version。新建、升级或重启时拒绝 archived/suspended system asset，并重新验证 Agent 的
+精确 Skill/MCP binding closure 与 MCP grant；已存在 binding 所指 asset 后续 archived 仍可解析，
+suspended 则立即 fail closed。系统发布新 version 绝不自动移动项目 binding。
+
+`ProjectAssetResolver` 在同一事务内共享锁定可信 project/membership、binding、asset、version 和
+精确 dependency closure：项目资产只解析本项目 `current_published_version_id`，system 资产只解析
+本项目 enabled binding 的 pinned version。snapshot 携带 catalog generation、version UUID、
+checksum、dependency version UUID 和 grant UUID；MCP definition 只含无 secret 字段，不得包含
+plaintext、ciphertext、nonce、key ID、storage locator 或 credential secret hash。普通 resolver
+不读取 envelope。`materialize_mcp_secrets()` 只接受 `ResolvedMcpSnapshot`，按
+`project -> MCP asset -> MCP version/slot -> sorted credential -> sorted semantic version -> envelope -> grant`
+重新加锁和校验 scope/status/schema；retired semantic version 的既有 grant 可继续使用，revoke、
+suspend、grant 替换或缺失 required slot 立即失败。解密前必须把 asyncpg UUID 值规范化为精确
+`uuid.UUID` 以匹配 AES-GCM AAD；返回的短生命周期 `MaterializedMcpSecrets.by_slot` 使用
+`repr=False`，不得写入 cache、日志、API、checkpoint 或 run event。Skill/Agent snapshot 不允许
+materialize secret。
+
+resolver-visible mutation 的 generation 由 `0007` PostgreSQL statement trigger 在业务事务内自动
+递增；现有 service 不得额外调用 `CatalogStateRepository.bump_generation()` 造成双增。该显式 helper
+只供未来没有 trigger 覆盖的 mutation 使用。resolver 在持有上述共享锁时读取 generation，cache
+消费者只能在数据库 generation 未变化的窗口复用 snapshot。
+
 **Platform and project roles**: `users.system_role` is restricted to
 `system_admin|user`; the legacy platform value `admin` is converted by revision 0005.
 Project authorization is independent and lives in `project_memberships.role` as

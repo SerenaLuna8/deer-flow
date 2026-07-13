@@ -41,3 +41,9 @@ class AssetStorageUnavailable(SharedAssetError):
     code = "asset_storage_unavailable"
     status_code = 503
     public_message = "Asset storage unavailable"
+
+
+class AssetResolutionUnavailable(SharedAssetError):
+    code = "asset_resolution_unavailable"
+    status_code = 503
+    public_message = "Asset resolution unavailable"
