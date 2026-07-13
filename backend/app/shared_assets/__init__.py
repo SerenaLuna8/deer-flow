@@ -21,6 +21,15 @@ from app.shared_assets.models import (
     SkillArchiveFile,
     WorkflowStatus,
 )
+from app.shared_assets.skill_service import (
+    CreateSkill,
+    SkillArchivePreview,
+    SkillAssetView,
+    SkillFileView,
+    SkillSecretRequirementView,
+    SkillService,
+    SkillVersionView,
+)
 
 __all__ = [
     "AgentPayload",
@@ -36,6 +45,7 @@ __all__ = [
     "AssetStorageUnavailable",
     "AssetValidationFailed",
     "CreateAgent",
+    "CreateSkill",
     "ResolvedAgentSnapshot",
     "ResolvedAssetSnapshot",
     "ResolvedMcpSnapshot",
@@ -43,6 +53,12 @@ __all__ = [
     "SharedAssetError",
     "SharedAssetGovernanceEventSink",
     "SkillArchiveFile",
+    "SkillArchivePreview",
+    "SkillAssetView",
+    "SkillFileView",
+    "SkillSecretRequirementView",
+    "SkillService",
+    "SkillVersionView",
     "SystemAssetGovernanceContext",
     "WorkflowStatus",
     "resolve_asset_actor",

@@ -806,6 +806,22 @@ suspend 使用相同 optimistic asset version，其中 suspend 的项目路径�
 所有 schema-bound 用户输入在打开 session 前完成长度校验；IntegrityError 只有明确的 Agent
 slug/version unique constraint 映射为 409，未知约束与存储错误统一为无 SQL 细节的 503。
 
+**M3 Skill domain**：`app.shared_assets.skill_repository.SkillRepository` 与
+`SkillService` 延续 Agent domain 的 context 锁、项目 SQL 强制作用域、system governance、
+optimistic asset version 和安全错误映射；跨项目、陈旧 membership 与错误 scope 统一返回
+404。每个 Skill version 保存完整目录快照，路径先规范为 POSIX 相对路径并拒绝绝对路径、
+`..`、Windows drive、重复项、文件/目录碰撞、symlink 与 executable media type；根目录必须有
+`SKILL.md`，总未压缩大小上限为 100 MiB。每个文件保存 SHA-256，version checksum 由按路径
+排序的 normalized path、file SHA 和 size 生成，和调用方输入顺序无关。创建与发布均在 worker
+thread 中复用现有 frontmatter validator、Skill parser 和强制启用的 SkillScan；数据库只保存
+allow/warn decision、rule ID 与 severity count，不保存 finding evidence。`required-secrets` 在
+共享快照边界 fail-closed，只接受规范的 name/optional 声明并持久化 schema metadata，禁止
+secret value、credential 或 grant 进入 Skill payload。发布事务锁定 Skill/version 后从当前
+文件行重建并重新验证快照、checksum 与 scan metadata；项目加载同时共享锁定 project、
+membership、Skill/version 与 system binding，避免与 suspend 或 binding 变更并发穿透。
+archived Skill 不再允许创建新版本，但历史 published version 仍可按 ID 加载；suspended Skill
+立即不可加载。Skill 文件行离开 draft 后继续由 PostgreSQL trigger 保证不可变。
+
 **M3 Credential crypto 边界**：`app.shared_assets.keyring` 只从
 `DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID` 与 `DEER_FLOW_CREDENTIAL_KEYRING_JSON` 加载
 密钥；每个 base64 value 必须严格解码为 32 bytes，active key 必须存在。配置失败只返回
