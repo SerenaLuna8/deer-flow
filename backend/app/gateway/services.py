@@ -56,6 +56,7 @@ _TERMINAL_RUN_STATUSES = {
     RunStatus.timeout,
     RunStatus.interrupted,
 }
+_CHECKPOINT_MAP_VALIDATION_DETAIL = "checkpoint.checkpoint_map must be an object"
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +153,14 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
                 converted.append(msg)
         return {**raw_input, "messages": converted}
     return raw_input
+
+
+def _require_checkpoint_map_mapping(checkpoint_map: object) -> Mapping[str, object] | None:
+    if checkpoint_map is None:
+        return None
+    if not isinstance(checkpoint_map, Mapping):
+        raise HTTPException(status_code=400, detail=_CHECKPOINT_MAP_VALIDATION_DETAIL)
+    return checkpoint_map
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -504,8 +513,8 @@ async def apply_checkpoint_to_run_config(
         raw_checkpoint_ns = checkpoint.get("checkpoint_ns")
         if raw_checkpoint_ns is not None:
             checkpoint_ns = str(raw_checkpoint_ns)
-        checkpoint_map = checkpoint.get("checkpoint_map")
-        if isinstance(checkpoint_map, Mapping):
+        checkpoint_map = _require_checkpoint_map_mapping(checkpoint.get("checkpoint_map"))
+        if checkpoint_map is not None:
             checkpoint_map = strip_private_client_fields(checkpoint_map)
 
     if not checkpoint_id:
@@ -562,6 +571,12 @@ async def start_run(
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
+    checkpoint = getattr(body, "checkpoint", None)
+    if checkpoint is not None:
+        if not isinstance(checkpoint, Mapping):
+            raise HTTPException(status_code=400, detail="checkpoint must be an object")
+        _require_checkpoint_map_mapping(checkpoint.get("checkpoint_map"))
+
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)

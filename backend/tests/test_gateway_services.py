@@ -644,6 +644,51 @@ def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
     }
 
 
+@pytest.mark.parametrize(
+    "checkpoint_map",
+    [
+        pytest.param([{"project_id": "secret-authority"}], id="list"),
+        pytest.param(({"__private_scope": {"role": "secret-authority"}},), id="tuple"),
+        pytest.param("secret-authority", id="scalar"),
+    ],
+)
+def test_apply_checkpoint_rejects_non_mapping_map_before_saver_lookup(checkpoint_map):
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import apply_checkpoint_to_run_config
+
+    class NeverCheckpointer:
+        calls = 0
+
+        async def aget_tuple(self, config):
+            self.calls += 1
+            raise AssertionError("invalid checkpoint map reached saver lookup")
+
+    checkpointer = NeverCheckpointer()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer)))
+    body = SimpleNamespace(
+        checkpoint={
+            "checkpoint_ns": "safe-ns",
+            "checkpoint_id": "ckpt-1",
+            "checkpoint_map": checkpoint_map,
+        },
+        checkpoint_id=None,
+    )
+    config = {"configurable": {"thread_id": "thread-1", "safe": "kept"}}
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "checkpoint.checkpoint_map must be an object"
+    assert "secret-authority" not in str(exc_info.value.detail)
+    assert checkpointer.calls == 0
+    assert config == {"configurable": {"thread_id": "thread-1", "safe": "kept"}}
+
+
 def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
     import asyncio
     from types import SimpleNamespace
@@ -956,6 +1001,66 @@ async def _capture_start_run_graph_input(body):
         await record.task
 
     return captured["graph_input"]
+
+
+@pytest.mark.parametrize(
+    "checkpoint_map",
+    [
+        pytest.param([{"project_id": "secret-authority"}], id="list"),
+        pytest.param(({"__private_scope": {"role": "secret-authority"}},), id="tuple"),
+        pytest.param("secret-authority", id="scalar"),
+    ],
+)
+def test_start_run_request_model_rejects_non_mapping_checkpoint_before_persistence(
+    _stub_app_config,
+    checkpoint_map,
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+
+    class NeverRunManager:
+        calls = 0
+
+        async def create_or_reject(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("invalid checkpoint map reached run persistence")
+
+    run_manager = NeverRunManager()
+    state = SimpleNamespace(
+        stream_bridge=SimpleNamespace(),
+        run_manager=run_manager,
+        checkpointer=SimpleNamespace(),
+        store=None,
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=SimpleNamespace(),
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(),
+        app=SimpleNamespace(state=state),
+    )
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "safe input"}]},
+        checkpoint={
+            "checkpoint_id": "ckpt-1",
+            "checkpoint_ns": "safe-ns",
+            "checkpoint_map": checkpoint_map,
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(start_run(body, "thread-invalid-checkpoint", request))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "checkpoint.checkpoint_map must be an object"
+    assert "secret-authority" not in str(exc_info.value.detail)
+    assert run_manager.calls == 0
 
 
 def test_start_run_sanitizes_live_persisted_and_response_run_control_without_touching_input(_stub_app_config):
