@@ -3,26 +3,79 @@
 Uses an isolated PostgreSQL database to test ORM-backed CRUD operations.
 """
 
+import uuid
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.dialects import postgresql
+from support.m4_private_threads import seed_m4_thread_database
 
+from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.persistence.run import RunRepository
 from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.runs.store.base import RunStore
 
 _DATABASE_URL: str | None = None
+_TEST_SCOPE: PrivateResourceScope | None = None
+
+
+class _ScopedRunRepository:
+    """Test-only adapter; production repositories never invent authority."""
+
+    _SCOPED_METHODS = frozenset(
+        {
+            "aggregate_tokens_by_thread",
+            "delete",
+            "get",
+            "list_by_thread",
+            "list_inflight",
+            "list_pending",
+            "put",
+            "update_model_name",
+            "update_run_completion",
+            "update_run_progress",
+            "update_status",
+        }
+    )
+
+    def __init__(self, repository: RunRepository, scope: PrivateResourceScope) -> None:
+        self._repository = repository
+        self._scope = scope
+
+    def __getattr__(self, name):
+        target = getattr(self._repository, name)
+        if name not in self._SCOPED_METHODS:
+            return target
+
+        async def scoped(*args, **kwargs):
+            kwargs["scope"] = self._scope
+            return await target(*args, **kwargs)
+
+        return scoped
 
 
 @pytest_asyncio.fixture()
 async def _postgres_database(migrated_postgres_database_url):
-    global _DATABASE_URL
+    global _DATABASE_URL, _TEST_SCOPE
     _DATABASE_URL = migrated_postgres_database_url
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    _TEST_SCOPE = seed.owner_a_scope
+    async with seed.factory() as session, session.begin():
+        threads = PrivateThreadRepository(session)
+        for thread_id in ("t1", "t2", "thread-1"):
+            await threads.create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
     try:
         yield
     finally:
         await _cleanup()
+        await seed.engine.dispose()
         _DATABASE_URL = None
+        _TEST_SCOPE = None
 
 
 async def _make_repo(_tmp_path):
@@ -30,8 +83,9 @@ async def _make_repo(_tmp_path):
     from deerflow.persistence.engine import get_session_factory, init_engine
 
     assert _DATABASE_URL is not None
+    assert _TEST_SCOPE is not None
     await init_engine(DatabaseConfig(url=_DATABASE_URL))
-    return RunRepository(get_session_factory())
+    return _ScopedRunRepository(RunRepository(get_session_factory()), _TEST_SCOPE)
 
 
 async def _cleanup():
@@ -100,7 +154,10 @@ async def test_aggregate_tokens_by_thread_returns_zeros_when_no_rows():
             return None
 
     repo = RunRepository(lambda: FakeSessionContext())
-    agg = await repo.aggregate_tokens_by_thread("t1")
+    agg = await repo.aggregate_tokens_by_thread(
+        "t1",
+        scope=PrivateResourceScope(str(uuid.uuid4()), str(uuid.uuid4()), 1),
+    )
     assert agg == {
         "total_tokens": 0,
         "total_input_tokens": 0,
@@ -133,7 +190,10 @@ async def test_aggregate_tokens_by_thread_compiles_on_postgres_dialect():
             return None
 
     repo = RunRepository(lambda: FakeSessionContext())
-    await repo.aggregate_tokens_by_thread("t1")
+    await repo.aggregate_tokens_by_thread(
+        "t1",
+        scope=PrivateResourceScope(str(uuid.uuid4()), str(uuid.uuid4()), 1),
+    )
     compiled = str(captured[0].compile(dialect=postgresql.dialect()))
     assert "token_usage_by_model" in compiled
     assert "GROUP BY" not in compiled.upper()
@@ -211,13 +271,13 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_list_by_thread_owner_filter(self, tmp_path):
+    async def test_scoped_list_ignores_legacy_client_user_filter(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", user_id="alice")
         await repo.put("r2", thread_id="t1", user_id="bob")
         rows = await repo.list_by_thread("t1", user_id="alice")
-        assert len(rows) == 1
-        assert rows[0]["user_id"] == "alice"
+        assert len(rows) == 2
+        assert {row["scope"] for row in rows} == {_TEST_SCOPE}
         await _cleanup()
 
     @pytest.mark.anyio

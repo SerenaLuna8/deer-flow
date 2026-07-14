@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,8 +16,10 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.events.store.base import RunEventStore
-from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
+from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,47 @@ class DbRunEventStore(RunEventStore):
         self._max_trace_content = max_trace_content
 
     @staticmethod
+    def _coordinates(scope: PrivateResourceScope) -> tuple[uuid.UUID, str]:
+        if type(scope) is not PrivateResourceScope:
+            raise ValueError("private event scope is required")
+        try:
+            return uuid.UUID(scope.project_id), str(uuid.UUID(scope.owner_user_id))
+        except (TypeError, ValueError):
+            raise ValueError("private event scope is invalid") from None
+
+    @classmethod
+    def _scope_predicates(cls, scope: PrivateResourceScope):
+        project_id, owner_user_id = cls._coordinates(scope)
+        return (
+            RunEventRow.project_id == project_id,
+            RunEventRow.owner_user_id == owner_user_id,
+        )
+
+    @classmethod
+    async def _require_parent_run(
+        cls,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+    ) -> tuple[uuid.UUID, str]:
+        project_id, owner_user_id = cls._coordinates(scope)
+        parent = (
+            await session.execute(
+                select(RunRow.project_id, RunRow.owner_user_id).where(
+                    RunRow.project_id == project_id,
+                    RunRow.owner_user_id == owner_user_id,
+                    RunRow.thread_id == thread_id,
+                    RunRow.run_id == run_id,
+                )
+            )
+        ).one_or_none()
+        if parent is None:
+            raise ValueError("scoped parent run not found")
+        return parent.project_id, parent.owner_user_id
+
+    @staticmethod
     def _row_to_dict(row: RunEventRow) -> dict:
         d = row.to_dict()
         d["metadata"] = d.pop("event_metadata", {})
@@ -36,6 +80,8 @@ class DbRunEventStore(RunEventStore):
             # ``coerce_iso`` normalizes legacy naive datetimes as UTC.
             d["created_at"] = coerce_iso(val)
         d.pop("id", None)
+        if isinstance(d.get("project_id"), uuid.UUID):
+            d["project_id"] = str(d["project_id"])
         # Restore structured content that was JSON-serialized on write.
         raw = d.get("content", "")
         metadata = d.get("metadata", {})
@@ -71,23 +117,11 @@ class DbRunEventStore(RunEventStore):
         return db_content, metadata
 
     @staticmethod
-    def _user_id_from_context() -> str | None:
-        """Soft read of user_id from contextvar for write paths.
-
-        Returns ``None`` (no filter / no stamp) if contextvar is unset,
-        which is the expected case for background worker writes. HTTP
-        request writes will have the contextvar set by auth middleware
-        and get their user_id stamped automatically.
-
-        Coerces ``user.id`` to ``str`` at the boundary: ``User.id`` is
-        typed as ``UUID`` by the auth layer, but ``run_events.user_id``
-        is ``VARCHAR(64)`` and expects a normalized string value.
-        """
-        user = get_current_user()
-        return str(user.id) if user is not None else None
-
-    @staticmethod
-    async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
+    async def _max_seq_for_thread(
+        session: AsyncSession,
+        thread_id: str,
+        scope: PrivateResourceScope | None = None,
+    ) -> int | None:
         """Return the current max seq while serializing writers per thread.
 
         PostgreSQL rejects ``SELECT max(...) FOR UPDATE`` because aggregate
@@ -96,6 +130,8 @@ class DbRunEventStore(RunEventStore):
         aggregate. Other dialects keep the existing row-locking statement.
         """
         stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
+        if scope is not None:
+            stmt = stmt.where(*DbRunEventStore._scope_predicates(scope))
         bind = session.get_bind()
         dialect_name = bind.dialect.name if bind is not None else ""
 
@@ -108,7 +144,7 @@ class DbRunEventStore(RunEventStore):
 
         return await session.scalar(stmt.with_for_update())
 
-    async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):  # noqa: D401
+    async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None, scope=None):  # noqa: D401
         """Write a single event — low-frequency path only.
 
         This opens a dedicated transaction with a FOR UPDATE lock to
@@ -119,15 +155,23 @@ class DbRunEventStore(RunEventStore):
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
-        user_id = self._user_id_from_context()
+        if scope is None:
+            raise ValueError("private event scope is required")
         async with self._sf() as session:
             async with session.begin():
-                max_seq = await self._max_seq_for_thread(session, thread_id)
+                project_id, owner_user_id = await self._require_parent_run(
+                    session,
+                    scope=scope,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                )
+                max_seq = await self._max_seq_for_thread(session, thread_id, scope)
                 seq = (max_seq or 0) + 1
                 row = RunEventRow(
                     thread_id=thread_id,
                     run_id=run_id,
-                    user_id=user_id,
+                    project_id=project_id,
+                    owner_user_id=owner_user_id,
                     event_type=event_type,
                     category=category,
                     content=db_content,
@@ -138,18 +182,27 @@ class DbRunEventStore(RunEventStore):
                 session.add(row)
             return self._row_to_dict(row)
 
-    async def put_batch(self, events):
+    async def put_batch(self, events, *, scope=None):
         if not events:
             return []
         thread_ids = {e["thread_id"] for e in events}
         if len(thread_ids) > 1:
             raise ValueError(f"put_batch requires all events to belong to the same thread; got {thread_ids!r}")
-        user_id = self._user_id_from_context()
+        if scope is None:
+            raise ValueError("private event scope is required")
         async with self._sf() as session:
             async with session.begin():
                 # All events belong to the same thread (validated above).
                 thread_id = events[0]["thread_id"]
-                max_seq = await self._max_seq_for_thread(session, thread_id)
+                parent_by_run: dict[str, tuple[uuid.UUID, str]] = {}
+                for run_id in {e["run_id"] for e in events}:
+                    parent_by_run[run_id] = await self._require_parent_run(
+                        session,
+                        scope=scope,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                    )
+                max_seq = await self._max_seq_for_thread(session, thread_id, scope)
                 seq = max_seq or 0
                 rows = []
                 for e in events:
@@ -159,10 +212,12 @@ class DbRunEventStore(RunEventStore):
                     metadata = e.get("metadata")
                     content, metadata = self._truncate_trace(category, content, metadata)
                     db_content, metadata = self._content_to_db(content, metadata)
+                    project_id, owner_user_id = parent_by_run[e["run_id"]]
                     row = RunEventRow(
                         thread_id=e["thread_id"],
                         run_id=e["run_id"],
-                        user_id=e.get("user_id", user_id),
+                        project_id=project_id,
+                        owner_user_id=owner_user_id,
                         event_type=e["event_type"],
                         category=category,
                         content=db_content,
@@ -182,11 +237,15 @@ class DbRunEventStore(RunEventStore):
         before_seq=None,
         after_seq=None,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ):
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_messages")
-        stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        if scope is None:
+            return []
+        stmt = select(RunEventRow).where(
+            RunEventRow.thread_id == thread_id,
+            RunEventRow.category == "message",
+            *self._scope_predicates(scope),
+        )
         if before_seq is not None:
             stmt = stmt.where(RunEventRow.seq < before_seq)
         if after_seq is not None:
@@ -216,11 +275,15 @@ class DbRunEventStore(RunEventStore):
         limit=500,
         after_seq=None,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ):
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_events")
-        stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id)
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        if scope is None:
+            return []
+        stmt = select(RunEventRow).where(
+            RunEventRow.thread_id == thread_id,
+            RunEventRow.run_id == run_id,
+            *self._scope_predicates(scope),
+        )
         if event_types:
             stmt = stmt.where(RunEventRow.event_type.in_(event_types))
         if task_id is not None:
@@ -246,15 +309,16 @@ class DbRunEventStore(RunEventStore):
         before_seq=None,
         after_seq=None,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ):
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_messages_by_run")
+        if scope is None:
+            return []
         stmt = select(RunEventRow).where(
             RunEventRow.thread_id == thread_id,
             RunEventRow.run_id == run_id,
             RunEventRow.category == "message",
+            *self._scope_predicates(scope),
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
         if before_seq is not None:
             stmt = stmt.where(RunEventRow.seq < before_seq)
         if after_seq is not None:
@@ -277,11 +341,19 @@ class DbRunEventStore(RunEventStore):
         thread_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ):
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.count_messages")
-        stmt = select(func.count()).select_from(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        if scope is None:
+            return 0
+        stmt = (
+            select(func.count())
+            .select_from(RunEventRow)
+            .where(
+                RunEventRow.thread_id == thread_id,
+                RunEventRow.category == "message",
+                *self._scope_predicates(scope),
+            )
+        )
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
@@ -290,12 +362,12 @@ class DbRunEventStore(RunEventStore):
         thread_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ):
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_thread")
+        if scope is None:
+            return 0
         async with self._sf() as session:
-            count_conditions = [RunEventRow.thread_id == thread_id]
-            if resolved_user_id is not None:
-                count_conditions.append(RunEventRow.user_id == resolved_user_id)
+            count_conditions = [RunEventRow.thread_id == thread_id, *self._scope_predicates(scope)]
             count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
             count = await session.scalar(count_stmt) or 0
             if count > 0:
@@ -309,12 +381,16 @@ class DbRunEventStore(RunEventStore):
         run_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ):
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_run")
+        if scope is None:
+            return 0
         async with self._sf() as session:
-            count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
-            if resolved_user_id is not None:
-                count_conditions.append(RunEventRow.user_id == resolved_user_id)
+            count_conditions = [
+                RunEventRow.thread_id == thread_id,
+                RunEventRow.run_id == run_id,
+                *self._scope_predicates(scope),
+            ]
             count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
             count = await session.scalar(count_stmt) or 0
             if count > 0:

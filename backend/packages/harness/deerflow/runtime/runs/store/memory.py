@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.runs.store.base import RunStore
 
 
@@ -39,6 +40,7 @@ class MemoryRunStore(RunStore):
         thread_id,
         assistant_id=None,
         user_id=None,
+        scope: PrivateResourceScope | None = None,
         model_name=None,
         status="pending",
         multitask_strategy="reject",
@@ -53,6 +55,7 @@ class MemoryRunStore(RunStore):
             "thread_id": thread_id,
             "assistant_id": assistant_id,
             "user_id": user_id,
+            "scope": scope,
             "model_name": model_name,
             "status": status,
             "multitask_strategy": multitask_strategy,
@@ -64,27 +67,31 @@ class MemoryRunStore(RunStore):
         }
         self._index_run(run_id, thread_id)
 
-    async def get(self, run_id, *, user_id=None):
+    async def get(self, run_id, *, user_id=None, scope=None):
         run = self._runs.get(run_id)
         if run is None:
             return None
         if user_id is not None and run.get("user_id") != user_id:
             return None
+        if scope is not None and run.get("scope") != scope:
+            return None
+        if scope is None and run.get("scope") is not None:
+            return None
         return run
 
-    async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
+    async def list_by_thread(self, thread_id, *, user_id=None, scope=None, limit=100):
         # Use the thread index for an O(runs-in-thread) lookup instead of
         # scanning every run. ``self._runs.get`` is defense-in-depth: it drops a
         # stale id still in the index but already gone from ``_runs``.
         run_ids = self._runs_by_thread.get(thread_id)
         if not run_ids:
             return []
-        results = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and (user_id is None or run.get("user_id") == user_id)]
+        results = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and (user_id is None or run.get("user_id") == user_id) and run.get("scope") == scope]
         results.sort(key=lambda r: r["created_at"], reverse=True)
         return results[:limit]
 
-    async def update_status(self, run_id, status, *, error=None):
-        if run_id in self._runs:
+    async def update_status(self, run_id, status, *, error=None, scope=None):
+        if run_id in self._runs and self._runs[run_id].get("scope") == scope:
             self._runs[run_id]["status"] = status
             if error is not None:
                 self._runs[run_id]["error"] = error
@@ -92,18 +99,19 @@ class MemoryRunStore(RunStore):
             return True
         return False
 
-    async def update_model_name(self, run_id, model_name):
-        if run_id in self._runs:
+    async def update_model_name(self, run_id, model_name, *, scope=None):
+        if run_id in self._runs and self._runs[run_id].get("scope") == scope:
             self._runs[run_id]["model_name"] = model_name
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
-    async def delete(self, run_id):
-        run = self._runs.pop(run_id, None)
+    async def delete(self, run_id, *, scope=None):
+        existing = self._runs.get(run_id)
+        run = self._runs.pop(run_id, None) if existing is not None and existing.get("scope") == scope else None
         if run is not None:
             self._unindex_run(run_id, run["thread_id"])
 
-    async def update_run_completion(self, run_id, *, status, **kwargs):
-        if run_id in self._runs:
+    async def update_run_completion(self, run_id, *, status, scope=None, **kwargs):
+        if run_id in self._runs and self._runs[run_id].get("scope") == scope:
             self._runs[run_id]["status"] = status
             for key, value in kwargs.items():
                 if value is not None:
@@ -112,31 +120,37 @@ class MemoryRunStore(RunStore):
             return True
         return False
 
-    async def update_run_progress(self, run_id, **kwargs):
-        if run_id in self._runs and self._runs[run_id].get("status") == "running":
+    async def update_run_progress(self, run_id, *, scope=None, **kwargs):
+        if run_id in self._runs and self._runs[run_id].get("scope") == scope and self._runs[run_id].get("status") == "running":
             for key, value in kwargs.items():
                 if value is not None:
                     self._runs[run_id][key] = value
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
-    async def list_pending(self, *, before=None):
+    async def list_pending(self, *, before=None, scope=None):
         now = before or datetime.now(UTC).isoformat()
-        results = [r for r in self._runs.values() if r["status"] == "pending" and r["created_at"] <= now]
+        results = [r for r in self._runs.values() if r.get("scope") == scope and r["status"] == "pending" and r["created_at"] <= now]
         results.sort(key=lambda r: r["created_at"])
         return results
 
-    async def list_inflight(self, *, before=None):
+    async def list_inflight(self, *, before=None, scope=None):
+        now = before or datetime.now(UTC).isoformat()
+        results = [r for r in self._runs.values() if r.get("scope") == scope and r["status"] in ("pending", "running") and r["created_at"] <= now]
+        results.sort(key=lambda r: r["created_at"])
+        return results
+
+    async def list_inflight_trusted_unscoped(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
         results = [r for r in self._runs.values() if r["status"] in ("pending", "running") and r["created_at"] <= now]
         results.sort(key=lambda r: r["created_at"])
         return results
 
-    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False, scope=None) -> dict[str, Any]:
         statuses = ("success", "error", "running") if include_active else ("success", "error")
         # Use the thread index for an O(runs-in-thread) lookup instead of
         # scanning every run in the process (mirrors ``list_by_thread``).
         run_ids = self._runs_by_thread.get(thread_id) or ()
-        completed = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("status") in statuses]
+        completed = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("scope") == scope and run.get("status") in statuses]
         by_model: dict[str, dict] = {}
         for r in completed:
             usage_by_model = r.get("token_usage_by_model") or {}

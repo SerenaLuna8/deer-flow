@@ -10,24 +10,83 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
+from support.m4_private_threads import seed_m4_thread_database
 
+from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
+from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 _DATABASE_URL: str | None = None
+_TEST_SCOPE: PrivateResourceScope | None = None
+
+
+class _ScopedEventStore:
+    """Test-only adapter binding DB event calls to seeded private authority."""
+
+    _SCOPED_METHODS = frozenset(
+        {
+            "count_messages",
+            "delete_by_run",
+            "delete_by_thread",
+            "list_events",
+            "list_messages",
+            "list_messages_by_run",
+            "put",
+            "put_batch",
+        }
+    )
+
+    def __init__(self, store: DbRunEventStore, scope: PrivateResourceScope) -> None:
+        self._store = store
+        self._scope = scope
+
+    def __getattr__(self, name):
+        target = getattr(self._store, name)
+        if name not in self._SCOPED_METHODS:
+            return target
+
+        async def scoped(*args, **kwargs):
+            kwargs["scope"] = self._scope
+            return await target(*args, **kwargs)
+
+        return scoped
+
+
+async def _seed_parent_runs(database_url: str, thread_id: str, run_ids: tuple[str, ...]):
+    seed = await seed_m4_thread_database(database_url)
+    async with seed.factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=seed.owner_a_scope,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+        repository = PrivateRunRepository(session)
+        for run_id in run_ids:
+            await repository.create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                request=PrivateRunCreate(run_id=run_id),
+            )
+    return seed
 
 
 @pytest_asyncio.fixture
 async def _postgres_database(migrated_postgres_database_url):
-    global _DATABASE_URL
+    global _DATABASE_URL, _TEST_SCOPE
     _DATABASE_URL = migrated_postgres_database_url
+    seed = await _seed_parent_runs(migrated_postgres_database_url, "t1", ("r1", "r2"))
+    _TEST_SCOPE = seed.owner_a_scope
     try:
         yield
     finally:
         from deerflow.persistence.engine import close_engine
 
         await close_engine()
+        await seed.engine.dispose()
         _DATABASE_URL = None
+        _TEST_SCOPE = None
 
 
 async def _init_db() -> None:
@@ -48,10 +107,21 @@ def store():
 async def test_concurrent_db_writes_assign_unique_contiguous_sequence(
     migrated_postgres_database_url: str,
 ) -> None:
+    seed = await _seed_parent_runs(
+        migrated_postgres_database_url,
+        "concurrent-thread",
+        ("run-1",),
+    )
     first_engine = create_async_engine(migrated_postgres_database_url, poolclass=NullPool)
     second_engine = create_async_engine(migrated_postgres_database_url, poolclass=NullPool)
-    first = DbRunEventStore(async_sessionmaker(first_engine, expire_on_commit=False))
-    second = DbRunEventStore(async_sessionmaker(second_engine, expire_on_commit=False))
+    first = _ScopedEventStore(
+        DbRunEventStore(async_sessionmaker(first_engine, expire_on_commit=False)),
+        seed.owner_a_scope,
+    )
+    second = _ScopedEventStore(
+        DbRunEventStore(async_sessionmaker(second_engine, expire_on_commit=False)),
+        seed.owner_a_scope,
+    )
     try:
         writes = [
             (first if index % 2 == 0 else second).put(
@@ -71,6 +141,7 @@ async def test_concurrent_db_writes_assign_unique_contiguous_sequence(
     finally:
         await first_engine.dispose()
         await second_engine.dispose()
+        await seed.engine.dispose()
 
 
 # -- Basic write and query --
@@ -386,7 +457,8 @@ class TestDbRunEventStore:
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         await _init_db()
-        s = DbRunEventStore(get_session_factory())
+        assert _TEST_SCOPE is not None
+        s = _ScopedEventStore(DbRunEventStore(get_session_factory()), _TEST_SCOPE)
 
         r = await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="hi")
         assert r["seq"] == 1
@@ -407,7 +479,11 @@ class TestDbRunEventStore:
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         await _init_db()
-        s = DbRunEventStore(get_session_factory(), max_trace_content=100)
+        assert _TEST_SCOPE is not None
+        s = _ScopedEventStore(
+            DbRunEventStore(get_session_factory(), max_trace_content=100),
+            _TEST_SCOPE,
+        )
 
         long = "x" * 200
         r = await s.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace", content=long)
@@ -426,7 +502,8 @@ class TestDbRunEventStore:
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         await _init_db()
-        s = DbRunEventStore(get_session_factory())
+        assert _TEST_SCOPE is not None
+        s = _ScopedEventStore(DbRunEventStore(get_session_factory()), _TEST_SCOPE)
 
         content = [{"type": "text", "text": "hello"}, {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}]
         record = await s.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message", content=content)
@@ -447,7 +524,8 @@ class TestDbRunEventStore:
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         await _init_db()
-        s = DbRunEventStore(get_session_factory())
+        assert _TEST_SCOPE is not None
+        s = _ScopedEventStore(DbRunEventStore(get_session_factory()), _TEST_SCOPE)
 
         for i in range(10):
             await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content=str(i))
@@ -472,7 +550,8 @@ class TestDbRunEventStore:
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         await _init_db()
-        s = DbRunEventStore(get_session_factory())
+        assert _TEST_SCOPE is not None
+        s = _ScopedEventStore(DbRunEventStore(get_session_factory()), _TEST_SCOPE)
 
         await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
         await s.put(thread_id="t1", run_id="r2", event_type="ai_message", category="message")
@@ -493,7 +572,8 @@ class TestDbRunEventStore:
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         await _init_db()
-        s = DbRunEventStore(get_session_factory())
+        assert _TEST_SCOPE is not None
+        s = _ScopedEventStore(DbRunEventStore(get_session_factory()), _TEST_SCOPE)
 
         events = [{"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace"} for _ in range(50)]
         results = await s.put_batch(events)
@@ -507,7 +587,8 @@ class TestDbRunEventStore:
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         await _init_db()
-        s = DbRunEventStore(get_session_factory())
+        assert _TEST_SCOPE is not None
+        s = _ScopedEventStore(DbRunEventStore(get_session_factory()), _TEST_SCOPE)
 
         content = [{"messages": [{"type": "ai", "content": ""}]}]
         results = await s.put_batch(
@@ -537,7 +618,8 @@ class TestDbRunEventStore:
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         await _init_db()
-        s = DbRunEventStore(get_session_factory())
+        assert _TEST_SCOPE is not None
+        s = _ScopedEventStore(DbRunEventStore(get_session_factory()), _TEST_SCOPE)
 
         content = {"status": "success"}
         record = await s.put(thread_id="t1", run_id="r1", event_type="run.end", category="outputs", content=content)

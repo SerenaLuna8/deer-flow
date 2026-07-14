@@ -8,6 +8,7 @@ minutes -- we don't hold connections across long execution.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,14 +16,32 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
+from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.runs.store.base import RunStore
-from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.time import coerce_iso
 
 
 class RunRepository(RunStore):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+
+    @staticmethod
+    def _coordinates(scope: PrivateResourceScope) -> tuple[uuid.UUID, str]:
+        if type(scope) is not PrivateResourceScope:
+            raise ValueError("private run scope is required")
+        try:
+            return uuid.UUID(scope.project_id), str(uuid.UUID(scope.owner_user_id))
+        except (TypeError, ValueError):
+            raise ValueError("private run scope is invalid") from None
+
+    @classmethod
+    def _scope_predicates(cls, scope: PrivateResourceScope):
+        project_id, owner_user_id = cls._coordinates(scope)
+        return (
+            RunRow.project_id == project_id,
+            RunRow.owner_user_id == owner_user_id,
+        )
 
     @staticmethod
     def _normalize_model_name(model_name: str | None) -> str | None:
@@ -64,7 +83,11 @@ class RunRepository(RunStore):
             return str(obj)
 
     @staticmethod
-    def _row_to_dict(row: RunRow) -> dict[str, Any]:
+    def _row_to_dict(
+        row: RunRow,
+        *,
+        scope: PrivateResourceScope | None = None,
+    ) -> dict[str, Any]:
         d = row.to_dict()
         # Remap JSON columns to match RunStore interface
         d["metadata"] = d.pop("metadata_json", {})
@@ -75,6 +98,11 @@ class RunRepository(RunStore):
             val = d.get(key)
             if isinstance(val, datetime):
                 d[key] = coerce_iso(val)
+        d["scope"] = scope or PrivateResourceScope(
+            project_id=str(row.project_id),
+            owner_user_id=row.owner_user_id,
+            membership_version=0,
+        )
         return d
 
     async def put(
@@ -84,6 +112,7 @@ class RunRepository(RunStore):
         thread_id,
         assistant_id=None,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
         model_name: str | None = None,
         status="pending",
         multitask_strategy="reject",
@@ -99,13 +128,16 @@ class RunRepository(RunStore):
         Making this operation idempotent prevents a successful-but-unacknowledged first
         commit from turning the retry into a primary-key failure.
         """
-        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.put")
+        if scope is None:
+            raise ValueError("private run scope is required")
+        project_id, owner_user_id = self._coordinates(scope)
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         values = {
             "thread_id": thread_id,
             "assistant_id": assistant_id,
-            "user_id": resolved_user_id,
+            "owner_user_id": owner_user_id,
+            "project_id": project_id,
             "model_name": self._normalize_model_name(model_name),
             "status": status,
             "multitask_strategy": multitask_strategy,
@@ -116,7 +148,14 @@ class RunRepository(RunStore):
             "updated_at": now,
         }
         async with self._sf() as session:
-            row = await session.get(RunRow, run_id)
+            row = (
+                await session.execute(
+                    select(RunRow).where(
+                        RunRow.run_id == run_id,
+                        *self._scope_predicates(scope),
+                    )
+                )
+            ).scalar_one_or_none()
             if row is None:
                 session.add(RunRow(run_id=run_id, created_at=created, **values))
             else:
@@ -129,44 +168,60 @@ class RunRepository(RunStore):
         run_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ):
-        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get")
+        if scope is None:
+            return None
+        self._coordinates(scope)
         async with self._sf() as session:
-            row = await session.get(RunRow, run_id)
+            row = (
+                await session.execute(
+                    select(RunRow).where(
+                        RunRow.run_id == run_id,
+                        *self._scope_predicates(scope),
+                    )
+                )
+            ).scalar_one_or_none()
             if row is None:
                 return None
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
-                return None
-            return self._row_to_dict(row)
+            return self._row_to_dict(row, scope=scope)
 
     async def list_by_thread(
         self,
         thread_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
         limit=100,
     ):
-        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_by_thread")
-        stmt = select(RunRow).where(RunRow.thread_id == thread_id)
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        if scope is None:
+            return []
+        self._coordinates(scope)
+        stmt = select(RunRow).where(
+            RunRow.thread_id == thread_id,
+            *self._scope_predicates(scope),
+        )
         stmt = stmt.order_by(RunRow.created_at.desc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)
-            return [self._row_to_dict(r) for r in result.scalars()]
+            return [self._row_to_dict(r, scope=scope) for r in result.scalars()]
 
-    async def update_status(self, run_id, status, *, error=None) -> bool:
+    async def update_status(self, run_id, status, *, error=None, scope=None) -> bool:
+        if scope is None:
+            return False
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
         async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, *self._scope_predicates(scope)).values(**values))
             await session.commit()
             return result.rowcount != 0
 
-    async def update_model_name(self, run_id, model_name):
+    async def update_model_name(self, run_id, model_name, *, scope=None):
+        if scope is None:
+            return
         async with self._sf() as session:
-            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(model_name=self._normalize_model_name(model_name), updated_at=datetime.now(UTC)))
+            await session.execute(update(RunRow).where(RunRow.run_id == run_id, *self._scope_predicates(scope)).values(model_name=self._normalize_model_name(model_name), updated_at=datetime.now(UTC)))
             await session.commit()
 
     async def delete(
@@ -174,31 +229,51 @@ class RunRepository(RunStore):
         run_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ):
-        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.delete")
+        if scope is None:
+            return
+        self._coordinates(scope)
         async with self._sf() as session:
-            row = await session.get(RunRow, run_id)
+            row = (
+                await session.execute(
+                    select(RunRow).where(
+                        RunRow.run_id == run_id,
+                        *self._scope_predicates(scope),
+                    )
+                )
+            ).scalar_one_or_none()
             if row is None:
-                return
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
                 return
             await session.delete(row)
             await session.commit()
 
-    async def list_pending(self, *, before=None):
+    async def list_pending(self, *, before=None, scope=None):
+        if scope is None:
+            return []
         if before is None:
             before_dt = datetime.now(UTC)
         elif isinstance(before, datetime):
             before_dt = before
         else:
             before_dt = datetime.fromisoformat(before)
-        stmt = select(RunRow).where(RunRow.status == "pending", RunRow.created_at <= before_dt).order_by(RunRow.created_at.asc())
+        stmt = (
+            select(RunRow)
+            .where(
+                RunRow.status == "pending",
+                RunRow.created_at <= before_dt,
+                *self._scope_predicates(scope),
+            )
+            .order_by(RunRow.created_at.asc())
+        )
         async with self._sf() as session:
             result = await session.execute(stmt)
-            return [self._row_to_dict(r) for r in result.scalars()]
+            return [self._row_to_dict(r, scope=scope) for r in result.scalars()]
 
-    async def list_inflight(self, *, before=None):
+    async def list_inflight(self, *, before=None, scope=None):
         """Return persisted active runs for startup recovery."""
+        if scope is None:
+            return []
         if before is None:
             before_dt = datetime.now(UTC)
         elif isinstance(before, datetime):
@@ -210,12 +285,33 @@ class RunRepository(RunStore):
             .where(
                 RunRow.status.in_(("pending", "running")),
                 RunRow.created_at <= before_dt,
+                *self._scope_predicates(scope),
             )
             .order_by(RunRow.created_at.asc())
         )
         async with self._sf() as session:
             result = await session.execute(stmt)
-            return [self._row_to_dict(r) for r in result.scalars()]
+            return [self._row_to_dict(r, scope=scope) for r in result.scalars()]
+
+    async def list_inflight_trusted_unscoped(self, *, before=None):
+        """Trusted startup recovery scan with no product-facing scope parameter."""
+        if before is None:
+            before_dt = datetime.now(UTC)
+        elif isinstance(before, datetime):
+            before_dt = before
+        else:
+            before_dt = datetime.fromisoformat(before)
+        statement = (
+            select(RunRow)
+            .where(
+                RunRow.status.in_(("pending", "running")),
+                RunRow.created_at <= before_dt,
+            )
+            .order_by(RunRow.created_at.asc())
+        )
+        async with self._sf() as session:
+            rows = (await session.execute(statement)).scalars()
+            return [self._row_to_dict(row) for row in rows]
 
     async def update_run_completion(
         self,
@@ -234,11 +330,14 @@ class RunRepository(RunStore):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> bool:
         """Update status + token usage + convenience fields on run completion.
 
         Returns ``False`` when no run row matched the requested ``run_id``.
         """
+        if scope is None:
+            return False
         values: dict[str, Any] = {
             "status": status,
             "total_input_tokens": total_input_tokens,
@@ -259,7 +358,7 @@ class RunRepository(RunStore):
         if error is not None:
             values["error"] = error
         async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, *self._scope_predicates(scope)).values(**values))
             await session.commit()
             return result.rowcount != 0
 
@@ -278,8 +377,11 @@ class RunRepository(RunStore):
         message_count: int | None = None,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> None:
         """Update token usage + convenience fields while a run is still active."""
+        if scope is None:
+            return
         values: dict[str, Any] = {"updated_at": datetime.now(UTC)}
         optional_counters = {
             "total_input_tokens": total_input_tokens,
@@ -301,10 +403,18 @@ class RunRepository(RunStore):
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
         async with self._sf() as session:
-            await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
+            await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status == "running",
+                    *self._scope_predicates(scope),
+                )
+                .values(**values)
+            )
             await session.commit()
 
-    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False, scope=None) -> dict[str, Any]:
         """Aggregate token usage for a thread.
 
         ``by_model`` is reduced in Python from each row's ``token_usage_by_model``
@@ -318,6 +428,8 @@ class RunRepository(RunStore):
         their own columns and are therefore unaffected by the JSON column being
         empty.
         """
+        if scope is None:
+            raise ValueError("private run scope is required")
         statuses = ("success", "error", "running") if include_active else ("success", "error")
         _completed = RunRow.status.in_(statuses)
         _thread = RunRow.thread_id == thread_id
@@ -331,7 +443,7 @@ class RunRepository(RunStore):
             RunRow.subagent_tokens,
             RunRow.middleware_tokens,
             RunRow.token_usage_by_model,
-        ).where(_thread, _completed)
+        ).where(_thread, _completed, *self._scope_predicates(scope))
 
         async with self._sf() as session:
             rows = (await session.execute(stmt)).all()

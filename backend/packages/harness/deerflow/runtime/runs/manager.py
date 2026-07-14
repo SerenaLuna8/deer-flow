@@ -7,8 +7,10 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus
@@ -67,6 +69,7 @@ class RunRecord:
     multitask_strategy: str = "reject"
     metadata: dict = field(default_factory=dict)
     kwargs: dict = field(default_factory=dict)
+    scope: PrivateResourceScope | None = None
     user_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
@@ -146,6 +149,20 @@ class RunManager:
         return [record for run_id in run_ids if (record := self._runs.get(run_id)) is not None]
 
     @staticmethod
+    def _scope_allows(
+        record: RunRecord,
+        *,
+        scope: PrivateResourceScope | None,
+        user_id: str | None = None,
+    ) -> bool:
+        """Apply private scope even when the record was found in memory."""
+        if record.scope is not None:
+            return scope == record.scope
+        if scope is not None:
+            return False
+        return user_id is None or record.user_id == user_id
+
+    @staticmethod
     def _store_put_payload(record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
         payload = {
             "thread_id": record.thread_id,
@@ -160,6 +177,8 @@ class RunManager:
         }
         if record.user_id is not None:
             payload["user_id"] = record.user_id
+        if record.scope is not None:
+            payload["scope"] = record.scope
         return payload
 
     async def _call_store_with_retry(
@@ -237,10 +256,25 @@ class RunManager:
             return True
         row_recovery_payload = self._store_put_payload(record, error=error)
         try:
+            if record.scope is None:
+                operation = partial(
+                    self._store.update_status,
+                    record.run_id,
+                    status.value,
+                    error=error,
+                )
+            else:
+                operation = partial(
+                    self._store.update_status,
+                    record.run_id,
+                    status.value,
+                    error=error,
+                    scope=record.scope,
+                )
             updated = await self._call_store_with_retry(
                 "update_status",
                 record.run_id,
-                lambda: self._store.update_status(record.run_id, status.value, error=error),
+                operation,
             )
             if updated is False:
                 return await self._persist_snapshot_to_store(record.run_id, row_recovery_payload)
@@ -268,6 +302,7 @@ class RunManager:
             created_at=row.get("created_at") or "",
             updated_at=row.get("updated_at") or "",
             user_id=row.get("user_id"),
+            scope=row.get("scope"),
             error=row.get("error"),
             model_name=row.get("model_name"),
             store_only=True,
@@ -287,6 +322,7 @@ class RunManager:
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
         row_recovery_payload: dict[str, Any] | None = None
+        scope: PrivateResourceScope | None = None
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None:
@@ -297,13 +333,18 @@ class RunManager:
                         setattr(record, key, value)
                 record.updated_at = _now_iso()
                 row_recovery_payload = self._store_put_payload(record, error=kwargs.get("error"))
-        if self._store is None:
+                scope = record.scope
+        if self._store is None or row_recovery_payload is None:
             return
         try:
+            if scope is None:
+                operation = partial(self._store.update_run_completion, run_id, **kwargs)
+            else:
+                operation = partial(self._store.update_run_completion, run_id, scope=scope, **kwargs)
             updated = await self._call_store_with_retry(
                 "update_run_completion",
                 run_id,
-                lambda: self._store.update_run_completion(run_id, **kwargs),
+                operation,
             )
             if updated is False:
                 if row_recovery_payload is None:
@@ -314,7 +355,7 @@ class RunManager:
                 recovered = await self._call_store_with_retry(
                     "update_run_completion",
                     run_id,
-                    lambda: self._store.update_run_completion(run_id, **kwargs),
+                    operation,
                 )
                 if recovered is False:
                     logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
@@ -323,11 +364,13 @@ class RunManager:
 
     async def update_run_progress(self, run_id: str, **kwargs) -> None:
         """Persist a running token/message snapshot without changing status."""
-        should_persist = True
+        should_persist = False
+        scope: PrivateResourceScope | None = None
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None:
                 should_persist = record.status == RunStatus.running
+                scope = record.scope
             if record is not None and should_persist:
                 for key, value in kwargs.items():
                     if hasattr(record, key) and value is not None:
@@ -335,7 +378,10 @@ class RunManager:
                 record.updated_at = _now_iso()
         if should_persist and self._store is not None:
             try:
-                await self._store.update_run_progress(run_id, **kwargs)
+                if scope is None:
+                    await self._store.update_run_progress(run_id, **kwargs)
+                else:
+                    await self._store.update_run_progress(run_id, scope=scope, **kwargs)
             except Exception:
                 logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
 
@@ -349,6 +395,7 @@ class RunManager:
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
         user_id: str | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> RunRecord:
         """Create a new pending run and register it."""
         run_id = str(uuid.uuid4())
@@ -362,6 +409,7 @@ class RunManager:
             multitask_strategy=multitask_strategy,
             metadata=metadata or {},
             kwargs=kwargs or {},
+            scope=scope,
             user_id=user_id,
             created_at=now,
             updated_at=now,
@@ -384,7 +432,13 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
-    async def get(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    async def get(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        scope: PrivateResourceScope | None = None,
+    ) -> RunRecord | None:
         """Return a run record by ID, or ``None``.
 
         Args:
@@ -394,11 +448,11 @@ class RunManager:
         async with self._lock:
             record = self._runs.get(run_id)
         if record is not None:
-            return record
+            return record if self._scope_allows(record, scope=scope, user_id=user_id) else None
         if self._store is None:
             return None
         try:
-            row = await self._store.get(run_id, user_id=user_id)
+            row = await self._store.get(run_id, user_id=user_id, scope=scope)
         except Exception:
             logger.warning("Failed to hydrate run %s from store", run_id, exc_info=True)
             return None
@@ -407,7 +461,7 @@ class RunManager:
         async with self._lock:
             record = self._runs.get(run_id)
         if record is not None:
-            return record
+            return record if self._scope_allows(record, scope=scope, user_id=user_id) else None
         if row is None:
             return None
         try:
@@ -416,14 +470,27 @@ class RunManager:
             logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
             return None
 
-    async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    async def aget(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        scope: PrivateResourceScope | None = None,
+    ) -> RunRecord | None:
         """Return a run record by ID, checking the persistent store as fallback.
 
         Alias for :meth:`get` for backward compatibility.
         """
-        return await self.get(run_id, user_id=user_id)
+        return await self.get(run_id, user_id=user_id, scope=scope)
 
-    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[RunRecord]:
+    async def list_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+        scope: PrivateResourceScope | None = None,
+        limit: int = 100,
+    ) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
 
         In-memory runs take precedence only when the same ``run_id`` exists in both
@@ -436,13 +503,18 @@ class RunManager:
             limit: Maximum number of runs to return.
         """
         async with self._lock:
-            memory_records = self._thread_records_locked(thread_id)
+            memory_records = [record for record in self._thread_records_locked(thread_id) if self._scope_allows(record, scope=scope, user_id=user_id)]
         if self._store is None:
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
         records_by_id = {record.run_id: record for record in memory_records}
         store_limit = max(0, limit - len(memory_records))
         try:
-            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=store_limit)
+            rows = await self._store.list_by_thread(
+                thread_id,
+                user_id=user_id,
+                scope=scope,
+                limit=store_limit,
+            )
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
@@ -527,15 +599,24 @@ class RunManager:
                     return True
         return False
 
-    async def _persist_model_name(self, run_id: str, model_name: str | None) -> None:
+    async def _persist_model_name(
+        self,
+        run_id: str,
+        model_name: str | None,
+        scope: PrivateResourceScope | None,
+    ) -> None:
         """Best-effort persist model_name update to the backing store."""
         if self._store is None:
             return
         try:
+            if scope is None:
+                operation = partial(self._store.update_model_name, run_id, model_name)
+            else:
+                operation = partial(self._store.update_model_name, run_id, model_name, scope=scope)
             await self._call_store_with_retry(
                 "update_model_name",
                 run_id,
-                lambda: self._store.update_model_name(run_id, model_name),
+                operation,
             )
         except Exception:
             logger.warning("Failed to persist model_name update for run %s", run_id, exc_info=True)
@@ -549,10 +630,17 @@ class RunManager:
                 return
             record.model_name = model_name
             record.updated_at = _now_iso()
-        await self._persist_model_name(run_id, model_name)
+            scope = record.scope
+        await self._persist_model_name(run_id, model_name, scope)
         logger.info("Run %s model_name=%s", run_id, model_name)
 
-    async def cancel(self, run_id: str, *, action: str = "interrupt") -> bool:
+    async def cancel(
+        self,
+        run_id: str,
+        *,
+        action: str = "interrupt",
+        scope: PrivateResourceScope | None = None,
+    ) -> bool:
         """Request cancellation of a run.
 
         Args:
@@ -567,7 +655,7 @@ class RunManager:
         """
         async with self._lock:
             record = self._runs.get(run_id)
-            if record is None:
+            if record is None or not self._scope_allows(record, scope=scope):
                 return False
             if record.status == RunStatus.interrupted:
                 return True  # idempotent — already cancelled on this worker
@@ -596,6 +684,7 @@ class RunManager:
         multitask_strategy: str = "reject",
         model_name: str | None = None,
         user_id: str | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -616,7 +705,7 @@ class RunManager:
             if multitask_strategy not in _supported_strategies:
                 raise UnsupportedStrategyError(f"Multitask strategy '{multitask_strategy}' is not yet supported. Supported strategies: {', '.join(_supported_strategies)}")
 
-            inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
+            inflight = [r for r in self._thread_records_locked(thread_id) if self._scope_allows(r, scope=scope, user_id=user_id) and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing)]
 
             if multitask_strategy == "reject" and inflight:
                 raise ConflictError(f"Thread {thread_id} already has an active run")
@@ -638,6 +727,7 @@ class RunManager:
                 multitask_strategy=multitask_strategy,
                 metadata=metadata or {},
                 kwargs=kwargs or {},
+                scope=scope,
                 user_id=user_id,
                 created_at=now,
                 updated_at=now,
@@ -698,7 +788,7 @@ class RunManager:
             rows = await self._call_store_with_retry(
                 "list_inflight",
                 "*",
-                lambda: self._store.list_inflight(before=before),
+                lambda: self._store.list_inflight_trusted_unscoped(before=before),
             )
         except Exception:
             logger.warning("Failed to list orphaned inflight runs for reconciliation", exc_info=True)

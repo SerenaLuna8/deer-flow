@@ -1094,6 +1094,19 @@ graph launch 前返回稳定 `409 PRIVATE_WORK_CUTOVER`。create 固定锁序为
 时先补偿删除 raw checkpoint，branch 同时回滚 PostgreSQL authority hook；只有两者成功才物理清除
 补偿 tombstone，失败则保留 `retry_required`。branch 禁止读取宿主 Thread 目录。
 
+M4 项目 Run 继续复用唯一的 `RunManager`/`RunStore`/`RunEventStore`。`RunRecord.scope`
+对项目 run 必须是 `PrivateResourceScope`；manager 即使命中内存记录也要比较 scope，后台
+status/model/progress/completion 只从已登记的 run record 派生 scope，禁止接收客户端 owner。
+PostgreSQL Run/Event/Feedback 的项目入口每条 SQL 都同时包含 `project_id + owner_user_id`；
+event 与 feedback 写入先查 scoped parent run，再由 parent 派生 project/owner，忽略 event payload
+或 legacy `user_id` 中的 ownership。无 scope 的项目读 fail closed，startup orphan recovery 只走
+显式 `list_inflight_trusted_unscoped()`。`RunSnapshotRepository.create_run_with_snapshot()` 在单个
+PostgreSQL transaction 中写 run、`run_asset_versions` 和 `run_mcp_grant_snapshots`：root Agent 固定
+order 0，随后按 resolver 的 Skill、MCP 稳定顺序写 exact version/checksum/catalog generation；grant
+snapshot 只含 MCP version、slot、grant、credential-version UUID，绝不读取或持久化 envelope、key ID、
+nonce、ciphertext、storage locator。snapshot/event/file 的 run 关联必须依靠数据库复合 FK 拒绝
+scope 错配，不能只靠 Python 预检。
+
 项目 HTTP API 统一挂载 `/api/projects`，使用 request-scoped session 与认证 dependency；
 项目 path 只接受 UUID，项目专属的 path/query/body 校验统一返回
 `PROJECT_VALIDATION_FAILED`，不改变其他 router。默认项目 bootstrap 使用 transaction-level

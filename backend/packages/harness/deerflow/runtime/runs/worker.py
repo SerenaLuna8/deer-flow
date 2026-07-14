@@ -194,10 +194,11 @@ class _SubagentEventBuffer:
     #: a single deep subagent without paying a per-step lock.
     FLUSH_THRESHOLD = 25
 
-    def __init__(self, event_store: Any | None, thread_id: str, run_id: str) -> None:
+    def __init__(self, event_store: Any | None, thread_id: str, run_id: str, scope: Any | None = None) -> None:
         self._event_store = event_store
         self._thread_id = thread_id
         self._run_id = run_id
+        self._scope = scope
         self._pending: list[dict[str, Any]] = []
 
     async def add(self, chunk: Any) -> None:
@@ -224,7 +225,10 @@ class _SubagentEventBuffer:
         batch = self._pending
         self._pending = []
         try:
-            await self._event_store.put_batch(batch)
+            if self._scope is None:
+                await self._event_store.put_batch(batch)
+            else:
+                await self._event_store.put_batch(batch, scope=self._scope)
         except Exception:
             logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
 
@@ -298,6 +302,7 @@ async def run_agent(
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
+                scope=record.scope,
             )
 
         # 1. Mark running
@@ -456,7 +461,7 @@ async def run_agent(
         # Buffer subagent step events and persist them in batches (#3779) instead
         # of one low-frequency put() per step on the hot stream loop. Flushed in
         # the finally block so buffered steps survive abort/exception paths too.
-        subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id)
+        subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id, record.scope)
 
         goal_evaluator_model: Any | None = None
 

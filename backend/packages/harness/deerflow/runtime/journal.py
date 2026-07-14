@@ -34,6 +34,7 @@ from deerflow.utils.messages import message_to_text
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
+    from deerflow.runtime.private_scope import PrivateResourceScope
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class RunJournal(BaseCallbackHandler):
         flush_threshold: int = 20,
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
         progress_flush_interval: float = 5.0,
+        scope: PrivateResourceScope | None = None,
     ):
         super().__init__()
         self.run_id = run_id
@@ -75,6 +77,7 @@ class RunJournal(BaseCallbackHandler):
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
+        self._scope = scope
 
         # Write buffer
         self._buffer: list[dict] = []
@@ -477,7 +480,10 @@ class RunJournal(BaseCallbackHandler):
 
     async def _flush_async(self, batch: list[dict]) -> None:
         try:
-            await self._store.put_batch(batch)
+            if self._scope is None:
+                await self._store.put_batch(batch)
+            else:
+                await self._store.put_batch(batch, scope=self._scope)
         except Exception:
             logger.warning(
                 "Failed to flush %d events for run %s — returning to buffer",
@@ -646,7 +652,10 @@ class RunJournal(BaseCallbackHandler):
             batch = self._buffer[: self._flush_threshold]
             del self._buffer[: self._flush_threshold]
             try:
-                await self._store.put_batch(batch)
+                if self._scope is None:
+                    await self._store.put_batch(batch)
+                else:
+                    await self._store.put_batch(batch, scope=self._scope)
             except Exception:
                 self._buffer = batch + self._buffer
                 raise

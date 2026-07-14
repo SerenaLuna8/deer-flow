@@ -13,6 +13,8 @@ from __future__ import annotations
 import abc
 from typing import Any
 
+from deerflow.runtime.private_scope import PrivateResourceScope
+
 
 class RunStore(abc.ABC):
     @abc.abstractmethod
@@ -23,6 +25,7 @@ class RunStore(abc.ABC):
         thread_id: str,
         assistant_id: str | None = None,
         user_id: str | None = None,
+        scope: PrivateResourceScope | None = None,
         model_name: str | None = None,
         status: str = "pending",
         multitask_strategy: str = "reject",
@@ -39,6 +42,7 @@ class RunStore(abc.ABC):
         run_id: str,
         *,
         user_id: str | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> dict[str, Any] | None:
         pass
 
@@ -48,6 +52,7 @@ class RunStore(abc.ABC):
         thread_id: str,
         *,
         user_id: str | None = None,
+        scope: PrivateResourceScope | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         pass
@@ -59,6 +64,7 @@ class RunStore(abc.ABC):
         status: str,
         *,
         error: str | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> bool | None:
         """Update a run status.
 
@@ -68,7 +74,12 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def delete(self, run_id: str) -> None:
+    async def delete(
+        self,
+        run_id: str,
+        *,
+        scope: PrivateResourceScope | None = None,
+    ) -> None:
         pass
 
     @abc.abstractmethod
@@ -76,6 +87,8 @@ class RunStore(abc.ABC):
         self,
         run_id: str,
         model_name: str | None,
+        *,
+        scope: PrivateResourceScope | None = None,
     ) -> None:
         """Update the model_name field for an existing run."""
         pass
@@ -98,6 +111,7 @@ class RunStore(abc.ABC):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> bool | None:
         """Persist final completion fields.
 
@@ -120,21 +134,46 @@ class RunStore(abc.ABC):
         message_count: int | None = None,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> None:
         """Persist a best-effort running snapshot without changing run status."""
         return None
 
     @abc.abstractmethod
-    async def list_pending(self, *, before: str | None = None) -> list[dict[str, Any]]:
+    async def list_pending(
+        self,
+        *,
+        before: str | None = None,
+        scope: PrivateResourceScope | None = None,
+    ) -> list[dict[str, Any]]:
         pass
 
     @abc.abstractmethod
-    async def list_inflight(self, *, before: str | None = None) -> list[dict[str, Any]]:
+    async def list_inflight(
+        self,
+        *,
+        before: str | None = None,
+        scope: PrivateResourceScope | None = None,
+    ) -> list[dict[str, Any]]:
         """Return persisted runs that are still ``pending`` or ``running``."""
         pass
 
+    async def list_inflight_trusted_unscoped(
+        self,
+        *,
+        before: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Trusted startup/cutover scan; never expose through product entrypoints."""
+        raise NotImplementedError
+
     @abc.abstractmethod
-    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+    async def aggregate_tokens_by_thread(
+        self,
+        thread_id: str,
+        *,
+        include_active: bool = False,
+        scope: PrivateResourceScope | None = None,
+    ) -> dict[str, Any]:
         """Aggregate token usage for completed runs in a thread.
 
         Returns a dict with keys: total_tokens, total_input_tokens,

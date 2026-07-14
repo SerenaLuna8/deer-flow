@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import abc
 
+from deerflow.runtime.private_scope import PrivateResourceScope
+
 
 class RunEventStore(abc.ABC):
     """Run event stream storage interface.
@@ -36,11 +38,17 @@ class RunEventStore(abc.ABC):
         content: str | dict = "",
         metadata: dict | None = None,
         created_at: str | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> dict:
         """Write an event, auto-assign seq, return the complete record."""
 
     @abc.abstractmethod
-    async def put_batch(self, events: list[dict]) -> list[dict]:
+    async def put_batch(
+        self,
+        events: list[dict],
+        *,
+        scope: PrivateResourceScope | None = None,
+    ) -> list[dict]:
         """Batch-write events. Used by RunJournal flush buffer.
 
         Each dict's keys match put()'s keyword arguments.
@@ -55,6 +63,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a thread, ordered by seq ascending.
 
@@ -74,6 +83,7 @@ class RunEventStore(abc.ABC):
         task_id: str | None = None,
         limit: int = 500,
         after_seq: int | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> list[dict]:
         """Return the full event stream for a run, ordered by seq ascending.
 
@@ -93,6 +103,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a specific run, ordered by seq ascending.
 
@@ -103,13 +114,19 @@ class RunEventStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def count_messages(self, thread_id: str) -> int:
+    async def count_messages(self, thread_id: str, *, scope: PrivateResourceScope | None = None) -> int:
         """Count displayable messages (category=message) in a thread."""
 
     @abc.abstractmethod
-    async def delete_by_thread(self, thread_id: str) -> int:
+    async def delete_by_thread(self, thread_id: str, *, scope: PrivateResourceScope | None = None) -> int:
         """Delete all events for a thread. Return the number of deleted events."""
 
     @abc.abstractmethod
-    async def delete_by_run(self, thread_id: str, run_id: str) -> int:
+    async def delete_by_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        scope: PrivateResourceScope | None = None,
+    ) -> int:
         """Delete all events for a specific run. Return the number of deleted events."""
