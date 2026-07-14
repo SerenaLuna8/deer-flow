@@ -1037,6 +1037,19 @@ resolver 的单条 joined SELECT 退出后先结束只读 transaction，mutation
 中复查完整 scope/version，并把写入与 read-back 放在同一 transaction，只有 read-back 成功
 才 commit。调用方不得预先开启 transaction；该误用的 `InvalidRequestError` 不得伪装成
 数据库不可用。
+
+**M4 private-work 授权边界**：`app.private_work.PrivateWorkContext` 只能由精确的服务端
+`ProjectContext` 通过 `from_project()` 派生，禁止直接构造和 subclass；客户端 context 中的
+user/project/owner/membership/role/capability/system-role/project-context 与所有双下划线内部字段
+必须在进入 runtime 前丢弃。harness 只接收不含 role/capability 的
+`deerflow.runtime.PrivateResourceScope`，继续禁止 import `app.*`。每个 mutation 或副作用边界
+通过 `PrivateWorkRevalidator.require()` 在调用方已有 transaction 内重验 active project、未暂停
+状态、active membership、membership ID/version 和 capability；失效 scope 统一 404，当前 scope
+缺 capability 才返回 403。`resolve_project_context_in_transaction()` 不开始、提交或回滚调用方
+transaction；`lock=True` 使用同一 joined query 的 `FOR UPDATE OF projects,
+project_memberships`，保持 project → membership 锁序。private-work HTTP 错误只映射固定
+`code/message/request_id`，不得拼接底层异常或资源细节。
+
 项目 HTTP API 统一挂载 `/api/projects`，使用 request-scoped session 与认证 dependency；
 项目 path 只接受 UUID，项目专属的 path/query/body 校验统一返回
 `PROJECT_VALIDATION_FAILED`，不改变其他 router。默认项目 bootstrap 使用 transaction-level

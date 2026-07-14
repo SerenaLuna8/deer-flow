@@ -39,6 +39,25 @@ async def resolve_project_context(
     ``UUID`` identifiers address a project ID. Strings always address a slug,
     even when the string itself is UUID-shaped, so caller intent is unambiguous.
     """
+    async with session.begin():
+        return await resolve_project_context_in_transaction(
+            session,
+            user_id,
+            project_identifier,
+            request_id,
+        )
+
+
+async def resolve_project_context_in_transaction(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    project_identifier: uuid.UUID | str,
+    request_id: str,
+    *,
+    lock: bool = False,
+) -> ProjectContext:
+    """Resolve project authority without changing the caller-owned transaction."""
+
     identifier_filter = ProjectRow.id == project_identifier if isinstance(project_identifier, uuid.UUID) else ProjectRow.slug == project_identifier
     statement = (
         select(
@@ -61,9 +80,10 @@ async def resolve_project_context(
             ProjectRow.is_suspended.is_(False),
         )
     )
+    if lock:
+        statement = statement.with_for_update(of=(ProjectRow, ProjectMembershipRow))
     try:
-        async with session.begin():
-            rows = (await session.execute(statement)).all()
+        rows = (await session.execute(statement)).all()
     except DBAPIError:
         raise ProjectDatabaseUnavailable() from None
     if len(rows) != 1:
