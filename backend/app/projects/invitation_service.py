@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from email_validator import EmailNotValidError, validate_email
 
+from app.private_work.retention import PrivateWorkRetentionService
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectValidationFailed
@@ -39,8 +40,14 @@ def normalize_email(email: str) -> str:
 
 
 class InvitationService:
-    def __init__(self, repository: InvitationRepository):
+    def __init__(
+        self,
+        repository: InvitationRepository,
+        *,
+        retention: object = PrivateWorkRetentionService,
+    ):
         self.repository = repository
+        self._retention = retention
 
     async def create(
         self,
@@ -131,12 +138,19 @@ class InvitationService:
             self._require_redeemable(invitation, now)
             if invitation.invited_email != normalized_email:
                 raise ProjectInvitationInvalid()
-            return await self.repository.redeem_locked(
+            result = await self.repository.redeem_locked(
                 project,
                 invitation,
                 user_id=user_id,
                 now=now,
             )
+            await self._retention.restore_owner(
+                self.repository.session,
+                project_id=project.id,
+                owner_user_id=str(user_id),
+                now=now,
+            )
+            return result
 
     @staticmethod
     def _require_redeemable(invitation, now: datetime) -> None:

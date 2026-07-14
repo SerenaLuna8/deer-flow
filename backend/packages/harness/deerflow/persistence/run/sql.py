@@ -12,7 +12,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
@@ -209,9 +209,15 @@ class RunRepository(RunStore):
     async def update_status(self, run_id, status, *, error=None, scope=None) -> bool:
         if scope is None:
             return False
-        values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
+        revoked = RunRow.authorization_cancel_requested_at.is_not(None)
+        values: dict[str, Any] = {
+            "status": case((revoked, "interrupted"), else_=status),
+            "updated_at": datetime.now(UTC),
+        }
         if error is not None:
-            values["error"] = error
+            values["error"] = case((revoked, "authorization_revoked"), else_=error)
+        else:
+            values["error"] = case((revoked, "authorization_revoked"), else_=RunRow.error)
         async with self._sf() as session:
             result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, *self._scope_predicates(scope)).values(**values))
             await session.commit()
@@ -338,8 +344,9 @@ class RunRepository(RunStore):
         """
         if scope is None:
             return False
+        revoked = RunRow.authorization_cancel_requested_at.is_not(None)
         values: dict[str, Any] = {
-            "status": status,
+            "status": case((revoked, "interrupted"), else_=status),
             "total_input_tokens": total_input_tokens,
             "total_output_tokens": total_output_tokens,
             "total_tokens": total_tokens,
@@ -356,7 +363,9 @@ class RunRepository(RunStore):
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
         if error is not None:
-            values["error"] = error
+            values["error"] = case((revoked, "authorization_revoked"), else_=error)
+        else:
+            values["error"] = case((revoked, "authorization_revoked"), else_=RunRow.error)
         async with self._sf() as session:
             result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, *self._scope_predicates(scope)).values(**values))
             await session.commit()

@@ -171,7 +171,15 @@ async def test_remove_and_leave_record_distinct_end_metadata() -> None:
     repository = _repository()
     target = _member(role=ProjectRole.VIEWER)
     repository.lock_project_and_member.return_value = (project, target)
-    service = MembershipService(repository, clock=lambda: now)
+    authorization = AsyncMock()
+    authorization.mark_revoked.return_value = ()
+    retention = AsyncMock()
+    service = MembershipService(
+        repository,
+        clock=lambda: now,
+        authorization=authorization,
+        retention=retention,
+    )
 
     await service.remove(context, target.id, expected_version=1)
     repository.end_membership.assert_awaited_once_with(
@@ -221,3 +229,84 @@ async def test_repository_revalidates_actor_after_project_lock_before_target_loc
     assert "FOR UPDATE" not in statements[1]
     assert "FROM project_memberships" in statements[2]
     assert "FOR UPDATE" in statements[2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_role", [ProjectRole.EDITOR, ProjectRole.RUNNER])
+async def test_executable_role_downgrade_keeps_active_runs(new_role: ProjectRole) -> None:
+    context = _context()
+    repository = _repository()
+    target = _member(role=ProjectRole.ADMIN)
+    repository.lock_project_and_member.return_value = (SimpleNamespace(id=context.project_id), target)
+    authorization = AsyncMock()
+    retention = AsyncMock()
+
+    await MembershipService(
+        repository,
+        authorization=authorization,
+        retention=retention,
+    ).change_role(context, target.id, new_role, expected_version=1)
+
+    authorization.mark_revoked.assert_not_awaited()
+    retention.freeze_owner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_viewer_downgrade_marks_runs_in_transaction_then_notifies_after_commit() -> None:
+    events: list[str] = []
+    repository = _repository()
+
+    @asynccontextmanager
+    async def transaction():
+        events.append("transaction-enter")
+        yield
+        events.append("transaction-commit")
+
+    repository.transaction = transaction
+    context = _context()
+    target = _member(role=ProjectRole.EDITOR)
+    repository.lock_project_and_member.return_value = (SimpleNamespace(id=context.project_id), target)
+    authorization = AsyncMock()
+    authorization.mark_revoked.return_value = ("run-1",)
+    retention = AsyncMock()
+
+    async def notify(run_ids, reason):
+        events.append(f"notify:{run_ids}:{reason}")
+
+    await MembershipService(
+        repository,
+        authorization=authorization,
+        retention=retention,
+        notify_local_cancellation=notify,
+    ).change_role(context, target.id, ProjectRole.VIEWER, expected_version=1)
+
+    assert events == [
+        "transaction-enter",
+        "transaction-commit",
+        "notify:('run-1',):authorization_revoked",
+    ]
+    authorization.mark_revoked.assert_awaited_once()
+    retention.freeze_owner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remove_marks_runs_and_freezes_owner_but_notifier_failure_cannot_rollback() -> None:
+    context = _context()
+    repository = _repository()
+    target = _member(role=ProjectRole.VIEWER)
+    repository.lock_project_and_member.return_value = (SimpleNamespace(id=context.project_id), target)
+    authorization = AsyncMock()
+    authorization.mark_revoked.return_value = ("run-1",)
+    retention = AsyncMock()
+    notifier = AsyncMock(side_effect=RuntimeError("local task disappeared"))
+
+    await MembershipService(
+        repository,
+        authorization=authorization,
+        retention=retention,
+        notify_local_cancellation=notifier,
+    ).remove(context, target.id, expected_version=1)
+
+    authorization.mark_revoked.assert_awaited_once()
+    retention.freeze_owner.assert_awaited_once()
+    notifier.assert_awaited_once_with(("run-1",), "authorization_revoked")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 from sqlalchemy import func, select
@@ -23,6 +25,14 @@ class ProjectLifecycleRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[None]:
+        try:
+            async with self.session.begin():
+                yield
+        except DBAPIError:
+            raise ProjectDatabaseUnavailable() from None
+
     async def mark_pending(
         self,
         context: ProjectContext,
@@ -30,25 +40,16 @@ class ProjectLifecycleRepository:
         requested_at: datetime,
         effective_at: datetime,
     ) -> ProjectView:
-        try:
-            async with self.session.begin():
-                project = await self._lock_project(context.project_id, not_found=ProjectNotFound)
-                actor = await self._lock_current_actor(context)
-                self._require_lifecycle_capability(actor)
-                if project.status != "active":
-                    raise ProjectDeletionStateConflict()
-                if project.is_suspended:
-                    raise ProjectNotFound()
-
-                project.status = "pending_deletion"
-                project.deletion_requested_at = requested_at
-                project.deletion_effective_at = effective_at
-                project.deletion_requested_by_user_id = str(context.user_id)
-                project.membership_version += 1
-                await self.session.flush()
-                return await self._view(project, actor, context.request_id)
-        except DBAPIError:
-            raise ProjectDatabaseUnavailable() from None
+        async with self.transaction():
+            project, actor = await self.lock_pending_deletion(context)
+            return await self.mark_pending_locked(
+                project,
+                actor,
+                requested_at=requested_at,
+                effective_at=effective_at,
+                requested_by_user_id=context.user_id,
+                request_id=context.request_id,
+            )
 
     async def restore(
         self,
@@ -58,22 +59,135 @@ class ProjectLifecycleRepository:
         request_id: str,
         now: datetime,
     ) -> ProjectView:
-        try:
-            async with self.session.begin():
-                project, actor = await self.lock_recoverable_admin_project(
-                    user_id,
-                    project_id,
-                    now,
+        async with self.transaction():
+            project, actor = await self.lock_restore(user_id, project_id, now)
+            return await self.restore_locked(project, actor, request_id=request_id)
+
+    async def lock_pending_deletion(
+        self,
+        context: ProjectContext,
+    ) -> tuple[ProjectRow, ProjectMembershipRow]:
+        project = await self._lock_project(context.project_id, not_found=ProjectNotFound)
+        actor = await self._lock_current_actor(context)
+        self._require_lifecycle_capability(actor)
+        if project.status != "active":
+            raise ProjectDeletionStateConflict()
+        if project.is_suspended:
+            raise ProjectNotFound()
+        return project, actor
+
+    async def lock_restore(
+        self,
+        user_id: uuid.UUID,
+        project_id: uuid.UUID,
+        now: datetime,
+    ) -> tuple[ProjectRow, ProjectMembershipRow]:
+        return await self.lock_recoverable_admin_project(user_id, project_id, now)
+
+    async def lock_active_members(
+        self,
+        project_id: uuid.UUID,
+    ) -> tuple[ProjectMembershipRow, ...]:
+        rows = (
+            await self.session.execute(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == project_id,
+                    ProjectMembershipRow.status == "active",
                 )
-                project.status = "active"
-                project.deletion_requested_at = None
-                project.deletion_effective_at = None
-                project.deletion_requested_by_user_id = None
-                project.membership_version += 1
-                await self.session.flush()
-                return await self._view(project, actor, request_id)
-        except DBAPIError:
-            raise ProjectDatabaseUnavailable() from None
+                .order_by(ProjectMembershipRow.id)
+                .with_for_update(of=ProjectMembershipRow)
+            )
+        ).scalars()
+        return tuple(rows)
+
+    async def mark_pending_locked(
+        self,
+        project: ProjectRow,
+        actor: ProjectMembershipRow,
+        *,
+        requested_at: datetime,
+        effective_at: datetime,
+        requested_by_user_id: uuid.UUID,
+        request_id: str,
+    ) -> ProjectView:
+        project.status = "pending_deletion"
+        project.deletion_requested_at = requested_at
+        project.deletion_effective_at = effective_at
+        project.deletion_requested_by_user_id = str(requested_by_user_id)
+        project.membership_version += 1
+        await self.session.flush()
+        return await self._view(project, actor, request_id)
+
+    async def restore_locked(
+        self,
+        project: ProjectRow,
+        actor: ProjectMembershipRow,
+        *,
+        request_id: str,
+    ) -> ProjectView:
+        project.status = "active"
+        project.deletion_requested_at = None
+        project.deletion_effective_at = None
+        project.deletion_requested_by_user_id = None
+        project.membership_version += 1
+        await self.session.flush()
+        return await self._view(project, actor, request_id)
+
+    async def lock_suspend(
+        self,
+        context: ProjectContext,
+    ) -> tuple[ProjectRow, ProjectMembershipRow]:
+        project, actor = await self.lock_pending_deletion(context)
+        if project.is_suspended:
+            raise ProjectDeletionStateConflict()
+        return project, actor
+
+    async def suspend_locked(
+        self,
+        project: ProjectRow,
+        actor: ProjectMembershipRow,
+        *,
+        request_id: str,
+    ) -> ProjectView:
+        project.is_suspended = True
+        project.membership_version += 1
+        await self.session.flush()
+        return await self._view(project, actor, request_id)
+
+    async def lock_resume(
+        self,
+        user_id: uuid.UUID,
+        project_id: uuid.UUID,
+    ) -> tuple[ProjectRow, ProjectMembershipRow]:
+        project = await self._lock_project(project_id, not_found=ProjectNotFound)
+        actor = (
+            await self.session.execute(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == project_id,
+                    ProjectMembershipRow.user_id == str(user_id),
+                    ProjectMembershipRow.status == "active",
+                    ProjectMembershipRow.role == ProjectRole.ADMIN.value,
+                )
+                .with_for_update(of=ProjectMembershipRow)
+            )
+        ).scalar_one_or_none()
+        if actor is None or project.status != "active" or not project.is_suspended:
+            raise ProjectDeletionStateConflict()
+        return project, actor
+
+    async def resume_locked(
+        self,
+        project: ProjectRow,
+        actor: ProjectMembershipRow,
+        *,
+        request_id: str,
+    ) -> ProjectView:
+        project.is_suspended = False
+        project.membership_version += 1
+        await self.session.flush()
+        return await self._view(project, actor, request_id)
 
     async def lock_recoverable_admin_project(
         self,
@@ -87,12 +201,14 @@ class ProjectLifecycleRepository:
         )
         actor = (
             await self.session.execute(
-                select(ProjectMembershipRow).where(
+                select(ProjectMembershipRow)
+                .where(
                     ProjectMembershipRow.project_id == project_id,
                     ProjectMembershipRow.user_id == str(user_id),
                     ProjectMembershipRow.status == "active",
                     ProjectMembershipRow.role == ProjectRole.ADMIN.value,
                 )
+                .with_for_update(of=ProjectMembershipRow)
             )
         ).scalar_one_or_none()
         if actor is None or project.is_suspended or project.status != "pending_deletion" or project.deletion_effective_at is None or now >= project.deletion_effective_at:

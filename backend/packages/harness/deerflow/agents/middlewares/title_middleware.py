@@ -13,6 +13,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
+from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -192,7 +193,11 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         user_msg = self._get_title_user_message(state)
         return {"title": self._fallback_title(user_msg)}
 
-    async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
+    async def _agenerate_title_result(
+        self,
+        state: TitleMiddlewareState,
+        runtime_context: object | None = None,
+    ) -> dict | None:
         """Generate a configured LLM title asynchronously and fall back locally."""
         if not self._should_generate_title(state):
             return None
@@ -214,10 +219,16 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             if self._app_config is not None:
                 model_kwargs["app_config"] = self._app_config
             model = create_chat_model(name=config.model_name, **model_kwargs)
+            await check_authorization_boundary(
+                runtime_context,
+                "before_model_call",
+            )
             response = await model.ainvoke(prompt, config=self._get_runnable_config())
             title = self._parse_title(response.content)
             if title:
                 return {"title": title}
+        except AuthorizationRevoked:
+            raise
         except Exception:
             logger.debug("Failed to generate async title; falling back to local title", exc_info=True)
         return {"title": self._fallback_title(user_msg)}
@@ -228,4 +239,4 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     @override
     async def aafter_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-        return await self._agenerate_title_result(state)
+        return await self._agenerate_title_result(state, runtime.context)

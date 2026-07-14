@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import case, delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -198,12 +198,15 @@ class PrivateRunRepository:
         status: str,
         error: str | None = None,
     ) -> bool:
+        revoked = RunRow.authorization_cancel_requested_at.is_not(None)
         values: dict[str, Any] = {
-            "status": status,
+            "status": case((revoked, "interrupted"), else_=status),
             "updated_at": datetime.now(UTC),
         }
         if error is not None:
-            values["error"] = error
+            values["error"] = case((revoked, "authorization_revoked"), else_=error)
+        else:
+            values["error"] = case((revoked, "authorization_revoked"), else_=RunRow.error)
         result = await self.session.execute(update(RunRow).where(RunRow.run_id == run_id, *self.predicates(scope)).values(**values))
         return result.rowcount != 0
 

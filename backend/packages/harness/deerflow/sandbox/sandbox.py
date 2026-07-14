@@ -1,5 +1,9 @@
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Mapping
+from typing import Protocol
+
+from langgraph.errors import GraphBubbleUp
 
 from deerflow.sandbox.search import GrepMatch
 
@@ -12,6 +16,55 @@ from deerflow.sandbox.search import GrepMatch
 # contract: a future shell-splicing implementation must not have to re-derive
 # its own rule.
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+AUTHORIZATION_REVOKED_REASON = "authorization_revoked"
+
+
+class AuthorizationRevoked(GraphBubbleUp):
+    """Internal control-flow signal with one stable, non-sensitive public reason."""
+
+    def __init__(self) -> None:
+        super().__init__(AUTHORIZATION_REVOKED_REASON)
+
+
+class AuthorizationBoundary(Protocol):
+    """App-supplied run authorization checks; the harness stays app-agnostic."""
+
+    async def before_model_call(self) -> None: ...
+
+    async def before_tool_call(self) -> None: ...
+
+    async def before_mcp_call(self) -> None: ...
+
+    async def before_sandbox_write(self) -> None: ...
+
+    async def before_sandbox_exec(self) -> None: ...
+
+    async def before_checkpoint_read(self) -> None: ...
+
+    async def before_checkpoint_write(self) -> None: ...
+
+    async def before_file_finalization(self) -> None: ...
+
+
+async def check_authorization_boundary(
+    runtime_context: object | None,
+    operation: str,
+) -> None:
+    """Call a trusted boundary when present; legacy runs remain a no-op."""
+
+    if not isinstance(runtime_context, Mapping):
+        return
+    boundary = runtime_context.get("__authorization_boundary")
+    method = getattr(boundary, operation, None)
+    if callable(method):
+        await method()
+        return
+    checker = runtime_context.get("__authorization_checker")
+    if callable(checker):
+        result = checker()
+        if isinstance(result, Awaitable):
+            await result
 
 
 def _validate_extra_env(extra_env: dict[str, str] | None) -> None:

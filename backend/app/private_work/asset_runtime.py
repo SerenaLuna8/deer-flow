@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.private_work.authorization import PrivateRunAuthorizationService
 from app.private_work.context import PrivateWorkContext, require_issued_private_work_context
 from app.private_work.errors import (
     PrivateWorkAssetStale,
@@ -29,6 +30,7 @@ from app.private_work.run_admission import AdmittedPrivateRun
 from app.private_work.run_repository import PrivateRunRepository
 from app.private_work.snapshot_repository import RunSnapshotAssetStale, RunSnapshotRepository
 from app.projects.capabilities import Capability
+from app.projects.context import resolve_project_context_in_transaction
 from app.shared_assets.errors import (
     AssetForbidden,
     AssetResolutionUnavailable,
@@ -44,6 +46,7 @@ from app.shared_assets.models import (
 )
 from app.shared_assets.resolver import ProjectAssetResolver
 from deerflow.persistence.shared_assets.binding_model import AssetCatalogStateRow
+from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import Skill, SkillCategory
 
@@ -175,6 +178,7 @@ class PrivateAgentRuntime:
     """Run-owned exact assets.  Its repr and public manifest are secret-free."""
 
     __slots__ = (
+        "_authorization_boundary",
         "_closed",
         "_context",
         "_mcp_snapshots",
@@ -204,6 +208,7 @@ class PrivateAgentRuntime:
         self._resolver = resolver
         self._session_factory = session_factory
         self._mcp_snapshots = mcp_snapshots
+        self._authorization_boundary = None
         self._closed = False
         self.safe_manifest = safe_manifest
         self.skill_root = skill_root
@@ -241,6 +246,9 @@ class PrivateAgentRuntime:
     def mcp_tools(self) -> tuple[object, ...]:
         return self._mcp_tools
 
+    def set_authorization_boundary(self, boundary: object) -> None:
+        self._authorization_boundary = boundary
+
     async def discover_mcp_tools(self) -> None:
         """Copy remote schemas into run-local proxies, never remote tool objects."""
 
@@ -252,6 +260,7 @@ class PrivateAgentRuntime:
                     version_id,
                     definition,
                     material,
+                    authorization_boundary=self._authorization_boundary,
                 ),
             )
             schemas.extend(discovered)
@@ -267,6 +276,7 @@ class PrivateAgentRuntime:
                     material,
                     schema.name,
                     arguments,
+                    authorization_boundary=self._authorization_boundary,
                 ),
             )
 
@@ -275,6 +285,7 @@ class PrivateAgentRuntime:
             name=schema.name,
             description=schema.description,
             args_schema=schema.args_schema,
+            metadata={"deerflow_private_mcp": True},
         )
 
     @staticmethod
@@ -380,6 +391,7 @@ class PrivateAgentRuntime:
         definition: Mapping[str, object],
         material: Mapping[str, Mapping[str, object]],
         operation: Callable[[tuple[object, ...]], Awaitable[Any]],
+        authorization_boundary: object | None = None,
     ) -> Any:
         client = None
         merged_config = None
@@ -400,6 +412,8 @@ class PrivateAgentRuntime:
                 {server_name: merged_config},
                 tool_name_prefix=True,
             )
+            if authorization_boundary is not None:
+                await authorization_boundary.before_mcp_call()
             remote_tools = tuple(await client.get_tools(server_name=server_name))
             return await operation(remote_tools)
         finally:
@@ -419,6 +433,7 @@ class PrivateAgentRuntime:
         version_id: uuid.UUID,
         definition: Mapping[str, object],
         material: Mapping[str, Mapping[str, object]],
+        authorization_boundary: object | None = None,
     ) -> tuple[_DiscoveredMcpTool, ...]:
         forbidden_values = cls._material_values(material)
 
@@ -448,11 +463,19 @@ class PrivateAgentRuntime:
                 )
             return tuple(copied)
 
+        if authorization_boundary is None:
+            return await cls._with_one_shot_mcp_tools(
+                version_id,
+                definition,
+                material,
+                copy_schemas,
+            )
         return await cls._with_one_shot_mcp_tools(
             version_id,
             definition,
             material,
             copy_schemas,
+            authorization_boundary,
         )
 
     @staticmethod
@@ -462,6 +485,7 @@ class PrivateAgentRuntime:
         material: Mapping[str, Mapping[str, object]],
         tool_name: str,
         arguments: Mapping[str, object],
+        authorization_boundary: object | None = None,
     ) -> Any:
         try:
 
@@ -469,6 +493,8 @@ class PrivateAgentRuntime:
                 selected = next((tool for tool in discovered if getattr(tool, "name", None) == tool_name), None)
                 if selected is None:
                     raise PrivateWorkAssetStale("unknown")
+                if authorization_boundary is not None:
+                    await authorization_boundary.before_mcp_call()
                 result = await selected.ainvoke(dict(arguments))
                 PrivateAgentRuntime._assert_mcp_result_secret_free(
                     result,
@@ -476,13 +502,23 @@ class PrivateAgentRuntime:
                 )
                 return result
 
+            if authorization_boundary is None:
+                return await PrivateAgentRuntime._with_one_shot_mcp_tools(
+                    version_id,
+                    definition,
+                    material,
+                    call_selected,
+                )
             return await PrivateAgentRuntime._with_one_shot_mcp_tools(
                 version_id,
                 definition,
                 material,
                 call_selected,
+                authorization_boundary,
             )
         except PrivateWorkError:
+            raise
+        except AuthorizationRevoked:
             raise
         except Exception:
             raise PrivateWorkUnavailable("unknown") from None
@@ -499,6 +535,8 @@ class PrivateAgentRuntime:
         snapshot = next((item for item in self._mcp_snapshots if item.version_id == mcp_version_id), None)
         if snapshot is None:
             raise PrivateWorkAssetStale(self._context.request_id)
+        if self._authorization_boundary is not None:
+            await self._authorization_boundary.before_mcp_call()
         materialized = await self._materialize_mcp_call(snapshot)
         try:
             try:
@@ -511,6 +549,8 @@ class PrivateAgentRuntime:
             raise PrivateWorkUnavailable(self._context.request_id) from None
         except PrivateWorkError as error:
             raise type(error)(self._context.request_id) from None
+        except AuthorizationRevoked:
+            raise
         except Exception:
             raise PrivateWorkUnavailable(self._context.request_id) from None
 
@@ -520,11 +560,20 @@ class PrivateAgentRuntime:
         repository = RunSnapshotRepository(self._session_factory)
         try:
             async with self._session_factory() as session, session.begin():
-                current = await PrivateWorkRevalidator().require(
+                active = await PrivateRunAuthorizationService.is_active(
                     session,
-                    self._context,
-                    Capability.PRIVATE_WORK_CREATE,
-                    Capability.SHARED_ASSETS_EXECUTE,
+                    project_id=self._context.project_id,
+                    owner_user_id=str(self._context.user_id),
+                    run_id=self._run_id,
+                    lock=False,
+                )
+                if not active:
+                    raise AuthorizationRevoked
+                current = await resolve_project_context_in_transaction(
+                    session,
+                    self._context.user_id,
+                    self._context.project_id,
+                    self._context.request_id,
                     lock=True,
                 )
                 run = await PrivateRunRepository(session).get(

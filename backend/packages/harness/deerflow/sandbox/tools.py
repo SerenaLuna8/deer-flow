@@ -1433,6 +1433,7 @@ async def _run_sync_tool_after_async_sandbox_init(
     func: Callable[..., str] | None,
     runtime: Runtime,
     *args: object,
+    authorization_operation: str | None = None,
 ) -> str:
     """Initialize lazily via async provider, then run sync tool body off-thread."""
     try:
@@ -1444,6 +1445,14 @@ async def _run_sync_tool_after_async_sandbox_init(
 
     if func is None:
         return "Error: Tool implementation not available"
+
+    if authorization_operation is not None:
+        from deerflow.sandbox.sandbox import check_authorization_boundary
+
+        await check_authorization_boundary(
+            getattr(runtime, "context", None),
+            authorization_operation,
+        )
 
     return await asyncio.to_thread(func, runtime, *args)
 
@@ -1759,7 +1768,13 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
 
 
 async def _bash_tool_async(runtime: Runtime, description: str, command: str) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, description, command)
+    return await _run_sync_tool_after_async_sandbox_init(
+        bash_tool.func,
+        runtime,
+        description,
+        command,
+        authorization_operation="before_sandbox_exec",
+    )
 
 
 bash_tool.coroutine = _bash_tool_async
@@ -2194,7 +2209,15 @@ async def _write_file_tool_async(
     content: str,
     append: bool = False,
 ) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, description, path, content, append)
+    return await _run_sync_tool_after_async_sandbox_init(
+        write_file_tool.func,
+        runtime,
+        description,
+        path,
+        content,
+        append,
+        authorization_operation="before_sandbox_write",
+    )
 
 
 write_file_tool.coroutine = _write_file_tool_async
@@ -2270,6 +2293,7 @@ async def _str_replace_tool_async(
         old_str,
         new_str,
         replace_all,
+        authorization_operation="before_sandbox_write",
     )
 
 

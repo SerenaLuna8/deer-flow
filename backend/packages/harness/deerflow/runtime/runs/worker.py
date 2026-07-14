@@ -51,6 +51,10 @@ from deerflow.runtime.goal import (
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user, get_effective_user_id
+from deerflow.sandbox.sandbox import (
+    AUTHORIZATION_REVOKED_REASON,
+    AuthorizationRevoked,
+)
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, get_sandbox_provider
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
@@ -86,6 +90,7 @@ def _build_runtime_context(
     *,
     private_scope: object | None = None,
     authorization_checker: Callable[[], Awaitable[None]] | None = None,
+    authorization_boundary: object | None = None,
     file_authority: object | None = None,
     run_read_only_mounts: tuple[object, ...] = (),
     runtime_owner_user_id: str | None = None,
@@ -112,6 +117,8 @@ def _build_runtime_context(
         runtime_ctx["private_scope"] = private_scope
     if authorization_checker is not None:
         runtime_ctx["__authorization_checker"] = authorization_checker
+    if authorization_boundary is not None:
+        runtime_ctx["__authorization_boundary"] = authorization_boundary
     if file_authority is not None:
         runtime_ctx["__file_authority"] = file_authority
     if run_read_only_mounts:
@@ -149,6 +156,7 @@ class RunContext:
     on_run_completed: Any | None = field(default=None)
     private_scope: object | None = field(default=None)
     authorization_checker: Callable[[], Awaitable[None]] | None = field(default=None)
+    authorization_boundary: object | None = field(default=None)
     file_authority: object | None = field(default=None)
     private_agent_runtime: PrivateAgentRuntime | None = field(default=None)
 
@@ -171,6 +179,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         for key in (
             "private_scope",
             "__authorization_checker",
+            "__authorization_boundary",
             "__file_authority",
             "__run_read_only_mounts",
         ):
@@ -432,6 +441,7 @@ async def run_agent(
             ctx.app_config,
             private_scope=ctx.private_scope,
             authorization_checker=ctx.authorization_checker,
+            authorization_boundary=ctx.authorization_boundary,
             file_authority=ctx.file_authority,
             run_read_only_mounts=(
                 (
@@ -624,6 +634,7 @@ async def run_agent(
                 app_config=ctx.app_config,
                 evaluator_model_factory=_get_goal_evaluator_model,
                 abort_event=record.abort_event,
+                authorization_boundary=ctx.authorization_boundary,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -648,7 +659,11 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
             else:
-                await run_manager.set_status(run_id, RunStatus.interrupted)
+                await run_manager.set_status(
+                    run_id,
+                    RunStatus.interrupted,
+                    error=(AUTHORIZATION_REVOKED_REASON if action == "authorization_revoked" else None),
+                )
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
@@ -676,8 +691,29 @@ async def run_agent(
             except Exception:
                 logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
         else:
-            await run_manager.set_status(run_id, RunStatus.interrupted)
+            await run_manager.set_status(
+                run_id,
+                RunStatus.interrupted,
+                error=(AUTHORIZATION_REVOKED_REASON if action == "authorization_revoked" else None),
+            )
             logger.info("Run %s was cancelled", run_id)
+
+    except AuthorizationRevoked:
+        record.abort_action = "authorization_revoked"
+        record.abort_event.set()
+        await run_manager.set_status(
+            run_id,
+            RunStatus.interrupted,
+            error=AUTHORIZATION_REVOKED_REASON,
+        )
+        await bridge.publish(
+            run_id,
+            "error",
+            {
+                "message": AUTHORIZATION_REVOKED_REASON,
+                "name": AUTHORIZATION_REVOKED_REASON,
+            },
+        )
 
     except Exception as exc:
         error_msg = f"{exc}"
@@ -724,7 +760,7 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-        if checkpointer is not None and record.status == RunStatus.interrupted:
+        if checkpointer is not None and record.status == RunStatus.interrupted and record.abort_action != "authorization_revoked":
             try:
                 await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                 if not await run_manager.has_later_started_run(thread_id, run_id):
@@ -933,6 +969,7 @@ async def _prepare_goal_continuation_input(
     app_config: AppConfig | None,
     evaluator_model_factory: Any | None = None,
     abort_event: asyncio.Event | None = None,
+    authorization_boundary: object | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -1010,9 +1047,12 @@ async def _prepare_goal_continuation_input(
             model=evaluator_model,
             model_name=model_name,
             app_config=app_config,
+            authorization_boundary=authorization_boundary,
         )
         if abort_event is not None and abort_event.is_set():
             return None
+    except AuthorizationRevoked:
+        raise
     except Exception:
         logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
         return None

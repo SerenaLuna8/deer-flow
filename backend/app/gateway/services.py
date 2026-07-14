@@ -34,6 +34,7 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.utils import sanitize_log_param
 from app.private_work.asset_runtime import PrivateAssetRuntime
+from app.private_work.authorization import PrivateRunAuthorizationBoundary
 from app.private_work.context import PrivateWorkContext, strip_private_client_fields
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import (
@@ -1038,13 +1039,6 @@ async def start_private_run(
         private_runtime = await asset_runtime.materialize(context, admitted)
         if private_runtime.model_ref != exact_model_name:
             raise PrivateWorkAssetStale(context.request_id)
-        private_run_context = replace(
-            base_run_context,
-            checkpointer=scoped_checkpointer,
-            thread_store=None,
-            private_scope=admitted.opaque_runtime_scope,
-            private_agent_runtime=private_runtime,
-        )
         run_manager = get_run_manager(request)
         record = await run_manager.register_persisted(
             run_id=admitted.run.run_id,
@@ -1057,6 +1051,35 @@ async def start_private_run(
             model_name=private_runtime.model_ref,
             scope=admitted.opaque_runtime_scope,
             created_at=admitted.run.created_at.isoformat(),
+        )
+        authorization_boundary = PrivateRunAuthorizationBoundary(
+            session_factory,
+            project_id=admitted.run.project_id,
+            owner_user_id=admitted.run.owner_user_id,
+            run_id=admitted.run.run_id,
+            abort_event=record.abort_event,
+        )
+        set_checkpoint_boundary = getattr(
+            scoped_checkpointer,
+            "set_authorization_boundary",
+            None,
+        )
+        if callable(set_checkpoint_boundary):
+            set_checkpoint_boundary(authorization_boundary)
+        set_runtime_boundary = getattr(
+            private_runtime,
+            "set_authorization_boundary",
+            None,
+        )
+        if callable(set_runtime_boundary):
+            set_runtime_boundary(authorization_boundary)
+        private_run_context = replace(
+            base_run_context,
+            checkpointer=scoped_checkpointer,
+            thread_store=None,
+            private_scope=admitted.opaque_runtime_scope,
+            authorization_boundary=authorization_boundary,
+            private_agent_runtime=private_runtime,
         )
         _launch_registered_run(
             bridge=get_stream_bridge(request),

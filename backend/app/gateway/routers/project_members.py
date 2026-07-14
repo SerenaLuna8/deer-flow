@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from functools import partial
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gateway.deps import project_session
+from app.gateway.deps import get_run_manager, project_session
 from app.gateway.routers.project_governance import (
     GOVERNANCE_DOMAIN_ERRORS,
     GovernanceRoute,
     raise_governance_error,
 )
 from app.gateway.routers.projects import authenticated_project_identity
+from app.private_work.authorization import notify_local_cancellation
 from app.projects.context import resolve_project_context
 from app.projects.membership_models import MembershipView
 from app.projects.membership_repository import MembershipRepository
@@ -52,6 +54,14 @@ def _response(view: MembershipView) -> MembershipResponse:
     return MembershipResponse(**vars(view))
 
 
+def _cancellation_notifier(request: Request):
+    try:
+        run_manager = get_run_manager(request)
+    except (RuntimeError, HTTPException):
+        return None
+    return partial(notify_local_cancellation, run_manager=run_manager)
+
+
 async def _context(
     project_id: uuid.UUID,
     identity: tuple[uuid.UUID, str],
@@ -77,6 +87,7 @@ async def list_members(
 
 @router.patch("/{project_id}/members/{membership_id}", response_model=MembershipResponse)
 async def patch_member(
+    request: Request,
     project_id: uuid.UUID,
     membership_id: uuid.UUID,
     body: MembershipMutationRequest,
@@ -85,7 +96,10 @@ async def patch_member(
 ):
     try:
         context = await _context(project_id, identity, session)
-        view = await MembershipService(MembershipRepository(session)).change_role(
+        view = await MembershipService(
+            MembershipRepository(session),
+            notify_local_cancellation=_cancellation_notifier(request),
+        ).change_role(
             context,
             membership_id,
             body.role,
@@ -98,6 +112,7 @@ async def patch_member(
 
 @router.delete("/{project_id}/members/{membership_id}", response_model=MembershipResponse)
 async def remove_member(
+    request: Request,
     project_id: uuid.UUID,
     membership_id: uuid.UUID,
     body: MembershipVersionRequest,
@@ -106,7 +121,10 @@ async def remove_member(
 ):
     try:
         context = await _context(project_id, identity, session)
-        view = await MembershipService(MembershipRepository(session)).remove(
+        view = await MembershipService(
+            MembershipRepository(session),
+            notify_local_cancellation=_cancellation_notifier(request),
+        ).remove(
             context,
             membership_id,
             body.version,
@@ -118,6 +136,7 @@ async def remove_member(
 
 @router.post("/{project_id}/leave", response_model=MembershipResponse)
 async def leave_project(
+    request: Request,
     project_id: uuid.UUID,
     body: MembershipVersionRequest,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
@@ -125,7 +144,10 @@ async def leave_project(
 ):
     try:
         context = await _context(project_id, identity, session)
-        view = await MembershipService(MembershipRepository(session)).leave(
+        view = await MembershipService(
+            MembershipRepository(session),
+            notify_local_cancellation=_cancellation_notifier(request),
+        ).leave(
             context,
             body.version,
         )

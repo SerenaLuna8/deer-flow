@@ -721,6 +721,35 @@ class RunManager:
         logger.info("Run %s cancelled (action=%s)", run_id, action)
         return True
 
+    async def cancel_authorization_revoked(
+        self,
+        run_id: str,
+        *,
+        reason: str = "authorization_revoked",
+    ) -> bool:
+        """Trusted post-commit cancellation that cannot be invoked by clients."""
+
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return False
+            if record.status == RunStatus.interrupted:
+                return True
+            if record.status not in (RunStatus.pending, RunStatus.running):
+                return False
+            record.abort_action = "authorization_revoked"
+            record.abort_event.set()
+            task_active = record.task is not None and not record.task.done()
+            record.finalizing = task_active
+            if task_active:
+                record.task.cancel()
+            record.status = RunStatus.interrupted
+            record.error = reason
+            record.updated_at = _now_iso()
+        await self._persist_status(record, RunStatus.interrupted, error=reason)
+        logger.info("Run %s cancelled after authorization revocation", run_id)
+        return True
+
     async def create_or_reject(
         self,
         thread_id: str,

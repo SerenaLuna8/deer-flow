@@ -1101,6 +1101,24 @@ graph launch 前返回稳定 `409 PRIVATE_WORK_CUTOVER`。create 固定锁序为
 时先补偿删除 raw checkpoint，branch 同时回滚 PostgreSQL authority hook；只有两者成功才物理清除
 补偿 tombstone，失败则保留 `retry_required`。branch 禁止读取宿主 Thread 目录。
 
+已登记的活动项目 run 使用 `AuthorizationBoundary`，不再把 admission 时的
+`membership_version` 当成长时运行资格：Admin 降为 Editor/Runner 后 model、checkpoint、tool、MCP
+和 sandbox 边界继续按当前 active membership + 当前 execute capability 运行；降为 Viewer、退出、
+移除、项目暂停或 pending deletion 时，在治理 transaction 内按 project → membership → active runs
+写 `authorization_cancel_requested_at/reason`，commit 后才 best-effort 通知本地 `RunManager`。远端 worker
+在每次 model（包括 retry 与 title/summarization/goal 旁路）、tool/MCP dispatch、checkpoint read/write、
+sandbox exec/write 及未来 file-finalization hook 前重查 marker、项目状态和当前 role；数据库异常同样
+fail closed。harness 只定义 app-agnostic protocol/`AuthorizationRevoked`，不得 import `app.*`。
+撤销终态固定为 `interrupted`，公开 reason 只能是 `authorization_revoked`，且不得再调用 interrupted-title
+模型；成功等既有终态不写 marker，completion/status 竞争也不能覆盖已撤销 run 的 interrupted 结果。
+
+离组/移除、项目暂停或 pending deletion 同一治理 transaction 冻结该 project+owner 的 Thread 和
+connected channel connection，但绝不物理删除 Thread、file、Memory、credential 或其他私有内容；降为
+Viewer 只停止活动 run，不冻结既有内容。原 membership row 通过 invitation rejoin，或项目 restore/resume
+后，只恢复相同 project+owner 的 frozen row；revoked connection 永不恢复，且外部 identity 已被另一条
+connected row 占用时原 connection 保持 frozen。connection 的全局 active-identity partial unique predicate
+在 ORM、migration 与 bootstrap catalog 中统一为 `status = 'connected'`。
+
 M4 项目 Run 继续复用唯一的 `RunManager`/`RunStore`/`RunEventStore`。`RunRecord.scope`
 对项目 run 必须是 `PrivateResourceScope`；manager 即使命中内存记录也要比较 scope，后台
 status/model/progress/completion 只从已登记的 run record 派生 scope，禁止接收客户端 owner。

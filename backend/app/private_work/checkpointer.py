@@ -83,6 +83,10 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         self._context = context
         self._owner_loop = owner_loop
         self._revalidator = PrivateWorkRevalidator()
+        self._authorization_boundary: object | None = None
+
+    def set_authorization_boundary(self, boundary: object) -> None:
+        self._authorization_boundary = boundary
 
     @property
     def config_specs(self):
@@ -155,16 +159,20 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         self,
         thread_id: str,
         capability: Capability,
+        authorization_operation: str,
     ) -> AsyncIterator[None]:
         try:
+            if self._authorization_boundary is not None:
+                await getattr(self._authorization_boundary, authorization_operation)()
             async with self._session_factory() as session:
                 async with session.begin():
-                    await self._revalidator.require(
-                        session,
-                        self._context,
-                        capability,
-                        lock=True,
-                    )
+                    if self._authorization_boundary is None:
+                        await self._revalidator.require(
+                            session,
+                            self._context,
+                            capability,
+                            lock=True,
+                        )
                     record = await PrivateThreadRepository(session).get(
                         scope=self._context.resource_scope,
                         thread_id=thread_id,
@@ -184,6 +192,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         async with self._locked_active(
             thread_id,
             Capability.PRIVATE_WORK_READ_OWN,
+            "before_checkpoint_read",
         ):
             try:
                 item = await self._raw.aget_tuple(clean_config)
@@ -221,6 +230,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         async with self._locked_active(
             thread_id,
             Capability.PRIVATE_WORK_READ_OWN,
+            "before_checkpoint_read",
         ):
             try:
                 async for item in self._raw.alist(
@@ -247,6 +257,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         async with self._locked_active(
             thread_id,
             Capability.PRIVATE_WORK_CREATE,
+            "before_checkpoint_write",
         ):
             try:
                 written_config = await self._raw.aput(
@@ -277,6 +288,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         async with self._locked_active(
             thread_id,
             Capability.PRIVATE_WORK_CREATE,
+            "before_checkpoint_write",
         ):
             try:
                 item = await self._raw.aget_tuple(clean_config)

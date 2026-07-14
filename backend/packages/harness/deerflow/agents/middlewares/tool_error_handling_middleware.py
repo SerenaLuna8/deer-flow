@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
@@ -23,6 +24,7 @@ from deerflow.agents.middlewares.tool_result_meta import (
 from deerflow.config.app_config import AppConfig
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.sandbox.sandbox import check_authorization_boundary
 from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
@@ -118,6 +120,25 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         tool_name = str(request.tool_call.get("name") or "")
         return self._stamp_skill_read_metadata(result, request, tool_name=tool_name)
 
+    @staticmethod
+    def _runtime_context(request: object) -> object | None:
+        runtime = getattr(request, "runtime", None)
+        return getattr(runtime, "context", None)
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        # This middleware is inside the retry wrapper, so every retry reaches
+        # the database-backed authorization check before invoking the model.
+        await check_authorization_boundary(
+            self._runtime_context(request),
+            "before_model_call",
+        )
+        return await handler(request)
+
     @override
     def wrap_tool_call(
         self,
@@ -141,6 +162,17 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         try:
+            runtime_context = self._runtime_context(request)
+            await check_authorization_boundary(
+                runtime_context,
+                "before_tool_call",
+            )
+            metadata = getattr(request.tool, "metadata", None)
+            if isinstance(metadata, dict) and metadata.get("deerflow_private_mcp") is True:
+                await check_authorization_boundary(
+                    runtime_context,
+                    "before_mcp_call",
+                )
             result = await handler(request)
         except GraphBubbleUp:
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).

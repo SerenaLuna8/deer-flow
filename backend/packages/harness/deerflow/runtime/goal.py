@@ -258,6 +258,7 @@ async def evaluate_goal_completion(
     model: Any | None = None,
     model_name: str | None = None,
     app_config: Any | None = None,
+    authorization_boundary: object | None = None,
 ) -> GoalEvaluation:
     """Ask a small non-thinking model whether the active goal is satisfied."""
     conversation = format_visible_conversation(messages)
@@ -283,6 +284,8 @@ async def evaluate_goal_completion(
 
     if model is None:
         model = create_goal_evaluator_model(model_name=model_name, app_config=app_config)
+    if authorization_boundary is not None:
+        await authorization_boundary.before_model_call()
     response = await model.ainvoke(
         [SystemMessage(content=system_instruction), HumanMessage(content=user_content)],
         config={"run_name": "goal_evaluator"},

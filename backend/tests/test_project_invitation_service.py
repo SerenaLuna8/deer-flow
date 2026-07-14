@@ -198,7 +198,8 @@ async def test_redeem_passes_locked_pending_invitation_to_repository() -> None:
     claim = SimpleNamespace(invitation_id=row.id, token_hash="b" * 64)
     user_id = uuid.uuid4()
 
-    result = await InvitationService(repository).redeem(
+    retention = AsyncMock()
+    result = await InvitationService(repository, retention=retention).redeem(
         user_id,
         " MEMBER@example.com ",
         claim,
@@ -207,6 +208,12 @@ async def test_redeem_passes_locked_pending_invitation_to_repository() -> None:
 
     assert result == expected
     repository.redeem_locked.assert_awaited_once_with(project, row, user_id=user_id, now=NOW)
+    retention.restore_owner.assert_awaited_once_with(
+        repository.session,
+        project_id=row.project_id,
+        owner_user_id=str(user_id),
+        now=NOW,
+    )
 
 
 def test_hash_invitation_token_is_lowercase_sha256_hexdigest() -> None:

@@ -364,10 +364,14 @@ async def test_delete_and_restore_lock_project_row(
             )
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
 
-        assert len(statements) >= 3
+        assert len(statements) >= 7
         assert "FROM projects" in statements[0]
         assert "FROM project_memberships" in statements[1]
-        assert "FROM projects" in statements[2]
+        assert "FROM project_memberships" in statements[2]
+        assert "FROM runs" in statements[3]
+        assert "FROM projects" in statements[4]
+        assert "FROM project_memberships" in statements[5]
+        assert "FROM project_memberships" in statements[6]
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", capture):
             event.remove(engine.sync_engine, "before_cursor_execute", capture)

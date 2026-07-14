@@ -17,6 +17,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
 from deerflow.models import create_chat_model
+from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -129,7 +130,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             logger.exception("Summary generation failed; skipping compaction this turn")
             return None
 
-    async def _asummarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
+    async def _asummarize_with(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        previous_summary: str | None = None,
+        *,
+        authorization_context: object | None = None,
+    ) -> str | None:
         """Async counterpart of :meth:`_summarize_with` using the nostream model."""
         if not messages_to_summarize:
             return "No previous conversation history."
@@ -137,11 +144,21 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prompt is None:
             return "Previous conversation was too long to summarize."
         try:
+            try:
+                parent_config = get_config()
+            except RuntimeError:
+                parent_config = {}
+            await check_authorization_boundary(
+                authorization_context or parent_config.get("context"),
+                "before_model_call",
+            )
             response = await self._summary_model.ainvoke(
                 prompt,
                 config={"metadata": {"lc_source": "summarization"}},
             )
             return response.text.strip()
+        except AuthorizationRevoked:
+            raise
         except Exception:
             logger.exception("Summary generation failed; skipping compaction this turn")
             return None
@@ -320,7 +337,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
-        summary = await self._asummarize_with(messages_to_summarize, previous_summary=previous_summary)
+        summary = await self._asummarize_with(
+            messages_to_summarize,
+            previous_summary=previous_summary,
+            authorization_context=runtime.context,
+        )
         if summary is None:
             return None
         return ContextCompactionResult(
