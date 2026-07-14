@@ -1,10 +1,27 @@
 import asyncio
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
+from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox import Sandbox
+
+
+@dataclass(frozen=True, slots=True)
+class RunScopedReadOnlyMount:
+    """Trusted run-owned host tree exposed at one read-only sandbox path."""
+
+    run_id: str
+    container_path: str
+    host_path: str
+
+    def __post_init__(self) -> None:
+        normalized_container = PurePosixPath(self.container_path).as_posix()
+        if not self.run_id or not self.container_path.startswith("/") or ".." in PurePosixPath(self.container_path).parts or normalized_container != self.container_path.rstrip("/") or not Path(self.host_path).is_absolute():
+            raise ValueError("Invalid run-scoped read-only mount")
 
 
 class SandboxProvider(ABC):
@@ -31,6 +48,71 @@ class SandboxProvider(ABC):
         of stalling the event loop.
         """
         return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id)
+
+    def acquire_with_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        """Acquire a run-isolated sandbox or fail closed when unsupported."""
+
+        if mounts:
+            raise SandboxRuntimeError("Configured sandbox provider does not support run-scoped read-only mounts")
+        return self.acquire(thread_id, user_id=user_id)
+
+    async def acquire_with_mounts_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        return await asyncio.to_thread(
+            self.acquire_with_mounts,
+            thread_id,
+            user_id=user_id,
+            mounts=mounts,
+        )
+
+    def validate_run_scoped_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> None:
+        """Side-effect-free capability preflight before any model invocation."""
+
+        del thread_id, user_id
+        if mounts:
+            raise SandboxRuntimeError("Configured sandbox provider does not support run-scoped read-only mounts")
+
+    def release_run_scoped_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> None:
+        """Drop provider state owned by one run-specific mount set."""
+
+        del thread_id, user_id, mounts
+
+    async def release_run_scoped_mounts_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> None:
+        await asyncio.to_thread(
+            self.release_run_scoped_mounts,
+            thread_id,
+            user_id=user_id,
+            mounts=mounts,
+        )
 
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:

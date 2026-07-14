@@ -14,7 +14,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,7 +24,7 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
-from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_local_provider, get_project_checkpointer, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
     INTERNAL_SYSTEM_ROLE,
@@ -33,9 +33,21 @@ from app.gateway.internal_auth import (
     get_trusted_internal_runtime_user_id,
 )
 from app.gateway.utils import sanitize_log_param
-from app.private_work.context import strip_private_client_fields
+from app.private_work.asset_runtime import PrivateAssetRuntime
+from app.private_work.context import PrivateWorkContext, strip_private_client_fields
 from app.private_work.error_mapping import private_work_http_exception
-from app.private_work.errors import PrivateWorkCutover
+from app.private_work.errors import (
+    PrivateWorkAssetStale,
+    PrivateWorkConflict,
+    PrivateWorkCutover,
+    PrivateWorkError,
+    PrivateWorkUnavailable,
+)
+from app.private_work.revalidation import PrivateWorkRevalidator
+from app.private_work.run_admission import PrivateRunAdmissionService
+from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
+from app.private_work.runtime_context import prepare_private_run_config
+from app.projects.capabilities import Capability
 from deerflow.config.app_config import get_app_config
 from deerflow.persistence.thread_meta import LegacyThreadCreateAuthorityUnavailable
 from deerflow.runtime import (
@@ -51,6 +63,15 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.goal import goal_thread_lock
+from deerflow.runtime.run_config_security import (
+    DEFAULT_RECURSION_LIMIT as _DEFAULT_RECURSION_LIMIT,
+)
+from deerflow.runtime.run_config_security import (
+    clamp_recursion_limit as _clamp_recursion_limit,
+)
+from deerflow.runtime.run_config_security import (
+    resolve_max_recursion_limit as _resolve_max_recursion_limit,
+)
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import redact_config_secrets
 from deerflow.runtime.user_context import (
@@ -354,6 +375,8 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
     ``body.config['configurable']`` verbatim, so the same keys must be scrubbed
     from both sections after the config is assembled.
     """
+    for key in _CONTEXT_INTERNAL_CALLER_KEYS:
+        config.pop(key, None)
     for section in ("context", "configurable"):
         value = config.get(section)
         if isinstance(value, dict):
@@ -480,41 +503,6 @@ def resolve_agent_factory(assistant_id: str | None):
     return make_lead_agent
 
 
-# Lead-agent recursion budget bounds. The Gateway must NOT trust a
-# client-supplied ``recursion_limit`` verbatim: an arbitrarily large value lets
-# a single run execute unbounded LangGraph super-steps (each at least one LLM
-# call), enabling runaway API cost / DoS. ``_DEFAULT_RECURSION_LIMIT`` is the
-# server default when the client sends nothing; the hard ceiling any client
-# value is clamped to is configurable via ``AppConfig.max_recursion_limit``.
-_DEFAULT_RECURSION_LIMIT = 100
-_DEFAULT_MAX_RECURSION_LIMIT = 1000
-
-
-def _resolve_max_recursion_limit() -> int:
-    """Resolve the clamp ceiling from ``AppConfig.max_recursion_limit``.
-
-    Falls back to ``_DEFAULT_MAX_RECURSION_LIMIT`` when the app config cannot be
-    loaded (e.g. no ``config.yaml`` in a bare unit-test environment) so that the
-    clamp still applies rather than crashing the run-config assembly.
-    """
-    try:
-        return get_app_config().max_recursion_limit
-    except Exception:
-        return _DEFAULT_MAX_RECURSION_LIMIT
-
-
-def _clamp_recursion_limit(value: Any, max_limit: int) -> int:
-    """Clamp a client-supplied ``recursion_limit`` into a safe server range.
-
-    Non-integer values (including ``bool``, an ``int`` subclass) and non-positive
-    values fall back to ``_DEFAULT_RECURSION_LIMIT``; valid positive integers are
-    capped at ``max_limit`` (from ``AppConfig.max_recursion_limit``).
-    """
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return _DEFAULT_RECURSION_LIMIT
-    return min(value, max_limit)
-
-
 def build_run_config(
     thread_id: str,
     request_config: dict[str, Any] | None,
@@ -639,6 +627,7 @@ async def apply_checkpoint_to_run_config(
     thread_id: str,
     request: Request,
     checkpoint_control: _NormalizedCheckpointControl | None = None,
+    checkpointer: Any | None = None,
 ) -> dict[str, Any]:
     """Validate an optional run checkpoint and attach it to RunnableConfig."""
     if checkpoint_control is None:
@@ -671,7 +660,8 @@ async def apply_checkpoint_to_run_config(
     if checkpoint_map is not None:
         read_config["configurable"]["checkpoint_map"] = checkpoint_map
 
-    checkpointer = get_checkpointer(request)
+    if checkpointer is None:
+        checkpointer = get_checkpointer(request)
     try:
         checkpoint_tuple = await checkpointer.aget_tuple(read_config)
     except Exception as exc:
@@ -686,6 +676,54 @@ async def apply_checkpoint_to_run_config(
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
+
+
+def _launch_registered_run(
+    *,
+    bridge: StreamBridge,
+    run_manager: RunManager,
+    record: RunRecord,
+    run_context: Any,
+    agent_factory: Any,
+    graph_input: dict[str, Any] | Command,
+    config: dict[str, Any],
+    stream_modes: list[str],
+    stream_subgraphs: bool,
+    interrupt_before: Any,
+    interrupt_after: Any,
+    owner_user_id: str | None = None,
+    runtime_user_id: str | None = None,
+) -> None:
+    """Launch the sole ``run_agent`` worker for an already registered run."""
+
+    owner_context_token = None
+    storage_context_token = None
+    if owner_user_id is not None:
+        owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id))
+    if runtime_user_id is not None:
+        storage_context_token = set_runtime_storage_user_id(runtime_user_id)
+    try:
+        task = asyncio.create_task(
+            run_agent(
+                bridge,
+                run_manager,
+                record,
+                ctx=run_context,
+                agent_factory=agent_factory,
+                graph_input=graph_input,
+                config=config,
+                stream_modes=stream_modes,
+                stream_subgraphs=stream_subgraphs,
+                interrupt_before=interrupt_before,
+                interrupt_after=interrupt_after,
+            )
+        )
+    finally:
+        if storage_context_token is not None:
+            reset_runtime_storage_user_id(storage_context_token)
+        if owner_context_token is not None:
+            reset_current_user(owner_context_token)
+    record.task = task
 
 
 async def start_run(
@@ -822,6 +860,18 @@ async def start_run(
             except LegacyThreadCreateAuthorityUnavailable:
                 raise private_work_http_exception(PrivateWorkCutover(get_current_trace_id() or generate_trace_id())) from None
 
+        if isinstance(existing, Mapping) and existing.get("agent_scope") == "project":
+            if created_authority:
+                try:
+                    await run_ctx.thread_store.delete(thread_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to compensate project-agent legacy authority for %s",
+                        sanitize_log_param(thread_id),
+                        exc_info=True,
+                    )
+            raise private_work_http_exception(PrivateWorkCutover(get_current_trace_id() or generate_trace_id()))
+
         try:
             await apply_checkpoint_to_run_config(
                 config,
@@ -869,29 +919,20 @@ async def start_run(
         except Exception:
             logger.warning("Failed to update thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
-        storage_context_token = None
-        if runtime_user_id is not None:
-            storage_context_token = set_runtime_storage_user_id(runtime_user_id)
-        try:
-            task = asyncio.create_task(
-                run_agent(
-                    bridge,
-                    run_mgr,
-                    record,
-                    ctx=run_ctx,
-                    agent_factory=agent_factory,
-                    graph_input=graph_input,
-                    config=config,
-                    stream_modes=stream_modes,
-                    stream_subgraphs=body.stream_subgraphs,
-                    interrupt_before=body.interrupt_before,
-                    interrupt_after=body.interrupt_after,
-                )
-            )
-        finally:
-            if storage_context_token is not None:
-                reset_runtime_storage_user_id(storage_context_token)
-        record.task = task
+        _launch_registered_run(
+            bridge=bridge,
+            run_manager=run_mgr,
+            record=record,
+            run_context=run_ctx,
+            agent_factory=agent_factory,
+            graph_input=graph_input,
+            config=config,
+            stream_modes=stream_modes,
+            stream_subgraphs=body.stream_subgraphs,
+            interrupt_before=body.interrupt_before,
+            interrupt_after=body.interrupt_after,
+            runtime_user_id=runtime_user_id,
+        )
 
         # Title sync is handled by worker.py's finally block which reads the
         # title from the checkpoint and calls thread_store.update_display_name
@@ -901,6 +942,160 @@ async def start_run(
     finally:
         if owner_context_token is not None:
             reset_current_user(owner_context_token)
+
+
+async def _mark_private_run_launch_failed(
+    context: PrivateWorkContext,
+    run_id: str,
+) -> None:
+    from deerflow.persistence.engine import get_session_factory
+
+    try:
+        session_factory = get_session_factory()
+        async with session_factory() as session, session.begin():
+            await PrivateRunRepository(session).update_status(
+                scope=context.resource_scope,
+                run_id=run_id,
+                status="error",
+                error="Private runtime launch failed",
+            )
+    except Exception:
+        logger.warning("Failed to mark private run launch failure", exc_info=True)
+
+
+async def start_private_run(
+    body: Any,
+    thread_id: str,
+    request: Request,
+    context: PrivateWorkContext,
+    *,
+    admission_service: PrivateRunAdmissionService | None = None,
+    asset_runtime: PrivateAssetRuntime | None = None,
+) -> RunRecord:
+    """Admit exact project assets, register them, and launch the sole worker."""
+
+    from deerflow.persistence.engine import get_session_factory
+
+    session_factory = get_session_factory()
+    admission_service = admission_service or PrivateRunAdmissionService(session_factory)
+    asset_runtime = asset_runtime or PrivateAssetRuntime(session_factory)
+    sanitized_config, checkpoint_control = _normalize_run_checkpoint_inputs(body, thread_id)
+    raw_metadata = getattr(body, "metadata", None)
+    raw_body_context = getattr(body, "context", None)
+    config = prepare_private_run_config(
+        thread_id=thread_id,
+        opaque_scope=context.resource_scope,
+        request_config=sanitized_config if isinstance(sanitized_config, Mapping) else None,
+        metadata=raw_metadata if isinstance(raw_metadata, Mapping) else None,
+        body_context=raw_body_context if isinstance(raw_body_context, Mapping) else None,
+    )
+    scoped_checkpointer = get_project_checkpointer(request, context)
+    async with session_factory() as session, session.begin():
+        await PrivateWorkRevalidator().require(
+            session,
+            context,
+            Capability.PRIVATE_WORK_CREATE,
+            Capability.SHARED_ASSETS_EXECUTE,
+            lock=False,
+        )
+    await apply_checkpoint_to_run_config(
+        config,
+        body=body,
+        thread_id=thread_id,
+        request=request,
+        checkpoint_control=checkpoint_control,
+        checkpointer=scoped_checkpointer,
+    )
+
+    command = getattr(body, "command", None)
+    graph_input = Command(resume=command["resume"]) if command and command.get("resume") is not None else normalize_input(body.input)
+    persisted_context = dict(config.get("context", {}))
+    persisted_context.pop("private_scope", None)
+    persisted_config = {
+        **config,
+        "context": persisted_context,
+        "configurable": dict(config.get("configurable", {})),
+    }
+    disconnect = DisconnectMode.cancel if getattr(body, "on_disconnect", "cancel") == "cancel" else DisconnectMode.continue_
+    create_request = PrivateRunCreate(
+        assistant_id=None,
+        metadata=dict(config.get("metadata", {})),
+        kwargs={
+            "input": body.input,
+            "config": redact_config_secrets(persisted_config),
+        },
+        multitask_strategy=getattr(body, "multitask_strategy", "reject"),
+    )
+
+    admitted = await admission_service.admit(context, thread_id, create_request)
+    private_runtime = None
+    record = None
+    try:
+        base_run_context = get_run_context(request)
+        exact_model_name = admitted.run.model_name
+        if base_run_context.app_config is None or exact_model_name is None or base_run_context.app_config.get_model_config(exact_model_name) is None:
+            raise PrivateWorkAssetStale(context.request_id)
+        private_runtime = await asset_runtime.materialize(context, admitted)
+        if private_runtime.model_ref != exact_model_name:
+            raise PrivateWorkAssetStale(context.request_id)
+        private_run_context = replace(
+            base_run_context,
+            checkpointer=scoped_checkpointer,
+            thread_store=None,
+            private_scope=admitted.opaque_runtime_scope,
+            private_agent_runtime=private_runtime,
+        )
+        run_manager = get_run_manager(request)
+        record = await run_manager.register_persisted(
+            run_id=admitted.run.run_id,
+            thread_id=admitted.thread_id,
+            assistant_id=admitted.run.assistant_id,
+            on_disconnect=disconnect,
+            metadata=admitted.run.metadata,
+            kwargs=admitted.run.kwargs,
+            multitask_strategy=admitted.run.multitask_strategy,
+            model_name=private_runtime.model_ref,
+            scope=admitted.opaque_runtime_scope,
+            created_at=admitted.run.created_at.isoformat(),
+        )
+        _launch_registered_run(
+            bridge=get_stream_bridge(request),
+            run_manager=run_manager,
+            record=record,
+            run_context=private_run_context,
+            agent_factory=resolve_agent_factory(None),
+            graph_input=graph_input,
+            config=config,
+            stream_modes=normalize_stream_modes(getattr(body, "stream_mode", None)),
+            stream_subgraphs=bool(getattr(body, "stream_subgraphs", False)),
+            interrupt_before=getattr(body, "interrupt_before", None),
+            interrupt_after=getattr(body, "interrupt_after", None),
+            owner_user_id=admitted.run.owner_user_id,
+            runtime_user_id=admitted.run.owner_user_id,
+        )
+        return record
+    except Exception as error:
+        if record is not None:
+            try:
+                await get_run_manager(request).set_status(
+                    record.run_id,
+                    RunStatus.error,
+                    error="Private runtime launch failed",
+                )
+            except Exception:
+                logger.warning("Failed to compensate private run manager state")
+        else:
+            await _mark_private_run_launch_failed(context, admitted.run.run_id)
+        if private_runtime is not None:
+            try:
+                await private_runtime.aclose()
+            except Exception:
+                logger.warning("Failed to clean private runtime after launch failure")
+        if isinstance(error, ConflictError):
+            raise PrivateWorkConflict(context.request_id) from None
+        if isinstance(error, PrivateWorkError):
+            raise type(error)(context.request_id) from None
+        raise PrivateWorkUnavailable(context.request_id) from None
 
 
 async def launch_scheduled_thread_run(

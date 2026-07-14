@@ -84,11 +84,17 @@ class SkillActivationMiddleware(AgentMiddleware):
         available_skills: set[str] | None = None,
         app_config: AppConfig | None = None,
         user_id: str | None = None,
+        runtime_skills: tuple[Skill, ...] | None = None,
+        runtime_skills_root: Path | None = None,
+        runtime_skills_container_path: str | None = None,
     ) -> None:
         super().__init__()
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._app_config = app_config
         self._user_id = user_id
+        self._runtime_skills = runtime_skills
+        self._runtime_skills_root = runtime_skills_root
+        self._runtime_skills_container_path = runtime_skills_container_path
 
     def _storage(self) -> SkillStorage:
         if self._user_id is not None:
@@ -124,10 +130,13 @@ class SkillActivationMiddleware(AgentMiddleware):
         if reference is None:
             return None
 
-        storage = self._storage()
-        skills = get_catalog_skills_if_cutover(self._app_config)
-        if skills is None:
-            skills = storage.load_skills(enabled_only=False)
+        storage = None if self._runtime_skills is not None else self._storage()
+        if self._runtime_skills is not None:
+            skills = list(self._runtime_skills)
+        else:
+            skills = get_catalog_skills_if_cutover(self._app_config)
+            if skills is None:
+                skills = storage.load_skills(enabled_only=False)
         skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
         if skill is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not installed.")
@@ -140,20 +149,26 @@ class SkillActivationMiddleware(AgentMiddleware):
             text,
             skills,
             available_skills=self._available_skills,
-            container_base_path=storage.get_container_root(),
+            container_base_path=(self._runtime_skills_container_path or (str(self._runtime_skills_root) if self._runtime_skills_root is not None else storage.get_container_root())),
         )
         if resolved is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be resolved.")
 
         try:
-            skill_content = self._read_skill_content(resolved.skill.skill_file, storage.get_skills_root_path(), storage=storage)
+            skills_root = self._runtime_skills_root or storage.get_skills_root_path()
+            skill_content = self._read_skill_content(
+                resolved.skill.skill_file,
+                skills_root,
+                storage=storage,
+            )
         except (OSError, ValueError):
             logger.exception("Failed to read slash-activated skill %s", resolved.skill.name)
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be loaded safely. Please check the skill installation.")
 
         content_hash = hashlib.sha256(skill_content.encode("utf-8")).hexdigest()
-        # CUSTOM skills are editable; PUBLIC and LEGACY are read-only
-        editable = resolved.skill.category == SkillCategory.CUSTOM
+        # Persisted run-exact project Skills are immutable even though their
+        # isolated filesystem layout uses the CUSTOM category directory.
+        editable = resolved.skill.category == SkillCategory.CUSTOM and not resolved.skill.runtime_read_only
         return _ActivationResolution(
             activation=_Activation(
                 skill_name=resolved.skill.name,

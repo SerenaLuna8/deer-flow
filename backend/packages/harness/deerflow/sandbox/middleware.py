@@ -14,6 +14,7 @@ from langgraph.types import Command
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +50,50 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         super().__init__()
         self._lazy_init = lazy_init
 
-    def _acquire_sandbox(self, thread_id: str, *, user_id: str) -> str:
+    @staticmethod
+    def _run_mounts(runtime: Runtime) -> tuple[RunScopedReadOnlyMount, ...]:
+        raw = (runtime.context or {}).get("__run_read_only_mounts", ())
+        if not isinstance(raw, tuple) or any(type(item) is not RunScopedReadOnlyMount for item in raw):
+            return ()
+        return raw
+
+    def _acquire_sandbox(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+    ) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = provider.acquire(thread_id, user_id=user_id)
+        sandbox_id = (
+            provider.acquire_with_mounts(
+                thread_id,
+                user_id=user_id,
+                mounts=mounts,
+            )
+            if mounts
+            else provider.acquire(thread_id, user_id=user_id)
+        )
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
-    async def _acquire_sandbox_async(self, thread_id: str, *, user_id: str) -> str:
+    async def _acquire_sandbox_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+    ) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+        sandbox_id = (
+            await provider.acquire_with_mounts_async(
+                thread_id,
+                user_id=user_id,
+                mounts=mounts,
+            )
+            if mounts
+            else await provider.acquire_async(thread_id, user_id=user_id)
+        )
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
@@ -71,11 +107,16 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return super().before_agent(state, runtime)
 
         # Eager initialization (original behavior)
-        if "sandbox" not in state or state["sandbox"] is None:
+        mounts = self._run_mounts(runtime)
+        if mounts or "sandbox" not in state or state["sandbox"] is None:
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return super().before_agent(state, runtime)
-            sandbox_id = self._acquire_sandbox(thread_id, user_id=resolve_runtime_user_id(runtime))
+            sandbox_id = self._acquire_sandbox(
+                thread_id,
+                user_id=resolve_runtime_user_id(runtime),
+                mounts=mounts,
+            )
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return super().before_agent(state, runtime)
@@ -88,11 +129,16 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
         # Eager initialization (original behavior), but use the async provider
         # hook so blocking sandbox startup/polling runs outside the event loop.
-        if "sandbox" not in state or state["sandbox"] is None:
+        mounts = self._run_mounts(runtime)
+        if mounts or "sandbox" not in state or state["sandbox"] is None:
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return await super().abefore_agent(state, runtime)
-            sandbox_id = await self._acquire_sandbox_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+            sandbox_id = await self._acquire_sandbox_async(
+                thread_id,
+                user_id=resolve_runtime_user_id(runtime),
+                mounts=mounts,
+            )
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return await super().abefore_agent(state, runtime)

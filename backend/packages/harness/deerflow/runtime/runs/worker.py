@@ -20,9 +20,10 @@ import copy
 import inspect
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
 
@@ -50,6 +51,7 @@ from deerflow.runtime.goal import (
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user, get_effective_user_id
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, get_sandbox_provider
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
@@ -81,6 +83,12 @@ def _build_runtime_context(
     run_id: str,
     caller_context: Any | None,
     app_config: AppConfig | None = None,
+    *,
+    private_scope: object | None = None,
+    authorization_checker: Callable[[], Awaitable[None]] | None = None,
+    file_authority: object | None = None,
+    run_read_only_mounts: tuple[object, ...] = (),
+    runtime_owner_user_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -100,7 +108,27 @@ def _build_runtime_context(
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if private_scope is not None:
+        runtime_ctx["private_scope"] = private_scope
+    if authorization_checker is not None:
+        runtime_ctx["__authorization_checker"] = authorization_checker
+    if file_authority is not None:
+        runtime_ctx["__file_authority"] = file_authority
+    if run_read_only_mounts:
+        runtime_ctx["__run_read_only_mounts"] = run_read_only_mounts
+    if runtime_owner_user_id is not None:
+        runtime_ctx["user_id"] = runtime_owner_user_id
     return runtime_ctx
+
+
+class PrivateAgentRuntime(Protocol):
+    skill_root: Any
+
+    async def aclose(self) -> None: ...
+
+
+class PrivateRuntimeFactoryUnavailable(RuntimeError):
+    """Raised when a private run cannot enter a private-runtime-aware factory."""
 
 
 @dataclass(frozen=True)
@@ -119,17 +147,35 @@ class RunContext:
     thread_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     on_run_completed: Any | None = field(default=None)
+    private_scope: object | None = field(default=None)
+    authorization_checker: Callable[[], Awaitable[None]] | None = field(default=None)
+    file_authority: object | None = field(default=None)
+    private_agent_runtime: PrivateAgentRuntime | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
-        existing_context.setdefault("thread_id", runtime_context["thread_id"])
-        existing_context.setdefault("run_id", runtime_context["run_id"])
+        if "private_scope" in runtime_context or "__run_read_only_mounts" in runtime_context:
+            existing_context["thread_id"] = runtime_context["thread_id"]
+            existing_context["run_id"] = runtime_context["run_id"]
+            if "user_id" in runtime_context:
+                existing_context["user_id"] = runtime_context["user_id"]
+        else:
+            existing_context.setdefault("thread_id", runtime_context["thread_id"])
+            existing_context.setdefault("run_id", runtime_context["run_id"])
         if DEERFLOW_TRACE_METADATA_KEY in runtime_context:
             existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
+        for key in (
+            "private_scope",
+            "__authorization_checker",
+            "__file_authority",
+            "__run_read_only_mounts",
+        ):
+            if key in runtime_context:
+                existing_context[key] = runtime_context[key]
         return
 
     config["context"] = dict(runtime_context)
@@ -159,13 +205,33 @@ async def _call_agent_factory_off_loop(
     agent_factory: Any,
     config: Any,
     app_config: AppConfig | None,
+    private_runtime: PrivateAgentRuntime | None = None,
 ) -> Any:
     """Build a synchronous graph without blocking the Gateway event loop."""
 
     def _build() -> Any:
+        if private_runtime is not None:
+            private_factory = getattr(agent_factory, "private_runtime_factory", None)
+            if callable(private_factory):
+                private_kwargs: dict[str, Any] = {
+                    "config": config,
+                    "private_runtime": private_runtime,
+                }
+                if app_config is not None and _agent_factory_supports_app_config(private_factory):
+                    private_kwargs["app_config"] = app_config
+                return private_factory(**private_kwargs)
+            try:
+                accepts_private_runtime = "private_runtime" in inspect.signature(agent_factory).parameters
+            except (TypeError, ValueError):
+                accepts_private_runtime = False
+            if not accepts_private_runtime:
+                raise PrivateRuntimeFactoryUnavailable("Private runtime requires a private-runtime-aware agent factory.")
+        kwargs: dict[str, Any] = {"config": config}
         if app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            return agent_factory(config=config, app_config=app_config)
-        return agent_factory(config=config)
+            kwargs["app_config"] = app_config
+        if private_runtime is not None:
+            kwargs["private_runtime"] = private_runtime
+        return agent_factory(**kwargs)
 
     return await asyncio.to_thread(_build)
 
@@ -258,11 +324,15 @@ async def run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
+    private_owner_user_id = record.scope.owner_user_id if ctx.private_agent_runtime is not None and record.scope is not None else None
     requested_modes: set[str] = set(stream_modes or ["values"])
     pre_run_checkpoint_id: str | None = None
     pre_run_snapshot: dict[str, Any] | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
+    run_mounts: tuple[RunScopedReadOnlyMount, ...] = ()
+    run_mount_provider: Any | None = None
+    run_mount_user_id: str | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
     # Message ids checkpointed *before* this run started. The stream loop uses
@@ -309,7 +379,7 @@ async def run_agent(
         await run_manager.set_status(run_id, RunStatus.running)
 
         if event_store is not None:
-            workspace_changes_user_id = get_effective_user_id()
+            workspace_changes_user_id = private_owner_user_id or get_effective_user_id()
             try:
                 pre_run_workspace_snapshot = await capture_workspace_snapshot(
                     thread_id,
@@ -355,7 +425,27 @@ async def run_agent(
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
-        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        runtime_ctx = _build_runtime_context(
+            thread_id,
+            run_id,
+            config.get("context"),
+            ctx.app_config,
+            private_scope=ctx.private_scope,
+            authorization_checker=ctx.authorization_checker,
+            file_authority=ctx.file_authority,
+            run_read_only_mounts=(
+                (
+                    RunScopedReadOnlyMount(
+                        run_id=run_id,
+                        container_path=ctx.app_config.skills.container_path,
+                        host_path=str(ctx.private_agent_runtime.skill_root),
+                    ),
+                )
+                if ctx.private_agent_runtime is not None and ctx.app_config is not None
+                else ()
+            ),
+            runtime_owner_user_id=private_owner_user_id,
+        )
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
         if deerflow_trace_id:
@@ -369,6 +459,17 @@ async def run_agent(
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
+
+        run_mounts = runtime_ctx.get("__run_read_only_mounts", ())
+        if run_mounts:
+            run_mount_provider = get_sandbox_provider()
+            run_mount_user_id = private_owner_user_id or get_effective_user_id()
+            await asyncio.to_thread(
+                run_mount_provider.validate_run_scoped_mounts,
+                thread_id,
+                user_id=run_mount_user_id,
+                mounts=run_mounts,
+            )
 
         # Inject RunJournal as a LangChain callback handler.
         # on_llm_end captures token usage; on_chain_start/end captures lifecycle.
@@ -407,6 +508,7 @@ async def run_agent(
             agent_factory,
             initial_runnable_config,
             ctx.app_config,
+            ctx.private_agent_runtime,
         )
 
         # Capture the effective (resolved) model name from the agent's metadata.
@@ -658,6 +760,26 @@ async def run_agent(
                 logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
         if record.finalizing:
             await run_manager.set_finalizing(run_id, False)
+
+        if ctx.private_agent_runtime is not None:
+            try:
+                await ctx.private_agent_runtime.aclose()
+            except Exception:
+                logger.warning("Private runtime cleanup failed for run %s", run_id, exc_info=True)
+
+        if run_mount_provider is not None and run_mount_user_id is not None and run_mounts:
+            try:
+                await run_mount_provider.release_run_scoped_mounts_async(
+                    thread_id,
+                    user_id=run_mount_user_id,
+                    mounts=run_mounts,
+                )
+            except Exception:
+                logger.warning(
+                    "Run-scoped sandbox cleanup failed for run %s",
+                    run_id,
+                    exc_info=True,
+                )
 
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))

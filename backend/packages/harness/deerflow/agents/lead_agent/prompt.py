@@ -706,8 +706,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
         return ""
 
 
-@lru_cache(maxsize=32)
-def _get_cached_skills_prompt_section(
+def _render_skills_prompt_section(
     skill_signature: tuple[tuple[str, str, str, str], ...],
     disabled_skill_signature: tuple[tuple[str, str, str, str], ...],
     available_skills_key: tuple[str, ...] | None,
@@ -757,6 +756,23 @@ You have access to skills that provide optimized workflows for specific tasks. E
 {disabled_section}
 
 </skill_system>"""
+
+
+@lru_cache(maxsize=32)
+def _get_cached_skills_prompt_section(
+    skill_signature: tuple[tuple[str, str, str, str], ...],
+    disabled_skill_signature: tuple[tuple[str, str, str, str], ...],
+    available_skills_key: tuple[str, ...] | None,
+    container_base_path: str,
+    skill_evolution_section: str,
+) -> str:
+    return _render_skills_prompt_section(
+        skill_signature,
+        disabled_skill_signature,
+        available_skills_key,
+        container_base_path,
+        skill_evolution_section,
+    )
 
 
 def get_skills_prompt_section(
@@ -914,6 +930,9 @@ def apply_prompt_template(
     mcp_routing_hints_section: str = "",
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    exact_soul: str | None = None,
+    exact_skills: tuple[object, ...] | None = None,
+    exact_skills_container_path: str | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
@@ -938,12 +957,31 @@ def apply_prompt_template(
     )
 
     # Get skills section (deferred discovery when skill_names is provided)
-    skills_section = get_skills_prompt_section(
-        available_skills,
-        app_config=app_config,
-        user_id=user_id,
-        skill_names=skill_names,
-    )
+    if exact_skills is None:
+        skills_section = get_skills_prompt_section(
+            available_skills,
+            app_config=app_config,
+            user_id=user_id,
+            skill_names=skill_names,
+        )
+    else:
+        container_path = exact_skills_container_path or DEFAULT_SKILLS_CONTAINER_PATH
+        signature = tuple(
+            (
+                str(getattr(skill, "name")),
+                str(getattr(skill, "description")),
+                str(getattr(skill, "category")),
+                str(skill.get_container_file_path(container_path)),
+            )
+            for skill in exact_skills
+        )
+        skills_section = _render_skills_prompt_section(
+            signature,
+            (),
+            tuple(sorted(available_skills)) if available_skills is not None else None,
+            container_path,
+            "",
+        )
 
     # Get deferred tools section (tool_search)
     deferred_tools_section = get_deferred_tools_prompt_section(deferred_names=deferred_names)
@@ -967,8 +1005,8 @@ def apply_prompt_template(
     # identical across users and sessions for maximum prefix-cache reuse.
     return SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name),
-        self_update_section=_build_self_update_section(agent_name),
+        soul=(f"<soul>\n{exact_soul}\n</soul>\n" if exact_soul else "") if exact_soul is not None else get_agent_soul(agent_name),
+        self_update_section="" if exact_soul is not None else _build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
         mcp_routing_hints_section=mcp_routing_hints_section,

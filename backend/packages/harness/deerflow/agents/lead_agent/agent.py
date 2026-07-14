@@ -21,6 +21,7 @@ middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -232,6 +233,9 @@ def build_middlewares(
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
+    runtime_skills: tuple[Skill, ...] | None = None,
+    runtime_skills_root: Path | None = None,
+    runtime_skills_container_path: str | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -270,7 +274,16 @@ def build_middlewares(
     # explicit user activation priority over model-side relevance guessing.
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 
-    middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config, user_id=user_id))
+    middlewares.append(
+        SkillActivationMiddleware(
+            available_skills=available_skills,
+            app_config=resolved_app_config,
+            user_id=user_id,
+            runtime_skills=runtime_skills,
+            runtime_skills_root=runtime_skills_root,
+            runtime_skills_container_path=runtime_skills_container_path,
+        )
+    )
 
     # Capture completed task delegations and loaded skill files before
     # summarization can compact them, then inject durable context channels
@@ -279,7 +292,7 @@ def build_middlewares(
 
     middlewares.append(
         DurableContextMiddleware(
-            skills_container_path=resolved_app_config.skills.container_path,
+            skills_container_path=(runtime_skills_container_path or (str(runtime_skills_root) if runtime_skills_root is not None else resolved_app_config.skills.container_path)),
             skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
         )
     )
@@ -397,10 +410,13 @@ def make_lead_agent(config: RunnableConfig):
     """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
     runtime_config = _get_runtime_config(config)
     runtime_app_config = runtime_config.get("app_config")
-    return _make_lead_agent(config, app_config=runtime_app_config or get_app_config())
+    return _make_lead_agent(
+        config,
+        app_config=runtime_app_config or get_app_config(),
+    )
 
 
-def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
+def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_runtime=None):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
@@ -425,15 +441,29 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     non_interactive = bool(cfg.get("non_interactive", False))
-    agent_name = validate_agent_name(cfg.get("agent_name"))
+    agent_name = None if private_runtime is not None else validate_agent_name(cfg.get("agent_name"))
+    if private_runtime is not None:
+        is_plan_mode = False
+        subagent_enabled = False
+        max_concurrent_subagents = 3
+        is_bootstrap = False
 
-    agent_config = load_agent_config(agent_name) if not is_bootstrap else None
-    available_skills = _available_skill_names(agent_config, is_bootstrap)
+    agent_config = load_agent_config(agent_name) if not is_bootstrap and private_runtime is None else None
+    runtime_skills = tuple(getattr(private_runtime, "skills", ())) if private_runtime is not None else None
+    available_skills = {skill.name for skill in runtime_skills} if runtime_skills is not None else _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
-    agent_model_name = agent_config.model if agent_config and agent_config.model else None
+    agent_model_name = str(getattr(private_runtime, "model_ref")) if private_runtime is not None else agent_config.model if agent_config and agent_config.model else None
 
     # Final model name resolution: request → agent config → global default, with fallback for unknown names
-    model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=resolved_app_config)
+    if private_runtime is not None:
+        model_name = agent_model_name
+        if not model_name or resolved_app_config.get_model_config(model_name) is None:
+            raise ValueError("Exact project Agent model is not configured")
+    else:
+        model_name = _resolve_model_name(
+            requested_model_name or agent_model_name,
+            app_config=resolved_app_config,
+        )
 
     model_config = resolved_app_config.get_model_config(model_name)
 
@@ -466,7 +496,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             "reasoning_effort": reasoning_effort,
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
-            "tool_groups": agent_config.tool_groups if agent_config else None,
+            "tool_groups": list(getattr(private_runtime, "tool_groups", ())) if private_runtime is not None else agent_config.tool_groups if agent_config else None,
             "available_skills": sorted(available_skills) if available_skills is not None else None,
         }
     )
@@ -484,14 +514,23 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
+    skills_for_tool_policy = (
+        list(runtime_skills)
+        if runtime_skills is not None
+        else _load_enabled_skills_for_tool_policy(
+            available_skills,
+            app_config=resolved_app_config,
+            user_id=resolved_user_id,
+        )
+    )
 
     # Build skill search setup (deferred skill discovery).
     # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
     from deerflow.skills.describe import build_skill_search_setup
 
     skill_search_enabled = resolved_app_config.skills.deferred_discovery
-    container_base_path = resolved_app_config.skills.container_path
+    container_base_path = resolved_app_config.skills.container_path if private_runtime is not None else resolved_app_config.skills.container_path
+    runtime_skills_root = Path(getattr(private_runtime, "skill_root")) if private_runtime is not None else None
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
@@ -568,16 +607,20 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # leave it unset, so ``update_agent`` remains available there.
     channel_name = cfg.get("channel_name")
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
-    extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
+    extra_tools = [update_agent] if agent_name and not is_webhook_channel and private_runtime is None else []
     # Default lead agent (unchanged behavior)
-    raw_tools = get_available_tools(
-        model_name=model_name,
-        groups=agent_config.tool_groups if agent_config else None,
-        subagent_enabled=subagent_enabled,
-        app_config=resolved_app_config,
-        asset_context=_trusted_runtime_asset_context(cfg),
-    )
-    filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
+    tool_kwargs = {
+        "model_name": model_name,
+        "groups": list(getattr(private_runtime, "tool_groups", ())) if private_runtime is not None else agent_config.tool_groups if agent_config else None,
+        "subagent_enabled": subagent_enabled,
+        "app_config": resolved_app_config,
+        "asset_context": _trusted_runtime_asset_context(cfg),
+    }
+    if private_runtime is not None:
+        tool_kwargs["include_mcp"] = False
+    raw_tools = get_available_tools(**tool_kwargs)
+    private_mcp_tools = list(getattr(private_runtime, "mcp_tools", ())) if private_runtime is not None else []
+    filtered = filter_tools_by_skill_allowed_tools(raw_tools + private_mcp_tools + extra_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
     if non_interactive:
         filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
     final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
@@ -601,6 +644,9 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             deferred_setup=setup,
             mcp_routing_middleware=mcp_routing_middleware,
             user_id=resolved_user_id,
+            runtime_skills=runtime_skills,
+            runtime_skills_root=(runtime_skills_root if runtime_skills is not None else None),
+            runtime_skills_container_path=(container_base_path if runtime_skills is not None else None),
         ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
@@ -612,6 +658,27 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             mcp_routing_hints_section=mcp_routing_hints_section,
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
+            exact_soul=str(getattr(private_runtime, "soul")) if private_runtime is not None else None,
+            exact_skills=runtime_skills,
+            exact_skills_container_path=container_base_path if runtime_skills is not None else None,
         ),
         state_schema=ThreadState,
     )
+
+
+def _make_lead_agent_with_private_runtime(
+    *,
+    config: RunnableConfig,
+    private_runtime,
+    app_config: AppConfig | None = None,
+):
+    runtime_config = _get_runtime_config(config)
+    runtime_app_config = runtime_config.get("app_config")
+    return _make_lead_agent(
+        config,
+        app_config=app_config or runtime_app_config or get_app_config(),
+        private_runtime=private_runtime,
+    )
+
+
+setattr(make_lead_agent, "private_runtime_factory", _make_lead_agent_with_private_runtime)

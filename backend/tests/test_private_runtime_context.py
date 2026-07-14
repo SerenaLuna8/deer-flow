@@ -1,0 +1,1306 @@
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import json
+import uuid
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.private_work.errors import (
+    PrivateWorkAssetStale,
+    PrivateWorkConflict,
+    PrivateWorkNotFound,
+    PrivateWorkUnavailable,
+)
+from app.private_work.run_admission import AdmittedPrivateRun, PersistedRunSnapshot
+from app.private_work.run_repository import PrivateRunRecord
+from app.private_work.runtime_context import prepare_private_run_config
+from app.projects.capabilities import capabilities_for
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
+from deerflow.runtime import (
+    ConflictError,
+    DisconnectMode,
+    RunContext,
+    RunManager,
+    RunRecord,
+    RunStatus,
+    run_agent,
+)
+
+
+class _OpaqueScope:
+    def __repr__(self) -> str:
+        return "<opaque-private-scope>"
+
+
+def test_private_runtime_context_strips_client_authority_and_server_values_win() -> None:
+    opaque = _OpaqueScope()
+    config = prepare_private_run_config(
+        thread_id="trusted-thread",
+        opaque_scope=opaque,
+        request_config={
+            "thread_id": "forged-top-thread",
+            "run_id": "forged-top-run",
+            "sandbox_id": "forged-other-sandbox",
+            "context": {
+                "thread_id": "forged-context-thread",
+                "run_id": "forged-context-run",
+                "model_name": "forged-model",
+                "is_bootstrap": True,
+                "subagent_enabled": True,
+                "is_plan_mode": True,
+                "project_id": "attacker-project",
+                "private_scope": {"owner_user_id": "attacker"},
+                "deerflow_private_scope": {"project_id": "attacker"},
+                "oauth_provider": "forged-provider",
+                "oauth_id": "forged-oauth-id",
+                "channel_user_id": "forged-channel-user",
+                "auth_source": "forged-source",
+                "channel_name": "forged-channel",
+                "sandbox_id": "forged-context-sandbox",
+                "authorization_checker": "forged-checker",
+                "file_authority": "forged-file-authority",
+                "private_agent_runtime": "forged-runtime",
+                "asset_context": "forged-asset-context",
+                "trusted_asset_context": "forged-trusted-asset-context",
+            },
+            "configurable": {
+                "thread_id": "forged-configurable-thread",
+                "run_id": "forged-configurable-run",
+                "owner_user_id": "attacker",
+                "__private_scope": {"project_id": "attacker"},
+                "deerflow_private_scope": {"project_id": "attacker"},
+                "sandbox_id": "forged-configurable-sandbox",
+            },
+        },
+        metadata={"project_context": {"role": "admin"}, "safe": "value"},
+        body_context={
+            "capabilities": ["private_work.create"],
+            "thinking_enabled": False,
+            "disable_clarification": True,
+            "thread_id": "forged-body-thread",
+            "run_id": "forged-body-run",
+        },
+    )
+
+    assert config["configurable"]["thread_id"] == "trusted-thread"
+    assert "thread_id" not in config
+    assert "run_id" not in config
+    assert "run_id" not in config["configurable"]
+    assert "run_id" not in config["context"]
+    assert "private_scope" not in config["configurable"]
+    assert "deerflow_private_scope" not in config["configurable"]
+    assert config["context"]["private_scope"] is opaque
+    assert "model_name" not in config["context"]
+    assert "is_bootstrap" not in config["context"]
+    assert "subagent_enabled" not in config["context"]
+    assert "is_plan_mode" not in config["context"]
+    assert "disable_clarification" not in config["context"]
+    assert config["context"]["thinking_enabled"] is False
+    assert config["metadata"] == {"safe": "value"}
+    serialized = json.dumps(config, default=str)
+    assert "forged-" not in serialized
+
+
+def test_private_runtime_context_is_secret_and_marker_free_except_opaque_hook() -> None:
+    sentinel = "task5-secret-sentinel"
+    config = prepare_private_run_config(
+        thread_id="trusted-thread",
+        opaque_scope=_OpaqueScope(),
+        request_config={
+            "context": {
+                "credential_envelope": {"ciphertext": sentinel},
+                "checkpoint_scope_marker": sentinel,
+                "api_token": sentinel,
+            },
+            "configurable": {"private_scope": sentinel, "key_id": sentinel},
+        },
+        metadata={"storage_locator": sentinel},
+        body_context={"owner_user_id": sentinel},
+    )
+
+    serializable = {
+        "configurable": config["configurable"],
+        "metadata": config.get("metadata", {}),
+        "context": {key: value for key, value in config["context"].items() if key != "private_scope"},
+    }
+    serialized = json.dumps(serializable, default=str).lower()
+    assert sentinel not in serialized
+    for forbidden in ("credential_envelope", "ciphertext", "key_id", "storage_locator", "checkpoint_scope_marker"):
+        assert forbidden not in serialized
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(10_000_000, 1000, id="huge-clamped"),
+        pytest.param(True, 100, id="bool-defaulted"),
+        pytest.param(-1, 100, id="negative-defaulted"),
+    ],
+)
+def test_private_runtime_context_clamps_client_recursion_limit(
+    value,
+    expected,
+) -> None:
+    config = prepare_private_run_config(
+        thread_id="trusted-thread",
+        opaque_scope=_OpaqueScope(),
+        request_config={"recursion_limit": value},
+        metadata=None,
+        body_context=None,
+    )
+
+    assert config["recursion_limit"] == expected
+
+
+def test_private_runtime_context_defaults_recursion_and_strips_internal_modes() -> None:
+    config = prepare_private_run_config(
+        thread_id="trusted-thread",
+        opaque_scope=_OpaqueScope(),
+        request_config={
+            "non_interactive": True,
+            "context": {"non_interactive": True},
+            "configurable": {"non_interactive": True},
+        },
+        metadata={"nested": {"non_interactive": True}},
+        body_context={"non_interactive": True},
+    )
+
+    assert config["recursion_limit"] == 100
+    serialized = json.dumps(
+        {key: value for key, value in config.items() if key != "context"} | {"context": {key: value for key, value in config["context"].items() if key != "private_scope"}},
+        default=str,
+    )
+    assert "non_interactive" not in serialized
+
+
+def test_worker_private_context_overwrites_forged_runtime_user_id() -> None:
+    from deerflow.runtime.runs.worker import _install_runtime_context
+
+    config = {"context": {"user_id": "forged-client-owner"}}
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "exact-thread",
+            "run_id": "exact-run",
+            "private_scope": object(),
+            "user_id": "exact-admitted-owner",
+        },
+    )
+
+    assert config["context"]["user_id"] == "exact-admitted-owner"
+    assert config["context"]["thread_id"] == "exact-thread"
+    assert config["context"]["run_id"] == "exact-run"
+
+
+@pytest.mark.anyio
+async def test_worker_passes_private_runtime_to_supported_factory_off_loop() -> None:
+    from deerflow.runtime.runs.worker import _call_agent_factory_off_loop
+
+    private_runtime = object()
+    calls: list[tuple[object, object]] = []
+
+    def factory(*, config, private_runtime):
+        calls.append((config, private_runtime))
+        return "graph"
+
+    assert (
+        await _call_agent_factory_off_loop(
+            factory,
+            {"configurable": {}},
+            None,
+            private_runtime,
+        )
+        == "graph"
+    )
+    assert calls == [({"configurable": {}}, private_runtime)]
+
+
+@pytest.mark.anyio
+async def test_private_worker_preflights_mount_support_before_factory_and_cleans_runtime(
+    tmp_path,
+) -> None:
+    from deerflow.runtime.private_scope import PrivateResourceScope
+    from deerflow.runtime.user_context import (
+        reset_current_user,
+        reset_runtime_storage_user_id,
+        set_current_user,
+        set_runtime_storage_user_id,
+    )
+    from deerflow.sandbox.sandbox_provider import (
+        SandboxProvider,
+        reset_sandbox_provider,
+        set_sandbox_provider,
+    )
+
+    run_manager = RunManager()
+    record = await run_manager.create("private-thread")
+    record.scope = PrivateResourceScope(
+        project_id="exact-project",
+        owner_user_id="exact-admitted-owner",
+        membership_version=1,
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    calls = 0
+
+    class Runtime:
+        closed = False
+        skill_root = tmp_path
+
+        async def aclose(self):
+            self.closed = True
+
+    runtime = Runtime()
+
+    class UnsupportedProvider(SandboxProvider):
+        validated_users: list[str] = []
+        released_users: list[str] = []
+
+        def acquire(self, thread_id=None, *, user_id=None):
+            del thread_id, user_id
+            return "unsupported"
+
+        def get(self, sandbox_id):
+            del sandbox_id
+            return None
+
+        def release(self, sandbox_id):
+            del sandbox_id
+
+        def validate_run_scoped_mounts(
+            self,
+            thread_id,
+            *,
+            user_id,
+            mounts,
+        ):
+            del thread_id
+            assert mounts
+            self.validated_users.append(user_id)
+            return super().validate_run_scoped_mounts(
+                "private-thread",
+                user_id=user_id,
+                mounts=mounts,
+            )
+
+        def release_run_scoped_mounts(self, thread_id, *, user_id, mounts):
+            del thread_id
+            assert mounts
+            self.released_users.append(user_id)
+
+    def legacy_factory(*, config):
+        nonlocal calls
+        del config
+        calls += 1
+        raise AssertionError("legacy factory must not run for private assets")
+
+    provider = UnsupportedProvider()
+    set_sandbox_provider(provider)
+    owner_token = set_current_user(SimpleNamespace(id="forged-ambient-owner"))
+    storage_token = set_runtime_storage_user_id("forged-ambient-storage")
+    try:
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(
+                checkpointer=None,
+                private_agent_runtime=runtime,
+                app_config=SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+            ),
+            agent_factory=legacy_factory,
+            graph_input={},
+            config={},
+        )
+    finally:
+        reset_runtime_storage_user_id(storage_token)
+        reset_current_user(owner_token)
+        reset_sandbox_provider()
+
+    assert calls == 0
+    assert runtime.closed is True
+    assert provider.validated_users == ["exact-admitted-owner"]
+    assert provider.released_users == ["exact-admitted-owner"]
+    assert record.status == RunStatus.error
+    assert record.error == ("Configured sandbox provider does not support run-scoped read-only mounts")
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_private_factory_never_falls_back_to_legacy_callable() -> None:
+    from deerflow.runtime.runs.worker import (
+        PrivateRuntimeFactoryUnavailable,
+        _call_agent_factory_off_loop,
+    )
+
+    calls = 0
+
+    def legacy_factory(*, config):
+        nonlocal calls
+        del config
+        calls += 1
+
+    with pytest.raises(PrivateRuntimeFactoryUnavailable):
+        await _call_agent_factory_off_loop(
+            legacy_factory,
+            {"configurable": {}},
+            None,
+            SimpleNamespace(aclose=object()),
+        )
+    assert calls == 0
+
+
+def test_exact_skill_prompt_does_not_touch_legacy_global_cache(tmp_path) -> None:
+    from deerflow.agents.lead_agent.prompt import (
+        _get_cached_skills_prompt_section,
+        apply_prompt_template,
+    )
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    skill_root = tmp_path / "custom" / "exact"
+    skill_root.mkdir(parents=True)
+    skill_file = skill_root / "SKILL.md"
+    skill_file.write_text("---\nname: exact\ndescription: exact project skill\n---\nbody\n", encoding="utf-8")
+    skill = parse_skill_file(skill_file, SkillCategory.CUSTOM, skill_root.relative_to(tmp_path / "custom"))
+    assert skill is not None
+    before = _get_cached_skills_prompt_section.cache_info()
+
+    prompt = apply_prompt_template(
+        exact_soul="exact soul",
+        exact_skills=(skill,),
+        exact_skills_container_path=str(tmp_path),
+        available_skills={"exact"},
+    )
+
+    after = _get_cached_skills_prompt_section.cache_info()
+    assert after.currsize == before.currsize
+    assert after.hits == before.hits
+    assert "exact soul" in prompt
+    assert str(tmp_path / "custom" / "exact" / "SKILL.md") in prompt
+
+
+def test_exact_runtime_slash_skill_is_read_only_and_never_uses_catalog_storage(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from deerflow.agents.middlewares.skill_activation_middleware import (
+        SkillActivationMiddleware,
+    )
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    skill_root = tmp_path / "custom" / "exact"
+    skill_root.mkdir(parents=True)
+    skill_file = skill_root / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: exact\ndescription: exact project skill\n---\nbody\n",
+        encoding="utf-8",
+    )
+    parsed = parse_skill_file(
+        skill_file,
+        SkillCategory.CUSTOM,
+        skill_root.relative_to(tmp_path / "custom"),
+    )
+    assert parsed is not None
+    skill = dataclasses.replace(parsed, enabled=True, runtime_read_only=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"exact"},
+        runtime_skills=(skill,),
+        runtime_skills_root=tmp_path,
+    )
+    monkeypatch.setattr(
+        middleware,
+        "_storage",
+        lambda: (_ for _ in ()).throw(AssertionError("run temp must not be exposed as catalog storage")),
+    )
+
+    resolution = middleware._resolve_activation("/exact do the exact task")
+
+    assert resolution is not None
+    assert resolution.activation is not None
+    assert resolution.activation.editable is False
+    reminder = middleware._build_activation_reminder(resolution.activation)
+    assert 'editable="false"' in reminder
+    assert str(skill_file) in reminder
+
+
+def test_exact_runtime_root_is_used_by_durable_skill_capture(tmp_path) -> None:
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.agents.middlewares.durable_context_middleware import (
+        DurableContextMiddleware,
+    )
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.model_config import ModelConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    app_config = AppConfig(
+        models=[
+            ModelConfig(
+                name="exact-model",
+                display_name="Exact",
+                use="langchain_openai:ChatOpenAI",
+                model="exact-model",
+                supports_thinking=False,
+                supports_vision=False,
+            )
+        ],
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+    )
+
+    middlewares = build_middlewares(
+        {"configurable": {}},
+        model_name="exact-model",
+        app_config=app_config,
+        runtime_skills=(),
+        runtime_skills_root=tmp_path,
+    )
+
+    durable = next(middleware for middleware in middlewares if isinstance(middleware, DurableContextMiddleware))
+    assert durable._skills_root == tmp_path.as_posix()
+
+
+def test_local_run_scoped_mount_supports_configured_skills_root_and_masks_legacy(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from deerflow.sandbox.local import LocalSandboxProvider
+    from deerflow.sandbox.local.local_sandbox import PathMapping
+    from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
+
+    configured_root = "/opt/deerflow/skills"
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path=configured_root)),
+    )
+    global_root = tmp_path / "global"
+    exact_root = tmp_path / "exact"
+    global_file = global_root / "custom" / "global-only" / "SKILL.md"
+    exact_file = exact_root / "custom" / "exact-only" / "SKILL.md"
+    global_file.parent.mkdir(parents=True)
+    exact_file.parent.mkdir(parents=True)
+    global_file.write_text("global", encoding="utf-8")
+    exact_file.write_text("exact", encoding="utf-8")
+
+    provider = LocalSandboxProvider()
+    monkeypatch.setattr(
+        provider,
+        "_path_mappings",
+        [
+            PathMapping(
+                container_path=f"{configured_root}/custom",
+                local_path=str(global_root / "custom"),
+                read_only=True,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        provider,
+        "_build_thread_path_mappings",
+        lambda *_args, **_kwargs: [],
+    )
+
+    legacy_id = provider.acquire("thread", user_id="owner")
+    legacy = provider.get(legacy_id)
+    assert legacy is not None
+    assert legacy.read_file(f"{configured_root}/custom/global-only/SKILL.md") == "global"
+
+    exact_id = provider.acquire_with_mounts(
+        "thread",
+        user_id="owner",
+        mounts=(
+            RunScopedReadOnlyMount(
+                run_id="run-exact",
+                container_path=configured_root,
+                host_path=str(exact_root),
+            ),
+        ),
+    )
+    exact = provider.get(exact_id)
+    assert exact is not None
+    assert exact.read_file(f"{configured_root}/custom/exact-only/SKILL.md") == "exact"
+    with pytest.raises(OSError):
+        exact.read_file(f"{configured_root}/custom/global-only/SKILL.md")
+    with pytest.raises(OSError, match="Read-only file system"):
+        exact.write_file(
+            f"{configured_root}/custom/exact-only/SKILL.md",
+            "forged",
+        )
+    assert provider.get(legacy_id) is legacy
+    assert legacy.read_file(f"{configured_root}/custom/global-only/SKILL.md") == "global"
+    provider.release_run_scoped_mounts(
+        "thread",
+        user_id="owner",
+        mounts=(
+            RunScopedReadOnlyMount(
+                run_id="run-exact",
+                container_path=configured_root,
+                host_path=str(exact_root),
+            ),
+        ),
+    )
+    assert provider.get(exact_id) is None
+    assert provider.get(legacy_id) is legacy
+
+
+@pytest.mark.anyio
+async def test_private_worker_rejects_local_host_bash_before_model_factory(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.runtime.private_scope import PrivateResourceScope
+    from deerflow.sandbox.local import LocalSandboxProvider
+    from deerflow.sandbox.sandbox_provider import (
+        reset_sandbox_provider,
+        set_sandbox_provider,
+    )
+
+    app_config = AppConfig(
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=True,
+        )
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+    run_manager = RunManager()
+    record = await run_manager.create("private-thread")
+    record.scope = PrivateResourceScope(
+        project_id="exact-project",
+        owner_user_id="exact-owner",
+        membership_version=1,
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    factory_calls = 0
+
+    class Runtime:
+        skill_root = tmp_path
+
+        async def aclose(self):
+            return None
+
+    def model_factory(*_args, **_kwargs):
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("model factory must not run")
+
+    provider = LocalSandboxProvider()
+    set_sandbox_provider(provider)
+    try:
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(
+                checkpointer=None,
+                private_agent_runtime=Runtime(),
+                app_config=app_config,
+            ),
+            agent_factory=model_factory,
+            graph_input={},
+            config={},
+        )
+    finally:
+        reset_sandbox_provider()
+
+    assert factory_calls == 0
+    assert record.status == RunStatus.error
+    assert record.error == ("Local private runtime cannot enforce read-only mounts when host bash is enabled")
+
+
+@pytest.mark.parametrize(
+    ("material_value", "remote_result"),
+    [
+        pytest.param(734921, {"content": [{"value": 734921}]}, id="numeric"),
+        pytest.param(True, {"artifact": [False, {"value": True}]}, id="boolean"),
+    ],
+)
+def test_mcp_result_scan_rejects_nested_json_scalar_credential_echo(
+    material_value,
+    remote_result,
+) -> None:
+    from app.private_work.asset_runtime import PrivateAgentRuntime
+
+    with pytest.raises(PrivateWorkUnavailable) as captured:
+        PrivateAgentRuntime._assert_mcp_result_secret_free(
+            remote_result,
+            {"slot": {"oauth": {"sentinel": material_value}}},
+        )
+
+    assert str(captured.value) == "Private work is unavailable."
+
+
+@pytest.mark.anyio
+async def test_mcp_discovery_scans_mixed_type_schema_without_type_errors(
+    monkeypatch,
+) -> None:
+    from pydantic import BaseModel, Field
+
+    from app.private_work.asset_runtime import PrivateAgentRuntime
+
+    class SafeArgs(BaseModel):
+        value: str
+
+    class NumericLeakArgs(BaseModel):
+        value: int = Field(default=734921)
+
+    remote = SimpleNamespace(
+        name="safe_tool",
+        description="safe description",
+        args_schema=SafeArgs,
+    )
+
+    async def one_shot(_version_id, _definition, _material, operation):
+        return await operation((remote,))
+
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_with_one_shot_mcp_tools",
+        staticmethod(one_shot),
+    )
+    material = {"slot": {"oauth": {"count": 734921, "blob": b"binary-sentinel"}}}
+    discovered = await PrivateAgentRuntime._discover_exact_mcp(
+        uuid.uuid4(),
+        {},
+        material,
+    )
+    assert [tool.name for tool in discovered] == ["safe_tool"]
+
+    remote.args_schema = NumericLeakArgs
+    with pytest.raises(PrivateWorkAssetStale):
+        await PrivateAgentRuntime._discover_exact_mcp(uuid.uuid4(), {}, material)
+
+    remote.args_schema = SafeArgs
+    remote.description = "echoed binary-sentinel"
+    with pytest.raises(PrivateWorkAssetStale):
+        await PrivateAgentRuntime._discover_exact_mcp(uuid.uuid4(), {}, material)
+
+
+def _private_context() -> object:
+    from app.private_work.context import PrivateWorkContext
+
+    return PrivateWorkContext.from_project(
+        ProjectContext(
+            user_id=uuid.uuid4(),
+            project_id=uuid.uuid4(),
+            membership_id=uuid.uuid4(),
+            role=ProjectRole.ADMIN,
+            capabilities=capabilities_for(ProjectRole.ADMIN),
+            membership_version=1,
+            request_id="req-private-start",
+        )
+    )
+
+
+def _private_body(*, checkpoint_id=None, assistant_id=None):
+    return SimpleNamespace(
+        assistant_id=assistant_id,
+        input={"messages": [{"role": "user", "content": "hello"}]},
+        command=None,
+        metadata={"safe": "value"},
+        config={"context": {"project_id": "forged"}},
+        context={"thinking_enabled": False},
+        checkpoint_id=checkpoint_id,
+        checkpoint=None,
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        stream_mode=["values"],
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+
+
+@pytest.mark.anyio
+async def test_start_private_run_uses_shared_launch_once_after_snapshot(monkeypatch) -> None:
+    from app.gateway import services
+    from app.private_work.context import PrivateWorkContext
+
+    events: list[str] = []
+    context = _private_context()
+    assert isinstance(context, PrivateWorkContext)
+    now = datetime.now(UTC)
+    persisted = PrivateRunRecord(
+        run_id=str(uuid.uuid4()),
+        thread_id="private-thread",
+        project_id=context.project_id,
+        owner_user_id=str(context.user_id),
+        assistant_id=str(uuid.uuid4()),
+        status="pending",
+        multitask_strategy="reject",
+        metadata={"safe": "value"},
+        kwargs={"input": "safe"},
+        error=None,
+        model_name="exact-model",
+        created_at=now,
+        updated_at=now,
+    )
+    admitted = AdmittedPrivateRun(
+        run=persisted,
+        snapshot=PersistedRunSnapshot(assets=(), mcp_grants=(), catalog_generation=3),
+        opaque_runtime_scope=context.resource_scope,
+    )
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def begin(self):
+            return self
+
+    class Admission:
+        async def admit(self, passed_context, thread_id, request):
+            assert passed_context is context
+            assert thread_id == "private-thread"
+            assert request.status == "pending"
+            assert request.assistant_id is None
+            assert "forged-project-agent" not in json.dumps(
+                {"metadata": request.metadata, "kwargs": request.kwargs},
+                default=str,
+            )
+            events.append("snapshot")
+            return admitted
+
+    class Runtime:
+        model_ref = "exact-model"
+
+        async def aclose(self):
+            events.append("cleanup")
+
+    class Materializer:
+        async def materialize(self, passed_context, passed_admitted):
+            assert passed_context is context
+            assert passed_admitted is admitted
+            events.append("materialize")
+            return Runtime()
+
+    class Revalidator:
+        async def require(self, _session, passed_context, *capabilities, lock=False):
+            assert passed_context is context
+            assert len(capabilities) == 2
+            assert lock is False
+            events.append("preflight")
+            return object()
+
+    class Manager:
+        async def register_persisted(self, **kwargs):
+            events.append("register")
+            assert kwargs["run_id"] == persisted.run_id
+            return RunRecord(
+                run_id=persisted.run_id,
+                thread_id=persisted.thread_id,
+                assistant_id=persisted.assistant_id,
+                status=RunStatus.pending,
+                on_disconnect=DisconnectMode.cancel,
+                scope=context.resource_scope,
+            )
+
+    manager = Manager()
+    run_context = RunContext(
+        checkpointer=object(),
+        app_config=SimpleNamespace(get_model_config=lambda name: object() if name == "exact-model" else None),
+    )
+    monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", lambda: lambda: Session())
+    monkeypatch.setattr(services, "PrivateWorkRevalidator", Revalidator)
+    monkeypatch.setattr(services, "get_project_checkpointer", lambda *_args: object())
+    monkeypatch.setattr(services, "get_run_context", lambda _request: run_context)
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
+    monkeypatch.setattr(services, "get_stream_bridge", lambda _request: object())
+
+    def launch(**kwargs):
+        events.append("launch")
+        assert kwargs["run_context"].private_agent_runtime is not None
+        assert kwargs["record"].run_id == persisted.run_id
+        assert kwargs["owner_user_id"] == persisted.owner_user_id
+        assert kwargs["runtime_user_id"] == persisted.owner_user_id
+        serialized = json.dumps(kwargs["config"], default=str)
+        assert "forged-project-agent" not in serialized
+        assert "agent_name" not in kwargs["config"].get("context", {})
+
+    monkeypatch.setattr(services, "_launch_registered_run", launch)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()), state=SimpleNamespace())
+
+    record = await services.start_private_run(
+        _private_body(assistant_id="forged-project-agent"),
+        "private-thread",
+        request,
+        context,
+        admission_service=Admission(),
+        asset_runtime=Materializer(),
+    )
+
+    assert record.run_id == persisted.run_id
+    assert events == ["preflight", "snapshot", "materialize", "register", "launch"]
+
+
+@pytest.mark.anyio
+async def test_launch_registered_private_run_derives_task_identities_from_admitted_owner(
+    monkeypatch,
+) -> None:
+    from app.gateway import services
+    from deerflow.runtime.user_context import (
+        get_current_user,
+        get_runtime_storage_user_id,
+        reset_current_user,
+        reset_runtime_storage_user_id,
+        set_current_user,
+        set_runtime_storage_user_id,
+    )
+
+    captured: list[tuple[str | None, str | None]] = []
+
+    async def run_agent(*_args, **_kwargs):
+        current = get_current_user()
+        captured.append(
+            (
+                str(current.id) if current is not None else None,
+                get_runtime_storage_user_id(),
+            )
+        )
+
+    monkeypatch.setattr(services, "run_agent", run_agent)
+    record = RunRecord(
+        run_id=str(uuid.uuid4()),
+        thread_id="private-thread",
+        assistant_id=None,
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    owner_token = set_current_user(SimpleNamespace(id="forged-ambient-owner"))
+    storage_token = set_runtime_storage_user_id("forged-ambient-storage")
+    try:
+        services._launch_registered_run(
+            bridge=object(),
+            run_manager=object(),
+            record=record,
+            run_context=object(),
+            agent_factory=object(),
+            graph_input={},
+            config={},
+            stream_modes=[],
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+            owner_user_id="exact-admitted-owner",
+            runtime_user_id="exact-admitted-owner",
+        )
+        assert record.task is not None
+        await asyncio.wait_for(record.task, timeout=2)
+        assert captured == [("exact-admitted-owner", "exact-admitted-owner")]
+        assert get_current_user().id == "forged-ambient-owner"
+        assert get_runtime_storage_user_id() == "forged-ambient-storage"
+    finally:
+        reset_runtime_storage_user_id(storage_token)
+        reset_current_user(owner_token)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("internal_error", "public_error"),
+    [
+        pytest.param(
+            ConflictError("raw internal conflict task5-secret-sentinel"),
+            PrivateWorkConflict,
+            id="manager-conflict",
+        ),
+        pytest.param(
+            RuntimeError("raw internal failure task5-secret-sentinel"),
+            PrivateWorkUnavailable,
+            id="unexpected-manager-failure",
+        ),
+    ],
+)
+async def test_start_private_run_normalizes_registration_failures_and_compensates(
+    monkeypatch,
+    internal_error,
+    public_error,
+) -> None:
+    from app.gateway import services
+    from app.private_work.context import PrivateWorkContext
+
+    events: list[str] = []
+    context = _private_context()
+    assert isinstance(context, PrivateWorkContext)
+    now = datetime.now(UTC)
+    persisted = PrivateRunRecord(
+        run_id=str(uuid.uuid4()),
+        thread_id="private-thread",
+        project_id=context.project_id,
+        owner_user_id=str(context.user_id),
+        assistant_id=None,
+        status="pending",
+        multitask_strategy="reject",
+        metadata={},
+        kwargs={},
+        error=None,
+        model_name="exact-model",
+        created_at=now,
+        updated_at=now,
+    )
+    admitted = AdmittedPrivateRun(
+        run=persisted,
+        snapshot=PersistedRunSnapshot(
+            assets=(),
+            mcp_grants=(),
+            catalog_generation=1,
+        ),
+        opaque_runtime_scope=context.resource_scope,
+    )
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def begin(self):
+            return self
+
+    class Admission:
+        async def admit(self, *_args):
+            events.append("snapshot")
+            return admitted
+
+    class Runtime:
+        model_ref = "exact-model"
+
+        async def aclose(self):
+            events.append("cleanup")
+
+    class Materializer:
+        async def materialize(self, *_args):
+            events.append("materialize")
+            return Runtime()
+
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            events.append("preflight")
+            return object()
+
+    class Manager:
+        async def register_persisted(self, **_kwargs):
+            events.append("register")
+            raise internal_error
+
+    async def compensate(_context, run_id):
+        assert run_id == persisted.run_id
+        events.append("compensate")
+
+    monkeypatch.setattr(
+        "deerflow.persistence.engine.get_session_factory",
+        lambda: lambda: Session(),
+    )
+    monkeypatch.setattr(services, "PrivateWorkRevalidator", Revalidator)
+    monkeypatch.setattr(services, "get_project_checkpointer", lambda *_args: object())
+    monkeypatch.setattr(
+        services,
+        "get_run_context",
+        lambda _request: RunContext(
+            checkpointer=object(),
+            app_config=SimpleNamespace(get_model_config=lambda _name: object()),
+        ),
+    )
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: Manager())
+    monkeypatch.setattr(services, "_mark_private_run_launch_failed", compensate)
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace()),
+        state=SimpleNamespace(),
+    )
+
+    with pytest.raises(public_error) as captured:
+        await services.start_private_run(
+            _private_body(),
+            "private-thread",
+            request,
+            context,
+            admission_service=Admission(),
+            asset_runtime=Materializer(),
+        )
+
+    assert captured.value.request_id == context.request_id
+    assert "task5-secret-sentinel" not in str(captured.value)
+    assert events == [
+        "preflight",
+        "snapshot",
+        "materialize",
+        "register",
+        "compensate",
+        "cleanup",
+    ]
+
+
+@pytest.mark.anyio
+async def test_start_private_run_preserves_original_error_when_compensation_also_fails(
+    monkeypatch,
+    caplog,
+) -> None:
+    from app.gateway import services
+
+    context = _private_context()
+    now = datetime.now(UTC)
+    persisted = PrivateRunRecord(
+        run_id=str(uuid.uuid4()),
+        thread_id="private-thread",
+        project_id=context.project_id,
+        owner_user_id=str(context.user_id),
+        assistant_id=None,
+        status="pending",
+        multitask_strategy="reject",
+        metadata={},
+        kwargs={},
+        error=None,
+        model_name="exact-model",
+        created_at=now,
+        updated_at=now,
+    )
+    admitted = AdmittedPrivateRun(
+        run=persisted,
+        snapshot=PersistedRunSnapshot(
+            assets=(),
+            mcp_grants=(),
+            catalog_generation=1,
+        ),
+        opaque_runtime_scope=context.resource_scope,
+    )
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def begin(self):
+            return self
+
+    class Admission:
+        async def admit(self, *_args):
+            return admitted
+
+    class Runtime:
+        model_ref = "exact-model"
+
+        async def aclose(self):
+            raise RuntimeError("cleanup task5-secret-sentinel")
+
+    class Materializer:
+        async def materialize(self, *_args):
+            return Runtime()
+
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            return object()
+
+    record = RunRecord(
+        run_id=persisted.run_id,
+        thread_id=persisted.thread_id,
+        assistant_id=None,
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        scope=context.resource_scope,
+    )
+
+    class Manager:
+        async def register_persisted(self, **_kwargs):
+            return record
+
+        async def set_status(self, *_args, **_kwargs):
+            raise RuntimeError("status task5-secret-sentinel")
+
+    monkeypatch.setattr(
+        "deerflow.persistence.engine.get_session_factory",
+        lambda: lambda: Session(),
+    )
+    monkeypatch.setattr(services, "PrivateWorkRevalidator", Revalidator)
+    monkeypatch.setattr(services, "get_project_checkpointer", lambda *_args: object())
+    monkeypatch.setattr(
+        services,
+        "get_run_context",
+        lambda _request: RunContext(
+            checkpointer=object(),
+            app_config=SimpleNamespace(get_model_config=lambda _name: object()),
+        ),
+    )
+    manager = Manager()
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
+    monkeypatch.setattr(services, "get_stream_bridge", lambda _request: object())
+    monkeypatch.setattr(
+        services,
+        "_launch_registered_run",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("launch task5-secret-sentinel")),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace()),
+        state=SimpleNamespace(),
+    )
+
+    with pytest.raises(PrivateWorkUnavailable) as captured:
+        await services.start_private_run(
+            _private_body(),
+            "private-thread",
+            request,
+            context,
+            admission_service=Admission(),
+            asset_runtime=Materializer(),
+        )
+
+    assert captured.value.request_id == context.request_id
+    assert str(captured.value) == "Private work is unavailable."
+    assert "task5-secret-sentinel" not in str(captured.value)
+    assert "task5-secret-sentinel" not in caplog.text
+
+
+@pytest.mark.anyio
+async def test_start_private_run_rejects_unknown_exact_model_before_materialization(
+    monkeypatch,
+) -> None:
+    from app.gateway import services
+
+    context = _private_context()
+    now = datetime.now(UTC)
+    persisted = PrivateRunRecord(
+        run_id=str(uuid.uuid4()),
+        thread_id="private-thread",
+        project_id=context.project_id,
+        owner_user_id=str(context.user_id),
+        assistant_id=str(uuid.uuid4()),
+        status="pending",
+        multitask_strategy="reject",
+        metadata={},
+        kwargs={},
+        error=None,
+        model_name="removed-model",
+        created_at=now,
+        updated_at=now,
+    )
+    admitted = AdmittedPrivateRun(
+        run=persisted,
+        snapshot=PersistedRunSnapshot(assets=(), mcp_grants=(), catalog_generation=1),
+        opaque_runtime_scope=context.resource_scope,
+    )
+    calls = {"materialize": 0, "launch": 0, "compensate": 0}
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def begin(self):
+            return self
+
+    class Admission:
+        async def admit(self, *_args):
+            return admitted
+
+    class Materializer:
+        async def materialize(self, *_args):
+            calls["materialize"] += 1
+            raise AssertionError("materializer must not run")
+
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            return object()
+
+    async def compensate(_context, run_id):
+        assert run_id == persisted.run_id
+        calls["compensate"] += 1
+
+    monkeypatch.setattr(
+        "deerflow.persistence.engine.get_session_factory",
+        lambda: lambda: Session(),
+    )
+    monkeypatch.setattr(services, "PrivateWorkRevalidator", Revalidator)
+    monkeypatch.setattr(services, "get_project_checkpointer", lambda *_args: object())
+    monkeypatch.setattr(
+        services,
+        "get_run_context",
+        lambda _request: RunContext(
+            checkpointer=object(),
+            app_config=SimpleNamespace(get_model_config=lambda _name: None),
+        ),
+    )
+    monkeypatch.setattr(services, "_mark_private_run_launch_failed", compensate)
+    monkeypatch.setattr(
+        services,
+        "_launch_registered_run",
+        lambda **_kwargs: calls.__setitem__("launch", calls["launch"] + 1),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace()),
+        state=SimpleNamespace(),
+    )
+
+    with pytest.raises(PrivateWorkAssetStale):
+        await services.start_private_run(
+            _private_body(),
+            "private-thread",
+            request,
+            context,
+            admission_service=Admission(),
+            asset_runtime=Materializer(),
+        )
+
+    assert calls == {"materialize": 0, "launch": 0, "compensate": 1}
+
+
+@pytest.mark.anyio
+async def test_start_private_run_rejects_stale_scope_before_checkpoint_access(monkeypatch) -> None:
+    from app.gateway import services
+
+    context = _private_context()
+    checkpoint_calls = 0
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def begin(self):
+            return self
+
+    class Checkpointer:
+        async def aget_tuple(self, _config):
+            nonlocal checkpoint_calls
+            checkpoint_calls += 1
+
+    class Revalidator:
+        async def require(self, _session, passed_context, *_capabilities, lock=False):
+            raise PrivateWorkNotFound(passed_context.request_id)
+
+    monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", lambda: lambda: Session())
+    monkeypatch.setattr(services, "PrivateWorkRevalidator", Revalidator)
+    monkeypatch.setattr(services, "get_project_checkpointer", lambda *_args: Checkpointer())
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()), state=SimpleNamespace())
+
+    with pytest.raises(PrivateWorkNotFound):
+        await services.start_private_run(
+            _private_body(checkpoint_id="checkpoint-id"),
+            "private-thread",
+            request,
+            context,
+            admission_service=object(),
+            asset_runtime=object(),
+        )
+    assert checkpoint_calls == 0

@@ -68,7 +68,7 @@ class RunMcpGrantSnapshot:
     credential_version_id: uuid.UUID
 
 
-class _SnapshotAssetStale(Exception):
+class RunSnapshotAssetStale(Exception):
     """Internal stale marker remapped at the request-context boundary."""
 
 
@@ -116,7 +116,7 @@ class RunSnapshotRepository:
             )
         ).one_or_none()
         if row is None:
-            raise _SnapshotAssetStale
+            raise RunSnapshotAssetStale
         asset, version = row
         if (
             asset.scope != snapshot.scope.value
@@ -129,7 +129,7 @@ class RunSnapshotRepository:
                 project_id=project_id,
             )
         ):
-            raise _SnapshotAssetStale
+            raise RunSnapshotAssetStale
         return asset, version
 
     @staticmethod
@@ -142,7 +142,7 @@ class RunSnapshotRepository:
         for version_id in version_ids:
             row = (await session.execute(select(SkillRow, SkillVersionRow).join(SkillVersionRow, SkillVersionRow.skill_id == SkillRow.id).where(SkillVersionRow.id == version_id))).one_or_none()
             if row is None:
-                raise _SnapshotAssetStale
+                raise RunSnapshotAssetStale
             asset, version = row
             if (
                 not RunSnapshotRepository._asset_allowed(
@@ -153,7 +153,7 @@ class RunSnapshotRepository:
                 or asset.status != "active"
                 or version.workflow_status != "published"
             ):
-                raise _SnapshotAssetStale
+                raise RunSnapshotAssetStale
             rows.append((asset, version))
         return rows
 
@@ -167,7 +167,7 @@ class RunSnapshotRepository:
         for version_id in version_ids:
             row = (await session.execute(select(McpServerRow, McpServerVersionRow).join(McpServerVersionRow, McpServerVersionRow.mcp_server_id == McpServerRow.id).where(McpServerVersionRow.id == version_id))).one_or_none()
             if row is None:
-                raise _SnapshotAssetStale
+                raise RunSnapshotAssetStale
             asset, version = row
             if (
                 not RunSnapshotRepository._asset_allowed(
@@ -178,7 +178,7 @@ class RunSnapshotRepository:
                 or asset.status != "active"
                 or version.workflow_status != "published"
             ):
-                raise _SnapshotAssetStale
+                raise RunSnapshotAssetStale
             rows.append((asset, version))
         return rows
 
@@ -212,7 +212,7 @@ class RunSnapshotRepository:
             ).scalars()
         )
         if skill_ids != snapshot.payload.skill_version_ids or mcp_ids != snapshot.payload.mcp_version_ids or snapshot.dependency_version_ids != (*skill_ids, *mcp_ids):
-            raise _SnapshotAssetStale
+            raise RunSnapshotAssetStale
 
     @staticmethod
     async def _credential_closures(
@@ -234,7 +234,7 @@ class RunSnapshotRepository:
                 load_envelopes=False,
             )
         except McpCredentialClosureInvalid:
-            raise _SnapshotAssetStale from None
+            raise RunSnapshotAssetStale from None
 
     async def create_run_with_snapshot(
         self,
@@ -244,108 +244,16 @@ class RunSnapshotRepository:
         resolved_agent: ResolvedAgentSnapshot,
     ) -> PrivateRunRecord:
         context = require_issued_private_work_context(context)
-        if type(request) is not PrivateRunCreate or type(resolved_agent) is not ResolvedAgentSnapshot:
-            raise PrivateWorkConflict(context.request_id)
-        if resolved_agent.kind is not AssetKind.AGENT or resolved_agent.catalog_generation < 0:
-            raise PrivateWorkConflict(context.request_id)
-        _reject_secret_bearing_keys(request.metadata, context.request_id)
-        _reject_secret_bearing_keys(request.kwargs, context.request_id)
-        project_id = context.project_id
-        safe_request = replace(
-            request,
-            assistant_id=request.assistant_id or str(resolved_agent.asset_id),
-        )
         try:
             async with self._session_factory() as session, session.begin():
-                await self._agent(session, resolved_agent, project_id)
-                await self._validate_dependency_order(session, resolved_agent)
-                skills = await self._skills(
+                return await self.create_run_with_snapshot_in_session(
                     session,
-                    resolved_agent.payload.skill_version_ids,
-                    project_id,
+                    context,
+                    thread_id,
+                    request,
+                    resolved_agent,
                 )
-                mcps = await self._mcps(
-                    session,
-                    resolved_agent.payload.mcp_version_ids,
-                    project_id,
-                )
-                closures = await self._credential_closures(session, mcps)
-                generation = await session.scalar(select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1).with_for_update())
-                if generation != resolved_agent.catalog_generation:
-                    raise _SnapshotAssetStale
-                run = await PrivateRunRepository(session).create(
-                    scope=context.resource_scope,
-                    thread_id=thread_id,
-                    request=safe_request,
-                )
-                asset_rows = [
-                    RunAssetVersionRow(
-                        project_id=context.project_id,
-                        owner_user_id=str(context.user_id),
-                        thread_id=thread_id,
-                        run_id=run.run_id,
-                        asset_kind=AssetKind.AGENT.value,
-                        dependency_order=0,
-                        asset_scope=resolved_agent.scope.value,
-                        asset_id=resolved_agent.asset_id,
-                        version_id=resolved_agent.version_id,
-                        payload_checksum=resolved_agent.checksum,
-                        catalog_generation=resolved_agent.catalog_generation,
-                    )
-                ]
-                dependency_order = 1
-                for asset, version in skills:
-                    asset_rows.append(
-                        RunAssetVersionRow(
-                            project_id=context.project_id,
-                            owner_user_id=str(context.user_id),
-                            thread_id=thread_id,
-                            run_id=run.run_id,
-                            asset_kind=AssetKind.SKILL.value,
-                            dependency_order=dependency_order,
-                            asset_scope=asset.scope,
-                            asset_id=asset.id,
-                            version_id=version.id,
-                            payload_checksum=version.payload_checksum,
-                            catalog_generation=resolved_agent.catalog_generation,
-                        )
-                    )
-                    dependency_order += 1
-                for asset, version in mcps:
-                    asset_rows.append(
-                        RunAssetVersionRow(
-                            project_id=context.project_id,
-                            owner_user_id=str(context.user_id),
-                            thread_id=thread_id,
-                            run_id=run.run_id,
-                            asset_kind=AssetKind.MCP.value,
-                            dependency_order=dependency_order,
-                            asset_scope=asset.scope,
-                            asset_id=asset.id,
-                            version_id=version.id,
-                            payload_checksum=version.payload_checksum,
-                            catalog_generation=resolved_agent.catalog_generation,
-                        )
-                    )
-                    dependency_order += 1
-                session.add_all(asset_rows)
-                session.add_all(
-                    RunMcpGrantSnapshotRow(
-                        project_id=context.project_id,
-                        owner_user_id=str(context.user_id),
-                        thread_id=thread_id,
-                        run_id=run.run_id,
-                        mcp_version_id=material.grant.mcp_server_version_id,
-                        credential_slot_id=material.slot.id,
-                        credential_grant_id=material.grant.id,
-                        credential_version_id=material.version.id,
-                    )
-                    for _asset, version in mcps
-                    for material in closures[uuid.UUID(str(version.id))].materials
-                )
-                await session.flush()
-                return run
-        except _SnapshotAssetStale:
+        except RunSnapshotAssetStale:
             raise PrivateWorkAssetStale(context.request_id) from None
         except PrivateRunConflict:
             raise PrivateWorkConflict(context.request_id) from None
@@ -356,6 +264,122 @@ class RunSnapshotRepository:
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
 
+    async def create_run_with_snapshot_in_session(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        thread_id: str,
+        request: PrivateRunCreate,
+        resolved_agent: ResolvedAgentSnapshot,
+    ) -> PrivateRunRecord:
+        """Write a pending run and exact closure in a caller-owned transaction."""
+
+        context = require_issued_private_work_context(context)
+        if not isinstance(session, AsyncSession) or not session.in_transaction():
+            raise PrivateWorkConflict(context.request_id)
+        if type(request) is not PrivateRunCreate or type(resolved_agent) is not ResolvedAgentSnapshot:
+            raise PrivateWorkConflict(context.request_id)
+        if resolved_agent.kind is not AssetKind.AGENT or resolved_agent.catalog_generation < 0:
+            raise PrivateWorkConflict(context.request_id)
+        _reject_secret_bearing_keys(request.metadata, context.request_id)
+        _reject_secret_bearing_keys(request.kwargs, context.request_id)
+        project_id = context.project_id
+        safe_request = replace(
+            request,
+            assistant_id=str(resolved_agent.asset_id),
+            status="pending",
+            multitask_strategy="reject",
+            model_name=resolved_agent.payload.model_ref,
+        )
+        await self._agent(session, resolved_agent, project_id)
+        await self._validate_dependency_order(session, resolved_agent)
+        skills = await self._skills(
+            session,
+            resolved_agent.payload.skill_version_ids,
+            project_id,
+        )
+        mcps = await self._mcps(
+            session,
+            resolved_agent.payload.mcp_version_ids,
+            project_id,
+        )
+        closures = await self._credential_closures(session, mcps)
+        generation = await session.scalar(select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1).with_for_update())
+        if generation != resolved_agent.catalog_generation:
+            raise RunSnapshotAssetStale
+        run = await PrivateRunRepository(session).create(
+            scope=context.resource_scope,
+            thread_id=thread_id,
+            request=safe_request,
+        )
+        asset_rows = [
+            RunAssetVersionRow(
+                project_id=context.project_id,
+                owner_user_id=str(context.user_id),
+                thread_id=thread_id,
+                run_id=run.run_id,
+                asset_kind=AssetKind.AGENT.value,
+                dependency_order=0,
+                asset_scope=resolved_agent.scope.value,
+                asset_id=resolved_agent.asset_id,
+                version_id=resolved_agent.version_id,
+                payload_checksum=resolved_agent.checksum,
+                catalog_generation=resolved_agent.catalog_generation,
+            )
+        ]
+        dependency_order = 1
+        for asset, version in skills:
+            asset_rows.append(
+                RunAssetVersionRow(
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    thread_id=thread_id,
+                    run_id=run.run_id,
+                    asset_kind=AssetKind.SKILL.value,
+                    dependency_order=dependency_order,
+                    asset_scope=asset.scope,
+                    asset_id=asset.id,
+                    version_id=version.id,
+                    payload_checksum=version.payload_checksum,
+                    catalog_generation=resolved_agent.catalog_generation,
+                )
+            )
+            dependency_order += 1
+        for asset, version in mcps:
+            asset_rows.append(
+                RunAssetVersionRow(
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    thread_id=thread_id,
+                    run_id=run.run_id,
+                    asset_kind=AssetKind.MCP.value,
+                    dependency_order=dependency_order,
+                    asset_scope=asset.scope,
+                    asset_id=asset.id,
+                    version_id=version.id,
+                    payload_checksum=version.payload_checksum,
+                    catalog_generation=resolved_agent.catalog_generation,
+                )
+            )
+            dependency_order += 1
+        session.add_all(asset_rows)
+        session.add_all(
+            RunMcpGrantSnapshotRow(
+                project_id=context.project_id,
+                owner_user_id=str(context.user_id),
+                thread_id=thread_id,
+                run_id=run.run_id,
+                mcp_version_id=material.grant.mcp_server_version_id,
+                credential_slot_id=material.slot.id,
+                credential_grant_id=material.grant.id,
+                credential_version_id=material.version.id,
+            )
+            for _asset, version in mcps
+            for material in closures[uuid.UUID(str(version.id))].materials
+        )
+        await session.flush()
+        return run
+
     async def list_assets(
         self,
         context: PrivateWorkContext,
@@ -364,31 +388,43 @@ class RunSnapshotRepository:
         context = require_issued_private_work_context(context)
         try:
             async with self._session_factory() as session:
-                rows = (
-                    await session.execute(
-                        select(RunAssetVersionRow)
-                        .where(
-                            RunAssetVersionRow.project_id == context.project_id,
-                            RunAssetVersionRow.owner_user_id == str(context.user_id),
-                            RunAssetVersionRow.run_id == run_id,
-                        )
-                        .order_by(RunAssetVersionRow.dependency_order)
-                    )
-                ).scalars()
-                return tuple(
-                    RunAssetSnapshot(
-                        asset_kind=row.asset_kind,
-                        dependency_order=row.dependency_order,
-                        asset_scope=row.asset_scope,
-                        asset_id=row.asset_id,
-                        version_id=row.version_id,
-                        payload_checksum=row.payload_checksum,
-                        catalog_generation=row.catalog_generation,
-                    )
-                    for row in rows
-                )
+                return await self.list_assets_in_session(session, context, run_id)
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
+
+    async def list_assets_in_session(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        run_id: str,
+        *,
+        lock: bool = False,
+    ) -> tuple[RunAssetSnapshot, ...]:
+        context = require_issued_private_work_context(context)
+        statement = (
+            select(RunAssetVersionRow)
+            .where(
+                RunAssetVersionRow.project_id == context.project_id,
+                RunAssetVersionRow.owner_user_id == str(context.user_id),
+                RunAssetVersionRow.run_id == run_id,
+            )
+            .order_by(RunAssetVersionRow.dependency_order)
+        )
+        if lock:
+            statement = statement.with_for_update(of=RunAssetVersionRow)
+        rows = (await session.execute(statement)).scalars()
+        return tuple(
+            RunAssetSnapshot(
+                asset_kind=row.asset_kind,
+                dependency_order=row.dependency_order,
+                asset_scope=row.asset_scope,
+                asset_id=row.asset_id,
+                version_id=row.version_id,
+                payload_checksum=row.payload_checksum,
+                catalog_generation=row.catalog_generation,
+            )
+            for row in rows
+        )
 
     async def list_mcp_grants(
         self,
@@ -398,28 +434,87 @@ class RunSnapshotRepository:
         context = require_issued_private_work_context(context)
         try:
             async with self._session_factory() as session:
-                rows = (
-                    await session.execute(
-                        select(RunMcpGrantSnapshotRow)
-                        .where(
-                            RunMcpGrantSnapshotRow.project_id == context.project_id,
-                            RunMcpGrantSnapshotRow.owner_user_id == str(context.user_id),
-                            RunMcpGrantSnapshotRow.run_id == run_id,
-                        )
-                        .order_by(
-                            RunMcpGrantSnapshotRow.mcp_version_id,
-                            RunMcpGrantSnapshotRow.credential_slot_id,
-                        )
-                    )
-                ).scalars()
-                return tuple(
-                    RunMcpGrantSnapshot(
-                        mcp_version_id=row.mcp_version_id,
-                        credential_slot_id=row.credential_slot_id,
-                        credential_grant_id=row.credential_grant_id,
-                        credential_version_id=row.credential_version_id,
-                    )
-                    for row in rows
-                )
+                return await self.list_mcp_grants_in_session(session, context, run_id)
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
+
+    async def list_mcp_grants_in_session(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        run_id: str,
+        *,
+        lock: bool = False,
+    ) -> tuple[RunMcpGrantSnapshot, ...]:
+        context = require_issued_private_work_context(context)
+        statement = (
+            select(RunMcpGrantSnapshotRow)
+            .where(
+                RunMcpGrantSnapshotRow.project_id == context.project_id,
+                RunMcpGrantSnapshotRow.owner_user_id == str(context.user_id),
+                RunMcpGrantSnapshotRow.run_id == run_id,
+            )
+            .order_by(
+                RunMcpGrantSnapshotRow.mcp_version_id,
+                RunMcpGrantSnapshotRow.credential_slot_id,
+            )
+        )
+        if lock:
+            statement = statement.with_for_update(of=RunMcpGrantSnapshotRow)
+        rows = (await session.execute(statement)).scalars()
+        return tuple(
+            RunMcpGrantSnapshot(
+                mcp_version_id=row.mcp_version_id,
+                credential_slot_id=row.credential_slot_id,
+                credential_grant_id=row.credential_grant_id,
+                credential_version_id=row.credential_version_id,
+            )
+            for row in rows
+        )
+
+    async def current_mcp_grants_in_session(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        mcp_assets: tuple[RunAssetSnapshot, ...],
+    ) -> tuple[RunMcpGrantSnapshot, ...]:
+        """Lock the current exact closure and return only its secret-free IDs."""
+
+        context = require_issued_private_work_context(context)
+        if any(asset.asset_kind != AssetKind.MCP.value for asset in mcp_assets):
+            raise RunSnapshotAssetStale
+        mcps = await self._mcps(
+            session,
+            tuple(asset.version_id for asset in mcp_assets),
+            context.project_id,
+        )
+        by_version = {uuid.UUID(str(version.id)): (asset, version) for asset, version in mcps}
+        for persisted in mcp_assets:
+            row = by_version.get(persisted.version_id)
+            if row is None:
+                raise RunSnapshotAssetStale
+            asset, version = row
+            if asset.id != persisted.asset_id or asset.scope != persisted.asset_scope or version.payload_checksum != persisted.payload_checksum:
+                raise RunSnapshotAssetStale
+        closures = await self._credential_closures(session, mcps)
+        current = [
+            RunMcpGrantSnapshot(
+                mcp_version_id=material.grant.mcp_server_version_id,
+                credential_slot_id=material.slot.id,
+                credential_grant_id=material.grant.id,
+                credential_version_id=material.version.id,
+            )
+            for _asset, version in mcps
+            for material in closures[uuid.UUID(str(version.id))].materials
+        ]
+        return tuple(
+            sorted(
+                current,
+                key=lambda item: (
+                    item.mcp_version_id.int,
+                    item.credential_slot_id.int,
+                    item.credential_grant_id.int,
+                    item.credential_version_id.int,
+                ),
+            )
+        )

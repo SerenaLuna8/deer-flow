@@ -11,6 +11,249 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+def _legacy_run_body() -> SimpleNamespace:
+    return SimpleNamespace(
+        assistant_id="lead_agent",
+        input={"messages": [{"role": "user", "content": "hello"}]},
+        command=None,
+        metadata={},
+        config=None,
+        context={},
+        checkpoint_id=None,
+        checkpoint=None,
+        on_disconnect="cancel",
+        multitask_strategy="reject",
+        stream_mode=None,
+        stream_subgraphs=False,
+        interrupt_before=None,
+        interrupt_after=None,
+    )
+
+
+@pytest.mark.anyio
+async def test_legacy_start_rejects_project_agent_before_checkpoint_or_run_launch(
+    monkeypatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from app.gateway import services
+
+    thread_store = SimpleNamespace(
+        get=AsyncMock(
+            return_value={
+                "thread_id": "project-thread",
+                "agent_scope": "project",
+                "agent_asset_id": str(uuid.uuid4()),
+            }
+        ),
+        update_status=AsyncMock(),
+    )
+    manager = SimpleNamespace(create_or_reject=AsyncMock())
+    checkpoint = AsyncMock()
+    launch = MagicMock()
+    monkeypatch.setattr(services, "get_stream_bridge", lambda _request: object())
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
+    monkeypatch.setattr(
+        services,
+        "get_run_context",
+        lambda _request: SimpleNamespace(thread_store=thread_store),
+    )
+    monkeypatch.setattr(services, "apply_checkpoint_to_run_config", checkpoint)
+    monkeypatch.setattr(services, "_launch_registered_run", launch)
+    monkeypatch.setattr(
+        services,
+        "resolve_trusted_internal_owner_for_attribution",
+        AsyncMock(return_value=None),
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=None, auth_source=None),
+        headers={},
+    )
+
+    with pytest.raises(HTTPException) as captured:
+        await services.start_run(_legacy_run_body(), "project-thread", request)
+
+    assert captured.value.status_code == 409
+    assert captured.value.detail["code"] == "PRIVATE_WORK_CUTOVER"
+    checkpoint.assert_not_awaited()
+    manager.create_or_reject.assert_not_awaited()
+    launch.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_legacy_start_preserves_system_agent_runtime(
+    monkeypatch,
+) -> None:
+    from app.gateway import services
+
+    thread_store = SimpleNamespace(
+        get=AsyncMock(
+            return_value={
+                "thread_id": "system-thread",
+                "agent_scope": "system",
+                "agent_asset_id": str(uuid.uuid4()),
+            }
+        ),
+        update_status=AsyncMock(),
+    )
+    record = SimpleNamespace(run_id=str(uuid.uuid4()))
+    manager = SimpleNamespace(create_or_reject=AsyncMock(return_value=record))
+    checkpoint = AsyncMock()
+    launch = MagicMock()
+    monkeypatch.setattr(services, "get_stream_bridge", lambda _request: object())
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
+    monkeypatch.setattr(
+        services,
+        "get_run_context",
+        lambda _request: SimpleNamespace(thread_store=thread_store),
+    )
+    monkeypatch.setattr(services, "apply_checkpoint_to_run_config", checkpoint)
+    monkeypatch.setattr(services, "_launch_registered_run", launch)
+    monkeypatch.setattr(
+        services,
+        "resolve_trusted_internal_owner_for_attribution",
+        AsyncMock(return_value=None),
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=None, auth_source=None),
+        headers={},
+    )
+
+    result = await services.start_run(_legacy_run_body(), "system-thread", request)
+
+    assert result is record
+    checkpoint.assert_awaited_once()
+    manager.create_or_reject.assert_awaited_once()
+    launch.assert_called_once()
+
+
+def test_private_lead_agent_uses_only_run_exact_assets_without_global_caches(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from langchain_core.tools import StructuredTool
+
+    import deerflow.tools as tools_module
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.agents.lead_agent.prompt import _get_cached_skills_prompt_section
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.model_config import ModelConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.mcp import cache
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    skill_root = tmp_path / "custom" / "exact"
+    skill_root.mkdir(parents=True)
+    skill_file = skill_root / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: exact-private\ndescription: exact private skill\n---\nbody\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_file(
+        skill_file,
+        SkillCategory.CUSTOM,
+        skill_root.relative_to(tmp_path / "custom"),
+    )
+    assert skill is not None
+    mcp_tool = StructuredTool.from_function(
+        func=lambda value: value,
+        name="exact_private_mcp",
+        description="exact private MCP tool",
+    )
+    runtime = SimpleNamespace(
+        model_ref="exact-model",
+        tool_groups=("exact-group",),
+        skills=(skill,),
+        skill_root=tmp_path,
+        mcp_tools=(mcp_tool,),
+        soul="exact private soul",
+    )
+    app_config = AppConfig(
+        models=[
+            ModelConfig(
+                name="exact-model",
+                display_name="Exact",
+                use="langchain_openai:ChatOpenAI",
+                model="exact-model",
+                supports_thinking=False,
+                supports_vision=False,
+            )
+        ],
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+    )
+    available_calls: list[dict[str, object]] = []
+    middleware_calls: list[dict[str, object]] = []
+    builtin_tool = StructuredTool.from_function(
+        func=lambda: "ok",
+        name="builtin_exact_group",
+        description="builtin",
+    )
+    monkeypatch.setattr(
+        tools_module,
+        "get_available_tools",
+        lambda **kwargs: available_calls.append(kwargs) or [builtin_tool],
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "load_agent_config",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("legacy agent loader")),
+    )
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(
+        lead_agent_module,
+        "create_chat_model",
+        lambda **kwargs: ("model", kwargs),
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "build_middlewares",
+        lambda *_args, **kwargs: middleware_calls.append(kwargs) or [],
+    )
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    prompt_cache_before = _get_cached_skills_prompt_section.cache_info()
+    mcp_cache_before = (cache._mcp_tools_cache, cache._cache_initialized, cache._config_mtime)
+
+    result = lead_agent_module._make_lead_agent(
+        {
+            "configurable": {
+                "agent_name": "forged-global-agent",
+                "model_name": "forged-global-model",
+                "is_bootstrap": True,
+                "subagent_enabled": True,
+                "is_plan_mode": True,
+            }
+        },
+        app_config=app_config,
+        private_runtime=runtime,
+    )
+
+    assert result["model"][1]["name"] == "exact-model"
+    assert [tool.name for tool in result["tools"]] == [
+        "builtin_exact_group",
+        "exact_private_mcp",
+    ]
+    assert "exact private soul" in result["system_prompt"]
+    assert "forged-global-agent" not in result["system_prompt"]
+    assert available_calls == [
+        {
+            "model_name": "exact-model",
+            "groups": ["exact-group"],
+            "include_mcp": False,
+            "subagent_enabled": False,
+            "app_config": app_config,
+            "asset_context": None,
+        }
+    ]
+    assert middleware_calls[0]["runtime_skills"] == (skill,)
+    assert middleware_calls[0]["runtime_skills_root"] == tmp_path
+    assert middleware_calls[0]["runtime_skills_container_path"] == "/mnt/skills"
+    assert "/mnt/skills/custom/exact/SKILL.md" in result["system_prompt"]
+    assert str(tmp_path) not in result["system_prompt"]
+    assert _get_cached_skills_prompt_section.cache_info() == prompt_cache_before
+    assert (cache._mcp_tools_cache, cache._cache_initialized, cache._config_mtime) == mcp_cache_before
+
+
 @pytest.fixture(autouse=True)
 def _clear_catalog_provider():
     from deerflow.assets.catalog import set_asset_catalog_provider

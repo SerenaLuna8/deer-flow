@@ -432,6 +432,54 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
+    async def register_persisted(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        assistant_id: str | None,
+        on_disconnect: DisconnectMode = DisconnectMode.cancel,
+        metadata: dict | None = None,
+        kwargs: dict | None = None,
+        multitask_strategy: str = "reject",
+        model_name: str | None = None,
+        scope: PrivateResourceScope,
+        created_at: str | None = None,
+    ) -> RunRecord:
+        """Adopt a run already atomically persisted by private admission.
+
+        This method deliberately does not call ``RunStore.put``: the pending
+        row and its exact asset closure already committed in one database
+        transaction.  It only installs the process-local task/abort record used
+        by the same worker lifecycle as legacy runs.
+        """
+
+        now = _now_iso()
+        record = RunRecord(
+            run_id=run_id,
+            thread_id=thread_id,
+            assistant_id=assistant_id,
+            status=RunStatus.pending,
+            on_disconnect=on_disconnect,
+            multitask_strategy=multitask_strategy,
+            metadata=metadata or {},
+            kwargs=kwargs or {},
+            scope=scope,
+            created_at=created_at or now,
+            updated_at=now,
+            model_name=model_name,
+        )
+        async with self._lock:
+            if run_id in self._runs:
+                raise ConflictError("Run is already registered")
+            inflight = [item for item in self._thread_records_locked(thread_id) if self._scope_allows(item, scope=scope) and (item.status in (RunStatus.pending, RunStatus.running) or item.finalizing)]
+            if inflight:
+                raise ConflictError("Thread already has an active run")
+            self._runs[run_id] = record
+            self._index_run_locked(record)
+        logger.info("Persisted run registered: run_id=%s thread_id=%s", run_id, thread_id)
+        return record
+
     async def get(
         self,
         run_id: str,

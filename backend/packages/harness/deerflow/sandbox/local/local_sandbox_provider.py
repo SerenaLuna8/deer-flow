@@ -5,7 +5,7 @@ from pathlib import Path
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, SandboxProvider
 from deerflow.skills.storage import user_should_see_legacy_skills
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,8 @@ class LocalSandboxProvider(SandboxProvider):
         self._path_mappings = self._setup_path_mappings()
         self._generic_sandbox: LocalSandbox | None = None
         self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
+        self._run_sandboxes: OrderedDict[tuple[str, str, str], LocalSandbox] = OrderedDict()
+        self._run_sandbox_ids: dict[str, tuple[str, str, str]] = {}
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
 
@@ -374,6 +376,100 @@ class LocalSandboxProvider(SandboxProvider):
                 self._thread_sandboxes.move_to_end(key)
             return cached.id
 
+    def acquire_with_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        """Acquire a run-specific sandbox whose skills view is exact-only."""
+
+        self.validate_run_scoped_mounts(
+            thread_id,
+            user_id=user_id,
+            mounts=mounts,
+        )
+        mount = mounts[0]
+        skills_prefix = mount.container_path.rstrip("/")
+        host_root = Path(mount.host_path).resolve()
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        key = (effective_user_id, thread_id, mount.run_id)
+        with self._lock:
+            cached = self._run_sandboxes.get(key)
+            if cached is not None:
+                self._run_sandboxes.move_to_end(key)
+                return cached.id
+
+        base_mappings = list(self._path_mappings) + self._build_thread_path_mappings(
+            thread_id,
+            user_id=effective_user_id,
+        )
+        exact_mappings = [mapping for mapping in base_mappings if not (mapping.container_path == skills_prefix or mapping.container_path.startswith(f"{skills_prefix}/"))]
+        exact_mappings.append(
+            PathMapping(
+                container_path=skills_prefix,
+                local_path=str(host_root),
+                read_only=True,
+            )
+        )
+        sandbox_id = f"local-run:{effective_user_id}:{thread_id}:{mount.run_id}"
+        candidate = LocalSandbox(sandbox_id, path_mappings=exact_mappings)
+        with self._lock:
+            cached = self._run_sandboxes.get(key)
+            if cached is None:
+                cached = candidate
+                self._run_sandboxes[key] = cached
+                self._run_sandbox_ids[cached.id] = key
+            else:
+                self._run_sandboxes.move_to_end(key)
+            return cached.id
+
+    def validate_run_scoped_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> None:
+        del thread_id, user_id
+        if len(mounts) != 1:
+            raise ValueError("Local private runtime requires exactly one skills mount")
+        mount = mounts[0]
+        skills_prefix = mount.container_path.rstrip("/")
+        try:
+            from deerflow.config import get_app_config
+
+            app_config = get_app_config()
+            configured_prefix = app_config.skills.container_path.rstrip("/")
+            allow_host_bash = bool(getattr(getattr(app_config, "sandbox", None), "allow_host_bash", False))
+        except Exception:
+            configured_prefix = skills_prefix
+            allow_host_bash = False
+        if allow_host_bash:
+            raise ValueError("Local private runtime cannot enforce read-only mounts when host bash is enabled")
+        if skills_prefix != configured_prefix:
+            raise ValueError("Run-scoped skills must replace the configured skills root")
+        host_root = Path(mount.host_path).resolve()
+        if not host_root.is_dir():
+            raise ValueError("Run-scoped skills host tree is unavailable")
+
+    def release_run_scoped_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> None:
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        run_ids = {mount.run_id for mount in mounts}
+        with self._lock:
+            for run_id in run_ids:
+                key = (effective_user_id, thread_id, run_id)
+                sandbox = self._run_sandboxes.pop(key, None)
+                if sandbox is not None:
+                    self._run_sandbox_ids.pop(sandbox.id, None)
+
     def _evict_until_within_cap_locked(self) -> None:
         """LRU-evict cached thread sandboxes once the cap is exceeded.
 
@@ -389,6 +485,15 @@ class LocalSandboxProvider(SandboxProvider):
             )
 
     def get(self, sandbox_id: str) -> Sandbox | None:
+        if isinstance(sandbox_id, str) and sandbox_id.startswith("local-run:"):
+            with self._lock:
+                key = self._run_sandbox_ids.get(sandbox_id)
+                if key is None:
+                    return None
+                cached = self._run_sandboxes.get(key)
+                if cached is not None:
+                    self._run_sandboxes.move_to_end(key)
+                return cached
         if sandbox_id == "local":
             with self._lock:
                 generic = self._generic_sandbox
@@ -420,7 +525,11 @@ class LocalSandboxProvider(SandboxProvider):
         #
         # Note: This method is intentionally not called by SandboxMiddleware
         # to allow sandbox reuse across multiple turns in a thread.
-        pass
+        if isinstance(sandbox_id, str) and sandbox_id.startswith("local-run:"):
+            with self._lock:
+                key = self._run_sandbox_ids.pop(sandbox_id, None)
+                if key is not None:
+                    self._run_sandboxes.pop(key, None)
 
     def reset(self) -> None:
         """Drop all cached LocalSandbox instances.
@@ -434,6 +543,8 @@ class LocalSandboxProvider(SandboxProvider):
         with self._lock:
             self._generic_sandbox = None
             self._thread_sandboxes.clear()
+            self._run_sandboxes.clear()
+            self._run_sandbox_ids.clear()
             _singleton = None
 
     def shutdown(self) -> None:

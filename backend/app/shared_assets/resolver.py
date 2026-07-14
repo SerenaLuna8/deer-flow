@@ -153,12 +153,111 @@ class ProjectAssetResolver:
         except (DBAPIError, SATimeoutError):
             raise AssetStorageUnavailable(context.request_id) from None
 
+    async def resolve_project_asset_snapshot_in_session(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        selection: AssetSelection,
+    ) -> ResolvedAssetSnapshot:
+        """Resolve an exact snapshot inside a caller-owned transaction.
+
+        The caller must already hold the project/membership locks.  This is the
+        same resolver path as :meth:`resolve_project_asset_snapshot`, without a
+        nested session or a second project lock, so private-run admission can
+        preserve project -> membership -> Thread -> Run/assets ordering.
+        """
+
+        self._validate_resolve_input(context, selection)
+        if not isinstance(session, AsyncSession) or not session.in_transaction():
+            raise AssetValidationFailed(context.request_id)
+        try:
+            repository = BindingRepository(session)
+            record = await self._resolve_record(session, repository, context, selection)
+            snapshot = await self._snapshot(
+                session,
+                context,
+                selection.kind,
+                record,
+                0,
+            )
+            generation = await CatalogStateRepository(session).read_generation()
+            return replace(snapshot, catalog_generation=generation)
+        except (AssetForbidden, AssetValidationFailed, AssetResolutionUnavailable):
+            raise
+        except AssetNotFound:
+            raise AssetResolutionUnavailable(context.request_id) from None
+        except (DBAPIError, SATimeoutError):
+            raise AssetStorageUnavailable(context.request_id) from None
+
     async def materialize_mcp_secrets(
         self,
         context: ProjectContext,
         resolved: ResolvedMcpSnapshot,
     ) -> MaterializedMcpSecrets:
         request_id = getattr(context, "request_id", "unknown")
+        self._validate_materialize_input(context, resolved, request_id)
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    return await self._materialize(
+                        session,
+                        context,
+                        resolved,
+                        request_id,
+                        lock_project=True,
+                        expected_grants=None,
+                    )
+        except (AssetValidationFailed, AssetResolutionUnavailable):
+            raise
+        except AssetNotFound:
+            raise AssetResolutionUnavailable(request_id) from None
+        except (CredentialDecryptFailed, CredentialKeyringInvalid):
+            raise AssetStorageUnavailable(request_id) from None
+        except (DBAPIError, SATimeoutError):
+            raise AssetStorageUnavailable(request_id) from None
+
+    async def materialize_mcp_secrets_in_session(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        resolved: ResolvedMcpSnapshot,
+        *,
+        expected_grants: tuple[
+            tuple[uuid.UUID, uuid.UUID, uuid.UUID],
+            ...,
+        ]
+        | None = None,
+    ) -> MaterializedMcpSecrets:
+        """Decrypt an exact MCP closure inside the caller's locked transaction."""
+
+        request_id = getattr(context, "request_id", "unknown")
+        self._validate_materialize_input(context, resolved, request_id)
+        if not isinstance(session, AsyncSession) or not session.in_transaction():
+            raise AssetValidationFailed(request_id)
+        try:
+            return await self._materialize(
+                session,
+                context,
+                resolved,
+                request_id,
+                lock_project=False,
+                expected_grants=expected_grants,
+            )
+        except (AssetValidationFailed, AssetResolutionUnavailable):
+            raise
+        except AssetNotFound:
+            raise AssetResolutionUnavailable(request_id) from None
+        except (CredentialDecryptFailed, CredentialKeyringInvalid):
+            raise AssetStorageUnavailable(request_id) from None
+        except (DBAPIError, SATimeoutError):
+            raise AssetStorageUnavailable(request_id) from None
+
+    @staticmethod
+    def _validate_materialize_input(
+        context: ProjectContext,
+        resolved: ResolvedMcpSnapshot,
+        request_id: str,
+    ) -> None:
         if not isinstance(context, ProjectContext):
             raise AssetForbidden(request_id)
         if Capability.SHARED_ASSETS_EXECUTE not in context.capabilities:
@@ -177,23 +276,6 @@ class ProjectAssetResolver:
             or len(set(resolved.credential_grant_ids)) != len(resolved.credential_grant_ids)
         ):
             raise AssetValidationFailed(request_id)
-        try:
-            async with self._session_factory() as session:
-                async with session.begin():
-                    return await self._materialize(
-                        session,
-                        context,
-                        resolved,
-                        request_id,
-                    )
-        except (AssetValidationFailed, AssetResolutionUnavailable):
-            raise
-        except AssetNotFound:
-            raise AssetResolutionUnavailable(request_id) from None
-        except (CredentialDecryptFailed, CredentialKeyringInvalid):
-            raise AssetStorageUnavailable(request_id) from None
-        except (DBAPIError, SATimeoutError):
-            raise AssetStorageUnavailable(request_id) from None
 
     @staticmethod
     def _validate_resolve_input(
@@ -648,9 +730,17 @@ class ProjectAssetResolver:
         context: ProjectContext,
         resolved: ResolvedMcpSnapshot,
         request_id: str,
+        *,
+        lock_project: bool,
+        expected_grants: tuple[
+            tuple[uuid.UUID, uuid.UUID, uuid.UUID],
+            ...,
+        ]
+        | None,
     ) -> MaterializedMcpSecrets:
         repository = BindingRepository(session)
-        await repository.lock_project(context, read=True)
+        if lock_project:
+            await repository.lock_project(context, read=True)
         scope = resolved.scope
         project_id = uuid.UUID(str(context.project_id)) if scope is AssetScope.PROJECT else None
         if scope is AssetScope.SYSTEM:
@@ -694,6 +784,34 @@ class ProjectAssetResolver:
             load_envelopes=True,
         )
         closure = closures[uuid.UUID(str(version.id))]
+        current_grants = tuple(
+            sorted(
+                (
+                    (
+                        uuid.UUID(str(material.slot.id)),
+                        uuid.UUID(str(material.grant.id)),
+                        uuid.UUID(str(material.version.id)),
+                    )
+                    for material in closure.materials
+                ),
+                key=lambda item: (item[0].int, item[1].int, item[2].int),
+            )
+        )
+        if expected_grants is not None:
+            try:
+                normalized_values = tuple(tuple(uuid.UUID(str(value)) for value in item) for item in expected_grants if isinstance(item, tuple) and len(item) == 3)
+            except (AttributeError, TypeError, ValueError):
+                raise AssetValidationFailed(request_id)
+            if len(normalized_values) != len(expected_grants):
+                raise AssetValidationFailed(request_id)
+            normalized_expected = tuple(
+                sorted(
+                    normalized_values,
+                    key=lambda item: (item[0].int, item[1].int, item[2].int),
+                )
+            )
+            if current_grants != normalized_expected:
+                raise AssetResolutionUnavailable(request_id)
         locked_definition = self._safe_mcp_definition(
             McpVersionRecord(version, closure.slots, ()),
             request_id,

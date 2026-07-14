@@ -53,6 +53,7 @@ class Skill:
     # autonomous model load (skill_context), or only on explicit /slash
     # activation. Frontmatter: ``secrets-autonomous`` (default true).
     secrets_autonomous: bool = True
+    runtime_read_only: bool = False
 
     @property
     def skill_path(self) -> str:

@@ -130,7 +130,7 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
     """Render structured metadata for a list of matched skills."""
     blocks: list[str] = []
     for s in skills:
-        mutability = "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
+        mutability = "[run exact, read-only]" if s.runtime_read_only else "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
         tools_line = ", ".join(s.allowed_tools) if s.allowed_tools else "(all)"
         location = s.get_container_file_path(container_base_path)
         blocks.append(f"## Skill: {s.name}\n- Description: {s.description} {mutability}\n- Allowed tools: {tools_line}\n- Location: {location}")

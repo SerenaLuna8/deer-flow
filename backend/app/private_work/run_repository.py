@@ -130,6 +130,29 @@ class PrivateRunRepository:
             raise PrivateRunConflict from None
         return self.record(row)
 
+    async def has_conflicting_active_run(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+    ) -> bool:
+        """Lock and detect pending/running runs for one private Thread."""
+
+        row = (
+            await self.session.execute(
+                select(RunRow.run_id)
+                .where(
+                    RunRow.thread_id == thread_id,
+                    *self.predicates(scope),
+                    RunRow.status.in_(("pending", "running")),
+                )
+                .order_by(RunRow.created_at, RunRow.run_id)
+                .with_for_update(of=RunRow)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return row is not None
+
     async def get(
         self,
         *,

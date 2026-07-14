@@ -24,7 +24,10 @@ from deerflow.sandbox.exceptions import (
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import (
+    RunScopedReadOnlyMount,
+    get_sandbox_provider,
+)
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
@@ -1303,9 +1306,13 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
-    # Check if sandbox already exists in state
+    raw_mounts = (runtime.context or {}).get("__run_read_only_mounts", ())
+    mounts = raw_mounts if isinstance(raw_mounts, tuple) and all(type(item) is RunScopedReadOnlyMount for item in raw_mounts) else ()
+
+    # A checkpointed legacy sandbox is never authoritative for a private run.
+    # Exact mounts force a fresh run-scoped acquisition and overwrite state.
     sandbox_state = runtime.state.get("sandbox")
-    if sandbox_state is not None:
+    if not mounts and sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
             sandbox = get_sandbox_provider().get(sandbox_id)
@@ -1323,7 +1330,15 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
+    sandbox_id = (
+        provider.acquire_with_mounts(
+            thread_id,
+            user_id=resolve_runtime_user_id(runtime),
+            mounts=mounts,
+        )
+        if mounts
+        else provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
+    )
 
     # Update runtime state - this persists across tool calls
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
@@ -1351,8 +1366,11 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
+    raw_mounts = (runtime.context or {}).get("__run_read_only_mounts", ())
+    mounts = raw_mounts if isinstance(raw_mounts, tuple) and all(type(item) is RunScopedReadOnlyMount for item in raw_mounts) else ()
+
     sandbox_state = runtime.state.get("sandbox")
-    if sandbox_state is not None:
+    if not mounts and sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
             sandbox = get_sandbox_provider().get(sandbox_id)
@@ -1368,7 +1386,18 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+    sandbox_id = (
+        await provider.acquire_with_mounts_async(
+            thread_id,
+            user_id=resolve_runtime_user_id(runtime),
+            mounts=mounts,
+        )
+        if mounts
+        else await provider.acquire_async(
+            thread_id,
+            user_id=resolve_runtime_user_id(runtime),
+        )
+    )
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 

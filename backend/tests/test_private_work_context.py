@@ -359,7 +359,7 @@ def test_strip_private_client_fields_drops_every_authority_field() -> None:
         }
     )
 
-    assert cleaned == {"model_name": "allowed-model"}
+    assert cleaned == {}
 
 
 def test_strip_private_client_fields_recurses_through_mappings_lists_and_tuples() -> None:
