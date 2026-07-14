@@ -132,14 +132,14 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_agent_uses_context_user_id_over_contextvar(monkeypatch):
-    """A run carrying ``context.user_id`` traces to that user, not the contextvar.
+@pytest.mark.no_auto_user
+async def test_run_agent_uses_record_owner_over_runtime_context_user_id(monkeypatch):
+    """A persisted owner, not an execution bucket, owns Langfuse attribution.
 
-    Internal-token callers invoke a run on behalf of an end user, so the
-    ``_current_user`` ContextVar is never that end user. The caller instead
-    carries the real owner in the run request's ``config['context']['user_id']``,
-    which ``resolve_runtime_user_id(runtime)`` must prefer over the contextvar —
-    even though conftest's autouse fixture injects ``test-user-autouse`` into it.
+    The Gateway normally copies the bound owner into the background task's
+    repository ContextVar. ``RunRecord.user_id`` is the safe fallback when a
+    direct worker caller has no ambient repository context. Runtime
+    ``context.user_id`` remains a filesystem/storage bucket only.
     """
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
@@ -159,6 +159,7 @@ async def test_run_agent_uses_context_user_id_over_contextvar(monkeypatch):
         assistant_id="lead-agent",
         status=RunStatus.pending,
         on_disconnect=DisconnectMode.cancel,
+        user_id="real-end-user",
     )
     record.abort_event = asyncio.Event()
     ctx = RunContext(checkpointer=None)
@@ -172,39 +173,24 @@ async def test_run_agent_uses_context_user_id_over_contextvar(monkeypatch):
         graph_input={"messages": []},
         config={
             "configurable": {"thread_id": "thread-ctx"},
-            "context": {"user_id": "real-end-user"},
+            "context": {"user_id": "channel-runtime-bucket"},
         },
     )
 
     metadata = fake_agent.captured_config.get("metadata") or {}
-    # context.user_id wins over the contextvar's ``test-user-autouse``.
     assert metadata.get("langfuse_user_id") == "real-end-user"
 
 
 @pytest.mark.asyncio
+@pytest.mark.no_auto_user
 async def test_run_agent_falls_back_to_default_user_when_unset(monkeypatch):
-    """When no user is in the contextvar (and no context.user_id), langfuse_user_id
-    falls back to 'default'.
-
-    Uses ``monkeypatch.setattr`` to redirect ``get_effective_user_id`` to return
-    ``"default"`` rather than directly mutating the contextvar — direct contextvar
-    operations across pytest test boundaries have produced spooky cross-file
-    pollution when combined with the langfuse OTel global tracer provider.
-
-    The worker resolves the trace user via ``resolve_runtime_user_id(runtime)``;
-    with no ``context.user_id`` it falls back to ``get_effective_user_id()`` — so
-    we patch that fallback at its definition module (``user_context``), which is
-    the name ``resolve_runtime_user_id`` actually calls.
-    """
+    """No repository user and no persisted owner falls back to ``default``."""
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
     from deerflow.config.tracing_config import reset_tracing_config
-    from deerflow.runtime import user_context as user_context_module
-    from deerflow.runtime.user_context import DEFAULT_USER_ID
 
     reset_tracing_config()
-    monkeypatch.setattr(user_context_module, "get_effective_user_id", lambda: DEFAULT_USER_ID)
 
     fake_agent = _FakeAgent()
 

@@ -1,9 +1,12 @@
-"""Request-scoped user context for user-based authorization.
+"""Request-scoped repository and runtime-storage identity contexts.
 
-This module holds a :class:`~contextvars.ContextVar` that the gateway's
-auth middleware sets after a successful authentication. Repository
-methods read the contextvar via a sentinel default parameter, letting
-routers stay free of ``user_id`` boilerplate.
+This module deliberately keeps two :class:`~contextvars.ContextVar` values:
+
+- ``_current_user`` is the authenticated repository/authorization identity.
+  Repository methods read it via a sentinel default parameter, letting routers
+  stay free of ``user_id`` boilerplate.
+- ``_runtime_storage_user_id`` is an execution-only filesystem/storage bucket.
+  Trusted channel workers may override it without changing repository scope.
 
 Three-state semantics for the repository ``user_id`` parameter (the
 consumer side of this module lives in ``deerflow.persistence.*``):
@@ -50,6 +53,7 @@ class CurrentUser(Protocol):
 
 
 _current_user: Final[ContextVar[CurrentUser | None]] = ContextVar("deerflow_current_user", default=None)
+_runtime_storage_user_id: Final[ContextVar[str | None]] = ContextVar("deerflow_runtime_storage_user_id", default=None)
 
 
 def set_current_user(user: CurrentUser) -> Token[CurrentUser | None]:
@@ -91,6 +95,30 @@ def require_current_user() -> CurrentUser:
 
 
 # ---------------------------------------------------------------------------
+# Runtime storage identity (filesystem/workspace/memory/sandbox isolation)
+# ---------------------------------------------------------------------------
+
+
+def set_runtime_storage_user_id(user_id: str) -> Token[str | None]:
+    """Set an execution-only storage bucket for the current async task.
+
+    This value never grants repository, project, or private-work authority.
+    Callers must reset the returned token in a ``finally`` block.
+    """
+    return _runtime_storage_user_id.set(user_id)
+
+
+def reset_runtime_storage_user_id(token: Token[str | None]) -> None:
+    """Restore the runtime storage identity captured by ``token``."""
+    _runtime_storage_user_id.reset(token)
+
+
+def get_runtime_storage_user_id() -> str | None:
+    """Return the execution-only storage bucket, or ``None`` when unset."""
+    return _runtime_storage_user_id.get()
+
+
+# ---------------------------------------------------------------------------
 # Effective user_id helpers (filesystem isolation)
 # ---------------------------------------------------------------------------
 
@@ -98,11 +126,16 @@ DEFAULT_USER_ID: Final[str] = "default"
 
 
 def get_effective_user_id() -> str:
-    """Return the current user's id as a string, or DEFAULT_USER_ID if unset.
+    """Return the storage bucket, repository user id, or default bucket.
 
     Unlike :func:`require_current_user` this never raises — it is designed
     for filesystem-path resolution where a valid user bucket is always needed.
+    A trusted background execution may carry a runtime-storage override without
+    changing the repository identity returned by :func:`get_current_user`.
     """
+    storage_user_id = _runtime_storage_user_id.get()
+    if storage_user_id is not None:
+        return storage_user_id
     user = _current_user.get()
     if user is None:
         return DEFAULT_USER_ID

@@ -5,18 +5,24 @@ commit 6) because they explicitly test the cases where the contextvar
 is set or unset.
 """
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from deerflow.runtime.user_context import (
+    AUTO,
     DEFAULT_USER_ID,
     CurrentUser,
     get_current_user,
     get_effective_user_id,
+    get_runtime_storage_user_id,
     require_current_user,
     reset_current_user,
+    reset_runtime_storage_user_id,
+    resolve_user_id,
     set_current_user,
+    set_runtime_storage_user_id,
 )
 
 
@@ -109,3 +115,78 @@ def test_effective_user_id_coerces_to_str():
         assert get_effective_user_id() == str(uid)
     finally:
         reset_current_user(token)
+
+
+@pytest.mark.no_auto_user
+def test_runtime_storage_override_is_separate_from_repository_identity():
+    repository_user = SimpleNamespace(id="repository-owner")
+    repository_token = set_current_user(repository_user)
+    storage_token = set_runtime_storage_user_id("channel-runtime-bucket")
+    try:
+        assert get_runtime_storage_user_id() == "channel-runtime-bucket"
+        assert get_effective_user_id() == "channel-runtime-bucket"
+        assert get_current_user() is repository_user
+        assert require_current_user() is repository_user
+        assert resolve_user_id(AUTO, method_name="test repository") == "repository-owner"
+    finally:
+        reset_runtime_storage_user_id(storage_token)
+        reset_current_user(repository_token)
+
+    assert get_runtime_storage_user_id() is None
+    assert get_current_user() is None
+    assert get_effective_user_id() == DEFAULT_USER_ID
+
+
+@pytest.mark.no_auto_user
+def test_runtime_storage_override_is_task_local_and_resets_after_failure():
+    async def scenario() -> None:
+        repository_user = SimpleNamespace(id="repository-owner")
+        repository_token = set_current_user(repository_user)
+        release = asyncio.Event()
+        ready = [asyncio.Event(), asyncio.Event()]
+        observations: dict[str, tuple[str, str | None]] = {}
+
+        async def worker(name: str, storage_user_id: str, index: int, *, fail: bool) -> None:
+            storage_token = set_runtime_storage_user_id(storage_user_id)
+            try:
+                ready[index].set()
+                await release.wait()
+                current = get_current_user()
+                observations[name] = (
+                    get_effective_user_id(),
+                    str(current.id) if current is not None else None,
+                )
+                if fail:
+                    raise RuntimeError("expected worker failure")
+            finally:
+                reset_runtime_storage_user_id(storage_token)
+
+        try:
+            first = asyncio.create_task(worker("first", "runtime-a", 0, fail=False))
+            second = asyncio.create_task(worker("second", "runtime-b", 1, fail=True))
+            await asyncio.gather(*(event.wait() for event in ready))
+
+            assert get_runtime_storage_user_id() is None
+            assert get_effective_user_id() == "repository-owner"
+
+            release.set()
+            results = await asyncio.gather(first, second, return_exceptions=True)
+            assert results[0] is None
+            assert isinstance(results[1], RuntimeError)
+            assert observations == {
+                "first": ("runtime-a", "repository-owner"),
+                "second": ("runtime-b", "repository-owner"),
+            }
+
+            async def later_task() -> tuple[str | None, str]:
+                return get_runtime_storage_user_id(), get_effective_user_id()
+
+            assert await asyncio.create_task(later_task()) == (None, "repository-owner")
+        finally:
+            reset_current_user(repository_token)
+
+        assert get_runtime_storage_user_id() is None
+        assert get_current_user() is None
+        assert get_effective_user_id() == DEFAULT_USER_ID
+
+    asyncio.run(scenario())

@@ -49,7 +49,7 @@ from deerflow.runtime.goal import (
 )
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
-from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
+from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user, get_effective_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
@@ -64,6 +64,16 @@ logger = logging.getLogger(__name__)
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
+
+
+def _repository_trace_user_id(record: RunRecord) -> str:
+    """Resolve trace attribution without consulting runtime storage identity."""
+    repository_user = get_current_user()
+    if repository_user is not None:
+        return str(repository_user.id)
+    if record.user_id is not None:
+        return str(record.user_id)
+    return DEFAULT_USER_ID
 
 
 def _build_runtime_context(
@@ -367,7 +377,7 @@ async def run_agent(
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
-            user_id=resolve_runtime_user_id(runtime),
+            user_id=_repository_trace_user_id(record),
             assistant_id=record.assistant_id,
             model_name=record.model_name,
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),

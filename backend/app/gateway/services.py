@@ -50,7 +50,12 @@ from deerflow.runtime import (
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import redact_config_secrets
-from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.runtime.user_context import (
+    reset_current_user,
+    reset_runtime_storage_user_id,
+    set_current_user,
+    set_runtime_storage_user_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -835,11 +840,9 @@ async def start_run(
         except Exception:
             logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
-        execution_context_token = None
-        runtime_context = config.get("context")
-        execution_user_id = runtime_context.get("user_id") if isinstance(runtime_context, dict) else None
-        if is_internal_caller and execution_user_id:
-            execution_context_token = set_current_user(SimpleNamespace(id=str(execution_user_id)))
+        storage_context_token = None
+        if runtime_user_id is not None:
+            storage_context_token = set_runtime_storage_user_id(runtime_user_id)
         try:
             task = asyncio.create_task(
                 run_agent(
@@ -857,8 +860,8 @@ async def start_run(
                 )
             )
         finally:
-            if execution_context_token is not None:
-                reset_current_user(execution_context_token)
+            if storage_context_token is not None:
+                reset_runtime_storage_user_id(storage_context_token)
         record.task = task
 
         # Title sync is handled by worker.py's finally block which reads the
