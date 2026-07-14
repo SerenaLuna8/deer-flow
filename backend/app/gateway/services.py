@@ -29,6 +29,7 @@ from app.gateway.internal_auth import (
     get_trusted_internal_owner_user_id,
 )
 from app.gateway.utils import sanitize_log_param
+from app.private_work.context import strip_private_client_fields
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
@@ -220,11 +221,10 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     to LangGraph ``ToolRuntime.context`` consumers (e.g. the ``setup_agent`` tool —
     see issue #2677).
 
-    ``user_id`` is intentionally propagated into ``config['context']`` in addition to
-    the whitelisted keys, so non-web callers (e.g. IM channels) that supply identity in
-    ``body.context`` keep it on ``ToolRuntime.context``. It is merged with
-    ``setdefault`` so a server-authenticated id stamped by
-    :func:`inject_authenticated_user_context` always wins over the client-supplied one.
+    Private-work authority fields, including ``user_id``, are removed recursively
+    before the remaining allowlisted values are merged. Authenticated web identity
+    and trusted internal owner attribution are stamped later by
+    :func:`inject_authenticated_user_context`.
 
     :data:`_CONTEXT_INTERNAL_CALLER_KEYS`; those keys are dropped from client
     requests.
@@ -237,6 +237,7 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     """
     if not context:
         return
+    context = strip_private_client_fields(context)
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
     keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
@@ -251,11 +252,9 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     for key in _CONTEXT_RUNTIME_ONLY_KEYS:
         if key in context and isinstance(runtime_context, dict):
             runtime_context.setdefault(key, context[key])
-    if "user_id" in context and isinstance(runtime_context, dict):
-        runtime_context.setdefault("user_id", context["user_id"])
     # The raw platform user id from IM channels (Feishu open_id, Slack Uxxx, ...)
-    # follows the same runtime-context-only rule as user_id: tools may read it,
-    # but it never enters ``configurable`` (checkpointed with the thread).
+    # is runtime-only: tools may read it, but it never enters ``configurable``
+    # (checkpointed with the thread).
     if "channel_user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("channel_user_id", context["channel_user_id"])
 
@@ -391,6 +390,10 @@ def build_run_config(
     the LangGraph Platform-compatible HTTP API and the IM channel path behave
     identically.
     """
+    if request_config:
+        request_config = strip_private_client_fields(request_config)
+    if metadata:
+        metadata = strip_private_client_fields(metadata)
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
     # subagent inside ONE lead tools-node step, and subagents enforce their own
@@ -413,14 +416,8 @@ def build_run_config(
             if context_value is None:
                 context = {}
             elif isinstance(context_value, Mapping):
-                # Strip caller-supplied ``__``-prefixed keys: those are the
-                # harness's private run-context channels (skill secret-binding
-                # sources, the active-secret set, the run journal). A caller must
-                # not be able to seed them and forge internal state — e.g. a
-                # forged ``__slash_skill_secret_source`` would otherwise bypass the
-                # skill enabled/allowlist/declaration gates (#3938). Legitimate
-                # caller keys (``secrets``, ``user_id``, model overrides) never use
-                # the ``__`` prefix.
+                # The recursive sanitizer already removed private-work authority
+                # and ``__``-prefixed internal channels at every nesting depth.
                 context = {key: value for key, value in context_value.items() if not (isinstance(key, str) and key.startswith("__"))}
             else:
                 raise ValueError("request config 'context' must be a mapping or null.")

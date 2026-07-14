@@ -59,6 +59,43 @@ async def resolve_project_context_in_transaction(
     """Resolve project authority without changing the caller-owned transaction."""
 
     identifier_filter = ProjectRow.id == project_identifier if isinstance(project_identifier, uuid.UUID) else ProjectRow.slug == project_identifier
+    if lock:
+        project_statement = (
+            select(ProjectRow.id)
+            .where(
+                identifier_filter,
+                ProjectRow.status == "active",
+                ProjectRow.is_suspended.is_(False),
+            )
+            .with_for_update(of=ProjectRow)
+        )
+        try:
+            project_id = (await session.execute(project_statement)).scalar_one_or_none()
+            if project_id is None:
+                raise ProjectNotFound()
+            membership_statement = (
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == project_id,
+                    ProjectMembershipRow.user_id == str(user_id),
+                    ProjectMembershipRow.status == "active",
+                )
+                .with_for_update(of=ProjectMembershipRow)
+            )
+            membership = (await session.execute(membership_statement)).scalar_one_or_none()
+        except DBAPIError:
+            raise ProjectDatabaseUnavailable() from None
+        if membership is None:
+            raise ProjectNotFound()
+        return _project_context_from_values(
+            user_id=user_id,
+            project_id=project_id,
+            membership_id=membership.id,
+            role_value=membership.role,
+            membership_version=membership.version,
+            request_id=request_id,
+        )
+
     statement = (
         select(
             ProjectRow.id.label("project_id"),
@@ -80,8 +117,6 @@ async def resolve_project_context_in_transaction(
             ProjectRow.is_suspended.is_(False),
         )
     )
-    if lock:
-        statement = statement.with_for_update(of=(ProjectRow, ProjectMembershipRow))
     try:
         rows = (await session.execute(statement)).all()
     except DBAPIError:
@@ -89,16 +124,35 @@ async def resolve_project_context_in_transaction(
     if len(rows) != 1:
         raise ProjectNotFound()
     row = rows[0]
+    return _project_context_from_values(
+        user_id=user_id,
+        project_id=row.project_id,
+        membership_id=row.membership_id,
+        role_value=row.role,
+        membership_version=row.membership_version,
+        request_id=request_id,
+    )
+
+
+def _project_context_from_values(
+    *,
+    user_id: uuid.UUID,
+    project_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    role_value: str,
+    membership_version: int,
+    request_id: str,
+) -> ProjectContext:
     try:
-        role = ProjectRole(row.role)
+        role = ProjectRole(role_value)
     except ValueError:
         raise ProjectNotFound() from None
     return ProjectContext(
         user_id=user_id,
-        project_id=row.project_id,
-        membership_id=row.membership_id,
+        project_id=project_id,
+        membership_id=membership_id,
         role=role,
         capabilities=capabilities_for(role),
-        membership_version=row.membership_version,
+        membership_version=membership_version,
         request_id=request_id,
     )

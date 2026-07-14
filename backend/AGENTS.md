@@ -1039,15 +1039,19 @@ resolver 的单条 joined SELECT 退出后先结束只读 transaction，mutation
 数据库不可用。
 
 **M4 private-work 授权边界**：`app.private_work.PrivateWorkContext` 只能由精确的服务端
-`ProjectContext` 通过 `from_project()` 派生，禁止直接构造和 subclass；客户端 context 中的
-user/project/owner/membership/role/capability/system-role/project-context 与所有双下划线内部字段
-必须在进入 runtime 前丢弃。harness 只接收不含 role/capability 的
+`ProjectContext` 通过 `from_project()` 派生，禁止直接构造和 subclass；工厂签发的同进程对象以
+identity 和完整字段快照登记，`resource_scope` 与 revalidator 在读取权限字段前先校验签发状态，
+普通 copy/deepcopy/pickle/state hook/dataclass replace、直接 fabrication 与字段篡改均 fail closed。
+这是应用消费边界的 provenance 约束，不宣称能阻止任意 trusted reflective code。客户端
+`body.config` 的 context/configurable/metadata 与 `body.context` 中所有嵌套的
+user/project/owner/membership/role/capability/system-role/project-context 和双下划线内部字段，
+必须在进入 runtime 前递归丢弃，身份仅由后续服务端认证或 trusted internal owner 注入。harness 只接收不含 role/capability 的
 `deerflow.runtime.PrivateResourceScope`，继续禁止 import `app.*`。每个 mutation 或副作用边界
 通过 `PrivateWorkRevalidator.require()` 在调用方已有 transaction 内重验 active project、未暂停
 状态、active membership、membership ID/version 和 capability；失效 scope 统一 404，当前 scope
 缺 capability 才返回 403。`resolve_project_context_in_transaction()` 不开始、提交或回滚调用方
-transaction；`lock=True` 使用同一 joined query 的 `FOR UPDATE OF projects,
-project_memberships`，保持 project → membership 锁序。private-work HTTP 错误只映射固定
+transaction；`lock=True` 在同一 transaction 内先执行 project `FOR UPDATE`，确认后再执行
+membership `FOR UPDATE`，以两条显式语句固定 project → membership 锁序。private-work HTTP 错误只映射固定
 `code/message/request_id`，不得拼接底层异常或资源细节。
 
 项目 HTTP API 统一挂载 `/api/projects`，使用 request-scoped session 与认证 dependency；

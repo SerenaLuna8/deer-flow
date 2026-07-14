@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.private_work.context import PrivateWorkContext
+from app.private_work.context import PrivateWorkContext, require_issued_private_work_context
 from app.private_work.errors import PrivateWorkForbidden, PrivateWorkNotFound, PrivateWorkUnavailable
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext, resolve_project_context_in_transaction
@@ -17,9 +17,7 @@ class PrivateWorkRevalidator:
         *capabilities: Capability,
         lock: bool = False,
     ) -> ProjectContext:
-        request_id = getattr(context, "request_id", "unknown")
-        if type(context) is not PrivateWorkContext:
-            raise PrivateWorkNotFound(request_id if isinstance(request_id, str) else "unknown")
+        context = require_issued_private_work_context(context)
         try:
             current = await resolve_project_context_in_transaction(
                 session,

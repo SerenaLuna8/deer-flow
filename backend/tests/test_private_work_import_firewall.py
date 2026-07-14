@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from app.gateway.services import build_run_config
+from app.projects.capabilities import capabilities_for
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
 from app.shared_assets.errors import AssetForbidden
 from app.shared_assets.models import AssetKind, AssetScope, AssetSelection, ResolvedMcpSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver, materialize_mcp_secrets
@@ -83,4 +87,36 @@ async def test_m3_resolver_and_materializer_reject_client_shaped_authority_dicts
             client_context,
             snapshot,
             session_factory=_must_not_open_session,
+        )
+
+
+@pytest.mark.asyncio
+async def test_only_server_injected_exact_project_context_reaches_m3_after_gateway_sanitizing() -> None:
+    client_context = {
+        "project_context": {
+            "user_id": "attacker",
+            "project_id": "attacker",
+            "role": "admin",
+            "capabilities": ["shared_assets.execute"],
+        }
+    }
+    config = build_run_config("thread-safe", {"context": client_context}, None)
+    assert "project_context" not in config["context"]
+
+    trusted = ProjectContext(
+        user_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        membership_id=uuid.uuid4(),
+        role=ProjectRole.ADMIN,
+        capabilities=capabilities_for(ProjectRole.ADMIN),
+        membership_version=1,
+        request_id="req-server-context",
+    )
+    config["context"]["project_context"] = trusted
+    selection = AssetSelection(kind=AssetKind.MCP, asset_id=uuid.uuid4())
+
+    with pytest.raises(AssertionError, match="database access"):
+        await ProjectAssetResolver(_must_not_open_session).resolve_project_asset_snapshot(
+            config["context"]["project_context"],
+            selection,
         )

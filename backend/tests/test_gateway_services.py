@@ -254,6 +254,89 @@ def test_build_run_config_context_path_still_sets_configurable_thread_id(_stub_a
     assert "secrets" not in config["configurable"]
 
 
+def test_build_run_config_recursively_strips_private_authority_from_context_and_metadata(_stub_app_config):
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-safe",
+        {
+            "context": {
+                "model_name": "safe-model",
+                "project_id": "attacker",
+                "nested": [
+                    {"owner_user_id": "attacker", "value": 1},
+                    ({"role": "admin", "value": 2}, {"__private_scope": {}, "value": 3}),
+                ],
+            },
+            "metadata": {
+                "membership_version": 999,
+                "nested": {"project_context": {}, "value": 4},
+            },
+        },
+        {
+            "capabilities": ["shared_assets.execute"],
+            "nested": {"private_work_context": {}, "value": 5},
+        },
+    )
+
+    assert config["context"] == {
+        "model_name": "safe-model",
+        "nested": [
+            {"value": 1},
+            ({"value": 2}, {"value": 3}),
+        ],
+        "thread_id": "thread-safe",
+    }
+    assert config["metadata"] == {
+        "nested": {"value": 5},
+    }
+
+
+def test_build_run_config_recursively_strips_private_authority_from_configurable(_stub_app_config):
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-safe",
+        {
+            "configurable": {
+                "model_name": "safe-model",
+                "project_id": "attacker",
+                "nested": [
+                    {"membership_version": 999, "value": 1},
+                    {"resource_scope": {}, "__private_scope": {}, "value": 2},
+                ],
+            }
+        },
+        None,
+    )
+
+    assert config["configurable"] == {
+        "thread_id": "thread-safe",
+        "model_name": "safe-model",
+        "nested": [{"value": 1}, {"value": 2}],
+    }
+
+
+def test_body_context_merge_recursively_strips_private_authority(_stub_app_config):
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-safe", None, None)
+    merge_run_context_overrides(
+        config,
+        {
+            "user_id": "attacker",
+            "model_name": {
+                "project_id": "attacker",
+                "items": [{"capabilities": ["shared_assets.execute"], "value": 1}],
+            },
+        },
+    )
+
+    assert config["configurable"]["model_name"] == {"items": [{"value": 1}]}
+    assert config["context"]["model_name"] == {"items": [{"value": 1}]}
+    assert "user_id" not in config["context"]
+
+
 # ---------------------------------------------------------------------------
 # recursion_limit clamping: the Gateway must not trust a client-supplied
 # recursion_limit verbatim (runaway LLM cost / DoS). See build_run_config.
@@ -748,17 +831,14 @@ def test_inject_authenticated_user_context_overrides_client_user_id():
     assert config["context"]["user_id"] == "auth-user-42"
 
 
-def test_merge_run_context_overrides_propagates_user_id():
-    """Regression for PR #3294: ``user_id`` from ``body.context`` must land in
-    ``config['context']`` so non-web callers (e.g. IM channels) keep their identity
-    on ``ToolRuntime.context``.
-    """
+def test_merge_run_context_overrides_strips_client_user_id():
+    """Client body context cannot provide authorization-grade identity."""
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
     merge_run_context_overrides(config, {"user_id": "channel-user-7"})
 
-    assert config["context"]["user_id"] == "channel-user-7"
+    assert "user_id" not in config["context"]
 
 
 def test_merge_run_context_overrides_does_not_clobber_existing_user_id():
@@ -767,7 +847,8 @@ def test_merge_run_context_overrides_does_not_clobber_existing_user_id():
     """
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
-    config = build_run_config("thread-1", {"context": {"user_id": "auth-user-42"}}, None)
+    config = build_run_config("thread-1", None, None)
+    config["context"] = {"user_id": "auth-user-42"}
     merge_run_context_overrides(config, {"user_id": "spoofed-client"})
 
     assert config["context"]["user_id"] == "auth-user-42"
@@ -815,7 +896,7 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
 
     inject_authenticated_user_context(config, request)
 
-    assert config["context"]["user_id"] == "channel-user-7"
+    assert "user_id" not in config["context"]
     assert "user_role" not in config["context"]
     assert "oauth_provider" not in config["context"]
     assert "oauth_id" not in config["context"]
@@ -1115,9 +1196,9 @@ def test_build_run_config_with_context():
         None,
     )
     assert "context" in config
-    assert config["context"]["user_id"] == "u-42"
+    assert "user_id" not in config["context"]
     assert config["context"]["thread_id"] == "thread-1"
-    # configurable carries thread_id for the checkpointer; user context stays in context.
+    # configurable carries thread_id for the checkpointer; client identity is discarded.
     assert config["configurable"] == {"thread_id": "thread-1"}
     assert config["recursion_limit"] == 100
 
@@ -1131,7 +1212,7 @@ def test_build_run_config_context_injects_thread_id():
         None,
     )
 
-    assert config["context"]["user_id"] == "u-1"
+    assert "user_id" not in config["context"]
     assert config["context"]["thinking_enabled"] is True
     assert config["context"]["thread_id"] == "T-deadbeef-42"
     assert config["configurable"] == {"thread_id": "T-deadbeef-42"}
@@ -1185,7 +1266,7 @@ def test_build_run_config_context_plus_configurable_warns(caplog):
             None,
         )
     assert "context" in config
-    assert config["context"]["user_id"] == "u-42"
+    assert "user_id" not in config["context"]
     # context wins: caller's configurable (model_name) is dropped, but thread_id is
     # still set for the checkpointer.
     assert config["configurable"] == {"thread_id": "thread-1"}
