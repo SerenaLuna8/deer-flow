@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from fastapi import HTTPException
 
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 
@@ -1225,7 +1226,7 @@ def test_run_routes_preflight_before_thread_or_runtime_resolution(
     assert runtime_state.accesses == 0
 
 
-@pytest.mark.parametrize("route_name", ["thread_stream", "thread_wait"])
+@pytest.mark.parametrize("route_name", ["thread_create", "thread_stream", "thread_wait"])
 @pytest.mark.parametrize(
     ("config", "checkpoint", "detail"),
     [
@@ -1263,7 +1264,7 @@ def test_decorated_thread_run_routes_preflight_before_permission_dependencies(
 
     from app.gateway.auth.models import User
     from app.gateway.authz import AuthContext, Permissions
-    from app.gateway.routers.thread_runs import RunCreateRequest, stream_run, wait_run
+    from app.gateway.routers.thread_runs import RunCreateRequest, create_run, stream_run, wait_run
 
     class NeverDependencyState:
         accesses = 0
@@ -1287,7 +1288,11 @@ def test_decorated_thread_run_routes_preflight_before_permission_dependencies(
         config=config,
         checkpoint=checkpoint,
     )
-    route = {"thread_stream": stream_run, "thread_wait": wait_run}[route_name]
+    route = {
+        "thread_create": create_run,
+        "thread_stream": stream_run,
+        "thread_wait": wait_run,
+    }[route_name]
 
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(route(thread_id="thread-1", body=body, request=request))
@@ -1298,7 +1303,7 @@ def test_decorated_thread_run_routes_preflight_before_permission_dependencies(
     assert dependency_state.accesses == 0
 
 
-@pytest.mark.parametrize("route_name", ["thread_stream", "thread_wait"])
+@pytest.mark.parametrize("route_name", ["thread_create", "thread_stream", "thread_wait"])
 def test_decorated_thread_run_routes_keep_permission_path_for_valid_body(_stub_app_config, route_name: str):
     import asyncio
     import inspect
@@ -1308,7 +1313,7 @@ def test_decorated_thread_run_routes_keep_permission_path_for_valid_body(_stub_a
 
     from app.gateway.auth.models import User
     from app.gateway.authz import AuthContext, Permissions
-    from app.gateway.routers.thread_runs import RunCreateRequest, stream_run, wait_run
+    from app.gateway.routers.thread_runs import RunCreateRequest, create_run, stream_run, wait_run
 
     class DenyThreadStore:
         calls = 0
@@ -1337,15 +1342,215 @@ def test_decorated_thread_run_routes_keep_permission_path_for_valid_body(_stub_a
         app=SimpleNamespace(state=PermissionOnlyState(thread_store)),
     )
     body = RunCreateRequest(input={"messages": [{"role": "user", "content": "safe input"}]})
-    route = {"thread_stream": stream_run, "thread_wait": wait_run}[route_name]
+    route = {
+        "thread_create": create_run,
+        "thread_stream": stream_run,
+        "thread_wait": wait_run,
+    }[route_name]
 
     assert tuple(inspect.signature(route).parameters) == ("thread_id", "body", "request")
     with pytest.raises(HTTPException) as exc_info:
-        invocation = route(thread_id="thread-1", body=body, request=request) if route_name == "thread_stream" else route("thread-1", body, request)
-        asyncio.run(invocation)
+        asyncio.run(route(thread_id="thread-1", body=body, request=request))
 
     assert exc_info.value.status_code == 404
     assert thread_store.calls == 1
+
+
+@pytest.mark.parametrize("multitask_strategy", ["interrupt", "rollback"])
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_exception", "expected_status", "expected_detail"),
+    [
+        pytest.param("missing-checkpoint", HTTPException, 404, "Checkpoint missing not found", id="missing-checkpoint"),
+        pytest.param("failed-checkpoint", HTTPException, 500, "Failed to validate checkpoint", id="failed-checkpoint"),
+        pytest.param("malformed-message", HTTPException, 400, "Invalid message at input.messages[1]", id="malformed-message"),
+        pytest.param("invalid-config", ValueError, None, "request config 'context' must be a mapping", id="invalid-config"),
+    ],
+)
+def test_start_run_validates_before_lifecycle_side_effects_and_allows_retry(
+    _stub_app_config,
+    multitask_strategy: str,
+    failure_kind: str,
+    expected_exception: type[Exception],
+    expected_status: int | None,
+    expected_detail: str,
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class TrackingThreadStore:
+        def __init__(self):
+            self.status = "idle"
+            self.status_updates: list[str] = []
+
+        async def check_access(self, thread_id, user_id, *, require_existing=False):
+            return True
+
+        async def get(self, thread_id, **kwargs):
+            return {"thread_id": thread_id, "status": self.status}
+
+        async def update_status(self, thread_id, status):
+            self.status = status
+            self.status_updates.append(status)
+
+    class SelectiveCheckpointer:
+        def __init__(self):
+            self.checkpoint_ids: list[str] = []
+
+        async def aget_tuple(self, config):
+            checkpoint_id = config["configurable"]["checkpoint_id"]
+            self.checkpoint_ids.append(checkpoint_id)
+            if checkpoint_id == "missing":
+                return None
+            if checkpoint_id == "failed":
+                raise RuntimeError("driver secret")
+            return SimpleNamespace(config=config, checkpoint={"channel_values": {}})
+
+    async def _scenario():
+        thread_id = f"thread-{failure_kind}-{multitask_strategy}"
+        run_manager = RunManager(store=MemoryRunStore())
+        old_run = await run_manager.create_or_reject(thread_id)
+        thread_store = TrackingThreadStore()
+        checkpointer = SelectiveCheckpointer()
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=checkpointer,
+            store=None,
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+        )
+        request = SimpleNamespace(
+            headers={},
+            state=SimpleNamespace(user=SimpleNamespace(id="user-1", system_role="user"), auth_source="session"),
+            app=SimpleNamespace(state=state),
+        )
+        invalid_kwargs = {
+            "input": {"messages": [{"role": "user", "content": "safe input"}]},
+            "multitask_strategy": multitask_strategy,
+        }
+        if failure_kind == "missing-checkpoint":
+            invalid_kwargs["checkpoint"] = {"checkpoint_id": "missing"}
+        elif failure_kind == "failed-checkpoint":
+            invalid_kwargs["checkpoint"] = {"checkpoint_id": "failed"}
+        elif failure_kind == "malformed-message":
+            invalid_kwargs["input"] = {
+                "messages": [
+                    {"role": "user", "content": "safe input"},
+                    {"malformed": "message"},
+                ]
+            }
+        else:
+            invalid_kwargs["config"] = {"context": "not-a-mapping"}
+        invalid_body = RunCreateRequest(**invalid_kwargs)
+
+        async def fake_run_agent(*args, **kwargs):
+            return None
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            with pytest.raises(expected_exception) as exc_info:
+                await start_run(invalid_body, thread_id, request)
+
+            if expected_status is not None:
+                assert exc_info.value.status_code == expected_status
+                assert expected_detail in exc_info.value.detail
+            else:
+                assert expected_detail in str(exc_info.value)
+
+            runs_after_failure = await run_manager.list_by_thread(thread_id)
+            assert [record.run_id for record in runs_after_failure] == [old_run.run_id]
+            assert old_run.status == RunStatus.pending
+            assert old_run.abort_event.is_set() is False
+            assert thread_store.status == "idle"
+            assert thread_store.status_updates == []
+
+            valid_kwargs = {
+                "input": {"messages": [{"role": "user", "content": "valid retry"}]},
+                "multitask_strategy": multitask_strategy,
+            }
+            if failure_kind in {"missing-checkpoint", "failed-checkpoint"}:
+                valid_kwargs["checkpoint"] = {"checkpoint_id": "valid"}
+            valid_record = await start_run(RunCreateRequest(**valid_kwargs), thread_id, request)
+            await valid_record.task
+
+        runs_after_retry = await run_manager.list_by_thread(thread_id)
+        assert len(runs_after_retry) == 2
+        assert old_run.status == RunStatus.interrupted
+        assert old_run.abort_event.is_set() is True
+        assert valid_record.status == RunStatus.pending
+        assert thread_store.status == "running"
+        assert thread_store.status_updates == ["running"]
+        expected_checkpoint_ids = ["valid"] if failure_kind in {"missing-checkpoint", "failed-checkpoint"} else []
+        if failure_kind == "missing-checkpoint":
+            expected_checkpoint_ids.insert(0, "missing")
+        elif failure_kind == "failed-checkpoint":
+            expected_checkpoint_ids.insert(0, "failed")
+        assert checkpointer.checkpoint_ids == expected_checkpoint_ids
+
+    asyncio.run(_scenario())
+
+
+def test_start_run_authorizes_before_checkpoint_saver_probe(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+
+    class NeverRunManager:
+        calls = 0
+
+        async def create_or_reject(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("unauthorized request reached run persistence")
+
+    class DenyThreadStore:
+        async def check_access(self, thread_id, user_id, *, require_existing=False):
+            return False
+
+    class NeverCheckpointer:
+        calls = 0
+
+        async def aget_tuple(self, config):
+            self.calls += 1
+            raise AssertionError("unauthorized request probed checkpoint storage")
+
+    run_manager = NeverRunManager()
+    checkpointer = NeverCheckpointer()
+    state = SimpleNamespace(
+        stream_bridge=SimpleNamespace(),
+        run_manager=run_manager,
+        checkpointer=checkpointer,
+        store=None,
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=DenyThreadStore(),
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(user=SimpleNamespace(id="user-1", system_role="user"), auth_source="session"),
+        app=SimpleNamespace(state=state),
+    )
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "safe input"}]},
+        checkpoint={"checkpoint_id": "missing"},
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(start_run(body, "hidden-thread", request))
+
+    assert exc_info.value.status_code == 404
+    assert run_manager.calls == 0
+    assert checkpointer.calls == 0
 
 
 @pytest.mark.parametrize("typed_checkpoint", [False, True], ids=["config-only", "typed-overrides"])

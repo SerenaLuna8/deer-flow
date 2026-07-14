@@ -745,6 +745,42 @@ async def start_run(
         if not allowed:
             raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    agent_factory = resolve_agent_factory(body.assistant_id)
+    command = getattr(body, "command", None)
+    if command and command.get("resume") is not None:
+        graph_input = Command(resume=command["resume"])
+    else:
+        graph_input = normalize_input(body.input)
+    config = build_run_config(
+        thread_id,
+        sanitized_config,
+        sanitized_metadata,
+        assistant_id=body.assistant_id,
+        client_fields_sanitized=True,
+    )
+    await apply_checkpoint_to_run_config(
+        config,
+        body=body,
+        thread_id=thread_id,
+        request=request,
+        checkpoint_control=checkpoint_control,
+    )
+
+    # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
+    # The ``context`` field is a custom extension for the langgraph-compat layer
+    # that carries agent configuration (model_name, thinking_enabled, etc.).
+    # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
+    is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
+    merge_run_context_overrides(config, sanitized_body_context, internal=is_internal_caller)
+    if not is_internal_caller:
+        # ``body.config`` is free-form and copied verbatim by
+        # ``build_run_config``; scrub internal-only keys smuggled there.
+        strip_internal_context_keys(config)
+    internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
+    inject_authenticated_user_context(config, request, internal_owner_user=internal_owner_user)
+
+    stream_modes = normalize_stream_modes(body.stream_mode)
+
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
         try:
@@ -788,42 +824,6 @@ async def start_run(
                 await run_ctx.thread_store.update_status(thread_id, "running")
         except Exception:
             logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
-
-        agent_factory = resolve_agent_factory(body.assistant_id)
-        command = getattr(body, "command", None)
-        if command and command.get("resume") is not None:
-            graph_input = Command(resume=command["resume"])
-        else:
-            graph_input = normalize_input(body.input)
-        config = build_run_config(
-            thread_id,
-            sanitized_config,
-            sanitized_metadata,
-            assistant_id=body.assistant_id,
-            client_fields_sanitized=True,
-        )
-        await apply_checkpoint_to_run_config(
-            config,
-            body=body,
-            thread_id=thread_id,
-            request=request,
-            checkpoint_control=checkpoint_control,
-        )
-
-        # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
-        # The ``context`` field is a custom extension for the langgraph-compat layer
-        # that carries agent configuration (model_name, thinking_enabled, etc.).
-        # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-        is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
-        merge_run_context_overrides(config, sanitized_body_context, internal=is_internal_caller)
-        if not is_internal_caller:
-            # ``body.config`` is free-form and copied verbatim by
-            # ``build_run_config``; scrub internal-only keys smuggled there.
-            strip_internal_context_keys(config)
-        internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
-        inject_authenticated_user_context(config, request, internal_owner_user=internal_owner_user)
-
-        stream_modes = normalize_stream_modes(body.stream_mode)
 
         task = asyncio.create_task(
             run_agent(

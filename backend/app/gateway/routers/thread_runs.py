@@ -413,6 +413,7 @@ async def prepare_regenerate_run(
 
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
+@preflight_run_create_route
 @require_permission("runs", "create", owner_check=True, require_existing=True)
 async def create_run(thread_id: str, body: RunCreateRequest, request: Request) -> RunResponse:
     """Create a background run (returns immediately)."""

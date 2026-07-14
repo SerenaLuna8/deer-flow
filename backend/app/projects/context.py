@@ -39,13 +39,16 @@ async def resolve_project_context(
     ``UUID`` identifiers address a project ID. Strings always address a slug,
     even when the string itself is UUID-shaped, so caller intent is unambiguous.
     """
-    async with session.begin():
-        return await resolve_project_context_in_transaction(
-            session,
-            user_id,
-            project_identifier,
-            request_id,
-        )
+    try:
+        async with session.begin():
+            return await resolve_project_context_in_transaction(
+                session,
+                user_id,
+                project_identifier,
+                request_id,
+            )
+    except DBAPIError:
+        raise ProjectDatabaseUnavailable() from None
 
 
 async def resolve_project_context_in_transaction(

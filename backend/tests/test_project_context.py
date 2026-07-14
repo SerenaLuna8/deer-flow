@@ -85,6 +85,72 @@ async def test_resolver_maps_only_dbapi_failures_to_safe_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolver_maps_transaction_enter_dbapi_failure_to_safe_error() -> None:
+    failure = DBAPIError(
+        "BEGIN secret",
+        {"url": "postgresql://owner:password@db/deerflow"},
+        Exception("driver failed"),
+        False,
+    )
+
+    class FailingTransaction:
+        async def __aenter__(self):
+            raise failure
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    session = MagicMock()
+    session.begin.return_value = FailingTransaction()
+    session.execute = AsyncMock()
+
+    with pytest.raises(ProjectDatabaseUnavailable) as exc_info:
+        await resolve_project_context(session, uuid.uuid4(), uuid.uuid4(), "req-enter")
+
+    assert str(exc_info.value) == "Project storage unavailable"
+    assert exc_info.value.__cause__ is None
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolver_maps_transaction_exit_dbapi_failure_to_safe_error() -> None:
+    failure = DBAPIError(
+        "COMMIT secret",
+        {"url": "postgresql://owner:password@db/deerflow"},
+        Exception("driver failed"),
+        False,
+    )
+
+    class FailingTransaction:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            raise failure
+
+    result = SimpleNamespace(
+        all=lambda: [
+            SimpleNamespace(
+                project_id=uuid.uuid4(),
+                membership_id=uuid.uuid4(),
+                role="viewer",
+                membership_version=1,
+            )
+        ]
+    )
+    session = MagicMock()
+    session.begin.return_value = FailingTransaction()
+    session.execute = AsyncMock(return_value=result)
+
+    with pytest.raises(ProjectDatabaseUnavailable) as exc_info:
+        await resolve_project_context(session, uuid.uuid4(), uuid.uuid4(), "req-exit")
+
+    assert str(exc_info.value) == "Project storage unavailable"
+    assert exc_info.value.__cause__ is None
+    session.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_resolve_project_context_is_single_statement_and_fail_closed(
     migrated_postgres_database_url: str,
 ) -> None:
