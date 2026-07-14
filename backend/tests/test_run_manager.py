@@ -78,6 +78,35 @@ class FailingStatusRunStore(MemoryRunStore):
         raise PostgresDriverError("lock not available", "55P03")
 
 
+class BlockingAuthoritativeStatusStore(MemoryRunStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.write_started = asyncio.Event()
+        self.release_write = asyncio.Event()
+
+    async def update_status_authoritative(
+        self,
+        run_id,
+        status,
+        *,
+        error=None,
+        scope=None,
+    ):
+        if status != RunStatus.success.value:
+            return await super().update_status_authoritative(
+                run_id,
+                status,
+                error=error,
+                scope=scope,
+            )
+        self.write_started.set()
+        await self.release_write.wait()
+        return {
+            "status": RunStatus.interrupted.value,
+            "error": "authorization_revoked",
+        }
+
+
 class MissingCompletionRunStore(MemoryRunStore):
     """Memory run store that reports one missing row for completion updates."""
 
@@ -147,6 +176,24 @@ async def test_status_transitions(manager: RunManager):
 
     await manager.set_status(record.run_id, RunStatus.success)
     assert record.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_authoritative_status_is_not_published_before_store_outcome() -> None:
+    store = BlockingAuthoritativeStatusStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-authoritative")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    terminal_write = asyncio.create_task(manager.set_status(record.run_id, RunStatus.success))
+    await asyncio.wait_for(store.write_started.wait(), timeout=2)
+    assert record.status is RunStatus.running
+
+    store.release_write.set()
+    await asyncio.wait_for(terminal_write, timeout=2)
+    assert record.status is RunStatus.interrupted
+    assert record.error == "authorization_revoked"
+    assert record.abort_event.is_set()
 
 
 @pytest.mark.anyio

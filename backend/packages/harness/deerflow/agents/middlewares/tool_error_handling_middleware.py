@@ -167,7 +167,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 runtime_context,
                 "before_tool_call",
             )
-            metadata = getattr(request.tool, "metadata", None)
+            metadata = getattr(getattr(request, "tool", None), "metadata", None)
             if isinstance(metadata, dict) and metadata.get("deerflow_private_mcp") is True:
                 await check_authorization_boundary(
                     runtime_context,

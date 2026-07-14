@@ -207,6 +207,24 @@ class RunRepository(RunStore):
             return [self._row_to_dict(r, scope=scope) for r in result.scalars()]
 
     async def update_status(self, run_id, status, *, error=None, scope=None) -> bool:
+        outcome = await self.update_status_authoritative(
+            run_id,
+            status,
+            error=error,
+            scope=scope,
+        )
+        return outcome is not False
+
+    async def update_status_authoritative(
+        self,
+        run_id,
+        status,
+        *,
+        error=None,
+        scope=None,
+    ) -> dict[str, Any] | bool:
+        """Atomically return the CASE-resolved status written by PostgreSQL."""
+
         if scope is None:
             return False
         revoked = RunRow.authorization_cancel_requested_at.is_not(None)
@@ -219,9 +237,20 @@ class RunRepository(RunStore):
         else:
             values["error"] = case((revoked, "authorization_revoked"), else_=RunRow.error)
         async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, *self._scope_predicates(scope)).values(**values))
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    *self._scope_predicates(scope),
+                )
+                .values(**values)
+                .returning(RunRow.status, RunRow.error)
+            )
+            row = result.one_or_none()
             await session.commit()
-            return result.rowcount != 0
+            if row is None:
+                return False
+            return {"status": row.status, "error": row.error}
 
     async def update_model_name(self, run_id, model_name, *, scope=None):
         if scope is None:

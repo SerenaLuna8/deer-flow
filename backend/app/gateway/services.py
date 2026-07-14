@@ -1029,6 +1029,12 @@ async def start_private_run(
     )
 
     admitted = await admission_service.admit(context, thread_id, create_request)
+    authorization_boundary = PrivateRunAuthorizationBoundary(
+        session_factory,
+        project_id=admitted.run.project_id,
+        owner_user_id=admitted.run.owner_user_id,
+        run_id=admitted.run.run_id,
+    )
     private_runtime = None
     record = None
     try:
@@ -1036,7 +1042,11 @@ async def start_private_run(
         exact_model_name = admitted.run.model_name
         if base_run_context.app_config is None or exact_model_name is None or base_run_context.app_config.get_model_config(exact_model_name) is None:
             raise PrivateWorkAssetStale(context.request_id)
-        private_runtime = await asset_runtime.materialize(context, admitted)
+        private_runtime = await asset_runtime.materialize(
+            context,
+            admitted,
+            authorization_boundary=authorization_boundary,
+        )
         if private_runtime.model_ref != exact_model_name:
             raise PrivateWorkAssetStale(context.request_id)
         run_manager = get_run_manager(request)
@@ -1052,13 +1062,7 @@ async def start_private_run(
             scope=admitted.opaque_runtime_scope,
             created_at=admitted.run.created_at.isoformat(),
         )
-        authorization_boundary = PrivateRunAuthorizationBoundary(
-            session_factory,
-            project_id=admitted.run.project_id,
-            owner_user_id=admitted.run.owner_user_id,
-            run_id=admitted.run.run_id,
-            abort_event=record.abort_event,
-        )
+        authorization_boundary.bind_abort_event(record.abort_event)
         set_checkpoint_boundary = getattr(
             scoped_checkpointer,
             "set_authorization_boundary",
@@ -1066,13 +1070,6 @@ async def start_private_run(
         )
         if callable(set_checkpoint_boundary):
             set_checkpoint_boundary(authorization_boundary)
-        set_runtime_boundary = getattr(
-            private_runtime,
-            "set_authorization_boundary",
-            None,
-        )
-        if callable(set_runtime_boundary):
-            set_runtime_boundary(authorization_boundary)
         private_run_context = replace(
             base_run_context,
             checkpointer=scoped_checkpointer,

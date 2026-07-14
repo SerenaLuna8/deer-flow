@@ -25,6 +25,7 @@ from app.shared_assets.crypto import encrypt_credential_payload
 from app.shared_assets.keyring import CredentialKeyring
 from app.shared_assets.models import AssetScope
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 
 async def _prepare_exact_dependencies(
@@ -558,6 +559,110 @@ def _install_one_shot_mcp_client(monkeypatch, sentinel: str):
 
     monkeypatch.setattr(client_module, "MultiServerMCPClient", OneShotClient)
     return counts, events
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_initial_mcp_discovery_rechecks_authorization_after_materialization(
+    snapshot_scenario: SnapshotScenario,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A marker committed after secret resolution must stop the first remote dispatch."""
+
+    from langchain_mcp_adapters import client as client_module
+
+    from app.private_work.asset_runtime import PrivateAgentRuntime
+
+    scenario, keyring, _sentinel, _content = await _prepare_exact_dependencies(snapshot_scenario)
+    resolver = ProjectAssetResolver(scenario.seed.factory, keyring=keyring)
+    admitted = await PrivateRunAdmissionService(
+        scenario.seed.factory,
+        resolver=resolver,
+    ).admit(scenario.seed.owner_a, scenario.thread_id, PrivateRunCreate())
+    materialized = asyncio.Event()
+    release_materialization = asyncio.Event()
+    real_materialize = PrivateAgentRuntime._materialize_mcp_call
+    remote_calls = 0
+
+    async def pause_after_materialization(self, snapshot):
+        result = await real_materialize(self, snapshot)
+        materialized.set()
+        await release_materialization.wait()
+        return result
+
+    class CountingClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def get_tools(self, *, server_name):
+            nonlocal remote_calls
+            del server_name
+            remote_calls += 1
+            return [_RemoteExactMcpTool([])]
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_materialize_mcp_call",
+        pause_after_materialization,
+    )
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", CountingClient)
+    runtime = None
+    task = asyncio.create_task(
+        PrivateAssetRuntime(
+            scenario.seed.factory,
+            resolver=resolver,
+        ).materialize(scenario.seed.owner_a, admitted)
+    )
+    try:
+        await asyncio.wait_for(materialized.wait(), timeout=10)
+        async with scenario.seed.factory() as session, session.begin():
+            await session.execute(
+                text(
+                    """UPDATE runs
+                    SET authorization_cancel_requested_at=now(),
+                        authorization_cancel_reason='authorization_revoked'
+                    WHERE run_id=:run_id"""
+                ),
+                {"run_id": admitted.run.run_id},
+            )
+        release_materialization.set()
+        with pytest.raises(AuthorizationRevoked) as captured:
+            runtime = await asyncio.wait_for(task, timeout=10)
+        assert str(captured.value) == "authorization_revoked"
+        assert remote_calls == 0
+        from app.private_work.run_repository import PrivateRunRepository
+
+        async with scenario.seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).update_status(
+                scope=scenario.seed.owner_a_scope,
+                run_id=admitted.run.run_id,
+                status="error",
+                error="Private runtime launch failed",
+            )
+        async with scenario.seed.engine.connect() as connection:
+            terminal = (
+                await connection.execute(
+                    text(
+                        """SELECT status,error FROM runs
+                        WHERE run_id=:run_id"""
+                    ),
+                    {"run_id": admitted.run.run_id},
+                )
+            ).one()
+        assert (terminal.status, terminal.error) == (
+            "interrupted",
+            "authorization_revoked",
+        )
+    finally:
+        release_materialization.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if runtime is not None:
+            await runtime.aclose()
 
 
 @pytest.mark.postgres

@@ -15,6 +15,9 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.persistence.channel_connections.identity_lock import (
+    lock_channel_identities,
+)
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
@@ -164,6 +167,10 @@ class ChannelConnectionRepository:
             last_error: IntegrityError | None = None
             for _ in range(_UPSERT_MAX_ATTEMPTS):
                 try:
+                    await lock_channel_identities(
+                        session,
+                        ((provider, external_account_id_value, workspace_id_value),),
+                    )
                     row = (await session.execute(stmt)).scalar_one_or_none()
                     # Revoke any other owner's active row for this external identity
                     # *before* our connected row is flushed, so the partial unique

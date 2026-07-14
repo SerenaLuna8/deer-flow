@@ -17,7 +17,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.private_work.authorization import PrivateRunAuthorizationService
+from app.private_work.authorization import (
+    PrivateRunAuthorizationBoundary,
+    PrivateRunAuthorizationService,
+)
 from app.private_work.context import PrivateWorkContext, require_issued_private_work_context
 from app.private_work.errors import (
     PrivateWorkAssetStale,
@@ -202,13 +205,14 @@ class PrivateAgentRuntime:
         skill_root: Path,
         skills: tuple[Skill, ...],
         mcp_snapshots: tuple[ResolvedMcpSnapshot, ...],
+        authorization_boundary: object,
     ) -> None:
         self._context = context
         self._run_id = run_id
         self._resolver = resolver
         self._session_factory = session_factory
         self._mcp_snapshots = mcp_snapshots
-        self._authorization_boundary = None
+        self._authorization_boundary = authorization_boundary
         self._closed = False
         self.safe_manifest = safe_manifest
         self.skill_root = skill_root
@@ -673,10 +677,18 @@ class PrivateAssetRuntime:
         self,
         context: PrivateWorkContext,
         admitted: AdmittedPrivateRun,
+        *,
+        authorization_boundary: PrivateRunAuthorizationBoundary | None = None,
     ) -> PrivateAgentRuntime:
         context = require_issued_private_work_context(context)
         if type(admitted) is not AdmittedPrivateRun:
             raise PrivateWorkNotFound(context.request_id)
+        authorization_boundary = authorization_boundary or PrivateRunAuthorizationBoundary(
+            self._session_factory,
+            project_id=admitted.run.project_id,
+            owner_user_id=admitted.run.owner_user_id,
+            run_id=admitted.run.run_id,
+        )
         skill_snapshots: tuple[ResolvedSkillSnapshot, ...]
         mcp_snapshots: tuple[ResolvedMcpSnapshot, ...]
         try:
@@ -808,6 +820,7 @@ class PrivateAssetRuntime:
                 skill_root=root,
                 skills=skills,
                 mcp_snapshots=mcp_snapshots,
+                authorization_boundary=authorization_boundary,
             )
             await runtime.discover_mcp_tools()
             return runtime
@@ -818,6 +831,8 @@ class PrivateAssetRuntime:
                 logger.warning("Private runtime cleanup failed after materialization")
             if isinstance(error, PrivateWorkError):
                 raise type(error)(context.request_id) from None
+            if isinstance(error, AuthorizationRevoked):
+                raise
             if isinstance(
                 error,
                 (

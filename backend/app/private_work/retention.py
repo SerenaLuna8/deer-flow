@@ -8,6 +8,10 @@ from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from deerflow.persistence.channel_connections.identity_lock import (
+    ChannelIdentity,
+    lock_channel_identities,
+)
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
@@ -72,14 +76,34 @@ class PrivateWorkRetentionService:
         owner_user_id: str,
         now: datetime | None = None,
     ) -> RetentionChange:
+        return await PrivateWorkRetentionService.restore_owners(
+            session,
+            project_id=project_id,
+            owner_user_ids=(owner_user_id,),
+            now=now,
+        )
+
+    @staticmethod
+    async def restore_owners(
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        owner_user_ids: tuple[str, ...],
+        now: datetime | None = None,
+    ) -> RetentionChange:
+        """Restore owners after locking all frozen identities in global order."""
+
         restored_at = now or datetime.now(UTC)
+        owners = tuple(sorted(set(owner_user_ids)))
+        if not owners:
+            return RetentionChange(thread_ids=(), connection_ids=())
         thread_ids = tuple(
             (
                 await session.execute(
                     update(ThreadMetaRow)
                     .where(
                         ThreadMetaRow.project_id == project_id,
-                        ThreadMetaRow.owner_user_id == owner_user_id,
+                        ThreadMetaRow.owner_user_id.in_(owners),
                         ThreadMetaRow.frozen_at.is_not(None),
                         ThreadMetaRow.deleted_at.is_(None),
                     )
@@ -90,6 +114,40 @@ class PrivateWorkRetentionService:
             .scalars()
             .all()
         )
+
+        candidates = (
+            await session.execute(
+                select(
+                    ChannelConnectionRow.id,
+                    ChannelConnectionRow.provider,
+                    ChannelConnectionRow.external_account_id,
+                    ChannelConnectionRow.workspace_id,
+                )
+                .where(
+                    ChannelConnectionRow.project_id == project_id,
+                    ChannelConnectionRow.owner_user_id.in_(owners),
+                    ChannelConnectionRow.status == "frozen",
+                )
+                .order_by(
+                    ChannelConnectionRow.provider,
+                    ChannelConnectionRow.external_account_id,
+                    ChannelConnectionRow.workspace_id,
+                    ChannelConnectionRow.id,
+                )
+            )
+        ).all()
+        identities: tuple[ChannelIdentity, ...] = tuple((row.provider, row.external_account_id, row.workspace_id) for row in candidates)
+        await lock_channel_identities(session, identities)
+
+        # Candidate ordering selects one stable winner per identity. The
+        # correlated holder check below leaves that winner frozen when another
+        # connected owner already holds the global identity.
+        winners: dict[ChannelIdentity, str] = {}
+        for row in candidates:
+            identity = (row.provider, row.external_account_id, row.workspace_id)
+            winners.setdefault(identity, row.id)
+        if not winners:
+            return RetentionChange(thread_ids=thread_ids, connection_ids=())
 
         other = aliased(ChannelConnectionRow)
         occupied = exists(
@@ -107,7 +165,8 @@ class PrivateWorkRetentionService:
                     update(ChannelConnectionRow)
                     .where(
                         ChannelConnectionRow.project_id == project_id,
-                        ChannelConnectionRow.owner_user_id == owner_user_id,
+                        ChannelConnectionRow.owner_user_id.in_(owners),
+                        ChannelConnectionRow.id.in_(tuple(winners.values())),
                         ChannelConnectionRow.status == "frozen",
                         ~occupied,
                     )

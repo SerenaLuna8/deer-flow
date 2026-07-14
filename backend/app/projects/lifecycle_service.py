@@ -84,13 +84,12 @@ class ProjectLifecycleService:
                 actor,
                 request_id=request_id,
             )
-            for member in members:
-                await self._retention.restore_owner(
-                    self.repository.session,
-                    project_id=project.id,
-                    owner_user_id=member.user_id,
-                    now=now,
-                )
+            await self._retention.restore_owners(
+                self.repository.session,
+                project_id=project.id,
+                owner_user_ids=tuple(member.user_id for member in members),
+                now=now,
+            )
         return result
 
     async def suspend(
@@ -138,13 +137,12 @@ class ProjectLifecycleService:
             project, actor = await self.repository.lock_resume(user_id, project_id)
             members = await self.repository.lock_active_members(project.id)
             result = await self.repository.resume_locked(project, actor, request_id=request_id)
-            for member in members:
-                await self._retention.restore_owner(
-                    self.repository.session,
-                    project_id=project.id,
-                    owner_user_id=member.user_id,
-                    now=now,
-                )
+            await self._retention.restore_owners(
+                self.repository.session,
+                project_id=project.id,
+                owner_user_ids=tuple(member.user_id for member in members),
+                now=now,
+            )
         return result
 
     async def _notify(self, run_ids: tuple[str, ...]) -> None:

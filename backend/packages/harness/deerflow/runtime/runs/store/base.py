@@ -73,6 +73,28 @@ class RunStore(abc.ABC):
         """
         pass
 
+    async def update_status_authoritative(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        scope: PrivateResourceScope | None = None,
+    ) -> dict[str, Any] | bool | None:
+        """Write status and optionally return the store's authoritative outcome.
+
+        Legacy stores inherit the boolean/``None`` result from ``update_status``.
+        Stores that transform writes atomically may return ``status`` and ``error``.
+        """
+
+        if scope is None:
+            return await self.update_status(
+                run_id,
+                status,
+                error=error,
+            )
+        return await self.update_status(run_id, status, error=error, scope=scope)
+
     @abc.abstractmethod
     async def delete(
         self,

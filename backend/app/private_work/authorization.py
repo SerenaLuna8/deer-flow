@@ -131,6 +131,15 @@ class PrivateRunAuthorizationBoundary:
         self._abort_event = abort_event
         self._on_revoke = on_revoke
 
+    def bind_abort_event(self, abort_event: asyncio.Event) -> None:
+        """Attach the process-local abort only after the run is registered."""
+
+        if self._abort_event is abort_event:
+            return
+        if self._abort_event is not None:
+            raise RuntimeError("authorization boundary abort event is already bound")
+        self._abort_event = abort_event
+
     async def _check(self) -> None:
         try:
             async with self._session_factory() as session:

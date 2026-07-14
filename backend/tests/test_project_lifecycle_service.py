@@ -163,7 +163,7 @@ async def test_restore_only_restores_active_members_of_same_project() -> None:
 
     await ProjectLifecycleService(repository, retention=retention).restore(uuid.uuid4(), project_id, "req-restore", NOW)
 
-    retention.restore_owner.assert_awaited_once()
-    kwargs = retention.restore_owner.await_args.kwargs
+    retention.restore_owners.assert_awaited_once()
+    kwargs = retention.restore_owners.await_args.kwargs
     assert kwargs["project_id"] == project_id
-    assert kwargs["owner_user_id"] == member.user_id
+    assert kwargs["owner_user_ids"] == (member.user_id,)

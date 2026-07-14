@@ -1111,13 +1111,22 @@ sandbox exec/write 及未来 file-finalization hook 前重查 marker、项目状
 fail closed。harness 只定义 app-agnostic protocol/`AuthorizationRevoked`，不得 import `app.*`。
 撤销终态固定为 `interrupted`，公开 reason 只能是 `authorization_revoked`，且不得再调用 interrupted-title
 模型；成功等既有终态不写 marker，completion/status 竞争也不能覆盖已撤销 run 的 interrupted 结果。
+私有 asset materialization 必须在首次 MCP discovery 前安装同一个 run-bound boundary；run 注册后只允许
+把对应 `abort_event` 幂等绑定到该 boundary，禁止先 discovery 再 setter，也禁止持有数据库 transaction
+跨远端 MCP 网络调用。PostgreSQL status write 使用单条 marker-aware `UPDATE ... RETURNING status,error`
+返回权威终态；`RunManager` 在 store 返回前不得先向 wait/consumer 暴露请求的 success/error，旧 store
+仍可沿用 bool/None contract。
 
 离组/移除、项目暂停或 pending deletion 同一治理 transaction 冻结该 project+owner 的 Thread 和
 connected channel connection，但绝不物理删除 Thread、file、Memory、credential 或其他私有内容；降为
 Viewer 只停止活动 run，不冻结既有内容。原 membership row 通过 invitation rejoin，或项目 restore/resume
 后，只恢复相同 project+owner 的 frozen row；revoked connection 永不恢复，且外部 identity 已被另一条
 connected row 占用时原 connection 保持 frozen。connection 的全局 active-identity partial unique predicate
-在 ORM、migration 与 bootstrap catalog 中统一为 `status = 'connected'`。
+在 ORM、migration 与 bootstrap catalog 中统一为 `status = 'connected'`。restore/rejoin 必须先收集本次
+所有 owner 的 frozen external identities，以确定性的 signed-int64 key 去重并按数值全局排序取得
+PostgreSQL transaction advisory locks，再选择每 identity 的稳定 winner；project restore/resume 必须一次
+bulk 调用，禁止按 member 循环拿锁。普通 connection upsert 必须复用同一 identity-lock helper，确保并发
+restore 的 loser 保持 frozen 而治理 transaction 仍可提交。
 
 M4 项目 Run 继续复用唯一的 `RunManager`/`RunStore`/`RunEventStore`。`RunRecord.scope`
 对项目 run 必须是 `PrivateResourceScope`；manager 即使命中内存记录也要比较 scope，后台

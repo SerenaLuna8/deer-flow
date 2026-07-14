@@ -27,6 +27,11 @@ from deerflow.agents.middlewares.summarization_middleware import (
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
 from deerflow.config.title_config import TitleConfig
+from deerflow.persistence.channel_connections.identity_lock import (
+    channel_identity_lock_key,
+    lock_channel_identities,
+)
+from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime.goal import evaluate_goal_completion
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.runs.manager import RunManager
@@ -136,6 +141,127 @@ async def test_database_failure_at_boundary_is_fail_closed_without_detail() -> N
     assert "secret" not in str(exc_info.value)
 
 
+def test_authorization_boundary_abort_binding_is_idempotent_and_immutable() -> None:
+    boundary = PrivateRunAuthorizationBoundary(
+        MagicMock(),
+        project_id=uuid.uuid4(),
+        owner_user_id=str(uuid.uuid4()),
+        run_id="run-bind",
+    )
+    abort_event = asyncio.Event()
+    boundary.bind_abort_event(abort_event)
+    boundary.bind_abort_event(abort_event)
+
+    with pytest.raises(RuntimeError, match="already bound"):
+        boundary.bind_abort_event(asyncio.Event())
+
+
+@pytest.mark.asyncio
+async def test_channel_identity_locks_are_deduplicated_in_numeric_order() -> None:
+    session = AsyncMock()
+    identities = (
+        ("slack", "external-y", "workspace-y"),
+        ("slack", "external-x", "workspace-x"),
+        ("slack", "external-y", "workspace-y"),
+    )
+
+    await lock_channel_identities(session, identities)
+
+    expected = sorted({channel_identity_lock_key(identity) for identity in identities})
+    actual = [call.args[1]["identity_key"] for call in session.execute.await_args_list]
+    assert actual == expected
+
+
+@pytest.mark.asyncio
+async def test_normal_channel_connect_locks_identity_before_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.persistence.channel_connections.model import ChannelConnectionRow
+    from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
+
+    events: list[str] = []
+    row = ChannelConnectionRow(
+        id="connection-lock-order",
+        owner_user_id=str(uuid.uuid4()),
+        provider="slack",
+        status="frozen",
+        external_account_id="external-lock-order",
+        workspace_id="workspace-lock-order",
+        project_id=uuid.uuid4(),
+        scopes_json=[],
+        capabilities_json={},
+        metadata_json={},
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    class Result:
+        def __init__(self, *, scalar=None, values=()):
+            self.scalar = scalar
+            self.values = values
+
+        def scalar_one_or_none(self):
+            return self.scalar
+
+        def scalars(self):
+            return self
+
+        def __iter__(self):
+            return iter(self.values)
+
+    class Session:
+        calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, _statement):
+            self.calls += 1
+            events.append(f"execute-{self.calls}")
+            if self.calls == 1:
+                return Result(scalar=row)
+            return Result(values=())
+
+        async def commit(self):
+            events.append("commit")
+
+        async def rollback(self):
+            events.append("rollback")
+
+        async def refresh(self, _row):
+            events.append("refresh")
+
+        @property
+        def no_autoflush(self):
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+    async def record_lock(_session, identities):
+        assert tuple(identities) == (("slack", "external-lock-order", "workspace-lock-order"),)
+        events.append("lock")
+
+    monkeypatch.setattr(
+        "deerflow.persistence.channel_connections.sql.lock_channel_identities",
+        record_lock,
+    )
+    repository = ChannelConnectionRepository(lambda: Session())
+
+    result = await repository.upsert_connection(
+        owner_user_id=row.owner_user_id,
+        provider=row.provider,
+        external_account_id=row.external_account_id,
+        workspace_id=row.workspace_id,
+        status="connected",
+    )
+
+    assert result["status"] == "connected"
+    assert events[:2] == ["lock", "execute-1"]
+
+
 class _RecordingBoundary:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -204,6 +330,17 @@ async def test_retention_freeze_and_restore_are_scope_bound_and_non_destructive(
         _ScalarResult(("thread-1",)),
         _ScalarResult(("connection-1",)),
         _ScalarResult(("thread-1",)),
+        _ScalarResult(
+            (
+                SimpleNamespace(
+                    id="connection-1",
+                    provider="slack",
+                    external_account_id="external-1",
+                    workspace_id="workspace-1",
+                ),
+            )
+        ),
+        _ScalarResult(),
         _ScalarResult(("connection-1",)),
     ]
     project_id = uuid.uuid4()
@@ -227,7 +364,8 @@ async def test_retention_freeze_and_restore_are_scope_bound_and_non_destructive(
     assert restored.thread_ids == ("thread-1",)
     assert restored.connection_ids == ("connection-1",)
     statements = [str(call.args[0]) for call in session.execute.await_args_list]
-    assert all("project_id" in statement and "owner_user_id" in statement for statement in statements)
+    scoped_statements = [statement for statement in statements if "pg_advisory_xact_lock" not in statement]
+    assert all("project_id" in statement and "owner_user_id" in statement for statement in scoped_statements)
     assert all(not statement.lstrip().upper().startswith("DELETE ") for statement in statements)
     assert "status = 'connected'" in statements[0] or "status" in statements[1]
 
@@ -571,3 +709,178 @@ async def test_postgres_restore_keeps_colliding_connection_frozen(
             )
         ).scalar_one()
     assert status == "frozen"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_postgres_late_revocation_marker_overrides_memory_terminal_status(
+    private_seed: M4ThreadSeed,
+) -> None:
+    seed = private_seed
+    owner = str(seed.owner_a.user_id)
+    project_id = seed.owner_a.project_id
+    thread_id = "task6-late-marker-thread"
+    run_id = "task6-late-marker-run"
+    from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+
+    async with seed.factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=seed.owner_a_scope,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+        await session.execute(
+            text(
+                """INSERT INTO runs
+                (run_id,thread_id,project_id,owner_user_id,status,
+                 multitask_strategy,metadata_json,kwargs_json,finalization_status,
+                 message_count,total_input_tokens,total_output_tokens,total_tokens,
+                 llm_call_count,lead_agent_tokens,subagent_tokens,middleware_tokens,
+                 token_usage_by_model,created_at,updated_at)
+                VALUES (:run_id,:thread_id,:project_id,:owner,'running',
+                 'reject','{}'::json,'{}'::json,'pending',0,0,0,0,0,0,0,0,
+                 '{}'::json,now(),now())"""
+            ),
+            {
+                "run_id": run_id,
+                "thread_id": thread_id,
+                "project_id": project_id,
+                "owner": owner,
+            },
+        )
+
+    manager = RunManager(store=RunRepository(seed.factory))
+    record = await manager.register_persisted(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id=None,
+        scope=seed.owner_a_scope,
+    )
+    record.status = RunStatus.running
+    async with seed.factory() as session, session.begin():
+        assert await PrivateRunAuthorizationService.mark_revoked(
+            session,
+            project_id=project_id,
+            owner_user_id=owner,
+            now=NOW,
+        ) == (run_id,)
+
+    await manager.set_status(run_id, RunStatus.success)
+
+    current = await manager.get(run_id, scope=seed.owner_a_scope)
+    assert current is not None
+    assert current.status is RunStatus.interrupted
+    assert current.error == AUTHORIZATION_REVOKED_REASON
+    async with seed.engine.connect() as connection:
+        persisted = (
+            await connection.execute(
+                text("SELECT status,error FROM runs WHERE run_id=:run_id"),
+                {"run_id": run_id},
+            )
+        ).one()
+    assert (persisted.status, persisted.error) == (
+        RunStatus.interrupted.value,
+        AUTHORIZATION_REVOKED_REASON,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_postgres_concurrent_identity_restore_commits_one_winner(
+    private_seed: M4ThreadSeed,
+) -> None:
+    seed = private_seed
+    owner = str(seed.owner_a.user_id)
+    project_a = seed.owner_a.project_id
+    project_b = seed.project_b_owner_a.project_id
+    async with seed.factory() as session, session.begin():
+        await session.execute(
+            text(
+                """INSERT INTO channel_connections
+                (id,owner_user_id,provider,status,external_account_id,workspace_id,
+                 scopes_json,capabilities_json,metadata_json,project_id,frozen_at,
+                 created_at,updated_at)
+                VALUES
+                ('task6-race-a-x',:owner,'slack','frozen','external-race-x',
+                 'workspace-race-x','[]'::json,'{}'::json,'{}'::json,
+                 :project_a,now(),now(),now()),
+                ('task6-race-a-y',:owner,'slack','frozen','external-race-y',
+                 'workspace-race-y','[]'::json,'{}'::json,'{}'::json,
+                 :project_a,now(),now(),now()),
+                ('task6-race-b-y',:owner,'slack','frozen','external-race-y',
+                 'workspace-race-y','[]'::json,'{}'::json,'{}'::json,
+                 :project_b,now(),now(),now()),
+                ('task6-race-b-x',:owner,'slack','frozen','external-race-x',
+                 'workspace-race-x','[]'::json,'{}'::json,'{}'::json,
+                 :project_b,now(),now(),now())"""
+            ),
+            {
+                "owner": owner,
+                "project_a": project_a,
+                "project_b": project_b,
+            },
+        )
+        await session.execute(
+            text(
+                """CREATE FUNCTION task6_restore_pause() RETURNS trigger
+                LANGUAGE plpgsql AS $$
+                BEGIN
+                  PERFORM pg_sleep(0.2);
+                  RETURN NEW;
+                END $$"""
+            )
+        )
+        await session.execute(
+            text(
+                """CREATE TRIGGER task6_restore_pause_trigger
+                BEFORE UPDATE ON channel_connections
+                FOR EACH ROW
+                WHEN (OLD.status = 'frozen' AND NEW.status = 'connected')
+                EXECUTE FUNCTION task6_restore_pause()"""
+            )
+        )
+
+    ready_count = 0
+    ready_lock = asyncio.Lock()
+    both_ready = asyncio.Event()
+    release = asyncio.Event()
+
+    async def restore(project_id: uuid.UUID):
+        nonlocal ready_count
+        async with seed.factory() as session, session.begin():
+            async with ready_lock:
+                ready_count += 1
+                if ready_count == 2:
+                    both_ready.set()
+            await release.wait()
+            return await PrivateWorkRetentionService.restore_owner(
+                session,
+                project_id=project_id,
+                owner_user_id=owner,
+                now=NOW,
+            )
+
+    first = asyncio.create_task(restore(project_a))
+    second = asyncio.create_task(restore(project_b))
+    await asyncio.wait_for(both_ready.wait(), timeout=5)
+    release.set()
+    results = await asyncio.wait_for(
+        asyncio.gather(first, second, return_exceptions=True),
+        timeout=10,
+    )
+
+    assert not [result for result in results if isinstance(result, BaseException)]
+    assert sum(len(result.connection_ids) for result in results) == 2
+    async with seed.engine.connect() as connection:
+        statuses = tuple(
+            (
+                await connection.execute(
+                    text(
+                        """SELECT status FROM channel_connections
+                        WHERE id LIKE 'task6-race-%'
+                        ORDER BY id"""
+                    )
+                )
+            ).scalars()
+        )
+    assert sorted(statuses) == ["connected", "connected", "frozen", "frozen"]

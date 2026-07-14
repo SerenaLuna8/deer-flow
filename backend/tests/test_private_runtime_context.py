@@ -31,6 +31,7 @@ from deerflow.runtime import (
     RunStatus,
     run_agent,
 )
+from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 
 class _OpaqueScope:
@@ -920,9 +921,16 @@ async def test_start_private_run_uses_shared_launch_once_after_snapshot(monkeypa
             events.append("cleanup")
 
     class Materializer:
-        async def materialize(self, passed_context, passed_admitted):
+        async def materialize(
+            self,
+            passed_context,
+            passed_admitted,
+            *,
+            authorization_boundary,
+        ):
             assert passed_context is context
             assert passed_admitted is admitted
+            assert authorization_boundary is not None
             events.append("materialize")
             return Runtime()
 
@@ -983,6 +991,103 @@ async def test_start_private_run_uses_shared_launch_once_after_snapshot(monkeypa
 
     assert record.run_id == persisted.run_id
     assert events == ["preflight", "snapshot", "materialize", "register", "launch"]
+
+
+@pytest.mark.anyio
+async def test_start_private_run_does_not_register_revoked_materialization(
+    monkeypatch,
+) -> None:
+    from app.gateway import services
+
+    context = _private_context()
+    now = datetime.now(UTC)
+    persisted = PrivateRunRecord(
+        run_id=str(uuid.uuid4()),
+        thread_id="private-thread",
+        project_id=context.project_id,
+        owner_user_id=str(context.user_id),
+        assistant_id=None,
+        status="pending",
+        multitask_strategy="reject",
+        metadata={},
+        kwargs={},
+        error=None,
+        model_name="exact-model",
+        created_at=now,
+        updated_at=now,
+    )
+    admitted = AdmittedPrivateRun(
+        run=persisted,
+        snapshot=PersistedRunSnapshot(
+            assets=(),
+            mcp_grants=(),
+            catalog_generation=1,
+        ),
+        opaque_runtime_scope=context.resource_scope,
+    )
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def begin(self):
+            return self
+
+    class Admission:
+        async def admit(self, *_args):
+            return admitted
+
+    class Materializer:
+        async def materialize(
+            self,
+            *_args,
+            authorization_boundary,
+        ):
+            assert authorization_boundary is not None
+            raise AuthorizationRevoked
+
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            return object()
+
+    manager = AsyncMock()
+    compensate = AsyncMock()
+    monkeypatch.setattr(
+        "deerflow.persistence.engine.get_session_factory",
+        lambda: lambda: Session(),
+    )
+    monkeypatch.setattr(services, "PrivateWorkRevalidator", Revalidator)
+    monkeypatch.setattr(services, "get_project_checkpointer", lambda *_args: object())
+    monkeypatch.setattr(
+        services,
+        "get_run_context",
+        lambda _request: RunContext(
+            checkpointer=object(),
+            app_config=SimpleNamespace(get_model_config=lambda _name: object()),
+        ),
+    )
+    monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
+    monkeypatch.setattr(services, "_mark_private_run_launch_failed", compensate)
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace()),
+        state=SimpleNamespace(),
+    )
+
+    with pytest.raises(PrivateWorkUnavailable):
+        await services.start_private_run(
+            _private_body(),
+            "private-thread",
+            request,
+            context,
+            admission_service=Admission(),
+            asset_runtime=Materializer(),
+        )
+
+    manager.register_persisted.assert_not_awaited()
+    compensate.assert_awaited_once_with(context, persisted.run_id)
 
 
 @pytest.mark.anyio
@@ -1121,7 +1226,7 @@ async def test_start_private_run_normalizes_registration_failures_and_compensate
             events.append("cleanup")
 
     class Materializer:
-        async def materialize(self, *_args):
+        async def materialize(self, *_args, **_kwargs):
             events.append("materialize")
             return Runtime()
 
@@ -1237,7 +1342,7 @@ async def test_start_private_run_preserves_original_error_when_compensation_also
             raise RuntimeError("cleanup task5-secret-sentinel")
 
     class Materializer:
-        async def materialize(self, *_args):
+        async def materialize(self, *_args, **_kwargs):
             return Runtime()
 
     class Revalidator:
@@ -1348,7 +1453,7 @@ async def test_start_private_run_rejects_unknown_exact_model_before_materializat
             return admitted
 
     class Materializer:
-        async def materialize(self, *_args):
+        async def materialize(self, *_args, **_kwargs):
             calls["materialize"] += 1
             raise AssertionError("materializer must not run")
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -92,6 +92,18 @@ class RunRecord:
     last_ai_message: str | None = None
     first_human_message: str | None = None
     finalizing: bool = False
+    status_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _PersistedStatusOutcome:
+    persisted: bool
+    status: RunStatus
+    error: str | None
+    authoritative_error: bool = False
+
+    def __bool__(self) -> bool:
+        return self.persisted
 
 
 class RunManager:
@@ -250,22 +262,29 @@ class RunManager:
             self._store_put_payload(record, error=error),
         )
 
-    async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None) -> bool:
+    async def _persist_status(
+        self,
+        record: RunRecord,
+        status: RunStatus,
+        *,
+        error: str | None = None,
+    ) -> _PersistedStatusOutcome:
         """Best-effort persist a status transition to the backing store."""
         if self._store is None:
-            return True
+            return _PersistedStatusOutcome(True, status, error, error is not None)
         row_recovery_payload = self._store_put_payload(record, error=error)
+        row_recovery_payload["status"] = status.value
         try:
             if record.scope is None:
                 operation = partial(
-                    self._store.update_status,
+                    self._store.update_status_authoritative,
                     record.run_id,
                     status.value,
                     error=error,
                 )
             else:
                 operation = partial(
-                    self._store.update_status,
+                    self._store.update_status_authoritative,
                     record.run_id,
                     status.value,
                     error=error,
@@ -277,11 +296,36 @@ class RunManager:
                 operation,
             )
             if updated is False:
-                return await self._persist_snapshot_to_store(record.run_id, row_recovery_payload)
-            return True
+                persisted = await self._persist_snapshot_to_store(
+                    record.run_id,
+                    row_recovery_payload,
+                )
+                return _PersistedStatusOutcome(
+                    persisted,
+                    status,
+                    error,
+                    error is not None,
+                )
+            if isinstance(updated, Mapping):
+                try:
+                    authoritative_status = RunStatus(str(updated["status"]))
+                except (KeyError, TypeError, ValueError):
+                    logger.warning(
+                        "Store returned invalid authoritative status for run %s",
+                        record.run_id,
+                    )
+                else:
+                    authoritative_error = updated.get("error")
+                    return _PersistedStatusOutcome(
+                        True,
+                        authoritative_status,
+                        str(authoritative_error) if authoritative_error is not None else None,
+                        True,
+                    )
+            return _PersistedStatusOutcome(True, status, error, error is not None)
         except Exception:
             logger.warning("Failed to persist status update for run %s", record.run_id, exc_info=True)
-            return False
+            return _PersistedStatusOutcome(False, status, error, error is not None)
 
     @staticmethod
     def _record_from_store(row: dict[str, Any]) -> RunRecord:
@@ -582,12 +626,20 @@ class RunManager:
             if record is None:
                 logger.warning("set_status called for unknown run %s", run_id)
                 return
-            record.status = status
-            record.updated_at = _now_iso()
-            if error is not None:
-                record.error = error
-        await self._persist_status(record, status, error=error)
-        logger.info("Run %s -> %s", run_id, status.value)
+        async with record.status_write_lock:
+            outcome = await self._persist_status(record, status, error=error)
+            async with self._lock:
+                current = self._runs.get(run_id)
+                if current is not record:
+                    return
+                record.status = outcome.status
+                record.updated_at = _now_iso()
+                if outcome.authoritative_error:
+                    record.error = outcome.error
+                if outcome.status is RunStatus.interrupted and outcome.error == "authorization_revoked":
+                    record.abort_action = "authorization_revoked"
+                    record.abort_event.set()
+        logger.info("Run %s -> %s", run_id, record.status.value)
 
     async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
         """Mark whether a run is performing post-cancel cleanup."""
