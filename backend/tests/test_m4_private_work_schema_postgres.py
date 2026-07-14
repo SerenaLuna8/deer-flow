@@ -120,6 +120,16 @@ def test_m4_models_register_final_private_work_schema() -> None:
         assert table.c.owner_user_id.type.length == 36
 
 
+def test_thread_checkpoint_delete_status_requires_retry_required_contract() -> None:
+    importlib.import_module("deerflow.persistence.models")
+
+    constraints = {constraint.name: str(constraint.sqltext) for constraint in Base.metadata.tables["threads_meta"].constraints if getattr(constraint, "sqltext", None) is not None}
+    status_check = constraints["ck_threads_meta_checkpoint_delete_status"]
+
+    assert "retry_required" in status_check
+    assert "'failed'" not in status_check
+
+
 def test_m4_models_install_composite_scope_constraints_without_snapshot_secrets() -> None:
     importlib.import_module("deerflow.persistence.models")
 
@@ -255,6 +265,88 @@ async def test_m4_finalize_schema_has_private_scope_and_composite_fks(
         assert marker.checkpoint_marker_probe_complete is True
         assert marker.cutover_at is not None
         assert revision == "0009_project_private_work_finalize"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_checkpoint_delete_status_accepts_retry_required(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    owner_user_id = str(uuid.uuid4())
+    project_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                    (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,:email,'user',now(),false,0)"""
+                ),
+                {"id": owner_user_id, "email": f"{owner_user_id}@example.com"},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO projects
+                    (id,slug,display_name,created_by_user_id)
+                    VALUES (:id,:slug,'Checkpoint Retry Project',:owner_user_id)"""
+                ),
+                {
+                    "id": project_id,
+                    "slug": f"checkpoint-retry-{project_id.hex[:12]}",
+                    "owner_user_id": owner_user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO project_memberships
+                    (id,project_id,user_id,role)
+                    VALUES (:id,:project_id,:owner_user_id,'admin')"""
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "project_id": project_id,
+                    "owner_user_id": owner_user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO agents
+                    (id,scope,project_id,slug,display_name,status,version,created_by_user_id)
+                    VALUES (:id,'project',:project_id,'retry-agent','Retry Agent','active',1,:owner_user_id)"""
+                ),
+                {
+                    "id": agent_id,
+                    "project_id": project_id,
+                    "owner_user_id": owner_user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO threads_meta
+                    (thread_id,owner_user_id,status,metadata_json,created_at,updated_at,
+                     project_id,agent_asset_id,agent_scope,checkpoint_delete_status,version)
+                    VALUES ('checkpoint-retry-thread',:owner_user_id,'idle','{}'::json,
+                            now(),now(),:project_id,:agent_id,'project','retry_required',1)"""
+                ),
+                {
+                    "owner_user_id": owner_user_id,
+                    "project_id": project_id,
+                    "agent_id": agent_id,
+                },
+            )
+
+        async with engine.connect() as connection:
+            status = await connection.scalar(
+                text(
+                    """SELECT checkpoint_delete_status FROM threads_meta
+                    WHERE thread_id = 'checkpoint-retry-thread'"""
+                )
+            )
+        assert status == "retry_required"
     finally:
         await engine.dispose()
 

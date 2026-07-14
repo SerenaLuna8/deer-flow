@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaStore
+from deerflow.persistence.thread_meta.base import (
+    InvalidMetadataFilterError,
+    ThreadMetaStore,
+    TrustedUnscopedThreadMetaStore,
+)
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
@@ -18,18 +22,20 @@ __all__ = [
     "ThreadMetaRepository",
     "ThreadMetaRow",
     "ThreadMetaStore",
+    "TrustedUnscopedThreadMetaStore",
     "make_thread_store",
 ]
 
 
 def make_thread_store(
     session_factory: async_sessionmaker[AsyncSession],
-) -> ThreadMetaStore:
-    """Create the PostgreSQL-backed ThreadMetaStore.
+) -> TrustedUnscopedThreadMetaStore:
+    """Create the explicit trusted legacy adapter over PostgreSQL storage.
 
     Tests that need an in-memory double construct ``MemoryThreadMetaStore``
-    directly instead of routing it through the production factory.
+    directly instead of routing it through the production factory. Project
+    business paths use ``PrivateThreadRepository`` and never this adapter.
     """
     if session_factory is None:
         raise TypeError("make_thread_store requires a PostgreSQL session factory")
-    return ThreadMetaRepository(session_factory)
+    return TrustedUnscopedThreadMetaStore(ThreadMetaRepository(session_factory))

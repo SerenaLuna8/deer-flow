@@ -28,6 +28,7 @@ from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.context import PrivateWorkContext
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import RunContext, RunManager, StreamBridge
@@ -253,11 +254,17 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize and probe PostgreSQL before opening checkpointer/store pools.
         await init_engine_from_config(config.database)
 
-        app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
+        app.state._raw_checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
+        from app.private_work.checkpointer import ProjectScopedCheckpointer
+
+        app.state.project_scoped_checkpointer = ProjectScopedCheckpointer(
+            app.state._raw_checkpointer,
+            sf,
+        )
         from deerflow.persistence.feedback import FeedbackRepository
         from deerflow.persistence.run import RunRepository
 
@@ -333,10 +340,23 @@ def _require(attr: str, label: str) -> Callable[[Request], T]:
 
 get_stream_bridge: Callable[[Request], StreamBridge] = _require("stream_bridge", "Stream bridge")
 get_run_manager: Callable[[Request], RunManager] = _require("run_manager", "Run manager")
-get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "Checkpointer")
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
+
+
+def get_checkpointer(request: Request) -> Checkpointer:
+    """Return the legacy raw saver without exposing it to project modules."""
+
+    raw = getattr(request.app.state, "_raw_checkpointer", None)
+    if raw is None:
+        # Compatibility for isolated legacy router tests and external FastAPI
+        # embeddings that predate the private app-state name. Production
+        # lifespan only installs ``_raw_checkpointer``.
+        raw = getattr(request.app.state, "checkpointer", None)
+    if raw is None:
+        raise HTTPException(status_code=503, detail="Checkpointer not available")
+    return cast(Checkpointer, raw)
 
 
 def get_store(request: Request):
@@ -350,6 +370,19 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     if val is None:
         raise HTTPException(status_code=503, detail="Thread metadata store not available")
     return val
+
+
+def get_project_checkpointer(request: Request, context: PrivateWorkContext):
+    """Return a trusted-context view; project code cannot obtain the raw saver."""
+
+    project_scoped_checkpointer = getattr(
+        request.app.state,
+        "project_scoped_checkpointer",
+        None,
+    )
+    if project_scoped_checkpointer is None:
+        raise HTTPException(status_code=503, detail="Project checkpointer not available")
+    return project_scoped_checkpointer.for_context(context)
 
 
 def get_scheduled_task_repo(request: Request):

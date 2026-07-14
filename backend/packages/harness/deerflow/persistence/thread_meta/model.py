@@ -50,7 +50,7 @@ class ThreadMetaRow(Base):
         ),
         CheckConstraint("agent_scope IN ('system', 'project')", name="ck_threads_meta_agent_scope"),
         CheckConstraint(
-            "checkpoint_delete_status IN ('not_requested', 'pending', 'complete', 'failed')",
+            "checkpoint_delete_status IN ('not_requested', 'pending', 'complete', 'retry_required')",
             name="ck_threads_meta_checkpoint_delete_status",
         ),
         CheckConstraint("version >= 1", name="ck_threads_meta_version"),

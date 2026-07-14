@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import delete as sql_delete
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.json_compat import json_match
 from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -23,8 +26,30 @@ class ThreadMetaRepository(ThreadMetaStore):
         self._sf = session_factory
 
     @staticmethod
+    def _thread_predicate(
+        thread_id: str,
+        resolved_user_id: str | None,
+        scope: PrivateResourceScope | None,
+    ):
+        predicate = [
+            ThreadMetaRow.thread_id == thread_id,
+            ThreadMetaRow.deleted_at.is_(None),
+        ]
+        if scope is not None:
+            predicate.extend(
+                (
+                    ThreadMetaRow.project_id == uuid.UUID(scope.project_id),
+                    ThreadMetaRow.owner_user_id == scope.owner_user_id,
+                )
+            )
+        elif resolved_user_id is not None:
+            predicate.append(ThreadMetaRow.owner_user_id == resolved_user_id)
+        return tuple(predicate)
+
+    @staticmethod
     def _row_to_dict(row: ThreadMetaRow) -> dict[str, Any]:
         d = row.to_dict()
+        d["user_id"] = d.get("owner_user_id")
         d["metadata"] = d.pop("metadata_json", None) or {}
         for key in ("created_at", "updated_at"):
             val = d.get(key)
@@ -41,10 +66,19 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
         display_name: str | None = None,
         metadata: dict | None = None,
+        scope: PrivateResourceScope | None = None,
+        agent_asset_id: uuid.UUID | None = None,
+        agent_scope: str | None = None,
     ) -> dict:
-        # Auto-resolve user_id from contextvar when AUTO; explicit None
-        # creates an orphan row (used by migration scripts).
-        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.create")
+        # Project creates take owner identity from the trusted scope. Ownerless
+        # legacy rows cannot be created after the final M4 schema constraint.
+        if scope is None or agent_asset_id is None or agent_scope not in {"system", "project"}:
+            raise RuntimeError("ThreadMetaRepository.create requires scoped final-schema authority")
+        resolved_user_id = scope.owner_user_id
+        try:
+            project_id = uuid.UUID(scope.project_id)
+        except (TypeError, ValueError):
+            raise RuntimeError("invalid final-schema thread project scope") from None
         now = datetime.now(UTC)
         row = ThreadMetaRow(
             thread_id=thread_id,
@@ -54,6 +88,9 @@ class ThreadMetaRepository(ThreadMetaStore):
             metadata_json=metadata or {},
             created_at=now,
             updated_at=now,
+            project_id=project_id,
+            agent_asset_id=agent_asset_id,
+            agent_scope=agent_scope,
         )
         async with self._sf() as session:
             session.add(row)
@@ -66,18 +103,22 @@ class ThreadMetaRepository(ThreadMetaStore):
         thread_id: str,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ) -> dict | None:
-        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.get")
+        resolved_user_id = None if scope is not None else resolve_user_id(user_id, method_name="ThreadMetaRepository.get")
         async with self._sf() as session:
-            row = await session.get(ThreadMetaRow, thread_id)
-            if row is None:
-                return None
-            # Enforce owner filter unless explicitly bypassed (user_id=None).
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
-                return None
-            return self._row_to_dict(row)
+            statement = select(ThreadMetaRow).where(*self._thread_predicate(thread_id, resolved_user_id, scope))
+            row = (await session.execute(statement)).scalar_one_or_none()
+            return None if row is None else self._row_to_dict(row)
 
-    async def check_access(self, thread_id: str, user_id: str, *, require_existing: bool = False) -> bool:
+    async def check_access(
+        self,
+        thread_id: str,
+        user_id: str,
+        *,
+        require_existing: bool = False,
+        scope: PrivateResourceScope | None = None,
+    ) -> bool:
         """Check if ``user_id`` has access to ``thread_id``.
 
         Two modes — one row, two distinct semantics depending on what
@@ -100,12 +141,19 @@ class ThreadMetaRepository(ThreadMetaStore):
           made every other user appear to "own" it.
         """
         async with self._sf() as session:
-            row = await session.get(ThreadMetaRow, thread_id)
-            if row is None:
+            statement = select(ThreadMetaRow.owner_user_id).where(
+                *self._thread_predicate(
+                    thread_id,
+                    None if scope is None else user_id,
+                    scope,
+                )
+            )
+            row_owner = (await session.execute(statement)).scalar_one_or_none()
+            if scope is not None:
+                return row_owner is not None and user_id == scope.owner_user_id
+            if row_owner is None:
                 return not require_existing
-            if row.user_id is None:
-                return True
-            return row.user_id == user_id
+            return row_owner == user_id
 
     async def search(
         self,
@@ -115,14 +163,20 @@ class ThreadMetaRepository(ThreadMetaStore):
         limit: int = 100,
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ) -> list[dict[str, Any]]:
         """Search threads with optional metadata and status filters.
 
         Owner filter is enforced by default: caller must be in a user
         context. Pass ``user_id=None`` to bypass (migration/CLI).
         """
-        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.search")
-        stmt = select(ThreadMetaRow).order_by(ThreadMetaRow.updated_at.desc(), ThreadMetaRow.thread_id.desc())
+        resolved_user_id = None if scope is not None else resolve_user_id(user_id, method_name="ThreadMetaRepository.search")
+        stmt = select(ThreadMetaRow).where(ThreadMetaRow.deleted_at.is_(None)).order_by(ThreadMetaRow.updated_at.desc(), ThreadMetaRow.thread_id.desc())
+        if scope is not None:
+            stmt = stmt.where(
+                ThreadMetaRow.project_id == uuid.UUID(scope.project_id),
+                ThreadMetaRow.owner_user_id == scope.owner_user_id,
+            )
         if resolved_user_id is not None:
             stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
         if status:
@@ -148,26 +202,18 @@ class ThreadMetaRepository(ThreadMetaStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def _check_ownership(self, session: AsyncSession, thread_id: str, resolved_user_id: str | None) -> bool:
-        """Return True if the row exists and is owned (or filter bypassed)."""
-        if resolved_user_id is None:
-            return True  # explicit bypass
-        row = await session.get(ThreadMetaRow, thread_id)
-        return row is not None and row.user_id == resolved_user_id
-
     async def update_display_name(
         self,
         thread_id: str,
         display_name: str,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ) -> None:
         """Update the display_name (title) for a thread."""
-        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_display_name")
+        resolved_user_id = None if scope is not None else resolve_user_id(user_id, method_name="ThreadMetaRepository.update_display_name")
         async with self._sf() as session:
-            if not await self._check_ownership(session, thread_id, resolved_user_id):
-                return
-            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(display_name=display_name, updated_at=datetime.now(UTC)))
+            await session.execute(update(ThreadMetaRow).where(*self._thread_predicate(thread_id, resolved_user_id, scope)).values(display_name=display_name, updated_at=datetime.now(UTC)))
             await session.commit()
 
     async def update_status(
@@ -176,12 +222,11 @@ class ThreadMetaRepository(ThreadMetaStore):
         status: str,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ) -> None:
-        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_status")
+        resolved_user_id = None if scope is not None else resolve_user_id(user_id, method_name="ThreadMetaRepository.update_status")
         async with self._sf() as session:
-            if not await self._check_ownership(session, thread_id, resolved_user_id):
-                return
-            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(status=status, updated_at=datetime.now(UTC)))
+            await session.execute(update(ThreadMetaRow).where(*self._thread_predicate(thread_id, resolved_user_id, scope)).values(status=status, updated_at=datetime.now(UTC)))
             await session.commit()
 
     async def update_metadata(
@@ -190,6 +235,7 @@ class ThreadMetaRepository(ThreadMetaStore):
         metadata: dict,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ) -> None:
         """Merge ``metadata`` into ``metadata_json``.
 
@@ -197,12 +243,11 @@ class ThreadMetaRepository(ThreadMetaStore):
         callers see consistent state. No-op if the row does not exist or
         the user_id check fails.
         """
-        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_metadata")
+        resolved_user_id = None if scope is not None else resolve_user_id(user_id, method_name="ThreadMetaRepository.update_metadata")
         async with self._sf() as session:
-            row = await session.get(ThreadMetaRow, thread_id)
+            statement = select(ThreadMetaRow).where(*self._thread_predicate(thread_id, resolved_user_id, scope)).with_for_update(of=ThreadMetaRow)
+            row = (await session.execute(statement)).scalar_one_or_none()
             if row is None:
-                return
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
                 return
             merged = dict(row.metadata_json or {})
             merged.update(metadata)
@@ -216,13 +261,14 @@ class ThreadMetaRepository(ThreadMetaStore):
         owner_user_id: str,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ) -> None:
         """Move a thread metadata row to ``owner_user_id``."""
+        if scope is not None:
+            raise RuntimeError("scoped project thread ownership is immutable")
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_owner")
         async with self._sf() as session:
-            if not await self._check_ownership(session, thread_id, resolved_user_id):
-                return
-            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(user_id=owner_user_id, updated_at=datetime.now(UTC)))
+            await session.execute(update(ThreadMetaRow).where(*self._thread_predicate(thread_id, resolved_user_id, None)).values(user_id=owner_user_id, updated_at=datetime.now(UTC)))
             await session.commit()
 
     async def delete(
@@ -230,13 +276,9 @@ class ThreadMetaRepository(ThreadMetaStore):
         thread_id: str,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ) -> None:
-        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.delete")
+        resolved_user_id = None if scope is not None else resolve_user_id(user_id, method_name="ThreadMetaRepository.delete")
         async with self._sf() as session:
-            row = await session.get(ThreadMetaRow, thread_id)
-            if row is None:
-                return
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
-                return
-            await session.delete(row)
+            await session.execute(sql_delete(ThreadMetaRow).where(*self._thread_predicate(thread_id, resolved_user_id, scope)))
             await session.commit()

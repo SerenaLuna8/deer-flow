@@ -1070,6 +1070,22 @@ transaction；`lock=True` 在同一 transaction 内先执行 project `FOR UPDATE
 membership `FOR UPDATE`，以两条显式语句固定 project → membership 锁序。private-work HTTP 错误只映射固定
 `code/message/request_id`，不得拼接底层异常或资源细节。
 
+M4 项目 Thread 的普通业务入口是 `app.private_work.PrivateThreadService`，repository 的每条
+create/get/search/check-access/update/delete SQL 必须把 `project_id`、`owner_user_id` 与
+`deleted_at` 放在数据库 predicate/insert authority 中；active 读取同时排除 frozen row，mutation
+使用 `version` 做 optimistic compare。legacy user-only Thread API 只能经显式
+`TrustedUnscopedThreadMetaStore`，final schema 下 trusted create 还必须在 adapter 构造时给出
+project、Agent 和 membership-version authority，禁止猜默认 project/Agent。项目 checkpoint 只能从
+`ProjectScopedCheckpointer.for_context()` 取得；sync/async get/tuple/list/put/put-writes/delete 每次先
+重验 scoped Thread，写入服务端 `deerflow_private_scope={project_id, owner_user_id}` marker，读取和
+list 每项同时核验 thread ID 与 marker。删除顺序固定为先将 Thread 标记 deleted +
+`checkpoint_delete_status=pending`，再调用 raw saver；raw 删除失败保留不可见并标记
+`retry_required`，成功标记 `complete`。Gateway production lifespan 只把 raw saver 放在私有
+`app.state._raw_checkpointer`；`get_checkpointer` 仅供 legacy，项目模块不得 import/call，项目依赖使用
+`get_project_checkpointer`。create 固定锁序为 project → membership，再验 `private_work.create` 与
+Agent 可执行性、写 Thread、写 root checkpoint；root 失败补偿物理删除 row。branch 的文件复制只
+保留 PostgreSQL authority hook，禁止读取宿主 Thread 目录。
+
 项目 HTTP API 统一挂载 `/api/projects`，使用 request-scoped session 与认证 dependency；
 项目 path 只接受 UUID，项目专属的 path/query/body 校验统一返回
 `PROJECT_VALIDATION_FAILED`，不改变其他 router。默认项目 bootstrap 使用 transaction-level

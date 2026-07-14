@@ -1,10 +1,16 @@
 """Tests for ThreadMetaRepository (SQLAlchemy-backed)."""
 
 import logging
+import uuid
 
 import pytest
+from sqlalchemy import text
 
-from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadMetaRepository
+from deerflow.persistence.thread_meta import (
+    InvalidMetadataFilterError,
+    ThreadMetaRepository,
+    TrustedUnscopedThreadMetaStore,
+)
 
 
 @pytest.fixture
@@ -13,7 +19,67 @@ async def repo(migrated_postgres_database_url):
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 
     await init_engine(DatabaseConfig(url=migrated_postgres_database_url))
-    yield ThreadMetaRepository(get_session_factory())
+    session_factory = get_session_factory()
+    project_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    owners = ("test-user-autouse", "user1", "default", "owner-1")
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                text(
+                    """INSERT INTO users
+                    (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,:email,'user',now(),false,0)"""
+                ),
+                [{"id": owner, "email": f"{owner}-{project_id}@example.com"} for owner in owners],
+            )
+            await session.execute(
+                text(
+                    """INSERT INTO projects
+                    (id,slug,display_name,created_by_user_id)
+                    VALUES (:id,:slug,'Legacy Thread Test',:owner)"""
+                ),
+                {
+                    "id": project_id,
+                    "slug": f"legacy-thread-test-{project_id.hex[:12]}",
+                    "owner": owners[0],
+                },
+            )
+            await session.execute(
+                text(
+                    """INSERT INTO project_memberships
+                    (id,project_id,user_id,role,status,version)
+                    VALUES (:id,:project_id,:user_id,'admin','active',1)"""
+                ),
+                [
+                    {
+                        "id": uuid.uuid4(),
+                        "project_id": project_id,
+                        "user_id": owner,
+                    }
+                    for owner in owners
+                ],
+            )
+            await session.execute(
+                text(
+                    """INSERT INTO agents
+                    (id,scope,project_id,slug,display_name,status,version,
+                     created_by_user_id)
+                    VALUES (:id,'project',:project_id,'legacy-thread-agent',
+                            'Legacy Thread Agent','active',1,:owner)"""
+                ),
+                {
+                    "id": agent_id,
+                    "project_id": project_id,
+                    "owner": owners[0],
+                },
+            )
+    yield TrustedUnscopedThreadMetaStore(
+        ThreadMetaRepository(session_factory),
+        create_project_id=project_id,
+        create_agent_asset_id=agent_id,
+        create_agent_scope="project",
+    )
     await close_engine()
 
 
@@ -64,11 +130,9 @@ class TestThreadMetaRepository:
         assert await repo.check_access("t1", "user2") is False
 
     @pytest.mark.anyio
-    async def test_check_access_no_owner_allows_all(self, repo):
-        # Explicit user_id=None to bypass the new AUTO default that
-        # would otherwise pick up the test user from the autouse fixture.
-        await repo.create("t1", user_id=None)
-        assert await repo.check_access("t1", "anyone") is True
+    async def test_final_schema_rejects_ownerless_legacy_create(self, repo):
+        with pytest.raises(ValueError, match="require an owner"):
+            await repo.create("t1", user_id=None)
 
     @pytest.mark.anyio
     async def test_check_access_strict_missing_row_denied(self, repo):
@@ -91,15 +155,10 @@ class TestThreadMetaRepository:
         assert await repo.check_access("t1", "user2", require_existing=True) is False
 
     @pytest.mark.anyio
-    async def test_check_access_strict_null_owner_still_allowed(self, repo):
-        """Even in strict mode, a row with NULL user_id stays shared.
-
-        The strict flag tightens the *missing row* case, not the *shared
-        row* case — legacy pre-auth rows that survived a clean migration
-        without an owner are still everyone's.
-        """
-        await repo.create("t1", user_id=None)
-        assert await repo.check_access("t1", "anyone", require_existing=True) is True
+    async def test_ownerless_legacy_row_cannot_be_created_for_strict_access(self, repo):
+        with pytest.raises(ValueError, match="require an owner"):
+            await repo.create("t1", user_id=None)
+        assert await repo.check_access("t1", "anyone", require_existing=True) is False
 
     @pytest.mark.anyio
     async def test_update_status(self, repo):

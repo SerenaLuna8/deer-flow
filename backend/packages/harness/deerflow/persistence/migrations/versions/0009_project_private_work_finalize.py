@@ -170,7 +170,7 @@ def _install_scope_checks_uniques_and_composite_foreign_keys() -> None:
     op.create_check_constraint(
         "ck_threads_meta_checkpoint_delete_status",
         "threads_meta",
-        "checkpoint_delete_status IN ('not_requested', 'pending', 'complete', 'failed')",
+        "checkpoint_delete_status IN ('not_requested', 'pending', 'complete', 'retry_required')",
     )
     op.create_check_constraint("ck_threads_meta_version", "threads_meta", "version >= 1")
 
