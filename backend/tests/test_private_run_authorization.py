@@ -713,6 +713,142 @@ async def test_postgres_restore_keeps_colliding_connection_frozen(
 
 @pytest.mark.asyncio
 @pytest.mark.postgres
+async def test_postgres_normal_connect_preserves_frozen_owner_credential(
+    private_seed: M4ThreadSeed,
+) -> None:
+    from deerflow.persistence.channel_connections.sql import (
+        ChannelConnectionRepository,
+    )
+
+    seed = private_seed
+    frozen_owner = str(seed.owner_a.user_id)
+    connecting_owner = str(seed.owner_b.user_id)
+    project_id = seed.owner_a.project_id
+    async with seed.factory() as session, session.begin():
+        await session.execute(
+            text(
+                """INSERT INTO channel_connections
+                (id,owner_user_id,provider,status,external_account_id,workspace_id,
+                 scopes_json,capabilities_json,metadata_json,project_id,frozen_at,
+                 created_at,updated_at)
+                VALUES
+                ('task6-normal-frozen',:frozen_owner,'slack','frozen',
+                 'external-normal-retention','workspace-normal-retention',
+                 '[]'::json,'{}'::json,'{}'::json,:project_id,now(),now(),now()),
+                ('task6-normal-revoked',:connecting_owner,'slack','revoked',
+                 'external-normal-retention','workspace-normal-retention',
+                 '[]'::json,'{}'::json,'{}'::json,:project_id,NULL,now(),now())"""
+            ),
+            {
+                "frozen_owner": frozen_owner,
+                "connecting_owner": connecting_owner,
+                "project_id": project_id,
+            },
+        )
+        await session.execute(
+            text(
+                """INSERT INTO channel_credentials
+                (connection_id,encrypted_access_token,version,updated_at)
+                VALUES ('task6-normal-frozen','retained-envelope',7,now())"""
+            )
+        )
+
+    connected = await ChannelConnectionRepository(seed.factory).upsert_connection(
+        owner_user_id=connecting_owner,
+        provider="slack",
+        external_account_id="external-normal-retention",
+        workspace_id="workspace-normal-retention",
+        status="connected",
+    )
+
+    assert connected["id"] == "task6-normal-revoked"
+    assert connected["status"] == "connected"
+    async with seed.engine.connect() as connection:
+        rows = (
+            await connection.execute(
+                text(
+                    """SELECT c.id,c.status,c.frozen_at IS NOT NULL AS frozen,
+                              cc.version,cc.encrypted_access_token
+                    FROM channel_connections AS c
+                    LEFT JOIN channel_credentials AS cc
+                      ON cc.connection_id=c.id
+                    WHERE c.id IN ('task6-normal-frozen','task6-normal-revoked')
+                    ORDER BY c.id"""
+                )
+            )
+        ).all()
+    assert [(row.id, row.status, row.frozen, row.version, row.encrypted_access_token) for row in rows] == [
+        ("task6-normal-frozen", "frozen", True, 7, "retained-envelope"),
+        ("task6-normal-revoked", "connected", False, None, None),
+    ]
+
+    repeated = await ChannelConnectionRepository(seed.factory).upsert_connection(
+        owner_user_id=connecting_owner,
+        provider="slack",
+        external_account_id="external-normal-retention",
+        workspace_id="workspace-normal-retention",
+        status="connected",
+    )
+    assert repeated["id"] == "task6-normal-revoked"
+
+    async with seed.factory() as session, session.begin():
+        await session.execute(
+            text(
+                """INSERT INTO channel_connections
+                (id,owner_user_id,provider,status,external_account_id,workspace_id,
+                 scopes_json,capabilities_json,metadata_json,project_id,frozen_at,
+                 created_at,updated_at)
+                VALUES
+                ('task6-transfer-connected',:frozen_owner,'slack','connected',
+                 'external-normal-transfer','workspace-normal-transfer',
+                 '[]'::json,'{}'::json,'{}'::json,:project_id,NULL,now(),now()),
+                ('task6-transfer-revoked',:connecting_owner,'slack','revoked',
+                 'external-normal-transfer','workspace-normal-transfer',
+                 '[]'::json,'{}'::json,'{}'::json,:project_id,NULL,now(),now())"""
+            ),
+            {
+                "frozen_owner": frozen_owner,
+                "connecting_owner": connecting_owner,
+                "project_id": project_id,
+            },
+        )
+        await session.execute(
+            text(
+                """INSERT INTO channel_credentials
+                (connection_id,encrypted_access_token,version,updated_at)
+                VALUES ('task6-transfer-connected','old-owner-envelope',4,now())"""
+            )
+        )
+
+    transferred = await ChannelConnectionRepository(seed.factory).upsert_connection(
+        owner_user_id=connecting_owner,
+        provider="slack",
+        external_account_id="external-normal-transfer",
+        workspace_id="workspace-normal-transfer",
+        status="connected",
+    )
+    assert transferred["id"] == "task6-transfer-revoked"
+    async with seed.engine.connect() as connection:
+        transfer_rows = (
+            await connection.execute(
+                text(
+                    """SELECT c.id,c.status,cc.connection_id AS credential_id
+                    FROM channel_connections AS c
+                    LEFT JOIN channel_credentials AS cc
+                      ON cc.connection_id=c.id
+                    WHERE c.id IN ('task6-transfer-connected','task6-transfer-revoked')
+                    ORDER BY c.id"""
+                )
+            )
+        ).all()
+    assert [(row.id, row.status, row.credential_id) for row in transfer_rows] == [
+        ("task6-transfer-connected", "revoked", None),
+        ("task6-transfer-revoked", "connected", None),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
 async def test_postgres_late_revocation_marker_overrides_memory_terminal_status(
     private_seed: M4ThreadSeed,
 ) -> None:
@@ -766,21 +902,44 @@ async def test_postgres_late_revocation_marker_overrides_memory_terminal_status(
         ) == (run_id,)
 
     await manager.set_status(run_id, RunStatus.success)
+    await manager.update_run_completion(
+        run_id,
+        status=RunStatus.error.value,
+        error="completion detail",
+        total_input_tokens=5,
+        total_output_tokens=12,
+        total_tokens=17,
+        message_count=3,
+        last_ai_message="completion payload",
+    )
 
     current = await manager.get(run_id, scope=seed.owner_a_scope)
     assert current is not None
     assert current.status is RunStatus.interrupted
     assert current.error == AUTHORIZATION_REVOKED_REASON
+    assert current.total_tokens == 17
+    assert current.message_count == 3
+    assert current.last_ai_message == "completion payload"
     async with seed.engine.connect() as connection:
         persisted = (
             await connection.execute(
-                text("SELECT status,error FROM runs WHERE run_id=:run_id"),
+                text(
+                    """SELECT status,error,total_input_tokens,total_output_tokens,
+                              total_tokens,message_count,last_ai_message
+                    FROM runs WHERE run_id=:run_id"""
+                ),
                 {"run_id": run_id},
             )
         ).one()
-    assert (persisted.status, persisted.error) == (
+    assert (persisted.status, persisted.error, persisted.total_tokens) == (
         RunStatus.interrupted.value,
         AUTHORIZATION_REVOKED_REASON,
+        17,
+    )
+    assert (persisted.total_input_tokens, persisted.total_output_tokens) == (5, 12)
+    assert (persisted.message_count, persisted.last_ai_message) == (
+        3,
+        "completion payload",
     )
 
 

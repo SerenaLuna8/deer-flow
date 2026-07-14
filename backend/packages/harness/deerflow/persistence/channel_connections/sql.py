@@ -147,7 +147,7 @@ class ChannelConnectionRepository:
                         ChannelConnectionRow.external_account_id == external_account_id_value,
                         ChannelConnectionRow.workspace_id == workspace_id_value,
                         ChannelConnectionRow.owner_user_id != owner_user_id,
-                        ChannelConnectionRow.status != "revoked",
+                        ChannelConnectionRow.status == "connected",
                     )
                 )
             transferred_ids = [row_id for row_id in result.scalars()]

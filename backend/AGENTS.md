@@ -1115,7 +1115,11 @@ fail closed。harness 只定义 app-agnostic protocol/`AuthorizationRevoked`，�
 把对应 `abort_event` 幂等绑定到该 boundary，禁止先 discovery 再 setter，也禁止持有数据库 transaction
 跨远端 MCP 网络调用。PostgreSQL status write 使用单条 marker-aware `UPDATE ... RETURNING status,error`
 返回权威终态；`RunManager` 在 store 返回前不得先向 wait/consumer 暴露请求的 success/error，旧 store
-仍可沿用 bool/None contract。
+仍可沿用 bool/None contract。completion persistence 与 status persistence 必须共用同一条 per-record
+写序列，且不得持有 manager 全局锁跨 store I/O；一旦 record 已是
+`interrupted/authorization_revoked`，completion 只能补写 token/message 等非安全字段，不得用普通
+completion status/error 覆盖内存或 store 的权威撤销终态。legacy/no-store 普通 completion 与
+`error=None` 的既有语义保持不变。
 
 离组/移除、项目暂停或 pending deletion 同一治理 transaction 冻结该 project+owner 的 Thread 和
 connected channel connection，但绝不物理删除 Thread、file、Memory、credential 或其他私有内容；降为
@@ -1126,7 +1130,9 @@ connected row 占用时原 connection 保持 frozen。connection 的全局 activ
 所有 owner 的 frozen external identities，以确定性的 signed-int64 key 去重并按数值全局排序取得
 PostgreSQL transaction advisory locks，再选择每 identity 的稳定 winner；project restore/resume 必须一次
 bulk 调用，禁止按 member 循环拿锁。普通 connection upsert 必须复用同一 identity-lock helper，确保并发
-restore 的 loser 保持 frozen 而治理 transaction 仍可提交。
+restore 的 loser 保持 frozen 而治理 transaction 仍可提交。普通 identity ownership transfer 只能撤销
+真正 `connected` 的其他 owner 并清理其 credential；`frozen` row 及其保留 credential 不得被 normal
+connect 转成 revoked 或删除。
 
 M4 项目 Run 继续复用唯一的 `RunManager`/`RunStore`/`RunEventStore`。`RunRecord.scope`
 对项目 run 必须是 `PrivateResourceScope`；manager 即使命中内存记录也要比较 scope，后台

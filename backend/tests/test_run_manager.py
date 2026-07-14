@@ -107,6 +107,56 @@ class BlockingAuthoritativeStatusStore(MemoryRunStore):
         }
 
 
+class OrderedCompletionStore(MemoryRunStore):
+    def __init__(self, *, blocked_operation: str) -> None:
+        super().__init__()
+        self.blocked_operation = blocked_operation
+        self.status_started = asyncio.Event()
+        self.completion_started = asyncio.Event()
+        self.release_status = asyncio.Event()
+        self.release_completion = asyncio.Event()
+
+    async def update_status_authoritative(
+        self,
+        run_id,
+        status,
+        *,
+        error=None,
+        scope=None,
+    ):
+        if status != RunStatus.success.value:
+            return await super().update_status_authoritative(
+                run_id,
+                status,
+                error=error,
+                scope=scope,
+            )
+        self.status_started.set()
+        if self.blocked_operation == "status":
+            await self.release_status.wait()
+        await super().update_status(
+            run_id,
+            RunStatus.interrupted.value,
+            error="authorization_revoked",
+            scope=scope,
+        )
+        return {
+            "status": RunStatus.interrupted.value,
+            "error": "authorization_revoked",
+        }
+
+    async def update_run_completion(self, run_id, *, status, scope=None, **kwargs):
+        self.completion_started.set()
+        if self.blocked_operation == "completion":
+            await self.release_completion.wait()
+        return await super().update_run_completion(
+            run_id,
+            status=RunStatus.interrupted.value,
+            scope=scope,
+            **(kwargs | {"error": "authorization_revoked"}),
+        )
+
+
 class MissingCompletionRunStore(MemoryRunStore):
     """Memory run store that reports one missing row for completion updates."""
 
@@ -194,6 +244,106 @@ async def test_authoritative_status_is_not_published_before_store_outcome() -> N
     assert record.status is RunStatus.interrupted
     assert record.error == "authorization_revoked"
     assert record.abort_event.is_set()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("first_operation", ["status", "completion"])
+async def test_completion_and_authoritative_status_share_record_write_order(
+    first_operation: str,
+) -> None:
+    store = OrderedCompletionStore(blocked_operation=first_operation)
+    manager = RunManager(store=store)
+    record = await manager.create(f"thread-{first_operation}-first")
+    await manager.set_status(record.run_id, RunStatus.running)
+    completion_kwargs = {
+        "status": RunStatus.error.value,
+        "error": "completion detail",
+        "total_tokens": 17,
+        "message_count": 3,
+    }
+
+    if first_operation == "status":
+        first = asyncio.create_task(manager.set_status(record.run_id, RunStatus.success))
+        await asyncio.wait_for(store.status_started.wait(), timeout=2)
+        second_caller_started = asyncio.Event()
+
+        async def persist_completion() -> None:
+            second_caller_started.set()
+            await manager.update_run_completion(record.run_id, **completion_kwargs)
+
+        second = asyncio.create_task(persist_completion())
+        await asyncio.wait_for(second_caller_started.wait(), timeout=2)
+        try:
+            assert not store.completion_started.is_set()
+        finally:
+            store.release_status.set()
+            await asyncio.gather(first, second)
+    else:
+        first = asyncio.create_task(manager.update_run_completion(record.run_id, **completion_kwargs))
+        await asyncio.wait_for(store.completion_started.wait(), timeout=2)
+        second_caller_started = asyncio.Event()
+
+        async def persist_status() -> None:
+            second_caller_started.set()
+            await manager.set_status(record.run_id, RunStatus.success)
+
+        second = asyncio.create_task(persist_status())
+        await asyncio.wait_for(second_caller_started.wait(), timeout=2)
+        try:
+            assert not store.status_started.is_set()
+        finally:
+            store.release_completion.set()
+            await asyncio.gather(first, second)
+
+    assert record.status is RunStatus.interrupted
+    assert record.error == "authorization_revoked"
+    assert record.total_tokens == 17
+    assert record.message_count == 3
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert (stored["status"], stored["error"]) == (
+        RunStatus.interrupted.value,
+        "authorization_revoked",
+    )
+    assert (stored["total_tokens"], stored["message_count"]) == (17, 3)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("with_store", [False, True])
+async def test_ordinary_completion_preserves_legacy_error_none_semantics(
+    with_store: bool,
+) -> None:
+    store = MemoryRunStore() if with_store else None
+    manager = RunManager(store=store)
+    record = await manager.create(f"thread-completion-{with_store}")
+    await manager.set_status(record.run_id, RunStatus.error, error="existing detail")
+    await manager.update_run_completion(
+        record.run_id,
+        status=RunStatus.success.value,
+        error=None,
+        total_tokens=11,
+    )
+
+    assert record.status is RunStatus.error
+    assert record.error == "existing detail"
+    assert record.total_tokens == 11
+    if store is not None:
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert (stored["status"], stored["error"], stored["total_tokens"]) == (
+            RunStatus.success.value,
+            "existing detail",
+            11,
+        )
+
+    await manager.update_run_completion(
+        record.run_id,
+        status=RunStatus.error.value,
+        error="replacement detail",
+        total_tokens=12,
+    )
+    assert record.error == "replacement detail"
+    assert record.total_tokens == 12
 
 
 @pytest.mark.anyio

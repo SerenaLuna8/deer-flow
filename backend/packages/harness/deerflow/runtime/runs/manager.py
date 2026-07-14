@@ -365,46 +365,83 @@ class RunManager:
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
-        row_recovery_payload: dict[str, Any] | None = None
-        scope: PrivateResourceScope | None = None
         async with self._lock:
             record = self._runs.get(run_id)
-            if record is not None:
+            if record is None:
+                return
+        async with record.status_write_lock:
+            row_recovery_payload: dict[str, Any] | None = None
+            scope: PrivateResourceScope | None = None
+            completion_kwargs = dict(kwargs)
+            async with self._lock:
+                if self._runs.get(run_id) is not record:
+                    return
+                authorization_revoked = record.status is RunStatus.interrupted and record.abort_action == "authorization_revoked" and record.error == "authorization_revoked"
+                if authorization_revoked:
+                    completion_kwargs["status"] = RunStatus.interrupted.value
+                    completion_kwargs["error"] = "authorization_revoked"
                 for key, value in kwargs.items():
                     if key == "status":
+                        continue
+                    if key == "error" and authorization_revoked:
                         continue
                     if hasattr(record, key) and value is not None:
                         setattr(record, key, value)
                 record.updated_at = _now_iso()
-                row_recovery_payload = self._store_put_payload(record, error=kwargs.get("error"))
+                row_recovery_payload = self._store_put_payload(
+                    record,
+                    error=completion_kwargs.get("error"),
+                )
                 scope = record.scope
-        if self._store is None or row_recovery_payload is None:
-            return
-        try:
-            if scope is None:
-                operation = partial(self._store.update_run_completion, run_id, **kwargs)
-            else:
-                operation = partial(self._store.update_run_completion, run_id, scope=scope, **kwargs)
-            updated = await self._call_store_with_retry(
-                "update_run_completion",
-                run_id,
-                operation,
-            )
-            if updated is False:
-                if row_recovery_payload is None:
-                    logger.warning("Failed to recreate missing run %s for completion persistence", run_id)
-                    return
-                if not await self._persist_snapshot_to_store(run_id, row_recovery_payload):
-                    return
-                recovered = await self._call_store_with_retry(
+            if self._store is None or row_recovery_payload is None:
+                return
+            try:
+                if scope is None:
+                    operation = partial(
+                        self._store.update_run_completion,
+                        run_id,
+                        **completion_kwargs,
+                    )
+                else:
+                    operation = partial(
+                        self._store.update_run_completion,
+                        run_id,
+                        scope=scope,
+                        **completion_kwargs,
+                    )
+                updated = await self._call_store_with_retry(
                     "update_run_completion",
                     run_id,
                     operation,
                 )
-                if recovered is False:
-                    logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
-        except Exception:
-            logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
+                if updated is False:
+                    if row_recovery_payload is None:
+                        logger.warning(
+                            "Failed to recreate missing run %s for completion persistence",
+                            run_id,
+                        )
+                        return
+                    if not await self._persist_snapshot_to_store(
+                        run_id,
+                        row_recovery_payload,
+                    ):
+                        return
+                    recovered = await self._call_store_with_retry(
+                        "update_run_completion",
+                        run_id,
+                        operation,
+                    )
+                    if recovered is False:
+                        logger.warning(
+                            "Run completion update for %s affected no rows after row recreation",
+                            run_id,
+                        )
+            except Exception:
+                logger.warning(
+                    "Failed to persist run completion for %s",
+                    run_id,
+                    exc_info=True,
+                )
 
     async def update_run_progress(self, run_id: str, **kwargs) -> None:
         """Persist a running token/message snapshot without changing status."""
