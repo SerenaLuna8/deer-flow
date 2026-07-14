@@ -256,11 +256,16 @@ def test_is_local_sandbox_accepts_generic_and_per_thread_id_formats():
 
     generic = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={})
     per_thread = SimpleNamespace(state={"sandbox": {"sandbox_id": "local:default:alpha"}}, context={})
+    per_run = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local-run:owner:alpha:run-1"}},
+        context={},
+    )
     foreign = SimpleNamespace(state={"sandbox": {"sandbox_id": "aio-12345"}}, context={})
     unset = SimpleNamespace(state={}, context={})
 
     assert is_local_sandbox(generic) is True
     assert is_local_sandbox(per_thread) is True
+    assert is_local_sandbox(per_run) is True
     assert is_local_sandbox(foreign) is False
     assert is_local_sandbox(unset) is False
 

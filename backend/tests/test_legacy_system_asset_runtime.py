@@ -136,9 +136,11 @@ def test_private_lead_agent_uses_only_run_exact_assets_without_global_caches(
     import deerflow.tools as tools_module
     from deerflow.agents.lead_agent import agent as lead_agent_module
     from deerflow.agents.lead_agent.prompt import _get_cached_skills_prompt_section
+    from deerflow.config.acp_config import ACPAgentConfig
     from deerflow.config.app_config import AppConfig
     from deerflow.config.model_config import ModelConfig
     from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.config.skill_evolution_config import SkillEvolutionConfig
     from deerflow.mcp import cache
     from deerflow.skills.parser import parse_skill_file
     from deerflow.skills.types import SkillCategory
@@ -181,6 +183,13 @@ def test_private_lead_agent_uses_only_run_exact_assets_without_global_caches(
             )
         ],
         sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        skill_evolution=SkillEvolutionConfig(enabled=True),
+        acp_agents={
+            "global-acp": ACPAgentConfig(
+                command="global-acp",
+                description="global optional ACP agent",
+            )
+        },
     )
     available_calls: list[dict[str, object]] = []
     middleware_calls: list[dict[str, object]] = []
@@ -189,10 +198,30 @@ def test_private_lead_agent_uses_only_run_exact_assets_without_global_caches(
         name="builtin_exact_group",
         description="builtin",
     )
+    skill_manage = StructuredTool.from_function(
+        func=lambda: "mutated",
+        name="skill_manage",
+        description="global skill mutation",
+    )
+    invoke_acp = StructuredTool.from_function(
+        func=lambda: "delegated",
+        name="invoke_acp_agent",
+        description="global ACP delegation",
+    )
+
+    def load_tools(**kwargs):
+        available_calls.append(kwargs)
+        loaded = [builtin_tool]
+        if kwargs.get("include_skill_manage", True):
+            loaded.append(skill_manage)
+        if kwargs.get("include_acp", True):
+            loaded.append(invoke_acp)
+        return loaded
+
     monkeypatch.setattr(
         tools_module,
         "get_available_tools",
-        lambda **kwargs: available_calls.append(kwargs) or [builtin_tool],
+        load_tools,
     )
     monkeypatch.setattr(
         lead_agent_module,
@@ -240,6 +269,8 @@ def test_private_lead_agent_uses_only_run_exact_assets_without_global_caches(
             "model_name": "exact-model",
             "groups": ["exact-group"],
             "include_mcp": False,
+            "include_skill_manage": False,
+            "include_acp": False,
             "subagent_enabled": False,
             "app_config": app_config,
             "asset_context": None,

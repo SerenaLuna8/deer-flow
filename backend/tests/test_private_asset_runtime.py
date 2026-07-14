@@ -597,6 +597,128 @@ async def test_malformed_exact_skill_parse_cleans_temp_and_returns_stable_error(
     assert not roots[0].exists()
 
 
+@pytest.mark.anyio
+async def test_private_runtime_cleanup_retries_before_marking_closed(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app.private_work import asset_runtime as runtime_module
+    from app.private_work.asset_runtime import PrivateAgentRuntime
+
+    root = tmp_path / "private-skill-tree"
+    root.mkdir()
+    runtime = object.__new__(PrivateAgentRuntime)
+    runtime._closed = False
+    runtime.skill_root = root
+    attempts = 0
+    real_rmtree = runtime_module.shutil.rmtree
+
+    def flaky_rmtree(path, *_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(f"transient removal failure at {path}")
+        real_rmtree(path)
+
+    monkeypatch.setattr(runtime_module.shutil, "rmtree", flaky_rmtree)
+
+    await runtime.aclose()
+
+    assert attempts == 2
+    assert runtime._closed is True
+    assert not root.exists()
+
+
+@pytest.mark.anyio
+async def test_private_runtime_cleanup_persistent_failure_is_generic_and_retryable(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app.private_work import asset_runtime as runtime_module
+    from app.private_work.asset_runtime import PrivateAgentRuntime
+
+    root = tmp_path / "private-host-path-sentinel"
+    root.mkdir()
+    runtime = object.__new__(PrivateAgentRuntime)
+    runtime._closed = False
+    runtime.skill_root = root
+    attempts = 0
+
+    def failed_rmtree(path, *_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise OSError(f"persistent removal failure at {path}")
+
+    monkeypatch.setattr(runtime_module.shutil, "rmtree", failed_rmtree)
+
+    with pytest.raises(Exception, match="Private runtime cleanup failed") as captured:
+        await runtime.aclose()
+
+    assert attempts > 1
+    assert runtime._closed is False
+    assert str(root) not in str(captured.value)
+
+
+def test_private_skill_root_creation_failure_is_stable_and_path_free(monkeypatch) -> None:
+    from app.private_work import asset_runtime as runtime_module
+    from app.private_work.asset_runtime import _create_private_skill_root
+
+    monkeypatch.setattr(
+        runtime_module.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("creation failed at /tmp/private-host-path-sentinel")),
+    )
+
+    with pytest.raises(PrivateWorkUnavailable) as captured:
+        _create_private_skill_root("run/with unsafe chars", "req-cleanup")
+
+    assert captured.value.request_id == "req-cleanup"
+    assert str(captured.value) == "Private work is unavailable."
+    assert "private-host-path-sentinel" not in str(captured.value)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_materialization_preserves_stable_error_when_temp_cleanup_persists(
+    snapshot_scenario: SnapshotScenario,  # noqa: F811
+    monkeypatch,
+    caplog,
+) -> None:
+    from app.private_work import asset_runtime as runtime_module
+
+    scenario, keyring, _sentinel, _skill_content = await _prepare_exact_dependencies(snapshot_scenario)
+    resolver = ProjectAssetResolver(scenario.seed.factory, keyring=keyring)
+    admitted = await PrivateRunAdmissionService(
+        scenario.seed.factory,
+        resolver=resolver,
+    ).admit(scenario.seed.owner_a, scenario.thread_id, PrivateRunCreate())
+    roots = []
+    real_mkdtemp = runtime_module.tempfile.mkdtemp
+
+    def tracked_mkdtemp(*args, **kwargs):
+        root = Path(real_mkdtemp(*args, **kwargs))
+        roots.append(root)
+        return str(root)
+
+    def failed_rmtree(path, *_args, **_kwargs):
+        raise OSError(f"persistent removal failure at {path}")
+
+    monkeypatch.setattr(runtime_module.tempfile, "mkdtemp", tracked_mkdtemp)
+    monkeypatch.setattr(runtime_module, "parse_skill_file", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_module.shutil, "rmtree", failed_rmtree)
+
+    with pytest.raises(PrivateWorkAssetStale) as captured:
+        await PrivateAssetRuntime(
+            scenario.seed.factory,
+            resolver=resolver,
+        ).materialize(scenario.seed.owner_a, admitted)
+
+    assert str(captured.value) == "Private work asset is stale."
+    assert len(roots) == 1
+    assert str(roots[0]) not in caplog.text
+    assert "Private runtime cleanup failed" in caplog.text
+
+
 @pytest.mark.postgres
 @pytest.mark.anyio
 async def test_exact_runtime_materializes_skill_and_run_local_mcp_tool(

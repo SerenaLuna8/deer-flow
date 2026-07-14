@@ -224,6 +224,7 @@ async def test_worker_passes_private_runtime_to_supported_factory_off_loop() -> 
 @pytest.mark.anyio
 async def test_private_worker_preflights_mount_support_before_factory_and_cleans_runtime(
     tmp_path,
+    caplog,
 ) -> None:
     from deerflow.runtime.private_scope import PrivateResourceScope
     from deerflow.runtime.user_context import (
@@ -258,6 +259,7 @@ async def test_private_worker_preflights_mount_support_before_factory_and_cleans
 
         async def aclose(self):
             self.closed = True
+            raise OSError(f"cleanup failed at {tmp_path / 'private-host-path-sentinel'}")
 
     runtime = Runtime()
 
@@ -332,6 +334,7 @@ async def test_private_worker_preflights_mount_support_before_factory_and_cleans
     assert provider.released_users == ["exact-admitted-owner"]
     assert record.status == RunStatus.error
     assert record.error == ("Configured sandbox provider does not support run-scoped read-only mounts")
+    assert "private-host-path-sentinel" not in caplog.text
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
@@ -550,6 +553,138 @@ def test_local_run_scoped_mount_supports_configured_skills_root_and_masks_legacy
     )
     assert provider.get(exact_id) is None
     assert provider.get(legacy_id) is legacy
+
+
+def test_exact_run_skill_read_and_list_never_touch_global_skill_state(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from deerflow.sandbox.local import LocalSandboxProvider
+    from deerflow.sandbox.sandbox_provider import (
+        RunScopedReadOnlyMount,
+        reset_sandbox_provider,
+        set_sandbox_provider,
+    )
+    from deerflow.sandbox.tools import ls_tool, read_file_tool
+
+    exact_root = tmp_path / "exact"
+    exact_skill = exact_root / "custom" / "asset-uuid" / "SKILL.md"
+    exact_reference = exact_skill.parent / "references" / "detail.txt"
+    exact_reference.parent.mkdir(parents=True)
+    exact_skill.write_text("exact project content", encoding="utf-8")
+    exact_reference.write_text("exact detail", encoding="utf-8")
+    mount = RunScopedReadOnlyMount(
+        run_id="run-exact",
+        container_path="/mnt/skills",
+        host_path=str(exact_root),
+    )
+    global_skills_root = tmp_path / "global-skills"
+    global_skills_root.mkdir()
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            container_path="/mnt/skills",
+            get_skills_path=lambda: global_skills_root,
+        ),
+        sandbox=SimpleNamespace(
+            allow_host_bash=False,
+            mounts=[],
+            read_file_output_max_chars=50000,
+            ls_output_max_chars=50000,
+        ),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: config)
+    provider = LocalSandboxProvider()
+    monkeypatch.setattr(
+        provider,
+        "_build_thread_path_mappings",
+        lambda *_args, **_kwargs: [],
+    )
+    sandbox_id = provider.acquire_with_mounts(
+        "thread-exact",
+        user_id="owner-exact",
+        mounts=(mount,),
+    )
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": sandbox_id},
+            "thread_data": {
+                "workspace_path": str(tmp_path / "workspace"),
+                "uploads_path": str(tmp_path / "uploads"),
+                "outputs_path": str(tmp_path / "outputs"),
+            },
+        },
+        context={
+            "thread_id": "thread-exact",
+            "run_id": "run-exact",
+            "user_id": "owner-exact",
+            "__run_read_only_mounts": (mount,),
+        },
+        config={},
+    )
+    monkeypatch.setattr(
+        "deerflow.skills.storage.get_or_new_user_skill_storage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("global user Skill storage must remain untouched")),
+    )
+    set_sandbox_provider(provider)
+    try:
+        assert (
+            read_file_tool.func(
+                runtime=runtime,
+                description="read exact skill",
+                path="/mnt/skills/custom/asset-uuid/SKILL.md",
+            )
+            == "exact project content"
+        )
+        listing = ls_tool.func(
+            runtime=runtime,
+            description="list exact skill",
+            path="/mnt/skills/custom/asset-uuid",
+        )
+        assert "SKILL.md" in listing
+        assert "references" in listing
+    finally:
+        reset_sandbox_provider()
+
+
+def test_only_typed_matching_run_mount_marks_exact_skill_path() -> None:
+    from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
+    from deerflow.sandbox.tools import _is_trusted_run_scoped_skill_path
+
+    path = "/mnt/skills/custom/asset-uuid/SKILL.md"
+    mount = RunScopedReadOnlyMount(
+        run_id="run-exact",
+        container_path="/mnt/skills",
+        host_path="/tmp/exact-skills",
+    )
+    trusted = SimpleNamespace(
+        context={
+            "run_id": "run-exact",
+            "__run_read_only_mounts": (mount,),
+        }
+    )
+    forged = SimpleNamespace(
+        context={
+            "run_id": "run-exact",
+            "__run_read_only_mounts": (
+                {
+                    "run_id": "run-exact",
+                    "container_path": "/mnt/skills",
+                    "host_path": "/tmp/exact-skills",
+                },
+            ),
+        }
+    )
+    wrong_run = SimpleNamespace(
+        context={
+            "run_id": "other-run",
+            "__run_read_only_mounts": (mount,),
+        }
+    )
+
+    assert _is_trusted_run_scoped_skill_path(trusted, path) is True
+    assert _is_trusted_run_scoped_skill_path(forged, path) is False
+    assert _is_trusted_run_scoped_skill_path(wrong_run, path) is False
 
 
 @pytest.mark.anyio

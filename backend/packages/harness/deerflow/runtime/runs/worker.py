@@ -765,7 +765,7 @@ async def run_agent(
             try:
                 await ctx.private_agent_runtime.aclose()
             except Exception:
-                logger.warning("Private runtime cleanup failed for run %s", run_id, exc_info=True)
+                logger.warning("Private runtime cleanup failed for run %s", run_id)
 
         if run_mount_provider is not None and run_mount_user_id is not None and run_mounts:
             try:

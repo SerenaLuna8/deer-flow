@@ -618,6 +618,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     }
     if private_runtime is not None:
         tool_kwargs["include_mcp"] = False
+        tool_kwargs["include_skill_manage"] = False
+        tool_kwargs["include_acp"] = False
     raw_tools = get_available_tools(**tool_kwargs)
     private_mcp_tools = list(getattr(private_runtime, "mcp_tools", ())) if private_runtime is not None else []
     filtered = filter_tools_by_skill_allowed_tools(raw_tools + private_mcp_tools + extra_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)

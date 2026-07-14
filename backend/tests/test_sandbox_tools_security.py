@@ -21,6 +21,7 @@ from deerflow.sandbox.tools import (
     _resolve_skills_path,
     bash_tool,
     mask_local_paths_in_output,
+    read_file_tool,
     replace_virtual_path,
     replace_virtual_paths_in_command,
     str_replace_tool,
@@ -557,6 +558,116 @@ def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> 
     )
 
     assert "Host bash execution is disabled" in result
+
+
+def test_run_scoped_local_tools_apply_confinement_resolution_and_masking(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    thread_data = {
+        "workspace_path": str(tmp_path / "workspace"),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+    expected_path = str(tmp_path / "workspace" / "safe.txt")
+
+    class RecordingSandbox:
+        id = "local-run:owner:thread-1:run-1"
+
+        def __init__(self) -> None:
+            self.read_paths: list[str] = []
+            self.write_paths: list[str] = []
+            self.fail_read = False
+
+        def read_file(self, path: str) -> str:
+            self.read_paths.append(path)
+            if self.fail_read:
+                raise OSError(f"read failed at {expected_path}")
+            return "safe content"
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            del content, append
+            self.write_paths.append(path)
+
+    sandbox = RecordingSandbox()
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": sandbox.id},
+            "thread_data": thread_data,
+        },
+        context={"thread_id": "thread-1", "run_id": "run-1"},
+        config={},
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda _runtime: sandbox,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        lambda _runtime: None,
+    )
+
+    assert (
+        read_file_tool.func(
+            runtime=runtime,
+            description="read safe file",
+            path="/mnt/user-data/workspace/safe.txt",
+        )
+        == "safe content"
+    )
+    assert sandbox.read_paths == [expected_path]
+
+    assert (
+        write_file_tool.func(
+            runtime=runtime,
+            description="write safe file",
+            path="/mnt/user-data/workspace/safe.txt",
+            content="updated",
+        )
+        == "OK"
+    )
+    assert sandbox.write_paths == [expected_path]
+
+    sandbox.fail_read = True
+    result = read_file_tool.func(
+        runtime=runtime,
+        description="read failing safe file",
+        path="/mnt/user-data/workspace/safe.txt",
+    )
+    assert expected_path not in result
+    assert "/mnt/user-data/workspace/safe.txt" in result
+
+
+def test_run_scoped_local_bash_uses_host_bash_disable_guard(monkeypatch) -> None:
+    execute_calls = 0
+
+    class RecordingSandbox:
+        def execute_command(self, *_args, **_kwargs):
+            nonlocal execute_calls
+            execute_calls += 1
+            return "unexpected"
+
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": "local-run:owner:thread-1:run-1"},
+            "thread_data": _THREAD_DATA.copy(),
+        },
+        context={"thread_id": "thread-1", "run_id": "run-1"},
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda _runtime: RecordingSandbox(),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: False)
+
+    result = bash_tool.func(
+        runtime=runtime,
+        description="print a safe greeting",
+        command="/bin/echo hello",
+    )
+
+    assert "Host bash execution is disabled" in result
+    assert execute_calls == 0
 
 
 def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) -> None:

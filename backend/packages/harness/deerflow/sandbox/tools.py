@@ -5,7 +5,7 @@ import os
 import posixpath
 import re
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import lru_cache
 from pathlib import Path
 
@@ -242,6 +242,25 @@ def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
         # skill's files. See review feedback on PR #3889.
         logger.warning("Failed to determine enabled state, denying access: %s", exc)
         return True
+
+
+def _is_trusted_run_scoped_skill_path(runtime: Runtime | None, path: str) -> bool:
+    """Return whether ``path`` belongs to the server-issued exact Skill mount."""
+
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, Mapping):
+        return False
+    run_id = context.get("run_id")
+    mounts = context.get("__run_read_only_mounts")
+    if not isinstance(run_id, str) or not isinstance(mounts, tuple):
+        return False
+    for mount in mounts:
+        if not isinstance(mount, RunScopedReadOnlyMount) or mount.run_id != run_id:
+            continue
+        prefix = mount.container_path.rstrip("/") or "/"
+        if path == prefix or path.startswith(f"{prefix}/"):
+            return True
+    return False
 
 
 def _resolve_skills_path(path: str) -> str:
@@ -1236,9 +1255,9 @@ def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
 def is_local_sandbox(runtime: Runtime | None) -> bool:
     """Check if the current sandbox is a local sandbox.
 
-    Accepts both the generic id ``"local"`` (acquire with no thread context)
-    and the per-thread id format ``"local:{user_id}:{thread_id}"`` produced
-    by :meth:`LocalSandboxProvider.acquire` once a thread is known.
+    Accepts the generic id ``"local"`` (acquire with no thread context), the
+    per-thread ``"local:{user_id}:{thread_id}"`` format, and the trusted
+    per-run ``"local-run:{user_id}:{thread_id}:{run_id}"`` format.
     """
     if runtime is None:
         return False
@@ -1250,7 +1269,7 @@ def is_local_sandbox(runtime: Runtime | None) -> bool:
     sandbox_id = sandbox_state.get("sandbox_id")
     if not isinstance(sandbox_id, str):
         return False
-    return sandbox_id == "local" or sandbox_id.startswith("local:")
+    return sandbox_id == "local" or sandbox_id.startswith("local:") or sandbox_id.startswith("local-run:")
 
 
 def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
@@ -1756,7 +1775,7 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
     """
     try:
         # Block access to disabled skill directories
-        if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
+        if not _is_trusted_run_scoped_skill_path(runtime, path) and _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
@@ -1989,7 +2008,8 @@ def read_current_file_content(runtime: Runtime | None, path: str) -> str:
         thread_data = get_thread_data(runtime)
         validate_local_tool_path(path, thread_data, read_only=True)
         if _is_skills_path(path):
-            path = _resolve_skills_path(path)
+            if not _is_trusted_run_scoped_skill_path(runtime, path):
+                path = _resolve_skills_path(path)
         elif _is_acp_workspace_path(path):
             path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
         elif not _is_custom_mount_path(path):
@@ -2016,7 +2036,7 @@ def read_file_tool(
     """
     try:
         # Block access to disabled skill files
-        if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
+        if not _is_trusted_run_scoped_skill_path(runtime, path) and _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         requested_path = path

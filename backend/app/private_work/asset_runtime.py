@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import shutil
 import tempfile
@@ -45,6 +46,36 @@ from app.shared_assets.resolver import ProjectAssetResolver
 from deerflow.persistence.shared_assets.binding_model import AssetCatalogStateRow
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import Skill, SkillCategory
+
+logger = logging.getLogger(__name__)
+
+_PRIVATE_SKILL_CLEANUP_ATTEMPTS = 3
+
+
+class PrivateRuntimeCleanupError(RuntimeError):
+    """Stable internal error for a run-owned temporary tree left behind."""
+
+
+def _remove_private_skill_tree(root: Path) -> None:
+    """Remove one private Skill tree with bounded, retryable semantics."""
+
+    for attempt in range(_PRIVATE_SKILL_CLEANUP_ATTEMPTS):
+        try:
+            shutil.rmtree(root)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt + 1 == _PRIVATE_SKILL_CLEANUP_ATTEMPTS:
+                raise PrivateRuntimeCleanupError("Private runtime cleanup failed") from None
+
+
+def _create_private_skill_root(run_id: str, request_id: str) -> Path:
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)[:80]
+    try:
+        return Path(tempfile.mkdtemp(prefix=f"deerflow-private-{safe_run_id}-"))
+    except OSError:
+        raise PrivateWorkUnavailable(request_id) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,8 +600,8 @@ class PrivateAgentRuntime:
     async def aclose(self) -> None:
         if self._closed:
             return
+        await asyncio.to_thread(_remove_private_skill_tree, self.skill_root)
         self._closed = True
-        await asyncio.to_thread(shutil.rmtree, self.skill_root, True)
 
 
 class PrivateAssetRuntime:
@@ -695,10 +726,9 @@ class PrivateAssetRuntime:
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
 
-        safe_run_id = re.sub(r"[^A-Za-z0-9_.-]", "_", admitted.run.run_id)[:80]
-        root = Path(tempfile.mkdtemp(prefix=f"deerflow-private-{safe_run_id}-"))
-        root.chmod(0o700)
+        root = _create_private_skill_root(admitted.run.run_id, context.request_id)
         try:
+            root.chmod(0o700)
             skill_manifests, skills = await asyncio.to_thread(_write_skill_tree, root, skill_snapshots)
             mcp_manifests = tuple(
                 PrivateMcpManifest(
@@ -733,7 +763,10 @@ class PrivateAssetRuntime:
             await runtime.discover_mcp_tools()
             return runtime
         except Exception as error:
-            await asyncio.to_thread(shutil.rmtree, root, True)
+            try:
+                await asyncio.to_thread(_remove_private_skill_tree, root)
+            except PrivateRuntimeCleanupError:
+                logger.warning("Private runtime cleanup failed after materialization")
             if isinstance(error, PrivateWorkError):
                 raise type(error)(context.request_id) from None
             if isinstance(
