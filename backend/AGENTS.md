@@ -1044,8 +1044,12 @@ identity 和完整字段快照登记，`resource_scope` 与 revalidator 在读�
 普通 copy/deepcopy/pickle/state hook/dataclass replace、直接 fabrication 与字段篡改均 fail closed。
 这是应用消费边界的 provenance 约束，不宣称能阻止任意 trusted reflective code。客户端
 `body.config` 的 context/configurable/metadata 与 `body.context` 中所有嵌套的
-user/project/owner/membership/role/capability/system-role/project-context 和双下划线内部字段，
-必须在进入 runtime 前递归丢弃，身份仅由后续服务端认证或 trusted internal owner 注入。harness 只接收不含 role/capability 的
+user/project/owner/membership/role/capability/system-role/runtime `user_role`/project-context 和双下划线内部字段，
+必须在进入 runtime 前递归丢弃；client checkpoint map 同样在 saver lookup 与写入 live
+configurable 前清洗。`start_run()` 在创建 run/thread record 前生成 authority-sanitized
+metadata/config/body-context 副本，并一致用于持久化、API response 与 live config；secret redaction
+发生在 authority sanitize 之后。graph input/messages 不经过该递归清洗，消息 `role` 是合法数据。
+身份仅由后续服务端认证或 trusted internal owner 注入。harness 只接收不含 role/capability 的
 `deerflow.runtime.PrivateResourceScope`，继续禁止 import `app.*`。每个 mutation 或副作用边界
 通过 `PrivateWorkRevalidator.require()` 在调用方已有 transaction 内重验 active project、未暂停
 状态、active membership、membership ID/version 和 capability；失效 scope 统一 404，当前 scope

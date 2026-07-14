@@ -33,6 +33,7 @@ _CLIENT_AUTHORITY_FIELDS = frozenset(
         "role",
         "system_role",
         "user_id",
+        "user_role",
     }
 )
 

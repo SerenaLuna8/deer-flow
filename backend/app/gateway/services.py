@@ -505,6 +505,8 @@ async def apply_checkpoint_to_run_config(
         if raw_checkpoint_ns is not None:
             checkpoint_ns = str(raw_checkpoint_ns)
         checkpoint_map = checkpoint.get("checkpoint_map")
+        if isinstance(checkpoint_map, Mapping):
+            checkpoint_map = strip_private_client_fields(checkpoint_map)
 
     if not checkpoint_id:
         return
@@ -564,10 +566,16 @@ async def start_run(
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)
 
+    raw_metadata = getattr(body, "metadata", None)
+    sanitized_metadata = strip_private_client_fields(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+    raw_config = getattr(body, "config", None)
+    sanitized_config = strip_private_client_fields(raw_config) if isinstance(raw_config, Mapping) else raw_config
+    raw_body_context = getattr(body, "context", None)
+    sanitized_body_context = strip_private_client_fields(raw_body_context) if isinstance(raw_body_context, Mapping) else {}
+
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
-    body_context = getattr(body, "context", None) or {}
-    model_name = body_context.get("model_name")
+    model_name = sanitized_body_context.get("model_name")
 
     # Coerce non-string model_name values to str before truncation.
     if model_name is not None and not isinstance(model_name, str):
@@ -615,12 +623,11 @@ async def start_run(
                     thread_id,
                     body.assistant_id,
                     on_disconnect=disconnect,
-                    metadata=body.metadata or {},
-                    # Persist a secret-redacted copy of the config: the run record is
-                    # written to runs.kwargs_json and echoed by the run API, so a
-                    # request-scoped secret (#3861) must not ride along. The live
-                    # config built below keeps the secrets for the actual run.
-                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
+                    metadata=sanitized_metadata,
+                    # Persist the authority-sanitized config after removing secrets:
+                    # runs.kwargs_json is echoed by the run API. Graph input remains
+                    # untouched because message ``role`` is legitimate input data.
+                    kwargs={"input": body.input, "config": redact_config_secrets(sanitized_config)},
                     multitask_strategy=body.multitask_strategy,
                     model_name=model_name,
                     user_id=owner_user_id,
@@ -645,7 +652,7 @@ async def start_run(
                 await run_ctx.thread_store.create(
                     thread_id,
                     assistant_id=body.assistant_id,
-                    metadata=body.metadata,
+                    metadata=sanitized_metadata,
                 )
             else:
                 await run_ctx.thread_store.update_status(thread_id, "running")
@@ -658,7 +665,7 @@ async def start_run(
             graph_input = Command(resume=command["resume"])
         else:
             graph_input = normalize_input(body.input)
-        config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+        config = build_run_config(thread_id, sanitized_config, sanitized_metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
@@ -666,7 +673,7 @@ async def start_run(
         # that carries agent configuration (model_name, thinking_enabled, etc.).
         # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
-        merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
+        merge_run_context_overrides(config, sanitized_body_context, internal=is_internal_caller)
         if not is_internal_caller:
             # ``body.config`` is free-form and copied verbatim by
             # ``build_run_config``; scrub internal-only keys smuggled there.

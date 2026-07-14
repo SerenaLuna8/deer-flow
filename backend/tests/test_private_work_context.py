@@ -367,9 +367,13 @@ def test_strip_private_client_fields_recurses_through_mappings_lists_and_tuples(
         {
             "safe": {
                 "project_id": "attacker",
+                "user_role": "system_admin",
                 "items": [
                     {"owner_user_id": "attacker", "value": 1},
-                    ({"role": "admin", "value": 2}, {"__private_scope": {}, "value": 3}),
+                    (
+                        {"role": "admin", "value": 2},
+                        {"__private_scope": {}, "nested": {"user_role": "admin", "value": 3}},
+                    ),
                 ],
             },
             "resource_scope": {"project_id": "attacker"},
@@ -380,7 +384,7 @@ def test_strip_private_client_fields_recurses_through_mappings_lists_and_tuples(
         "safe": {
             "items": [
                 {"value": 1},
-                ({"value": 2}, {"value": 3}),
+                ({"value": 2}, {"nested": {"value": 3}}),
             ]
         }
     }

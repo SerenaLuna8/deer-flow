@@ -609,7 +609,15 @@ def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
         checkpoint={
             "checkpoint_ns": "",
             "checkpoint_id": "ckpt-1",
-            "checkpoint_map": {"": "ckpt-1"},
+            "checkpoint_map": {
+                "": "ckpt-1",
+                "__private_scope": {"project_id": "attacker"},
+                "role": "admin",
+                "nested": [
+                    {"user_role": "system_admin", "safe": "ckpt-0"},
+                    {"membership_version": 999, "safe": "ckpt-parent"},
+                ],
+            },
         },
         checkpoint_id=None,
     )
@@ -622,12 +630,18 @@ def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
             "thread_id": "thread-1",
             "checkpoint_ns": "",
             "checkpoint_id": "ckpt-1",
-            "checkpoint_map": {"": "ckpt-1"},
+            "checkpoint_map": {
+                "": "ckpt-1",
+                "nested": [{"safe": "ckpt-0"}, {"safe": "ckpt-parent"}],
+            },
         }
     }
     assert config["configurable"]["checkpoint_id"] == "ckpt-1"
     assert config["configurable"]["checkpoint_ns"] == ""
-    assert config["configurable"]["checkpoint_map"] == {"": "ckpt-1"}
+    assert config["configurable"]["checkpoint_map"] == {
+        "": "ckpt-1",
+        "nested": [{"safe": "ckpt-0"}, {"safe": "ckpt-parent"}],
+    }
 
 
 def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
@@ -944,6 +958,164 @@ async def _capture_start_run_graph_input(body):
     return captured["graph_input"]
 
 
+def test_start_run_sanitizes_live_persisted_and_response_run_control_without_touching_input(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langchain_core.messages import HumanMessage
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.routers.thread_runs import RunCreateRequest, _record_to_response
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class FakeCheckpointer:
+        def __init__(self):
+            self.seen_config = None
+
+        async def aget_tuple(self, config):
+            self.seen_config = config
+            return SimpleNamespace(config=config, checkpoint={"channel_values": {}})
+
+    async def _scenario():
+        run_store = MemoryRunStore()
+        thread_store = MemoryThreadMetaStore(InMemoryStore())
+        checkpointer = FakeCheckpointer()
+        run_manager = RunManager(store=run_store)
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=checkpointer,
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+        )
+        request = SimpleNamespace(
+            headers={},
+            state=SimpleNamespace(
+                user=SimpleNamespace(
+                    id="web-user-1",
+                    system_role="user",
+                    oauth_provider="keycloak",
+                    oauth_id="subject-1",
+                ),
+                auth_source="session",
+            ),
+            app=SimpleNamespace(state=state),
+        )
+        body = RunCreateRequest(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "user", "content": "keep message role"}]},
+            metadata={
+                "safe_metadata": "kept",
+                "project_id": "attacker",
+                "nested": [{"__private_scope": {}, "role": "admin", "safe": "meta"}],
+            },
+            config={
+                "context": {
+                    "safe_context": "kept",
+                    "owner_user_id": "attacker",
+                    "secrets": {"ERP_TOKEN": "secret"},
+                    "nested": [{"user_role": "system_admin", "safe": "context"}],
+                },
+                "configurable": {
+                    "safe_configurable": "kept",
+                    "membership_version": 999,
+                },
+                "metadata": {
+                    "safe_config_metadata": "kept",
+                    "project_context": {"project_id": "attacker"},
+                },
+            },
+            context={
+                "thinking_enabled": True,
+                "user_id": "attacker",
+                "nested": [{"user_role": "system_admin", "safe": "body-context"}],
+            },
+            checkpoint={
+                "checkpoint_id": "ckpt-1",
+                "checkpoint_ns": "safe-ns",
+                "checkpoint_map": {
+                    "": "ckpt-1",
+                    "__private_scope": {},
+                    "nested": [{"project_id": "attacker", "safe": "checkpoint"}],
+                },
+            },
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured["config"] = kwargs["config"]
+            captured["graph_input"] = kwargs["graph_input"]
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "thread-sanitized-run", request)
+            await record.task
+
+        return {
+            "record": record,
+            "response": _record_to_response(record),
+            "persisted": await run_store.get(record.run_id),
+            "thread": await thread_store.get("thread-sanitized-run", user_id=None),
+            "checkpoint_read": checkpointer.seen_config,
+            **captured,
+        }
+
+    result = asyncio.run(_scenario())
+    safe_metadata = {
+        "safe_metadata": "kept",
+        "nested": [{"safe": "meta"}],
+    }
+    safe_persisted_config = {
+        "context": {
+            "safe_context": "kept",
+            "nested": [{"safe": "context"}],
+        },
+        "configurable": {"safe_configurable": "kept"},
+        "metadata": {"safe_config_metadata": "kept"},
+    }
+
+    live_config = result["config"]
+    assert live_config["metadata"] == {
+        "safe_config_metadata": "kept",
+        **safe_metadata,
+    }
+    assert live_config["context"]["user_id"] == "web-user-1"
+    assert live_config["context"]["user_role"] == "user"
+    assert live_config["context"]["oauth_provider"] == "keycloak"
+    assert live_config["context"]["oauth_id"] == "subject-1"
+    assert live_config["context"]["thinking_enabled"] is True
+    assert live_config["context"]["nested"] == [{"safe": "context"}]
+    assert live_config["configurable"]["checkpoint_map"] == {
+        "": "ckpt-1",
+        "nested": [{"safe": "checkpoint"}],
+    }
+    assert result["checkpoint_read"]["configurable"]["checkpoint_map"] == live_config["configurable"]["checkpoint_map"]
+
+    for surface in (result["record"], result["response"], result["persisted"]):
+        if isinstance(surface, dict):
+            metadata = surface["metadata"]
+            kwargs = surface["kwargs"]
+        else:
+            metadata = surface.metadata
+            kwargs = surface.kwargs
+        assert metadata == safe_metadata
+        assert kwargs["config"] == safe_persisted_config
+        assert kwargs["input"] == {"messages": [{"role": "user", "content": "keep message role"}]}
+
+    assert result["thread"]["metadata"] == safe_metadata
+    graph_input = result["graph_input"]
+    assert isinstance(graph_input["messages"][0], HumanMessage)
+    assert graph_input["messages"][0].content == "keep message role"
+
+
 def test_start_run_translates_resume_command_to_langgraph_command(_stub_app_config):
     import asyncio
 
@@ -1070,6 +1242,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
     from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
     from app.gateway.services import start_run
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
@@ -1101,7 +1274,10 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
         )
         request = SimpleNamespace(
             headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+            state=SimpleNamespace(
+                user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+                auth_source=AUTH_SOURCE_INTERNAL,
+            ),
             app=SimpleNamespace(state=state),
         )
         body = SimpleNamespace(
@@ -1115,7 +1291,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
                     "oauth_id": "spoofed-subject",
                 }
             },
-            context={"user_id": "spoofed-client"},
+            context={"user_id": "spoofed-client", "non_interactive": True},
             on_disconnect="cancel",
             multitask_strategy="reject",
             stream_mode=None,
@@ -1144,6 +1320,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
     assert context["user_role"] == "user"
     assert context["oauth_provider"] == "keycloak"
     assert context["oauth_id"] == "subject-123"
+    assert context["non_interactive"] is True
 
 
 def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
