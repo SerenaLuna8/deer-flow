@@ -4,11 +4,11 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import and_, exists, func, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
-from app.shared_assets.contexts import SystemAssetGovernanceContext
+from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
@@ -18,7 +18,6 @@ from deerflow.persistence.shared_assets import (
     McpCredentialSlotRow,
     McpServerRow,
     McpServerVersionRow,
-    ProjectSystemMcpBindingRow,
 )
 
 
@@ -58,6 +57,15 @@ class McpRepository:
     def _require_system_actor(context: SystemAssetGovernanceContext) -> None:
         if not isinstance(context, SystemAssetGovernanceContext):
             raise AssetForbidden(_request_id(context))
+
+    @staticmethod
+    def _require_system_catalog_reader(
+        context: SystemAssetGovernanceContext | SystemAssetReadContext,
+    ) -> None:
+        if not isinstance(context, (SystemAssetGovernanceContext, SystemAssetReadContext)):
+            raise AssetForbidden(_request_id(context))
+        if context.project_id is not None:
+            raise AssetForbidden(context.request_id)
 
     @staticmethod
     def _project_context_exists(context: ProjectContext):
@@ -286,16 +294,7 @@ class McpRepository:
         system_rows = (
             (
                 await self.session.execute(
-                    select(McpServerRow)
-                    .join(
-                        ProjectSystemMcpBindingRow,
-                        and_(
-                            ProjectSystemMcpBindingRow.system_mcp_server_id == McpServerRow.id,
-                            ProjectSystemMcpBindingRow.project_id == context.project_id,
-                            ProjectSystemMcpBindingRow.enabled.is_(True),
-                        ),
-                    )
-                    .where(
+                    select(McpServerRow).where(
                         McpServerRow.scope == "system",
                         McpServerRow.project_id.is_(None),
                         self._project_context_exists(context),
@@ -325,11 +324,9 @@ class McpRepository:
 
     async def list_system_visible(
         self,
-        context: SystemAssetGovernanceContext,
+        context: SystemAssetGovernanceContext | SystemAssetReadContext,
     ) -> tuple[McpServerRow, ...]:
-        self._require_system_actor(context)
-        if context.project_id is not None:
-            raise AssetForbidden(context.request_id)
+        self._require_system_catalog_reader(context)
         statement = select(McpServerRow).where(McpServerRow.scope == "system", McpServerRow.project_id.is_(None)).order_by(McpServerRow.created_at, McpServerRow.id)
         return tuple((await self.session.execute(statement)).scalars().all())
 
@@ -446,12 +443,29 @@ class McpRepository:
             select(McpServerRow.id, McpServerVersionRow)
             .outerjoin(
                 McpServerVersionRow,
-                McpServerVersionRow.mcp_server_id == McpServerRow.id,
+                and_(
+                    McpServerVersionRow.mcp_server_id == McpServerRow.id,
+                    or_(
+                        McpServerRow.scope == "project",
+                        and_(
+                            McpServerRow.scope == "system",
+                            McpServerVersionRow.workflow_status == "published",
+                        ),
+                    ),
+                ),
             )
             .where(
                 McpServerRow.id == asset_id,
-                McpServerRow.scope == "project",
-                McpServerRow.project_id == context.project_id,
+                or_(
+                    and_(
+                        McpServerRow.scope == "project",
+                        McpServerRow.project_id == context.project_id,
+                    ),
+                    and_(
+                        McpServerRow.scope == "system",
+                        McpServerRow.project_id.is_(None),
+                    ),
+                ),
                 self._project_context_exists(context),
             )
             .order_by(McpServerVersionRow.version_number.desc())

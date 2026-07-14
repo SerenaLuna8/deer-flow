@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { capabilitySchema } from "@/core/projects/types";
+
 export const ASSET_KINDS = ["agent", "skill", "mcp"] as const;
 export const ASSET_LIST_KINDS = [
   "agents",
@@ -32,7 +34,7 @@ export const skillScanDecisionSchema = z.enum(SKILL_SCAN_DECISIONS);
 export const mcpTransportSchema = z.enum(MCP_TRANSPORTS);
 export const credentialGrantStatusSchema = z.enum(CREDENTIAL_GRANT_STATUSES);
 export const assetIdSchema = z.string().uuid();
-export const assetCapabilitiesSchema = z.array(z.string().min(1));
+export const assetCapabilitiesSchema = z.array(capabilitySchema);
 
 export const assetSummarySchema = z
   .object({
@@ -312,7 +314,7 @@ export const credentialRotationStatusSchema = z
       (value.status === "pending" ? value.pending > 0 : value.pending === 0),
   );
 
-export const systemBindingSchema = z
+const systemBindingItemSchema = z
   .object({
     project_id: assetIdSchema,
     kind: assetKindSchema,
@@ -324,22 +326,36 @@ export const systemBindingSchema = z
     updated_by_user_id: z.string().min(1),
     created_at: z.string().datetime({ offset: true }),
     updated_at: z.string().datetime({ offset: true }),
-    request_id: z.string().min(1),
   })
+  .strict();
+
+export const systemBindingSchema = systemBindingItemSchema
+  .extend({ request_id: z.string().min(1) })
+  .strict();
+
+export const projectAssetItemSchema = assetSummarySchema
+  .extend({
+    capabilities: assetCapabilitiesSchema,
+    binding: systemBindingItemSchema.nullable(),
+  })
+  .strict();
+
+export const projectCredentialItemSchema = credentialMetadataSchema
+  .extend({ capabilities: assetCapabilitiesSchema })
   .strict();
 
 export const projectAssetListSchema = z
   .object({
-    system_items: z.array(assetSummarySchema),
-    project_items: z.array(assetSummarySchema),
+    system_items: z.array(projectAssetItemSchema),
+    project_items: z.array(projectAssetItemSchema),
     request_id: z.string().min(1),
   })
   .strict();
 
 export const projectCredentialListSchema = z
   .object({
-    system_items: z.array(credentialMetadataSchema),
-    project_items: z.array(credentialMetadataSchema),
+    system_items: z.array(projectCredentialItemSchema),
+    project_items: z.array(projectCredentialItemSchema),
     request_id: z.string().min(1),
   })
   .strict();
@@ -500,6 +516,8 @@ export type AssetListKind = z.infer<typeof assetListKindSchema>;
 export type AssetScope = z.infer<typeof assetScopeSchema>;
 export type AssetStatus = z.infer<typeof assetStatusSchema>;
 export type AssetSummary = z.infer<typeof assetSummarySchema>;
+export type ProjectAssetItem = z.infer<typeof projectAssetItemSchema>;
+export type ProjectCredentialItem = z.infer<typeof projectCredentialItemSchema>;
 export type AssetVersion = z.infer<typeof assetVersionSchema>;
 export type VersionResponse = z.infer<typeof versionResponseSchema>;
 export type VersionHistoryResponse = z.infer<

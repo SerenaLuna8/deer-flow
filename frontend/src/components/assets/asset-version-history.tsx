@@ -4,16 +4,11 @@ import { ChevronDownIcon } from "lucide-react";
 import { useState } from "react";
 
 import { versionWorkflowActions } from "@/components/admin/assets/admin-asset-view-model";
-import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+  McpApprovalDialog,
+  type CredentialVersionOption,
+} from "@/components/projects/assets/mcp-approval-dialog";
+import { Button } from "@/components/ui/button";
 import type { AssetListKind, AssetVersion } from "@/core/shared-assets";
 
 import { AssetStatusBadge } from "./asset-status-badge";
@@ -34,6 +29,11 @@ export function AssetVersionHistory({
   onPublish,
   onSubmit,
   onApprove,
+  approvalCredentials = [],
+  approvalCredentialScope = "project",
+  approvalCredentialsLoading = false,
+  approvalCredentialsError,
+  onRetryApprovalCredentials,
 }: {
   kind: AssetListKind;
   versions: AssetVersion[];
@@ -44,6 +44,11 @@ export function AssetVersionHistory({
     version: McpVersion,
     credentialVersions: Record<string, string>,
   ) => void;
+  approvalCredentials?: CredentialVersionOption[];
+  approvalCredentialScope?: "system" | "project";
+  approvalCredentialsLoading?: boolean;
+  approvalCredentialsError?: unknown;
+  onRetryApprovalCredentials?: () => void;
 }) {
   const [approvalVersion, setApprovalVersion] = useState<McpVersion | null>(
     null,
@@ -85,7 +90,7 @@ export function AssetVersionHistory({
               <div className="border-border/70 space-y-4 border-t p-3">
                 {actions.length > 0 && (
                   <div className="flex flex-wrap gap-2">
-                    {actions.includes("publish") && (
+                    {actions.includes("publish") && onPublish && (
                       <Button
                         type="button"
                         size="sm"
@@ -95,7 +100,7 @@ export function AssetVersionHistory({
                         发布版本
                       </Button>
                     )}
-                    {actions.includes("submit") && isMcp && (
+                    {actions.includes("submit") && isMcp && onSubmit && (
                       <Button
                         type="button"
                         size="sm"
@@ -105,7 +110,7 @@ export function AssetVersionHistory({
                         提交审批
                       </Button>
                     )}
-                    {actions.includes("approve") && isMcp && (
+                    {actions.includes("approve") && isMcp && onApprove && (
                       <Button
                         type="button"
                         size="sm"
@@ -127,59 +132,18 @@ export function AssetVersionHistory({
         })}
       </div>
 
-      <Dialog
+      <McpApprovalDialog
+        version={approvalVersion}
         open={approvalVersion !== null}
+        pending={pending}
+        credentials={approvalCredentials}
+        credentialScope={approvalCredentialScope}
+        credentialsLoading={approvalCredentialsLoading}
+        credentialsError={approvalCredentialsError}
+        onRetryCredentials={onRetryApprovalCredentials}
         onOpenChange={(open) => !open && setApprovalVersion(null)}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>批准 MCP 版本</DialogTitle>
-            <DialogDescription>
-              为每个必需 Credential 槽位绑定已存在的 Credential 版本
-              ID。批准成功后版本才会发布。
-            </DialogDescription>
-          </DialogHeader>
-          {approvalVersion && (
-            <form
-              className="space-y-4"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const form = new FormData(event.currentTarget);
-                const bindings = Object.fromEntries(
-                  approvalVersion.credential_slots
-                    .map((slot) => [
-                      slot.name,
-                      (() => {
-                        const value = form.get(`slot:${slot.name}`);
-                        return typeof value === "string" ? value.trim() : "";
-                      })(),
-                    ])
-                    .filter(([, id]) => id !== ""),
-                );
-                onApprove?.(approvalVersion, bindings);
-                setApprovalVersion(null);
-              }}
-            >
-              {approvalVersion.credential_slots.map((slot) => (
-                <label key={slot.id} className="grid gap-2 text-sm">
-                  {slot.name} Credential 版本 ID
-                  <Input
-                    name={`slot:${slot.name}`}
-                    required={slot.required}
-                    autoComplete="off"
-                    placeholder={slot.purpose || "UUID"}
-                  />
-                </label>
-              ))}
-              <DialogFooter>
-                <Button type="submit" disabled={pending}>
-                  批准并发布
-                </Button>
-              </DialogFooter>
-            </form>
-          )}
-        </DialogContent>
-      </Dialog>
+        onApprove={(version, bindings) => onApprove?.(version, bindings)}
+      />
     </>
   );
 }

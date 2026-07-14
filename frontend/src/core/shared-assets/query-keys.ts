@@ -25,6 +25,17 @@ export function adminAssetKey(accountId: string, kind: AssetListKind) {
   ] as const;
 }
 
+export function systemCatalogKey(
+  accountId: string,
+  kind: Exclude<AssetListKind, "credentials">,
+) {
+  return [
+    ...sharedAssetKeys.account(accountId),
+    "catalog",
+    assetListKindSchema.parse(kind),
+  ] as const;
+}
+
 export function projectAssetKey(
   accountId: string,
   projectId: string,

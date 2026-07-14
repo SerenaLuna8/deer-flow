@@ -20,6 +20,7 @@ import {
   listAdminAssets,
   listProjectAssetVersions,
   listProjectAssets,
+  listSystemAssetCatalog,
   publishProjectAssetVersion,
   replaceProjectCredential,
   revokeProjectCredential,
@@ -41,6 +42,11 @@ const asset = {
   created_by_user_id: "user-1",
   created_at: "2026-07-14T00:00:00Z",
   updated_at: "2026-07-14T00:00:00Z",
+};
+const projectAsset = {
+  ...asset,
+  capabilities: ["shared_assets.read"],
+  binding: null,
 };
 const versionId = "22222222-2222-4222-8222-222222222222";
 const agentVersion = {
@@ -139,12 +145,12 @@ beforeEach(() => {
 });
 
 describe("shared asset api", () => {
-  test("uses only the authenticated fetcher for project and admin lists", async () => {
+  test("uses only the authenticated fetcher for project, admin, and system catalog lists", async () => {
     mockedFetch
       .mockResolvedValueOnce(
         jsonResponse(200, {
           system_items: [],
-          project_items: [asset],
+          project_items: [projectAsset],
           request_id: "req-1",
         }),
       )
@@ -153,18 +159,28 @@ describe("shared asset api", () => {
           items: [{ ...asset, scope: "system", project_id: null }],
           request_id: "req-2",
         }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          items: [{ ...asset, scope: "system", project_id: null }],
+          request_id: "req-3",
+        }),
       );
     const signal = new AbortController().signal;
 
     await expect(
       listProjectAssets(PROJECT_ID, "agents", signal),
-    ).resolves.toMatchObject({ project_items: [asset] });
+    ).resolves.toMatchObject({ project_items: [projectAsset] });
     await expect(listAdminAssets("agents", signal)).resolves.toMatchObject({
       items: [{ id: asset.id }],
     });
+    await expect(
+      listSystemAssetCatalog("agents", signal),
+    ).resolves.toMatchObject({ items: [{ id: asset.id }] });
     expect(mockedFetch.mock.calls).toEqual([
       [`/backend/api/projects/${PROJECT_ID}/agents`, { signal }],
       ["/backend/api/admin/assets/agents", { signal }],
+      ["/backend/api/assets/catalog/agents", { signal }],
     ]);
   });
 

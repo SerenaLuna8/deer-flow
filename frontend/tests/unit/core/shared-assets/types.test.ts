@@ -10,6 +10,8 @@ import {
   credentialMetadataSchema,
   mcpVersionSchema,
   mcpVersionInputSchema,
+  projectAssetListSchema,
+  projectCredentialListSchema,
   skillVersionInputSchema,
   skillVersionSchema,
   systemBindingSchema,
@@ -22,6 +24,83 @@ const VERSION_ID = "22222222-2222-4222-8222-222222222222";
 const PROJECT_ID = "33333333-3333-4333-8333-333333333333";
 
 describe("shared asset contracts", () => {
+  test("strictly parses persisted project binding and item capabilities", () => {
+    const base = {
+      id: ASSET_ID,
+      scope: "system",
+      project_id: null,
+      slug: "writer",
+      display_name: "Writer",
+      status: "active",
+      current_published_version_id: VERSION_ID,
+      version: 2,
+      created_by_user_id: "user-1",
+      created_at: "2026-07-14T00:00:00Z",
+      updated_at: "2026-07-14T00:00:00Z",
+      capabilities: ["shared_assets.read", "shared_assets.manage_bindings"],
+      binding: {
+        project_id: PROJECT_ID,
+        kind: "agent",
+        asset_id: ASSET_ID,
+        version_id: VERSION_ID,
+        enabled: true,
+        version: 3,
+        created_by_user_id: "user-1",
+        updated_by_user_id: "user-1",
+        created_at: "2026-07-14T00:00:00Z",
+        updated_at: "2026-07-14T00:00:00Z",
+      },
+    };
+
+    const parsed = projectAssetListSchema.parse({
+      system_items: [base],
+      project_items: [
+        {
+          ...base,
+          scope: "project",
+          project_id: PROJECT_ID,
+          binding: null,
+        },
+      ],
+      request_id: "req-project-assets",
+    });
+
+    expect(parsed.system_items[0]?.binding?.version).toBe(3);
+    expect(parsed.project_items[0]?.binding).toBeNull();
+    expect(parsed.system_items[0]?.capabilities).toContain(
+      "shared_assets.manage_bindings",
+    );
+  });
+
+  test("keeps project Credential metadata secret-safe while accepting capabilities", () => {
+    const parsed = projectCredentialListSchema.parse({
+      system_items: [],
+      project_items: [
+        {
+          id: ASSET_ID,
+          scope: "project",
+          project_id: PROJECT_ID,
+          name: "github",
+          display_name: "GitHub",
+          credential_type: "token",
+          status: "active",
+          current_version_id: VERSION_ID,
+          version: 1,
+          created_by_user_id: "user-1",
+          created_at: "2026-07-14T00:00:00Z",
+          updated_at: "2026-07-14T00:00:00Z",
+          capabilities: ["shared_assets.read"],
+        },
+      ],
+      request_id: "req-project-credentials",
+    });
+
+    expect(parsed.project_items[0]?.capabilities).toEqual([
+      "shared_assets.read",
+    ]);
+    expect(parsed.project_items[0]).not.toHaveProperty("plaintext");
+  });
+
   test("strictly parses the Gateway asset item without inventing endpoint metadata", () => {
     const asset = assetSummarySchema.parse({
       id: ASSET_ID,

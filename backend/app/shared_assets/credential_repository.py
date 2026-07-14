@@ -206,7 +206,7 @@ class CredentialRepository:
     async def list_project_visible(self, context: ProjectContext) -> tuple[CredentialRow, ...]:
         self._require_project_actor(context)
         await self.lock_project(context)
-        statement = (
+        project_statement = (
             select(CredentialRow)
             .where(
                 CredentialRow.scope == "project",
@@ -215,7 +215,14 @@ class CredentialRepository:
             )
             .order_by(CredentialRow.created_at, CredentialRow.id)
         )
-        return tuple((await self.session.execute(statement)).scalars().all())
+        system_statement = select(CredentialRow).where(
+            CredentialRow.scope == "system",
+            CredentialRow.project_id.is_(None),
+            self._project_context_exists(context),
+        )
+        project_rows = (await self.session.execute(project_statement)).scalars().all()
+        system_rows = (await self.session.execute(system_statement)).scalars().all()
+        return tuple(sorted((*project_rows, *system_rows), key=lambda row: (row.created_at, row.id)))
 
     async def list_override_visible(
         self,

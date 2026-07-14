@@ -2,9 +2,13 @@
 
 import {
   ArrowLeftIcon,
+  BotIcon,
   FolderKanbanIcon,
+  KeyRoundIcon,
   MenuIcon,
+  NetworkIcon,
   SettingsIcon,
+  SparklesIcon,
   UsersIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -45,6 +49,14 @@ export function projectNavigationItems(
     { href: base, icon: FolderKanbanIcon, label: "项目概览" },
     { href: `${base}/members`, icon: UsersIcon, label: "成员与邀请" },
   ];
+  if (project.capabilities.includes("shared_assets.read")) {
+    items.push(
+      { href: `${base}/agents`, icon: BotIcon, label: "Agent" },
+      { href: `${base}/skills`, icon: SparklesIcon, label: "Skill" },
+      { href: `${base}/mcp`, icon: NetworkIcon, label: "MCP" },
+      { href: `${base}/credentials`, icon: KeyRoundIcon, label: "Credential" },
+    );
+  }
   if (canViewSettings(project)) {
     items.push({
       href: `${base}/settings`,

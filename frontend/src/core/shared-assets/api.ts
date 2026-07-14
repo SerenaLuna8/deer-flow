@@ -221,6 +221,13 @@ function adminAssetUrl(kind: AssetListKind): string {
   )}`;
 }
 
+function systemCatalogUrl(kind: Exclude<AssetListKind, "credentials">): string {
+  return `${getBackendBaseURL()}/api/assets/catalog/${parseInput(
+    assetListKindSchema,
+    kind,
+  )}`;
+}
+
 function versionHistorySchema(
   kind: AssetListKind,
 ): z.ZodType<VersionHistoryResponse> {
@@ -276,6 +283,14 @@ export async function listAdminAssets(
   if (kind === "credentials") {
     return parseResponse(response, adminCredentialListSchema);
   }
+  return parseResponse(response, adminAssetListSchema);
+}
+
+export async function listSystemAssetCatalog(
+  kind: Exclude<AssetListKind, "credentials">,
+  signal?: AbortSignal,
+): Promise<AdminAssetList> {
+  const response = await request(systemCatalogUrl(kind), { signal });
   return parseResponse(response, adminAssetListSchema);
 }
 

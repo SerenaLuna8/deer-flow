@@ -5,11 +5,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import and_, exists, func, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
-from app.shared_assets.contexts import SystemAssetGovernanceContext
+from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import AssetForbidden, AssetNotFound
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
@@ -19,7 +19,6 @@ from deerflow.persistence.shared_assets import (
     AgentVersionSkillRefRow,
     McpServerRow,
     McpServerVersionRow,
-    ProjectSystemAgentBindingRow,
     ProjectSystemMcpBindingRow,
     ProjectSystemSkillBindingRow,
     SkillRow,
@@ -59,6 +58,15 @@ class AgentRepository:
     def _require_system_actor(context: SystemAssetGovernanceContext) -> None:
         if not isinstance(context, SystemAssetGovernanceContext):
             raise AssetForbidden(_request_id(context))
+
+    @staticmethod
+    def _require_system_catalog_reader(
+        context: SystemAssetGovernanceContext | SystemAssetReadContext,
+    ) -> None:
+        if not isinstance(context, (SystemAssetGovernanceContext, SystemAssetReadContext)):
+            raise AssetForbidden(_request_id(context))
+        if context.project_id is not None:
+            raise AssetForbidden(context.request_id)
 
     @staticmethod
     def _project_context_exists(context: ProjectContext):
@@ -454,21 +462,10 @@ class AgentRepository:
             AgentRow.project_id == context.project_id,
             self._project_context_exists(context),
         )
-        system_statement = (
-            select(AgentRow)
-            .join(
-                ProjectSystemAgentBindingRow,
-                and_(
-                    ProjectSystemAgentBindingRow.system_agent_id == AgentRow.id,
-                    ProjectSystemAgentBindingRow.project_id == context.project_id,
-                    ProjectSystemAgentBindingRow.enabled.is_(True),
-                ),
-            )
-            .where(
-                AgentRow.scope == "system",
-                AgentRow.project_id.is_(None),
-                self._project_context_exists(context),
-            )
+        system_statement = select(AgentRow).where(
+            AgentRow.scope == "system",
+            AgentRow.project_id.is_(None),
+            self._project_context_exists(context),
         )
         project_rows = (await self.session.execute(project_statement)).scalars().all()
         system_rows = (await self.session.execute(system_statement)).scalars().all()
@@ -476,11 +473,9 @@ class AgentRepository:
 
     async def list_system_visible(
         self,
-        context: SystemAssetGovernanceContext,
+        context: SystemAssetGovernanceContext | SystemAssetReadContext,
     ) -> tuple[AgentRow, ...]:
-        self._require_system_actor(context)
-        if context.project_id is not None:
-            raise AssetForbidden(context.request_id)
+        self._require_system_catalog_reader(context)
         statement = (
             select(AgentRow)
             .where(
@@ -512,19 +507,50 @@ class AgentRepository:
         asset_id: uuid.UUID,
     ) -> tuple[AgentVersionRecord, ...]:
         self._require_project_actor(context)
-        await self.get_project_asset(context, asset_id)
         statement = (
-            select(AgentVersionRow)
-            .join(AgentRow, AgentRow.id == AgentVersionRow.agent_id)
+            select(AgentRow.id, AgentVersionRow)
+            .outerjoin(
+                AgentVersionRow,
+                and_(
+                    AgentVersionRow.agent_id == AgentRow.id,
+                    or_(
+                        AgentRow.scope == "project",
+                        and_(
+                            AgentRow.scope == "system",
+                            AgentVersionRow.workflow_status == "published",
+                        ),
+                    ),
+                ),
+            )
             .where(
-                AgentVersionRow.agent_id == asset_id,
-                AgentRow.scope == "project",
-                AgentRow.project_id == context.project_id,
+                AgentRow.id == asset_id,
+                or_(
+                    and_(
+                        AgentRow.scope == "project",
+                        AgentRow.project_id == context.project_id,
+                    ),
+                    and_(
+                        AgentRow.scope == "system",
+                        AgentRow.project_id.is_(None),
+                    ),
+                ),
                 self._project_context_exists(context),
             )
             .order_by(AgentVersionRow.version_number.desc())
         )
-        return await self._history(statement)
+        scoped_rows = tuple((await self.session.execute(statement)).all())
+        if not scoped_rows:
+            raise AssetNotFound(context.request_id)
+        rows = tuple(row[1] for row in scoped_rows if row[1] is not None)
+        skill_ids, mcp_ids = await self._load_refs(tuple(row.id for row in rows))
+        return tuple(
+            AgentVersionRecord(
+                row,
+                skill_ids.get(row.id, ()),
+                mcp_ids.get(row.id, ()),
+            )
+            for row in rows
+        )
 
     async def get_system_version_history(
         self,

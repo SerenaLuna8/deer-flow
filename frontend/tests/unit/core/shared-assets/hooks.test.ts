@@ -11,6 +11,7 @@ import {
   enableProjectSystemBinding,
   listAdminAssetVersions,
   listProjectAssetVersions,
+  listSystemAssetCatalog,
   publishProjectAssetVersion,
   replaceProjectCredential,
   revokeProjectCredential,
@@ -29,6 +30,7 @@ import {
   useDisableProjectSystemBinding,
   useEnableProjectSystemBinding,
   useProjectAssetVersions,
+  useSystemAssetCatalog,
   usePublishAdminAssetVersion,
   usePublishProjectAssetVersion,
   useReplaceAdminCredential,
@@ -63,6 +65,7 @@ rs.mock("@/core/shared-assets/api", () => ({
   listAdminAssets: rs.fn(),
   listProjectAssetVersions: rs.fn(),
   listProjectAssets: rs.fn(),
+  listSystemAssetCatalog: rs.fn(),
   publishAdminAssetVersion: rs.fn(),
   publishProjectAssetVersion: rs.fn(),
   replaceAdminCredential: rs.fn(),
@@ -107,6 +110,7 @@ beforeEach(() => {
     enableProjectSystemBinding,
     listAdminAssetVersions,
     listProjectAssetVersions,
+    listSystemAssetCatalog,
     publishProjectAssetVersion,
     replaceProjectCredential,
     revokeProjectCredential,
@@ -119,6 +123,25 @@ beforeEach(() => {
 });
 
 describe("shared asset hooks", () => {
+  test("loads the authenticated system catalog with an account-scoped key", async () => {
+    const signal = new AbortController().signal;
+    const catalog = useSystemAssetCatalog(
+      accountId,
+      "mcp-servers",
+    ) as unknown as QueryConfig;
+
+    await catalog.queryFn({ signal });
+
+    expect(catalog.queryKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "catalog",
+      "mcp-servers",
+    ]);
+    expect(listSystemAssetCatalog).toHaveBeenCalledWith("mcp-servers", signal);
+  });
+
   test("loads project and admin history with isolated account scope keys", async () => {
     const signal = new AbortController().signal;
     const project = useProjectAssetVersions(
@@ -190,7 +213,21 @@ describe("shared asset hooks", () => {
     await projectVersion.mutationFn({ assetId, input: agentInput } as never);
     await adminVersion.mutationFn({
       assetId,
-      input: { expected_asset_version: 1 },
+      input: {
+        description: "GitHub MCP",
+        transport: "http",
+        command: null,
+        args: [],
+        url: "https://mcp.example.test",
+        env: {},
+        headers: {},
+        oauth: {},
+        routing: {},
+        tool_overrides: {},
+        timeout_seconds: 30,
+        credential_slots: [],
+        expected_asset_version: 1,
+      },
     } as never);
     await projectCredential.mutationFn(credentialInput as never);
     await adminCredential.mutationFn(credentialInput as never);
@@ -205,7 +242,10 @@ describe("shared asset hooks", () => {
     expect(createAdminAssetVersion).toHaveBeenCalledWith(
       "mcp-servers",
       assetId,
-      { expected_asset_version: 1 },
+      expect.objectContaining({
+        transport: "http",
+        expected_asset_version: 1,
+      }),
     );
     expect(createProjectCredential).toHaveBeenCalledWith(
       projectId,

@@ -37,19 +37,23 @@ function renderShell(project: Project) {
 }
 
 describe("project shell navigation", () => {
-  test("renders only implemented M2 project destinations", () => {
+  test("renders implemented M3 asset destinations from shared_assets.read", () => {
     const html = renderShell(adminProject);
 
     for (const label of [
       "项目概览",
       "成员与邀请",
       "项目设置",
+      "Agent",
+      "Skill",
+      "MCP",
+      "Credential",
       "返回工作空间",
       "账户",
     ]) {
       expect(html).toContain(label);
     }
-    for (const unavailable of ["Agent", "Skill", "MCP", "私有工作", "自动化"]) {
+    for (const unavailable of ["私有工作", "自动化"]) {
       expect(html).not.toContain(unavailable);
     }
     expect(html).toContain("Project content");
@@ -75,5 +79,7 @@ describe("project shell navigation", () => {
     expect(renderShell(roleOnlyAdmin)).toContain("成员与邀请");
     expect(renderShell(roleOnlyAdmin)).not.toContain("项目设置");
     expect(renderShell(capabilityViewer)).toContain("项目设置");
+    expect(renderShell(roleOnlyAdmin)).not.toContain("Agent");
+    expect(renderShell(capabilityViewer)).not.toContain("Agent");
   });
 });

@@ -115,6 +115,21 @@ class BindingService:
         self._record(actor, selection, "binding.enable")
         return result
 
+    async def list_visible(
+        self,
+        actor: _Actor,
+        kind: AssetKind,
+    ) -> tuple[SystemAssetBinding, ...]:
+        if not isinstance(kind, AssetKind):
+            raise AssetValidationFailed(getattr(actor, "request_id", "unknown"))
+        self._require_read(actor)
+
+        async def operation(repository: BindingRepository) -> tuple[SystemAssetBinding, ...]:
+            rows = await repository.list_bindings(actor, kind)
+            return tuple(self._view(kind, row) for row in rows)
+
+        return await self._execute(actor, operation)
+
     async def upgrade(
         self,
         actor: _Actor,
@@ -248,6 +263,14 @@ class BindingService:
         if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
             return
         if isinstance(actor, ProjectContext) and Capability.SHARED_ASSETS_MANAGE_BINDINGS in actor.capabilities:
+            return
+        raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+
+    @staticmethod
+    def _require_read(actor: _Actor) -> None:
+        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
+            return
+        if isinstance(actor, ProjectContext) and Capability.SHARED_ASSETS_READ in actor.capabilities:
             return
         raise AssetForbidden(getattr(actor, "request_id", "unknown"))
 

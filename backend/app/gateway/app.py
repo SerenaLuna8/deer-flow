@@ -462,6 +462,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(project_members.router)
     app.include_router(project_invitations.router)
     app.include_router(project_lifecycle.router)
+    app.include_router(project_assets.catalog_router)
     app.include_router(project_assets.project_router)
     app.include_router(admin_assets.admin_router)
     app.include_router(admin_assets.admin_project_router)

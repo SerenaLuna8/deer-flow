@@ -60,6 +60,7 @@ function encodeBase64(value: string): string {
 
 export function CreateAssetDialog({
   kind,
+  scope = "system",
   open,
   pending,
   errorMessage,
@@ -67,6 +68,7 @@ export function CreateAssetDialog({
   onSubmit,
 }: {
   kind: MutableKind;
+  scope?: "system" | "project";
   open: boolean;
   pending: boolean;
   errorMessage: string | null;
@@ -80,7 +82,8 @@ export function CreateAssetDialog({
         <DialogHeader>
           <DialogTitle>创建 {label}</DialogTitle>
           <DialogDescription>
-            先创建系统级资产，再在资产中创建并发布版本。
+            先创建{scope === "system" ? "系统级" : "项目级"}
+            资产，再在资产中创建并发布版本。
           </DialogDescription>
         </DialogHeader>
         <form

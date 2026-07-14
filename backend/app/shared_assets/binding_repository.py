@@ -157,6 +157,25 @@ class BindingRepository:
             raise AssetNotFound(context.request_id)
         return row
 
+    async def list_bindings(
+        self,
+        context: _Actor,
+        kind: AssetKind,
+    ) -> tuple[object, ...]:
+        """Return this project's persisted bindings after validating scope.
+
+        The explicit project lock distinguishes a valid project with no bindings
+        from a stale or cross-project context, which must remain a 404.
+        """
+        await self.lock_project(context, read=True)
+        project_id = self._project_id(context)
+        binding_type, asset_column, _version_column = _BINDING_TYPES[kind]
+        statement = select(binding_type).where(binding_type.project_id == project_id)
+        if isinstance(context, ProjectContext):
+            statement = statement.where(self._project_context_exists(context))
+        statement = statement.order_by(getattr(binding_type, asset_column))
+        return tuple((await self.session.execute(statement)).scalars().all())
+
     async def lock_target(
         self,
         context: _Actor,

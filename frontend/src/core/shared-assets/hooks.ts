@@ -23,6 +23,7 @@ import {
   listAdminAssets,
   listProjectAssetVersions,
   listProjectAssets,
+  listSystemAssetCatalog,
   publishAdminAssetVersion,
   publishProjectAssetVersion,
   replaceAdminCredential,
@@ -40,6 +41,7 @@ import {
   adminCredentialRotationStatusKey,
   projectAssetKey,
   projectAssetVersionsKey,
+  systemCatalogKey,
 } from "./query-keys";
 import type {
   AdminAssetList,
@@ -65,11 +67,10 @@ import type {
 } from "./types";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
-type VersionInputByKind = {
-  agents: AgentVersionInput;
-  skills: SkillVersionInput;
-  "mcp-servers": McpVersionInput;
-};
+type VersionAuthoringInput =
+  | AgentVersionInput
+  | SkillVersionInput
+  | McpVersionInput;
 
 const BINDING_LIST_KIND: Record<AssetKind, MutableAssetKind> = {
   agent: "agents",
@@ -117,6 +118,7 @@ export function useProjectAssets(
   accountId: string,
   projectId: string,
   kind: AssetListKind,
+  enabled = true,
 ) {
   return useQuery<ProjectAssetList | ProjectCredentialList>({
     queryKey: projectAssetKey(accountId, projectId, kind),
@@ -124,16 +126,32 @@ export function useProjectAssets(
       kind === "credentials"
         ? listProjectAssets(projectId, kind, signal)
         : listProjectAssets(projectId, kind, signal),
+    enabled,
   });
 }
 
-export function useAdminAssets(accountId: string, kind: AssetListKind) {
+export function useAdminAssets(
+  accountId: string,
+  kind: AssetListKind,
+  enabled = true,
+) {
   return useQuery<AdminAssetList | AdminCredentialList>({
     queryKey: adminAssetKey(accountId, kind),
     queryFn: ({ signal }) =>
       kind === "credentials"
         ? listAdminAssets(kind, signal)
         : listAdminAssets(kind, signal),
+    enabled,
+  });
+}
+
+export function useSystemAssetCatalog(
+  accountId: string,
+  kind: Exclude<AssetListKind, "credentials">,
+) {
+  return useQuery<AdminAssetList>({
+    queryKey: systemCatalogKey(accountId, kind),
+    queryFn: ({ signal }) => listSystemAssetCatalog(kind, signal),
   });
 }
 
@@ -189,58 +207,63 @@ export function useCreateAdminAsset(accountId: string, kind: MutableAssetKind) {
   });
 }
 
-function createProjectVersionForKind<K extends MutableAssetKind>(
+function isAgentVersionInput(
+  input: VersionAuthoringInput,
+): input is AgentVersionInput {
+  return "soul" in input && "model_ref" in input;
+}
+
+function isSkillVersionInput(
+  input: VersionAuthoringInput,
+): input is SkillVersionInput {
+  return "files" in input;
+}
+
+function isMcpVersionInput(
+  input: VersionAuthoringInput,
+): input is McpVersionInput {
+  return "transport" in input;
+}
+
+function createProjectVersionForKind(
   projectId: string,
-  kind: K,
+  kind: MutableAssetKind,
   assetId: string,
-  input: VersionInputByKind[K],
+  input: VersionAuthoringInput,
 ) {
-  if (kind === "agents") {
-    return createProjectAssetVersion(
-      projectId,
-      kind,
-      assetId,
-      input as AgentVersionInput,
-    );
+  if (kind === "agents" && isAgentVersionInput(input)) {
+    return createProjectAssetVersion(projectId, kind, assetId, input);
   }
-  if (kind === "skills") {
-    return createProjectAssetVersion(
-      projectId,
-      kind,
-      assetId,
-      input as SkillVersionInput,
-    );
+  if (kind === "skills" && isSkillVersionInput(input)) {
+    return createProjectAssetVersion(projectId, kind, assetId, input);
   }
-  return createProjectAssetVersion(
-    projectId,
-    "mcp-servers",
-    assetId,
-    input as McpVersionInput,
-  );
+  if (kind === "mcp-servers" && isMcpVersionInput(input)) {
+    return createProjectAssetVersion(projectId, kind, assetId, input);
+  }
+  throw new TypeError(`Version input does not match ${kind}`);
 }
 
-function createAdminVersionForKind<K extends MutableAssetKind>(
-  kind: K,
+function createAdminVersionForKind(
+  kind: MutableAssetKind,
   assetId: string,
-  input: VersionInputByKind[K],
+  input: VersionAuthoringInput,
 ) {
-  if (kind === "agents") {
-    return createAdminAssetVersion(kind, assetId, input as AgentVersionInput);
+  if (kind === "agents" && isAgentVersionInput(input)) {
+    return createAdminAssetVersion(kind, assetId, input);
   }
-  if (kind === "skills") {
-    return createAdminAssetVersion(kind, assetId, input as SkillVersionInput);
+  if (kind === "skills" && isSkillVersionInput(input)) {
+    return createAdminAssetVersion(kind, assetId, input);
   }
-  return createAdminAssetVersion(
-    "mcp-servers",
-    assetId,
-    input as McpVersionInput,
-  );
+  if (kind === "mcp-servers" && isMcpVersionInput(input)) {
+    return createAdminAssetVersion(kind, assetId, input);
+  }
+  throw new TypeError(`Version input does not match ${kind}`);
 }
 
-export function useCreateProjectAssetVersion<K extends MutableAssetKind>(
+export function useCreateProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: K,
+  kind: MutableAssetKind,
 ) {
   const invalidate = useProjectInvalidation(accountId, projectId, kind);
   return useMutation({
@@ -249,15 +272,15 @@ export function useCreateProjectAssetVersion<K extends MutableAssetKind>(
       input,
     }: {
       assetId: string;
-      input: VersionInputByKind[K];
+      input: VersionAuthoringInput;
     }) => createProjectVersionForKind(projectId, kind, assetId, input),
     onSuccess: invalidate,
   });
 }
 
-export function useCreateAdminAssetVersion<K extends MutableAssetKind>(
+export function useCreateAdminAssetVersion(
   accountId: string,
-  kind: K,
+  kind: MutableAssetKind,
 ) {
   const invalidate = useAdminInvalidation(accountId, kind);
   return useMutation({
@@ -266,7 +289,7 @@ export function useCreateAdminAssetVersion<K extends MutableAssetKind>(
       input,
     }: {
       assetId: string;
-      input: VersionInputByKind[K];
+      input: VersionAuthoringInput;
     }) => createAdminVersionForKind(kind, assetId, input),
     onSuccess: invalidate,
   });

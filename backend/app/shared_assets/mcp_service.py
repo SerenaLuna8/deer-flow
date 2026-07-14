@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
-from app.shared_assets.contexts import SystemAssetGovernanceContext
+from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.credential_repository import CredentialRepository, LockedCredentialVersion
 from app.shared_assets.credential_service import CredentialGrantView
 from app.shared_assets.errors import (
@@ -88,7 +88,7 @@ _CONFLICT_CONSTRAINTS = frozenset(
         "uq_credential_grants_active_slot",
     }
 )
-_Actor = ProjectContext | SystemAssetGovernanceContext
+_Actor = ProjectContext | SystemAssetGovernanceContext | SystemAssetReadContext
 _T = TypeVar("_T")
 
 
@@ -819,6 +819,8 @@ class McpService:
     @staticmethod
     def _require_capability(actor: _Actor, capability: Capability) -> None:
         if isinstance(actor, SystemAssetGovernanceContext):
+            return
+        if isinstance(actor, SystemAssetReadContext) and capability is Capability.SHARED_ASSETS_READ:
             return
         if isinstance(actor, ProjectContext) and capability in actor.capabilities:
             return

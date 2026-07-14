@@ -32,7 +32,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; its production WebServer build uses Webpack explicitly so the 120-second startup gate is deterministic across local and CI environments.
 
 ## Architecture
 
@@ -99,6 +99,20 @@ not repeat either request. The project shell shows only implemented M2 destinati
 settings from server-returned `project.lifecycle.manage` or `project.update` capabilities, and
 never derives visibility from role. Its private-work CTA remains visibly disabled and has no
 thread or router integration until the private-work milestone.
+项目资产页 `/projects/[project_slug]/{agents,skills,mcp,credentials}` 同样只消费
+`useCurrentProject()`，不得重复解析 slug、拉取项目列表或调用 enter。资产列表使用严格 read
+model，按系统级与项目级分组，并包含逐项 capability、当前已发布版本以及持久化的固定绑定、
+启用状态和并发控制修订版本；Query key 必须同时按 account、project 和 kind 隔离。界面只按逐项
+capability 展示操作，禁止从角色推断权限。系统资产的项目内版本历史只返回已发布版本，系统
+Credential 仅展示安全元数据；暂停或归档资产必须按服务端状态限制创建、发布、审批和绑定移动。
+M3 不提供运行或开始对话入口。旧 `/workspace/{agents,skills,tools}` 只读展示 PostgreSQL 系统
+资产，并使用 account-scoped `/api/assets/catalog/*`，不得复用受旧 feature gate 限制的配置接口；
+普通用户不能写入，`system_admin` 仅可跳转 `/admin/assets` 管理。MCP 审批的 Credential 选择器
+只列出同一作用域内已启用 Credential 的 current version：项目审批只能使用项目 Credential，
+系统审批只能使用系统 Credential；只强制 required slot，optional slot 允许留空。Credential catalog
+的 loading/error 必须与空列表区分，并提供安全错误文案和重试。secret-bearing 字段不得进入 TanStack
+cache、响应或错误；用户在 password control 中输入的值提交后必须立即清空，不得继续在 DOM 中
+残留或被 UI 回显。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie

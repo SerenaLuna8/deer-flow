@@ -1,10 +1,5 @@
-import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
-import { WorkspaceCapabilityPage } from "@/components/workspace/workspace-capability-page";
+import { LegacySystemAssetsCompatibility } from "@/components/workspace/legacy-system-assets-compatibility";
 
 export default function SkillsPage() {
-  return (
-    <WorkspaceCapabilityPage>
-      <SkillSettingsPage />
-    </WorkspaceCapabilityPage>
-  );
+  return <LegacySystemAssetsCompatibility kind="Skill" />;
 }

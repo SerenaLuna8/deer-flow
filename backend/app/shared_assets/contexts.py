@@ -19,6 +19,15 @@ class SystemAssetGovernanceContext:
     project_id: uuid.UUID | None = None
 
 
+@dataclass(frozen=True)
+class SystemAssetReadContext:
+    """Authenticated, read-only access to the global PostgreSQL catalog."""
+
+    user_id: uuid.UUID
+    request_id: str
+    project_id: None = None
+
+
 def resolve_asset_actor(
     user: _AuthenticatedUser,
     *,
@@ -29,3 +38,14 @@ def resolve_asset_actor(
     if user.system_role != "system_admin" or not isinstance(user_id, uuid.UUID):
         raise AssetForbidden(request_id)
     return SystemAssetGovernanceContext(user_id=user_id, request_id=request_id, project_id=project_id)
+
+
+def resolve_asset_reader(
+    user: _AuthenticatedUser,
+    *,
+    request_id: str,
+) -> SystemAssetReadContext:
+    user_id = user.id
+    if not isinstance(user_id, uuid.UUID):
+        raise AssetForbidden(request_id)
+    return SystemAssetReadContext(user_id=user_id, request_id=request_id)

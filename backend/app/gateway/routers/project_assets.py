@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.deps import get_current_user_from_request
+from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext, resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound
 from app.shared_assets import (
@@ -42,6 +43,7 @@ from app.shared_assets import (
     SkillService,
     WorkflowStatus,
 )
+from app.shared_assets.contexts import SystemAssetReadContext, resolve_asset_reader
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
@@ -65,6 +67,11 @@ project_router = APIRouter(
     tags=["project-assets"],
     route_class=AssetRoute,
 )
+catalog_router = APIRouter(
+    prefix="/api/assets/catalog",
+    tags=["asset-catalog"],
+    route_class=AssetRoute,
+)
 
 
 class _StrictModel(BaseModel):
@@ -85,6 +92,24 @@ class AssetItemResponse(_StrictModel):
     updated_at: datetime
 
 
+class BindingItemResponse(_StrictModel):
+    project_id: uuid.UUID
+    kind: AssetKind
+    asset_id: uuid.UUID
+    version_id: uuid.UUID
+    enabled: bool
+    version: int
+    created_by_user_id: str
+    updated_by_user_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectAssetItemResponse(AssetItemResponse):
+    capabilities: list[Capability]
+    binding: BindingItemResponse | None
+
+
 class CredentialItemResponse(_StrictModel):
     id: uuid.UUID
     scope: AssetScope
@@ -100,15 +125,24 @@ class CredentialItemResponse(_StrictModel):
     updated_at: datetime
 
 
+class ProjectCredentialItemResponse(CredentialItemResponse):
+    capabilities: list[Capability]
+
+
 class ScopedAssetListResponse(_StrictModel):
-    system_items: list[AssetItemResponse]
-    project_items: list[AssetItemResponse]
+    system_items: list[ProjectAssetItemResponse]
+    project_items: list[ProjectAssetItemResponse]
     request_id: str
 
 
 class ScopedCredentialListResponse(_StrictModel):
-    system_items: list[CredentialItemResponse]
-    project_items: list[CredentialItemResponse]
+    system_items: list[ProjectCredentialItemResponse]
+    project_items: list[ProjectCredentialItemResponse]
+    request_id: str
+
+
+class SystemAssetCatalogResponse(_StrictModel):
+    items: list[AssetItemResponse]
     request_id: str
 
 
@@ -419,6 +453,16 @@ async def authenticated_asset_identity(
     return uuid.UUID(str(user.id)), get_current_trace_id() or generate_trace_id()
 
 
+async def system_asset_catalog_actor(
+    user=Depends(get_current_user_from_request),
+) -> SystemAssetReadContext:
+    request_id = get_current_trace_id() or generate_trace_id()
+    try:
+        return resolve_asset_reader(user, request_id=request_id)
+    except AssetForbidden as exc:
+        raise_asset_domain(exc)
+
+
 async def asset_session():
     from deerflow.persistence.engine import get_session_factory as resolve_session_factory
 
@@ -489,18 +533,103 @@ def _credential_item(view) -> CredentialItemResponse:
     return CredentialItemResponse.model_validate(view, from_attributes=True)
 
 
-def _scoped_assets(views, request_id: str) -> ScopedAssetListResponse:
-    items = [_asset_item(view) for view in views]
+async def _list_system_catalog(
+    actor: SystemAssetReadContext,
+    service,
+) -> SystemAssetCatalogResponse:
+    try:
+        return SystemAssetCatalogResponse(
+            items=[_asset_item(view) for view in await service.list_visible(actor)],
+            request_id=actor.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@catalog_router.get("/agents", response_model=SystemAssetCatalogResponse)
+async def list_system_catalog_agents(
+    actor: Annotated[SystemAssetReadContext, Depends(system_asset_catalog_actor)],
+    service: Annotated[AgentService, Depends(get_agent_service)],
+):
+    return await _list_system_catalog(actor, service)
+
+
+@catalog_router.get("/skills", response_model=SystemAssetCatalogResponse)
+async def list_system_catalog_skills(
+    actor: Annotated[SystemAssetReadContext, Depends(system_asset_catalog_actor)],
+    service: Annotated[SkillService, Depends(get_skill_service)],
+):
+    return await _list_system_catalog(actor, service)
+
+
+@catalog_router.get("/mcp-servers", response_model=SystemAssetCatalogResponse)
+async def list_system_catalog_mcp_servers(
+    actor: Annotated[SystemAssetReadContext, Depends(system_asset_catalog_actor)],
+    service: Annotated[McpService, Depends(get_mcp_service)],
+):
+    return await _list_system_catalog(actor, service)
+
+
+def _asset_item_capabilities(
+    context: ProjectContext,
+    scope: AssetScope,
+    kind: AssetKind,
+) -> list[Capability]:
+    allowed = {
+        Capability.SHARED_ASSETS_READ,
+        Capability.SHARED_ASSETS_EXECUTE,
+    }
+    if scope is AssetScope.SYSTEM:
+        allowed.add(Capability.SHARED_ASSETS_MANAGE_BINDINGS)
+    else:
+        allowed.add(Capability.SHARED_ASSETS_EDIT)
+        if kind is AssetKind.MCP:
+            allowed.add(Capability.MCP_CREDENTIALS_APPROVE)
+    return sorted(context.capabilities & allowed, key=str)
+
+
+def _credential_item_capabilities(
+    context: ProjectContext,
+    scope: AssetScope,
+) -> list[Capability]:
+    allowed = {Capability.SHARED_ASSETS_READ}
+    if scope is AssetScope.PROJECT:
+        allowed.add(Capability.MCP_CREDENTIALS_APPROVE)
+    return sorted(context.capabilities & allowed, key=str)
+
+
+def _scoped_assets(
+    views,
+    bindings,
+    context: ProjectContext,
+    kind: AssetKind,
+) -> ScopedAssetListResponse:
+    by_asset_id = {binding.asset_id: binding for binding in bindings}
+    items = [
+        ProjectAssetItemResponse(
+            **vars(view),
+            capabilities=_asset_item_capabilities(context, view.scope, kind),
+            binding=(BindingItemResponse(**vars(by_asset_id[view.id])) if view.scope is AssetScope.SYSTEM and view.id in by_asset_id else None),
+        )
+        for view in views
+    ]
     return ScopedAssetListResponse(
         system_items=[item for item in items if item.scope is AssetScope.SYSTEM],
         project_items=[item for item in items if item.scope is AssetScope.PROJECT],
-        request_id=request_id,
+        request_id=context.request_id,
     )
 
 
-async def _list_assets(context: ProjectContext, service) -> ScopedAssetListResponse:
+async def _list_assets(
+    context: ProjectContext,
+    kind: AssetKind,
+    service,
+    binding_service: BindingService,
+) -> ScopedAssetListResponse:
     try:
-        return _scoped_assets(await service.list_visible(context), context.request_id)
+        views = await service.list_visible(context)
+        bindings = await binding_service.list_visible(context, kind)
+        return _scoped_assets(views, bindings, context, kind)
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 
@@ -703,24 +832,27 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
 async def list_project_agents(
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[AgentService, Depends(get_agent_service)],
+    binding_service: Annotated[BindingService, Depends(get_binding_service)],
 ):
-    return await _list_assets(context, service)
+    return await _list_assets(context, AssetKind.AGENT, service, binding_service)
 
 
 @project_router.get("/skills", response_model=ScopedAssetListResponse)
 async def list_project_skills(
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[SkillService, Depends(get_skill_service)],
+    binding_service: Annotated[BindingService, Depends(get_binding_service)],
 ):
-    return await _list_assets(context, service)
+    return await _list_assets(context, AssetKind.SKILL, service, binding_service)
 
 
 @project_router.get("/mcp-servers", response_model=ScopedAssetListResponse)
 async def list_project_mcp_servers(
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[McpService, Depends(get_mcp_service)],
+    binding_service: Annotated[BindingService, Depends(get_binding_service)],
 ):
-    return await _list_assets(context, service)
+    return await _list_assets(context, AssetKind.MCP, service, binding_service)
 
 
 @project_router.get("/credentials", response_model=ScopedCredentialListResponse)
@@ -729,7 +861,13 @@ async def list_project_credentials(
     service: Annotated[CredentialService, Depends(get_credential_service)],
 ):
     try:
-        items = [_credential_item(view) for view in await service.list_visible(context)]
+        items = [
+            ProjectCredentialItemResponse(
+                **vars(view),
+                capabilities=_credential_item_capabilities(context, view.scope),
+            )
+            for view in await service.list_visible(context)
+        ]
         return ScopedCredentialListResponse(
             system_items=[item for item in items if item.scope is AssetScope.SYSTEM],
             project_items=[item for item in items if item.scope is AssetScope.PROJECT],

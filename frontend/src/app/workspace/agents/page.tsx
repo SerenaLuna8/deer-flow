@@ -1,5 +1,5 @@
-import { AgentGallery } from "@/components/workspace/agents/agent-gallery";
+import { LegacySystemAssetsCompatibility } from "@/components/workspace/legacy-system-assets-compatibility";
 
 export default function AgentsPage() {
-  return <AgentGallery />;
+  return <LegacySystemAssetsCompatibility kind="Agent" />;
 }

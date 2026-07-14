@@ -29,7 +29,7 @@ export default defineConfig({
     ? undefined
     : {
         command:
-          "./node_modules/.bin/next build && ./node_modules/.bin/next start",
+          "./node_modules/.bin/next build --webpack && ./node_modules/.bin/next start",
         url: baseURL,
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,

@@ -114,6 +114,11 @@ function AssetCard({
   const publish = usePublishAdminAssetVersion(accountId, kind);
   const submit = useSubmitAdminMcpVersion(accountId);
   const approve = useApproveAdminMcpVersion(accountId);
+  const credentialCatalog = useAdminAssets(
+    accountId,
+    "credentials",
+    kind === "mcp-servers",
+  );
   const pending =
     changeStatus.isPending ||
     createVersion.isPending ||
@@ -215,6 +220,16 @@ function AssetCard({
               kind={kind}
               versions={history.data?.data ?? []}
               pending={pending}
+              approvalCredentials={
+                (credentialCatalog.data as AdminCredentialList | undefined)
+                  ?.items ?? []
+              }
+              approvalCredentialScope="system"
+              approvalCredentialsLoading={credentialCatalog.isLoading}
+              approvalCredentialsError={credentialCatalog.error}
+              onRetryApprovalCredentials={() =>
+                void credentialCatalog.refetch()
+              }
               onPublish={(version) =>
                 publish.mutate({
                   assetId: asset.id,

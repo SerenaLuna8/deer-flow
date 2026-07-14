@@ -5,11 +5,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import and_, exists, func, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
-from app.shared_assets.contexts import SystemAssetGovernanceContext
+from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import AssetForbidden, AssetNotFound
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
@@ -51,6 +51,15 @@ class SkillRepository:
     def _require_system_actor(context: SystemAssetGovernanceContext) -> None:
         if not isinstance(context, SystemAssetGovernanceContext):
             raise AssetForbidden(_request_id(context))
+
+    @staticmethod
+    def _require_system_catalog_reader(
+        context: SystemAssetGovernanceContext | SystemAssetReadContext,
+    ) -> None:
+        if not isinstance(context, (SystemAssetGovernanceContext, SystemAssetReadContext)):
+            raise AssetForbidden(_request_id(context))
+        if context.project_id is not None:
+            raise AssetForbidden(context.request_id)
 
     @staticmethod
     def _project_context_exists(context: ProjectContext):
@@ -524,19 +533,43 @@ class SkillRepository:
         asset_id: uuid.UUID,
     ) -> tuple[SkillVersionRecord, ...]:
         self._require_project_actor(context)
-        await self.get_project_asset(context, asset_id)
         statement = (
-            select(SkillVersionRow)
-            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            select(SkillRow.id, SkillVersionRow)
+            .outerjoin(
+                SkillVersionRow,
+                and_(
+                    SkillVersionRow.skill_id == SkillRow.id,
+                    or_(
+                        SkillRow.scope == "project",
+                        and_(
+                            SkillRow.scope == "system",
+                            SkillVersionRow.workflow_status == "published",
+                        ),
+                    ),
+                ),
+            )
             .where(
-                SkillVersionRow.skill_id == asset_id,
-                SkillRow.scope == "project",
-                SkillRow.project_id == context.project_id,
+                SkillRow.id == asset_id,
+                or_(
+                    and_(
+                        SkillRow.scope == "project",
+                        SkillRow.project_id == context.project_id,
+                    ),
+                    and_(
+                        SkillRow.scope == "system",
+                        SkillRow.project_id.is_(None),
+                    ),
+                ),
                 self._project_context_exists(context),
             )
             .order_by(SkillVersionRow.version_number.desc())
         )
-        return await self._history(statement)
+        scoped_rows = tuple((await self.session.execute(statement)).all())
+        if not scoped_rows:
+            raise AssetNotFound(context.request_id)
+        rows = tuple(row[1] for row in scoped_rows if row[1] is not None)
+        files = await self._load_file_map(tuple(row.id for row in rows))
+        return tuple(SkillVersionRecord(row, files.get(row.id, ())) for row in rows)
 
     async def get_system_version_history(
         self,
@@ -612,21 +645,10 @@ class SkillRepository:
             SkillRow.project_id == context.project_id,
             self._project_context_exists(context),
         )
-        system_statement = (
-            select(SkillRow)
-            .join(
-                ProjectSystemSkillBindingRow,
-                and_(
-                    ProjectSystemSkillBindingRow.system_skill_id == SkillRow.id,
-                    ProjectSystemSkillBindingRow.project_id == context.project_id,
-                    ProjectSystemSkillBindingRow.enabled.is_(True),
-                ),
-            )
-            .where(
-                SkillRow.scope == "system",
-                SkillRow.project_id.is_(None),
-                self._project_context_exists(context),
-            )
+        system_statement = select(SkillRow).where(
+            SkillRow.scope == "system",
+            SkillRow.project_id.is_(None),
+            self._project_context_exists(context),
         )
         project_rows = (await self.session.execute(project_statement)).scalars().all()
         system_rows = (await self.session.execute(system_statement)).scalars().all()
@@ -634,11 +656,9 @@ class SkillRepository:
 
     async def list_system_visible(
         self,
-        context: SystemAssetGovernanceContext,
+        context: SystemAssetGovernanceContext | SystemAssetReadContext,
     ) -> tuple[SkillRow, ...]:
-        self._require_system_actor(context)
-        if context.project_id is not None:
-            raise AssetForbidden(context.request_id)
+        self._require_system_catalog_reader(context)
         statement = (
             select(SkillRow)
             .where(
