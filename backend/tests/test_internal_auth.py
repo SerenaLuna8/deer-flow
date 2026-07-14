@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
 
 
 def test_internal_auth_uses_shared_env_token(monkeypatch):
@@ -78,3 +79,22 @@ def test_get_internal_user_normalises_unsafe_owner_user_id():
     # Empty / None falls back to default.
     assert internal_auth.get_internal_user().id == "default"
     assert internal_auth.get_internal_user(owner_user_id="").id == "default"
+
+
+def test_runtime_identity_requires_verified_internal_auth_source_and_is_normalized():
+    import app.gateway.internal_auth as internal_auth
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
+    from deerflow.config.paths import make_safe_user_id
+
+    raw_runtime_user_id = "platform/user:7"
+    headers = {internal_auth.INTERNAL_RUNTIME_USER_ID_HEADER_NAME: raw_runtime_user_id}
+    state = SimpleNamespace(
+        user=SimpleNamespace(id="synthetic", system_role=internal_auth.INTERNAL_SYSTEM_ROLE),
+        auth_source=AUTH_SOURCE_SESSION,
+    )
+    request = SimpleNamespace(headers=headers, state=state)
+
+    assert internal_auth.get_trusted_internal_runtime_user_id(request) is None
+
+    state.auth_source = AUTH_SOURCE_INTERNAL
+    assert internal_auth.get_trusted_internal_runtime_user_id(request) == make_safe_user_id(raw_runtime_user_id)

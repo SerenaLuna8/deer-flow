@@ -520,6 +520,14 @@ def _owner_headers(msg: InboundMessage) -> dict[str, str] | None:
     return create_internal_auth_headers(owner_user_id=owner_user_id)
 
 
+def _run_headers(msg: InboundMessage) -> dict[str, str]:
+    """Authenticate a channel run and carry its non-authoritative bucket id."""
+    return create_internal_auth_headers(
+        owner_user_id=_effective_owner_user_id(msg),
+        runtime_user_id=_channel_storage_user_id(msg),
+    )
+
+
 def _safe_user_id_for_run(raw_user_id: str) -> str:
     from deerflow.config.paths import get_paths
 
@@ -1429,6 +1437,7 @@ class ChannelManager:
 
         client = self._get_client()
         storage_user_id = _channel_storage_user_id(msg)
+        run_headers = _run_headers(msg)
 
         # Look up the existing DeerFlow thread, creating one if this is the
         # first message for the chat. topic_id may be None (e.g. Telegram
@@ -1478,6 +1487,7 @@ class ChannelManager:
                 run_context,
                 human_message,
                 storage_user_id=storage_user_id,
+                run_headers=run_headers,
             )
             return
 
@@ -1487,8 +1497,7 @@ class ChannelManager:
             "context": run_context,
             "multitask_strategy": "reject",
         }
-        if owner_headers := _owner_headers(msg):
-            run_kwargs["headers"] = owner_headers
+        run_kwargs["headers"] = run_headers
 
         if policy is not None and policy.fire_and_forget:
             # Fire-and-forget path: the channel does its own outbound
@@ -1579,6 +1588,7 @@ class ChannelManager:
         run_context: dict[str, Any],
         human_message: dict[str, Any],
         storage_user_id: str | None = None,
+        run_headers: dict[str, str] | None = None,
     ) -> None:
         logger.info("[Manager] invoking runs.stream(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
 
@@ -1597,8 +1607,7 @@ class ChannelManager:
             "stream_mode": list(STREAM_MODES),
             "multitask_strategy": "reject",
         }
-        if owner_headers := _owner_headers(msg):
-            stream_kwargs["headers"] = owner_headers
+        stream_kwargs["headers"] = run_headers if run_headers is not None else _run_headers(msg)
 
         try:
             async for chunk in client.runs.stream(

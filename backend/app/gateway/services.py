@@ -30,6 +30,7 @@ from app.gateway.internal_auth import (
     INTERNAL_SYSTEM_ROLE,
     get_internal_user,
     get_trusted_internal_owner_user_id,
+    get_trusted_internal_runtime_user_id,
 )
 from app.gateway.utils import sanitize_log_param
 from app.private_work.context import strip_private_client_fields
@@ -415,6 +416,7 @@ def inject_authenticated_user_context(
     request: Request,
     *,
     internal_owner_user: Any | None = None,
+    internal_runtime_user_id: str | None = None,
 ) -> None:
     """Stamp the authenticated user into the run context for background tools.
 
@@ -433,6 +435,8 @@ def inject_authenticated_user_context(
         if not isinstance(runtime_context, dict):
             return
         if internal_owner_user is None:
+            if internal_runtime_user_id is not None:
+                runtime_context["user_id"] = internal_runtime_user_id
             runtime_context.pop("user_role", None)
             runtime_context.pop("oauth_provider", None)
             runtime_context.pop("oauth_id", None)
@@ -722,6 +726,7 @@ async def start_run(
             )
 
     owner_user_id = get_trusted_internal_owner_user_id(request)
+    runtime_user_id = get_trusted_internal_runtime_user_id(request)
     # Stateless run endpoints carry thread_id in the request *body*, so the
     # @require_permission(owner_check=True) decorator -- which resolves ownership
     # from the path param -- cannot protect them. Enforce thread ownership here,
@@ -777,7 +782,12 @@ async def start_run(
         # ``build_run_config``; scrub internal-only keys smuggled there.
         strip_internal_context_keys(config)
     internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
-    inject_authenticated_user_context(config, request, internal_owner_user=internal_owner_user)
+    inject_authenticated_user_context(
+        config,
+        request,
+        internal_owner_user=internal_owner_user,
+        internal_runtime_user_id=runtime_user_id,
+    )
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
@@ -825,21 +835,30 @@ async def start_run(
         except Exception:
             logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
-        task = asyncio.create_task(
-            run_agent(
-                bridge,
-                run_mgr,
-                record,
-                ctx=run_ctx,
-                agent_factory=agent_factory,
-                graph_input=graph_input,
-                config=config,
-                stream_modes=stream_modes,
-                stream_subgraphs=body.stream_subgraphs,
-                interrupt_before=body.interrupt_before,
-                interrupt_after=body.interrupt_after,
+        execution_context_token = None
+        runtime_context = config.get("context")
+        execution_user_id = runtime_context.get("user_id") if isinstance(runtime_context, dict) else None
+        if is_internal_caller and execution_user_id:
+            execution_context_token = set_current_user(SimpleNamespace(id=str(execution_user_id)))
+        try:
+            task = asyncio.create_task(
+                run_agent(
+                    bridge,
+                    run_mgr,
+                    record,
+                    ctx=run_ctx,
+                    agent_factory=agent_factory,
+                    graph_input=graph_input,
+                    config=config,
+                    stream_modes=stream_modes,
+                    stream_subgraphs=body.stream_subgraphs,
+                    interrupt_before=body.interrupt_before,
+                    interrupt_after=body.interrupt_after,
+                )
             )
-        )
+        finally:
+            if execution_context_token is not None:
+                reset_current_user(execution_context_token)
         record.task = task
 
         # Title sync is handled by worker.py's finally block which reads the

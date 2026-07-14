@@ -804,6 +804,7 @@ class TestChannelManager:
 
     def test_handle_chat_calls_channel_receive_file_for_inbound_files(self, monkeypatch):
         from app.channels.manager import ChannelManager
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_RUNTIME_USER_ID_HEADER_NAME
 
         async def go():
             bus = MessageBus()
@@ -859,6 +860,8 @@ class TestChannelManager:
             mock_client.runs.wait.assert_called_once()
             run_call_args = mock_client.runs.wait.call_args
             assert run_call_args[1]["input"]["messages"][0]["content"] == "with /mnt/user-data/uploads/demo.png"
+            assert run_call_args[1]["headers"][INTERNAL_OWNER_USER_ID_HEADER_NAME] == "owner-1"
+            assert run_call_args[1]["headers"][INTERNAL_RUNTIME_USER_ID_HEADER_NAME] == "owner-1"
 
         _run(go())
 
@@ -1331,8 +1334,8 @@ class TestChannelManager:
 
             history_by_checkpoint: dict[tuple[str, str], list[str]] = {}
 
-            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None):
-                del assistant_id, context  # unused in this test, kept for signature parity
+            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None, headers=None):
+                del assistant_id, context, headers  # unused in this test, kept for signature parity
 
                 checkpoint_ns = config.get("configurable", {}).get("checkpoint_ns")
                 key = (thread_id, str(checkpoint_ns))

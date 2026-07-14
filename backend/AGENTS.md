@@ -496,7 +496,7 @@ Lets a caller pass per-request, short-lived end-user credentials (e.g. an ERP to
 
 Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk, GitHub) to the DeerFlow agent via Gateway's LangGraph-compatible API.
 
-**Architecture**: Channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair so Gateway accepts state-changing thread/run requests from channel workers without relying on browser session cookies.
+**Architecture**: Channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair so Gateway accepts state-changing thread/run requests from channel workers without relying on browser session cookies. Run create/wait/stream calls additionally carry `X-DeerFlow-Runtime-User-Id`, a path-safe execution/storage bucket derived from `_channel_storage_user_id`; Gateway honors it only after internal-token authentication and never treats it as thread owner, persistence owner, project membership, or private-work authority.
 
 **Components**:
 - `message_bus.py` - Async pub/sub hub (`InboundMessage` → queue → dispatcher; `OutboundMessage` → callbacks → channels)
@@ -530,6 +530,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 - `_ingest_inbound_files(...)` and the underlying `ensure_uploads_dir` / `get_uploads_dir` — owner-scoped via the same kwarg
 - `_resolve_attachments` / `_prepare_artifact_delivery` — resolve output artifacts from the bound owner's bucket
 The cached value is reused for both the blocking (`runs.wait`) and streaming (`_handle_streaming_chat`) paths, so uploads and artifact delivery always target the same bucket even if a channel returns a rewritten `InboundMessage` from `receive_file`. The bucket id matches the memory bucket resolved by `_resolve_memory_user_id` (both normalize through `make_safe_user_id`).
+The same cached bucket is sent out-of-band on every channel run create/wait/stream request. `start_run()` installs it only in the live runtime context and in the background task's execution `ContextVar`; it is not written to run kwargs, checkpoint authority fields, metadata, `RunManager.create_or_reject(user_id=...)`, or thread ownership. Bound channels continue to send the separate raw owner header for authorization and persistence, while unbound auth-enabled channels keep distinct sanitized platform-user runtime buckets instead of converging on `default`.
 
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph-compatible Gateway API base URL (default: `http://localhost:8001/api`)
@@ -1060,7 +1061,7 @@ pure preflight wrapper 居中、`require_permission` 在内，使 malformed body
 `start_run()` 在创建 run/thread record 前生成 authority-sanitized
 metadata/config/body-context 副本，并一致用于持久化、API response 与 live config；secret redaction
 发生在 authority sanitize 之后。graph input/messages 不经过该递归清洗，消息 `role` 是合法数据。
-身份仅由后续服务端认证或 trusted internal owner 注入。harness 只接收不含 role/capability 的
+身份仅由后续服务端认证、trusted internal owner 或独立的 trusted internal runtime/storage header 注入；后者只设置 live execution bucket，不能成为 owner、repository scope、`ProjectContext` 或 `PrivateWorkContext`。普通 HTTP/API 请求即使伪造该 header 也会被忽略，`body.context.user_id` 仍会被清洗。harness 只接收不含 role/capability 的
 `deerflow.runtime.PrivateResourceScope`，继续禁止 import `app.*`。每个 mutation 或副作用边界
 通过 `PrivateWorkRevalidator.require()` 在调用方已有 transaction 内重验 active project、未暂停
 状态、active membership、membership ID/version 和 capability；失效 scope 统一 404，当前 scope
