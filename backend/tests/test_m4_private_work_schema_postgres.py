@@ -10,11 +10,12 @@ import pytest
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
+from postgres_utils import temporary_postgres_database
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.base import Base
-from deerflow.persistence.bootstrap import _get_alembic_config
+from deerflow.persistence.bootstrap import _get_alembic_config, bootstrap_schema
 
 M4_TABLES = {
     "run_asset_versions",
@@ -28,6 +29,56 @@ M4_TABLES = {
     "private_work_migration_ledger",
     "private_work_cutover_state",
 }
+
+
+def _normalize_catalog_value(value) -> str | None:
+    if value is None:
+        return None
+    return " ".join(str(value).split())
+
+
+def _private_work_catalog(sync_connection) -> dict[str, dict]:
+    inspector = inspect(sync_connection)
+    catalog: dict[str, dict] = {}
+    for table in sorted(M4_TABLES):
+        catalog[table] = {
+            "columns": tuple(
+                (
+                    column["name"],
+                    str(column["type"]),
+                    column["nullable"],
+                    _normalize_catalog_value(column.get("default")),
+                )
+                for column in inspector.get_columns(table)
+            ),
+            "primary_key": inspector.get_pk_constraint(table),
+            "unique": tuple(sorted((constraint["name"], tuple(constraint["column_names"])) for constraint in inspector.get_unique_constraints(table))),
+            "checks": tuple(sorted((constraint["name"], _normalize_catalog_value(constraint["sqltext"])) for constraint in inspector.get_check_constraints(table))),
+            "foreign_keys": tuple(
+                sorted(
+                    (
+                        constraint["name"],
+                        tuple(constraint["constrained_columns"]),
+                        constraint["referred_table"],
+                        tuple(constraint["referred_columns"]),
+                        constraint.get("options", {}).get("ondelete"),
+                    )
+                    for constraint in inspector.get_foreign_keys(table)
+                )
+            ),
+            "indexes": tuple(
+                sorted(
+                    (
+                        index["name"],
+                        tuple(index["column_names"]),
+                        index["unique"],
+                        _normalize_catalog_value(index.get("dialect_options", {}).get("postgresql_where")),
+                    )
+                    for index in inspector.get_indexes(table)
+                )
+            ),
+        }
+    return catalog
 
 
 def test_m4_models_register_final_private_work_schema() -> None:
@@ -198,6 +249,58 @@ async def test_m4_finalize_schema_has_private_scope_and_composite_fks(
         await engine.dispose()
 
 
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_fresh_and_staged_private_work_catalogs_are_identical(
+    postgres_admin_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    migration = importlib.import_module("deerflow.persistence.migrations.versions.0009_project_private_work_finalize")
+    async with temporary_postgres_database(postgres_admin_url) as fresh_url:
+        async with temporary_postgres_database(postgres_admin_url) as staged_url:
+            fresh_engine = create_async_engine(fresh_url)
+            staged_engine = create_async_engine(staged_url)
+            try:
+                await bootstrap_schema(fresh_engine)
+
+                staged_cfg = _get_alembic_config(staged_engine)
+                await asyncio.to_thread(command.upgrade, staged_cfg, "0008_project_private_work_expand")
+                migration_run_id = uuid.uuid4()
+                digest = "a" * 64
+                async with staged_engine.begin() as connection:
+                    await connection.execute(
+                        text(
+                            """INSERT INTO private_work_migration_runs
+                            (id,mode,status,source_fingerprint,owner_map_digest,
+                             legacy_source_probe_complete,checkpoint_marker_probe_complete,
+                             cross_scope_probe_complete,completed_at)
+                            VALUES (:id,'execute','completed',:digest,:digest,true,true,true,now())"""
+                        ),
+                        {"id": migration_run_id, "digest": digest},
+                    )
+                    await connection.execute(
+                        text(
+                            """INSERT INTO private_work_migration_ledger
+                            (migration_run_id,domain,source_key_hash,source_fingerprint,
+                             target_digest,status,row_count,byte_count)
+                            VALUES (:run_id,:domain,:digest,:digest,:digest,'complete',0,0)"""
+                        ),
+                        [{"run_id": migration_run_id, "domain": domain, "digest": f"{index:064x}"} for index, domain in enumerate(sorted(migration.FINALIZE_LEDGER_DOMAINS), start=1)],
+                    )
+                await asyncio.to_thread(command.upgrade, staged_cfg, "head")
+
+                async with fresh_engine.connect() as connection:
+                    fresh_catalog = await connection.run_sync(_private_work_catalog)
+                async with staged_engine.connect() as connection:
+                    staged_catalog = await connection.run_sync(_private_work_catalog)
+                assert fresh_catalog == staged_catalog
+            finally:
+                await fresh_engine.dispose()
+                await staged_engine.dispose()
+
+
 def test_0009_downgrade_checks_for_private_work_data_before_any_ddl(monkeypatch) -> None:
     migration = importlib.import_module("deerflow.persistence.migrations.versions.0009_project_private_work_finalize")
     mutations: list[str] = []
@@ -239,6 +342,90 @@ def test_0008_downgrade_checks_for_backfilled_scope_before_any_ddl(monkeypatch) 
     with pytest.raises(RuntimeError, match="backfilled private scope exists"):
         migration.downgrade()
     assert mutations == []
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["revoked", "frozen"])
+async def test_0009_downgrade_rejects_scoped_channel_rows_before_schema_changes(
+    migrated_postgres_database_url: str,
+    status: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    owner_user_id = str(uuid.uuid4())
+    project_ids = (uuid.uuid4(), uuid.uuid4())
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                    (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,'channel-owner@example.com','user',now(),false,0)"""
+                ),
+                {"id": owner_user_id},
+            )
+            for index, project_id in enumerate(project_ids, start=1):
+                await connection.execute(
+                    text(
+                        """INSERT INTO projects
+                        (id,slug,display_name,created_by_user_id)
+                        VALUES (:id,:slug,:display_name,:owner_user_id)"""
+                    ),
+                    {
+                        "id": project_id,
+                        "slug": f"channel-project-{index}",
+                        "display_name": f"Channel Project {index}",
+                        "owner_user_id": owner_user_id,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        """INSERT INTO project_memberships
+                        (id,project_id,user_id,role)
+                        VALUES (:id,:project_id,:owner_user_id,'admin')"""
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "project_id": project_id,
+                        "owner_user_id": owner_user_id,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        """INSERT INTO channel_connections
+                        (id,project_id,owner_user_id,provider,status,
+                         external_account_id,workspace_id,scopes_json,
+                         capabilities_json,metadata_json,created_at,updated_at)
+                        VALUES (:id,:project_id,:owner_user_id,'slack',:status,
+                                'same-account','same-workspace','[]'::jsonb,
+                                '{}'::jsonb,'{}'::jsonb,now(),now())"""
+                    ),
+                    {
+                        "id": f"connection-{index}",
+                        "project_id": project_id,
+                        "owner_user_id": owner_user_id,
+                        "status": status,
+                    },
+                )
+
+        cfg = _get_alembic_config(engine)
+        with pytest.raises(RuntimeError, match="scoped channel data exists"):
+            await asyncio.to_thread(command.downgrade, cfg, "0008_project_private_work_expand")
+
+        async with engine.connect() as connection:
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            unique_constraints = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_unique_constraints("channel_connections"))
+        final_identity = next(constraint for constraint in unique_constraints if constraint["name"] == "uq_channel_connection_owner_provider_identity")
+        assert revision == "0009_project_private_work_finalize"
+        assert final_identity["column_names"] == [
+            "project_id",
+            "owner_user_id",
+            "provider",
+            "external_account_id",
+            "workspace_id",
+        ]
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.postgres

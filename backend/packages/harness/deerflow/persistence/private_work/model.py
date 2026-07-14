@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     CHAR,
-    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -25,6 +24,7 @@ from sqlalchemy import (
     Uuid,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -191,7 +191,14 @@ class PrivateFileRow(Base):
 class PrivateFileChunkRow(Base):
     __tablename__ = "file_chunks"
 
-    file_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), primary_key=True)
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "files.id",
+            name="fk_file_chunks_file_id_files",
+            ondelete="CASCADE",
+        ),
+        primary_key=True,
+    )
     chunk_index: Mapped[int] = mapped_column(primary_key=True)
     content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     size: Mapped[int] = mapped_column(nullable=False)
@@ -215,7 +222,7 @@ class PrivateArtifactRow(Base):
     file_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     display_name: Mapped[str] = mapped_column(String(256), nullable=False)
     media_type: Mapped[str] = mapped_column(String(255), nullable=False)
-    artifact_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    artifact_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
 
     __table_args__ = (
@@ -243,7 +250,7 @@ class UserProjectMemoryRow(Base):
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
     namespace: Mapped[str] = mapped_column(String(255), nullable=False, default="default", server_default="default")
-    context_summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    context_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now, server_default=text("now()"))

@@ -429,6 +429,10 @@ def _assert_finalize_downgrade_safe() -> None:
         has_data = bind.execute(sa.text(f'SELECT EXISTS (SELECT 1 FROM "{table}" LIMIT 1)')).scalar_one()  # noqa: S608 - fixed internal identifiers
         if has_data:
             raise RuntimeError("cannot downgrade M4 finalize while private-work data exists")
+    for table in ("channel_connections", "channel_oauth_states", "channel_conversations"):
+        has_data = bind.execute(sa.text(f'SELECT EXISTS (SELECT 1 FROM "{table}" LIMIT 1)')).scalar_one()  # noqa: S608 - fixed internal identifiers
+        if has_data:
+            raise RuntimeError("cannot downgrade M4 finalize while scoped channel data exists")
 
 
 def downgrade() -> None:

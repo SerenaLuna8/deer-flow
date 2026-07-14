@@ -93,21 +93,27 @@ async def test_bootstrap_empty_database_creates_schema_and_stamps_head(postgres_
 async def test_bootstrap_legacy_database_backfills_baseline_and_upgrades(
     postgres_database_url: str,
     monkeypatch,
+    tmp_path,
 ) -> None:
     engine = create_async_engine(postgres_database_url)
     reset = MagicMock()
     monkeypatch.setattr(bootstrap_module, "_reset_failed_empty_bootstrap_sync", reset)
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     try:
         async with engine.begin() as connection:
             await connection.run_sync(_run_baseline_create_all_sync)
             await connection.execute(text("DROP TABLE channel_conversations CASCADE"))
 
-        await bootstrap_schema(engine)
+        with pytest.raises(RuntimeError, match="make migrate-private-work"):
+            await bootstrap_schema(engine)
 
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == _get_head_revision()
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0007_project_shared_assets"
             tables = await connection.run_sync(lambda sync_connection: set(sa_inspect(sync_connection).get_table_names()))
-            assert "channel_conversations" in tables
+            channel_columns = await connection.run_sync(lambda sync_connection: {column["name"] for column in sa_inspect(sync_connection).get_columns("channel_conversations")})
+            assert {"channel_conversations", "projects", "agents"} <= tables
+            assert "project_id" not in channel_columns
+            assert "files" not in tables
         reset.assert_not_called()
     finally:
         await engine.dispose()

@@ -14,31 +14,33 @@ Three-branch decision (see ``_decide_state``)
 
 | DB state                              | Action                                  |
 |---------------------------------------|-----------------------------------------|
-| empty (no DeerFlow tables)            | ``create_all`` + ``alembic stamp head`` |
-| legacy (DeerFlow tables, no alembic)  | ``create_all`` (baseline tables only, as backfill) + ``stamp 0001_baseline`` + ``upgrade head`` |
-| versioned (``alembic_version`` row)   | ``alembic upgrade head``                |
+| empty (no DeerFlow tables)            | ``create_all`` + ``stamp head`` + empty-source probes + cutover marker |
+| legacy (DeerFlow tables, no alembic)  | baseline-era backfill + ``stamp 0001`` + ``upgrade 0007`` + require explicit M4 migration |
+| versioned at M4 final/head            | no-op                                   |
+| versioned before M4 final             | require explicit M4 migration before any upgrade |
 
 The legacy branch handles pre-alembic databases that already have at least one
-DeerFlow-owned table. ``create_all`` runs first because stamping at
+DeerFlow-owned table. A frozen 0001-era catalog runs first because stamping at
 ``0001_baseline`` makes alembic skip the baseline's own ``create_table`` DDL on
-the subsequent upgrade -- so any baseline table introduced into
-``Base.metadata`` after the user's DB was first provisioned (e.g. the
+the subsequent upgrade -- so any table added to the baseline after the user's
+DB was first provisioned (e.g. the
 ``channel_*`` tables from PR #1930 for users upgrading across multiple
 releases) would otherwise never be created, and the first request hitting that
 table would 500 with ``no such table``. The backfill is **restricted to
-``_BASELINE_TABLE_NAMES``** so it does not also create tables that future
-revisions introduce -- those revisions' own ``op.create_table`` would then
+``_BASELINE_TABLE_NAMES``** and baseline-era columns/constraints so it does not
+introduce final ORM dependencies before their owning revisions. It also does
+not create tables that future revisions introduce -- those revisions' own
+``op.create_table`` would then
 fail with ``relation already exists``. A guard test pins the restriction
 set against ``0001_baseline.upgrade()``'s actual output.
 
-Column-level shape (the pre-#3658 vs post-#3658 vs manual-ALTER cases for
-``token_usage_by_model``) is answered by each ``versions/*.py`` revision via
+Column-level shape through revision 0007 (the pre-#3658 vs post-#3658 vs
+manual-ALTER cases for ``token_usage_by_model``) is answered by each
+``versions/*.py`` revision via
 the idempotent helpers in ``migrations/_helpers.py`` (``safe_add_column``
 no-ops when the column is already present and ``logger.warning``s on
-shape drift). Future schema additions therefore plug in by writing a new
-revision file -- **no edit to this module is required** *unless* the new
-revision creates a new baseline table, in which case ``_BASELINE_TABLE_NAMES``
-must be updated to match (the guard test fires otherwise).
+shape drift). The M4 boundary is crossed only by ``make migrate-private-work``;
+ordinary startup never invokes 0008/0009 for an existing database.
 
 Concurrency safety
 ------------------
@@ -62,6 +64,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import sqlalchemy as sa
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
@@ -100,6 +103,7 @@ _EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS = 5_000
 _EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS = 10_000
 
 _PRIVATE_WORK_FINAL_REVISION = "0009_project_private_work_finalize"
+_PRIVATE_WORK_PRE_EXPAND_REVISION = "0007_project_shared_assets"
 _LEGACY_PRIVATE_WORK_DB_TABLES: tuple[str, ...] = (
     "threads_meta",
     "runs",
@@ -108,6 +112,11 @@ _LEGACY_PRIVATE_WORK_DB_TABLES: tuple[str, ...] = (
     "channel_connections",
     "channel_oauth_states",
     "channel_conversations",
+)
+_LANGGRAPH_CHECKPOINT_TABLES: tuple[str, ...] = (
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
 )
 
 
@@ -135,6 +144,169 @@ _BASELINE_TABLE_NAMES: frozenset[str] = frozenset(
         "threads_meta",
         "users",
     }
+)
+
+_BASELINE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "channel_connections": (
+        "id",
+        "owner_user_id",
+        "provider",
+        "status",
+        "external_account_id",
+        "external_account_name",
+        "workspace_id",
+        "workspace_name",
+        "bot_user_id",
+        "scopes_json",
+        "capabilities_json",
+        "metadata_json",
+        "created_at",
+        "updated_at",
+        "last_seen_at",
+        "last_error_at",
+    ),
+    "channel_oauth_states": (
+        "state_hash",
+        "owner_user_id",
+        "provider",
+        "code_verifier_encrypted",
+        "nonce_hash",
+        "redirect_after",
+        "requested_scopes_json",
+        "metadata_json",
+        "expires_at",
+        "consumed_at",
+        "created_at",
+    ),
+    "feedback": (
+        "feedback_id",
+        "run_id",
+        "thread_id",
+        "user_id",
+        "message_id",
+        "rating",
+        "comment",
+        "created_at",
+    ),
+    "run_events": (
+        "id",
+        "thread_id",
+        "run_id",
+        "user_id",
+        "event_type",
+        "category",
+        "content",
+        "event_metadata",
+        "seq",
+        "created_at",
+    ),
+    "runs": (
+        "run_id",
+        "thread_id",
+        "assistant_id",
+        "user_id",
+        "status",
+        "model_name",
+        "multitask_strategy",
+        "metadata_json",
+        "kwargs_json",
+        "error",
+        "message_count",
+        "first_human_message",
+        "last_ai_message",
+        "total_input_tokens",
+        "total_output_tokens",
+        "total_tokens",
+        "llm_call_count",
+        "lead_agent_tokens",
+        "subagent_tokens",
+        "middleware_tokens",
+        "token_usage_by_model",
+        "follow_up_to_run_id",
+        "created_at",
+        "updated_at",
+    ),
+    "threads_meta": (
+        "thread_id",
+        "assistant_id",
+        "user_id",
+        "display_name",
+        "status",
+        "metadata_json",
+        "created_at",
+        "updated_at",
+    ),
+    "users": (
+        "id",
+        "email",
+        "password_hash",
+        "system_role",
+        "created_at",
+        "oauth_provider",
+        "oauth_id",
+        "needs_setup",
+        "token_version",
+    ),
+    "channel_conversations": (
+        "id",
+        "connection_id",
+        "owner_user_id",
+        "provider",
+        "external_conversation_id",
+        "external_topic_id",
+        "thread_id",
+        "created_at",
+        "updated_at",
+    ),
+    "channel_credentials": (
+        "connection_id",
+        "encrypted_access_token",
+        "encrypted_refresh_token",
+        "token_type",
+        "expires_at",
+        "refresh_expires_at",
+        "encrypted_extra_json",
+        "version",
+        "updated_at",
+    ),
+}
+
+_BASELINE_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
+    "channel_connections": ("id",),
+    "channel_oauth_states": ("state_hash",),
+    "feedback": ("feedback_id",),
+    "run_events": ("id",),
+    "runs": ("run_id",),
+    "threads_meta": ("thread_id",),
+    "users": ("id",),
+    "channel_conversations": ("id",),
+    "channel_credentials": ("connection_id",),
+}
+
+_BASELINE_INDEXES: tuple[tuple[str, str, tuple[str, ...], bool, str | None], ...] = (
+    ("channel_connections", "idx_channel_connections_event_lookup", ("provider", "workspace_id", "bot_user_id"), False, None),
+    ("channel_connections", "ix_channel_connections_owner_user_id", ("owner_user_id",), False, None),
+    ("channel_connections", "ix_channel_connections_provider", ("provider",), False, None),
+    ("channel_connections", "uq_channel_connection_active_identity", ("provider", "external_account_id", "workspace_id"), True, "status != 'revoked'"),
+    ("channel_oauth_states", "ix_channel_oauth_states_owner_user_id", ("owner_user_id",), False, None),
+    ("channel_oauth_states", "ix_channel_oauth_states_provider", ("provider",), False, None),
+    ("feedback", "ix_feedback_run_id", ("run_id",), False, None),
+    ("feedback", "ix_feedback_thread_id", ("thread_id",), False, None),
+    ("feedback", "ix_feedback_user_id", ("user_id",), False, None),
+    ("run_events", "ix_events_run", ("thread_id", "run_id", "seq"), False, None),
+    ("run_events", "ix_events_thread_cat_seq", ("thread_id", "category", "seq"), False, None),
+    ("run_events", "ix_run_events_user_id", ("user_id",), False, None),
+    ("runs", "ix_runs_thread_id", ("thread_id",), False, None),
+    ("runs", "ix_runs_thread_status", ("thread_id", "status"), False, None),
+    ("runs", "ix_runs_user_id", ("user_id",), False, None),
+    ("threads_meta", "ix_threads_meta_assistant_id", ("assistant_id",), False, None),
+    ("threads_meta", "ix_threads_meta_user_id", ("user_id",), False, None),
+    ("users", "idx_users_oauth_identity", ("oauth_provider", "oauth_id"), True, "oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
+    ("users", "ix_users_email", ("email",), True, None),
+    ("channel_conversations", "ix_channel_conversations_connection_id", ("connection_id",), False, None),
+    ("channel_conversations", "ix_channel_conversations_owner_user_id", ("owner_user_id",), False, None),
+    ("channel_conversations", "ix_channel_conversations_provider", ("provider",), False, None),
+    ("channel_conversations", "ix_channel_conversations_thread_id", ("thread_id",), False, None),
 )
 
 
@@ -240,15 +412,9 @@ def _decide_state(state: dict[str, bool]) -> str:
     return "legacy"
 
 
-def _requires_explicit_private_work_migration(revision: str, has_legacy_source: bool) -> bool:
+def _requires_explicit_private_work_migration(revision: str) -> bool:
     """Return whether ordinary startup must stop at the M4 staged boundary."""
-    if not has_legacy_source or revision == _PRIVATE_WORK_FINAL_REVISION:
-        return False
-    try:
-        revision_number = int(revision.split("_", 1)[0])
-    except (TypeError, ValueError):
-        return True
-    return revision_number < 9
+    return revision != _PRIVATE_WORK_FINAL_REVISION
 
 
 def _filesystem_has_legacy_private_source(home: Path) -> bool:
@@ -262,11 +428,12 @@ def _filesystem_has_legacy_private_source(home: Path) -> bool:
     if any(path.is_file() or path.is_symlink() for path in memory_candidates):
         return True
 
-    for user_data in home.glob("users/*/threads/*/user-data"):
-        for directory_name in ("uploads", "workspace", "outputs"):
-            directory = user_data / directory_name
-            if directory.is_dir() and any(path.is_file() or path.is_symlink() for path in directory.rglob("*")):
-                return True
+    for user_data_pattern in ("threads/*/user-data", "users/*/threads/*/user-data"):
+        for user_data in home.glob(user_data_pattern):
+            for directory_name in ("uploads", "workspace", "outputs"):
+                directory = user_data / directory_name
+                if directory.is_dir() and any(path.is_file() or path.is_symlink() for path in directory.rglob("*")):
+                    return True
     return False
 
 
@@ -276,6 +443,59 @@ def _database_has_legacy_private_source_sync(sync_conn: Any) -> bool:
     for table in _LEGACY_PRIVATE_WORK_DB_TABLES:
         if table in present and sync_conn.execute(text(f'SELECT EXISTS (SELECT 1 FROM "{table}" LIMIT 1)')).scalar_one():  # noqa: S608 - fixed table allowlist
             return True
+
+    checkpoint_tables = present & set(_LANGGRAPH_CHECKPOINT_TABLES)
+    if not checkpoint_tables:
+        return False
+
+    marker_is_valid = """
+        jsonb_typeof(metadata -> 'deerflow_private_scope') = 'object'
+        AND jsonb_typeof(metadata -> 'deerflow_private_scope' -> 'project_id') = 'string'
+        AND jsonb_typeof(metadata -> 'deerflow_private_scope' -> 'owner_user_id') = 'string'
+        AND metadata -> 'deerflow_private_scope' ->> 'project_id' <> ''
+        AND metadata -> 'deerflow_private_scope' ->> 'owner_user_id' <> ''
+    """
+    if "checkpoints" in checkpoint_tables:
+        has_unmarked_checkpoint = sync_conn.execute(text(f"SELECT EXISTS (SELECT 1 FROM checkpoints WHERE ({marker_is_valid}) IS NOT TRUE LIMIT 1)")).scalar_one()
+        if has_unmarked_checkpoint:
+            return True
+
+    if "checkpoint_blobs" in checkpoint_tables:
+        has_unmarked_blob = sync_conn.execute(
+            text(
+                f"""SELECT EXISTS (
+                    SELECT 1 FROM checkpoint_blobs blob
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM checkpoints checkpoint
+                        WHERE checkpoint.thread_id = blob.thread_id
+                          AND checkpoint.checkpoint_ns = blob.checkpoint_ns
+                          AND ({marker_is_valid})
+                    )
+                    LIMIT 1
+                )"""
+            )
+        ).scalar_one()
+        if has_unmarked_blob:
+            return True
+
+    if "checkpoint_writes" in checkpoint_tables:
+        has_unmarked_write = sync_conn.execute(
+            text(
+                f"""SELECT EXISTS (
+                    SELECT 1 FROM checkpoint_writes write
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM checkpoints checkpoint
+                        WHERE checkpoint.thread_id = write.thread_id
+                          AND checkpoint.checkpoint_ns = write.checkpoint_ns
+                          AND checkpoint.checkpoint_id = write.checkpoint_id
+                          AND ({marker_is_valid})
+                    )
+                    LIMIT 1
+                )"""
+            )
+        ).scalar_one()
+        if has_unmarked_write:
+            return True
     return False
 
 
@@ -283,7 +503,7 @@ async def _write_empty_install_cutover_marker(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         database_has_source = await conn.run_sync(_database_has_legacy_private_source_sync)
         if database_has_source:
-            raise RuntimeError("private-work empty-install probe found a database source")
+            raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
         await conn.execute(
             text(
                 """INSERT INTO private_work_cutover_state
@@ -319,6 +539,100 @@ def _run_create_all_sync(sync_conn: Any) -> None:
     )
 
 
+def _build_baseline_metadata() -> sa.MetaData:
+    """Build the immutable 0001-era table catalog used for legacy backfill."""
+    from deerflow.persistence.base import Base
+
+    try:
+        import deerflow.persistence.models  # noqa: F401
+    except ImportError:
+        logger.debug("deerflow.persistence.models not found; baseline backfill may be incomplete")
+
+    metadata = sa.MetaData()
+    core_owner_tables = {"threads_meta", "runs", "run_events", "feedback"}
+    for table_name, column_names in _BASELINE_COLUMNS.items():
+        source_table = Base.metadata.tables[table_name]
+        columns: list[sa.Column[Any]] = []
+        for column_name in column_names:
+            source_name = "owner_user_id" if column_name == "user_id" and table_name in core_owner_tables else column_name
+            source_column = source_table.c[source_name]
+            column_type = source_column.type.copy()
+            nullable = source_column.nullable
+            if column_name == "user_id" and table_name in core_owner_tables:
+                column_type = sa.String(64)
+                nullable = True
+            elif column_name == "owner_user_id":
+                column_type = sa.String(64)
+            server_default = None
+            if table_name == "runs" and column_name == "token_usage_by_model":
+                server_default = sa.text("'{}'")
+            columns.append(
+                sa.Column(
+                    column_name,
+                    column_type,
+                    nullable=nullable,
+                    autoincrement=True if table_name == "run_events" and column_name == "id" else "auto",
+                    server_default=server_default,
+                )
+            )
+
+        constraints: list[sa.Constraint] = [sa.PrimaryKeyConstraint(*_BASELINE_PRIMARY_KEYS[table_name])]
+        if table_name == "channel_connections":
+            constraints.append(
+                sa.UniqueConstraint(
+                    "owner_user_id",
+                    "provider",
+                    "external_account_id",
+                    "workspace_id",
+                    name="uq_channel_connection_owner_provider_identity",
+                )
+            )
+        elif table_name == "feedback":
+            constraints.append(
+                sa.UniqueConstraint(
+                    "thread_id",
+                    "run_id",
+                    "user_id",
+                    name="uq_feedback_thread_run_user",
+                )
+            )
+        elif table_name == "run_events":
+            constraints.append(sa.UniqueConstraint("thread_id", "seq", name="uq_events_thread_seq"))
+        elif table_name == "channel_conversations":
+            constraints.extend(
+                (
+                    sa.ForeignKeyConstraint(
+                        ["connection_id"],
+                        ["channel_connections.id"],
+                        ondelete="CASCADE",
+                    ),
+                    sa.UniqueConstraint(
+                        "connection_id",
+                        "external_conversation_id",
+                        "external_topic_id",
+                        name="uq_channel_conversation_connection_external",
+                    ),
+                )
+            )
+        elif table_name == "channel_credentials":
+            constraints.append(
+                sa.ForeignKeyConstraint(
+                    ["connection_id"],
+                    ["channel_connections.id"],
+                    ondelete="CASCADE",
+                )
+            )
+        sa.Table(table_name, metadata, *columns, *constraints)
+
+    for table_name, index_name, column_names, unique, predicate in _BASELINE_INDEXES:
+        table = metadata.tables[table_name]
+        kwargs: dict[str, Any] = {}
+        if predicate is not None:
+            kwargs["postgresql_where"] = sa.text(predicate)
+        sa.Index(index_name, *(table.c[name] for name in column_names), unique=unique, **kwargs)
+    return metadata
+
+
 def _run_baseline_create_all_sync(sync_conn: Any) -> None:
     """Create only the baseline tables on *sync_conn* (idempotent via checkfirst).
 
@@ -328,15 +642,9 @@ def _run_baseline_create_all_sync(sync_conn: Any) -> None:
     tables introduced by later revisions, which would then collide with
     those revisions' ``op.create_table`` calls when alembic ran upgrade.
     """
-    from deerflow.persistence.base import Base
-
-    try:
-        import deerflow.persistence.models  # noqa: F401
-    except ImportError:
-        logger.debug("deerflow.persistence.models not found; baseline backfill may be incomplete")
-
-    baseline_tables = [Base.metadata.tables[name] for name in _BASELINE_TABLE_NAMES if name in Base.metadata.tables]
-    Base.metadata.create_all(sync_conn, tables=baseline_tables, checkfirst=True)
+    baseline_metadata = _build_baseline_metadata()
+    baseline_tables = [baseline_metadata.tables[name] for name in _BASELINE_TABLE_NAMES]
+    baseline_metadata.create_all(sync_conn, tables=baseline_tables, checkfirst=True)
 
 
 def _reset_failed_empty_bootstrap_sync(sync_conn: Any) -> None:
@@ -509,7 +817,7 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
                 await _run_alembic_offload(_stamp, cfg, head)
                 has_filesystem_source = await asyncio.to_thread(_filesystem_has_legacy_private_source, runtime_home())
                 if has_filesystem_source:
-                    raise RuntimeError("private-work empty-install probe found a filesystem source")
+                    raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
                 await _write_empty_install_cutover_marker(engine)
             except BaseException:
                 # This invocation proved the DeerFlow-owned schema was empty
@@ -527,9 +835,9 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
             if database_has_source or filesystem_has_source:
                 raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
             logger.info(
-                "bootstrap: branch=legacy -> create_all (backfill missing baseline tables) + stamp %s + upgrade head (%s)",
+                "bootstrap: branch=legacy -> baseline-era backfill + stamp %s + upgrade %s + require explicit M4 migration",
                 _BASELINE_REVISION,
-                head,
+                _PRIVATE_WORK_PRE_EXPAND_REVISION,
             )
             # ``_run_baseline_create_all_sync`` is restricted to
             # ``_BASELINE_TABLE_NAMES`` -- a plain ``Base.metadata.create_all``
@@ -544,18 +852,14 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
             async with engine.begin() as conn:
                 await conn.run_sync(_run_baseline_create_all_sync)
             await _run_alembic_offload(_stamp, cfg, _BASELINE_REVISION)
-            await _run_alembic_offload(_upgrade, cfg, "head")
+            await _run_alembic_offload(_upgrade, cfg, _PRIVATE_WORK_PRE_EXPAND_REVISION)
+            raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
 
         elif decision == "versioned":
             logger.info("bootstrap: branch=versioned -> upgrade head (%s)", head)
             async with engine.connect() as conn:
                 current_revision = await conn.scalar(text("SELECT version_num FROM alembic_version"))
-                database_has_source = await conn.run_sync(_database_has_legacy_private_source_sync)
-            filesystem_has_source = await asyncio.to_thread(_filesystem_has_legacy_private_source, runtime_home())
-            if _requires_explicit_private_work_migration(
-                str(current_revision),
-                database_has_source or filesystem_has_source,
-            ):
+            if _requires_explicit_private_work_migration(str(current_revision)):
                 raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
             await _run_alembic_offload(_upgrade, cfg, "head")
 
