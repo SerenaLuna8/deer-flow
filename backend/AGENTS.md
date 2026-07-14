@@ -1052,7 +1052,9 @@ Mapping，其他形状在 lifecycle dependency、run/thread persistence、saver 
 `body.checkpoint` 覆盖 configurable 的 checkpoint ID/namespace/map，消除 reserved-field 歧义。
 stateless 与 thread-scoped 的 stream/wait handler 必须在 thread ID 解析和任何 runtime singleton
 读取前调用同一 pure preflight；`_resolve_thread_id()` 自身也不得在未验证 configurable shape 时
-调用 `.get()`。direct apply defense 即使 canonical checkpoint ID 为空，也必须先把 normalized config
+调用 `.get()`。两个 thread-scoped stream/wait route 的 decorator 顺序必须保持 router 注册在最外层、
+pure preflight wrapper 居中、`require_permission` 在内，使 malformed body 在 thread owner store 与
+其他 runtime dependency 前固定失败，同时合法 body 仍完整进入认证授权。direct apply defense 即使 canonical checkpoint ID 为空，也必须先把 normalized config
 和 reserved-field removals 安装到调用方 config 后再返回。
 `start_run()` 在创建 run/thread record 前生成 authority-sanitized
 metadata/config/body-context 副本，并一致用于持久化、API response 与 live config；secret redaction

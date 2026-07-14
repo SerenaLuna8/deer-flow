@@ -8,10 +8,12 @@ frames, and consuming stream bridge events.  Router modules
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -192,6 +194,22 @@ def preflight_run_create(body: Any, thread_id: str | None = None) -> None:
         checkpoint_thread_id = checkpoint.get("thread_id")
         if thread_id is not None and checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
             raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")
+
+
+def preflight_run_create_route[**P, T](func: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
+    """Run pure request-shape validation outside authorization decorators."""
+
+    signature = inspect.signature(func)
+
+    @functools.wraps(func)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        bound = signature.bind_partial(*args, **kwargs)
+        body = bound.arguments.get("body")
+        thread_id = bound.arguments.get("thread_id")
+        preflight_run_create(body, str(thread_id) if thread_id is not None else None)
+        return await func(**bound.arguments)
+
+    return wrapper
 
 
 def _normalize_run_checkpoint_inputs(body: Any, thread_id: str) -> tuple[dict[str, object] | None, _NormalizedCheckpointControl]:

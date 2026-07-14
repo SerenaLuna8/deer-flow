@@ -1225,6 +1225,129 @@ def test_run_routes_preflight_before_thread_or_runtime_resolution(
     assert runtime_state.accesses == 0
 
 
+@pytest.mark.parametrize("route_name", ["thread_stream", "thread_wait"])
+@pytest.mark.parametrize(
+    ("config", "checkpoint", "detail"),
+    [
+        pytest.param(
+            {"configurable": ["secret-authority"]},
+            None,
+            "request config configurable must be an object",
+            id="configurable",
+        ),
+        pytest.param(
+            {"configurable": {"checkpoint_map": [{"project_id": "secret-authority"}]}},
+            None,
+            "checkpoint.checkpoint_map must be an object",
+            id="config-checkpoint-map",
+        ),
+        pytest.param(
+            None,
+            {"checkpoint_map": [{"project_id": "secret-authority"}]},
+            "checkpoint.checkpoint_map must be an object",
+            id="typed-checkpoint-map",
+        ),
+    ],
+)
+def test_decorated_thread_run_routes_preflight_before_permission_dependencies(
+    _stub_app_config,
+    route_name: str,
+    config,
+    checkpoint,
+    detail: str,
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.auth.models import User
+    from app.gateway.authz import AuthContext, Permissions
+    from app.gateway.routers.thread_runs import RunCreateRequest, stream_run, wait_run
+
+    class NeverDependencyState:
+        accesses = 0
+
+        def __getattr__(self, name):
+            self.accesses += 1
+            raise RuntimeError(f"dependency-before-preflight:{name}")
+
+    dependency_state = NeverDependencyState()
+    auth = AuthContext(
+        user=User(email="preflight@example.com", password_hash="x"),
+        permissions=[Permissions.RUNS_CREATE],
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(auth=auth),
+        app=SimpleNamespace(state=dependency_state),
+    )
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "safe input"}]},
+        config=config,
+        checkpoint=checkpoint,
+    )
+    route = {"thread_stream": stream_run, "thread_wait": wait_run}[route_name]
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(route(thread_id="thread-1", body=body, request=request))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == detail
+    assert "secret-authority" not in str(exc_info.value.detail)
+    assert dependency_state.accesses == 0
+
+
+@pytest.mark.parametrize("route_name", ["thread_stream", "thread_wait"])
+def test_decorated_thread_run_routes_keep_permission_path_for_valid_body(_stub_app_config, route_name: str):
+    import asyncio
+    import inspect
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.auth.models import User
+    from app.gateway.authz import AuthContext, Permissions
+    from app.gateway.routers.thread_runs import RunCreateRequest, stream_run, wait_run
+
+    class DenyThreadStore:
+        calls = 0
+
+        async def check_access(self, thread_id, user_id, *, require_existing):
+            self.calls += 1
+            assert thread_id == "thread-1"
+            assert require_existing is True
+            return False
+
+    class PermissionOnlyState:
+        def __init__(self, thread_store):
+            self.thread_store = thread_store
+
+        def __getattr__(self, name):
+            raise AssertionError(f"valid denied request reached runtime dependency {name}")
+
+    thread_store = DenyThreadStore()
+    auth = AuthContext(
+        user=User(email="permission@example.com", password_hash="x"),
+        permissions=[Permissions.RUNS_CREATE],
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(auth=auth),
+        app=SimpleNamespace(state=PermissionOnlyState(thread_store)),
+    )
+    body = RunCreateRequest(input={"messages": [{"role": "user", "content": "safe input"}]})
+    route = {"thread_stream": stream_run, "thread_wait": wait_run}[route_name]
+
+    assert tuple(inspect.signature(route).parameters) == ("thread_id", "body", "request")
+    with pytest.raises(HTTPException) as exc_info:
+        invocation = route(thread_id="thread-1", body=body, request=request) if route_name == "thread_stream" else route("thread-1", body, request)
+        asyncio.run(invocation)
+
+    assert exc_info.value.status_code == 404
+    assert thread_store.calls == 1
+
+
 @pytest.mark.parametrize("typed_checkpoint", [False, True], ids=["config-only", "typed-overrides"])
 def test_start_run_normalizes_checkpoint_control_for_persistence_saver_and_live(
     _stub_app_config,
