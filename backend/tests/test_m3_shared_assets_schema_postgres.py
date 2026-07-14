@@ -262,7 +262,7 @@ async def test_m3_schema_has_all_typed_tables(migrated_postgres_database_url: st
             tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
             revision = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
         assert EXPECTED_TABLES <= tables
-        assert revision == "0007_project_shared_assets"
+        assert revision == "0009_project_private_work_finalize"
         assert EXPECTED_TABLES <= set(Base.metadata.tables)
 
         shared_assets = importlib.import_module("deerflow.persistence.shared_assets")
@@ -876,7 +876,7 @@ async def test_empty_m3_schema_can_downgrade(postgres_database_url: str) -> None
     engine = create_async_engine(postgres_database_url)
     try:
         cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await asyncio.to_thread(command.upgrade, cfg, "0007_project_shared_assets")
         await asyncio.to_thread(command.downgrade, cfg, "0006_project_governance")
         async with engine.connect() as conn:
             tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
@@ -892,7 +892,7 @@ async def test_populated_m3_schema_refuses_downgrade_before_mutation(postgres_da
     engine = create_async_engine(postgres_database_url)
     try:
         cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await asyncio.to_thread(command.upgrade, cfg, "0007_project_shared_assets")
         user_id, _project_id = await _seed_user_and_project(engine)
         await _insert_agent(engine, user_id=user_id, scope="system", project_id=None, slug="keep-schema")
 

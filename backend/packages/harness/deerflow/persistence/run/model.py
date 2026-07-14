@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Index, String, Text, text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKeyConstraint, Index, String, Text, UniqueConstraint, Uuid, text
+from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from deerflow.persistence.base import Base
 
@@ -16,7 +17,9 @@ class RunRow(Base):
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     assistant_id: Mapped[str | None] = mapped_column(String(128))
-    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    user_id = synonym("owner_user_id")
     status: Mapped[str] = mapped_column(String(20), default="pending")
     # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
 
@@ -44,7 +47,32 @@ class RunRow(Base):
     # Follow-up association
     follow_up_to_run_id: Mapped[str | None] = mapped_column(String(64))
 
+    authorization_cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    authorization_cancel_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    finalization_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
-    __table_args__ = (Index("ix_runs_thread_status", "thread_id", "status"),)
+    __table_args__ = (
+        Index("ix_runs_thread_status", "thread_id", "status"),
+        UniqueConstraint("project_id", "owner_user_id", "thread_id", "run_id", name="uq_runs_private_scope"),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_runs_project", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_runs_owner", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id"],
+            ["project_memberships.project_id", "project_memberships.user_id"],
+            name="fk_runs_project_membership",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id"],
+            ["threads_meta.project_id", "threads_meta.owner_user_id", "threads_meta.thread_id"],
+            name="fk_runs_private_thread",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "finalization_status IN ('pending', 'finalizing', 'complete', 'failed')",
+            name="ck_runs_finalization_status",
+        ),
+    )

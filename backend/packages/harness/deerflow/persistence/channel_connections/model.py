@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -18,7 +19,8 @@ class ChannelConnectionRow(Base):
     __tablename__ = "channel_connections"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="connected")
 
@@ -36,15 +38,27 @@ class ChannelConnectionRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
+            "project_id",
             "owner_user_id",
             "provider",
             "external_account_id",
             "workspace_id",
             name="uq_channel_connection_owner_provider_identity",
         ),
+        UniqueConstraint("project_id", "owner_user_id", "id", name="uq_channel_connections_private_scope"),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_channel_connections_project", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_channel_connections_owner", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id"],
+            ["project_memberships.project_id", "project_memberships.user_id"],
+            name="fk_channel_connections_project_membership",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("status IN ('connected', 'frozen', 'revoked')", name="ck_channel_connections_status"),
         Index("idx_channel_connections_event_lookup", "provider", "workspace_id", "bot_user_id"),
         # Enforce the single-active-owner invariant at the database layer: at most
         # one non-revoked row may exist per external identity. This makes ownership
@@ -57,7 +71,7 @@ class ChannelConnectionRow(Base):
             "external_account_id",
             "workspace_id",
             unique=True,
-            postgresql_where=text("status != 'revoked'"),
+            postgresql_where=text("status = 'connected'"),
         ),
     )
 
@@ -84,7 +98,8 @@ class ChannelOAuthStateRow(Base):
     __tablename__ = "channel_oauth_states"
 
     state_hash: Mapped[str] = mapped_column(String(128), primary_key=True)
-    owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     code_verifier_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     nonce_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -95,18 +110,30 @@ class ChannelOAuthStateRow(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
 
+    __table_args__ = (
+        ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_channel_oauth_states_project", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_channel_oauth_states_owner", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id"],
+            ["project_memberships.project_id", "project_memberships.user_id"],
+            name="fk_channel_oauth_states_project_membership",
+            ondelete="RESTRICT",
+        ),
+    )
+
 
 class ChannelConversationRow(Base):
     __tablename__ = "channel_conversations"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     connection_id: Mapped[str] = mapped_column(
         String(64),
         ForeignKey("channel_connections.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     external_conversation_id: Mapped[str] = mapped_column(String(128), nullable=False)
     external_topic_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
@@ -120,5 +147,25 @@ class ChannelConversationRow(Base):
             "external_conversation_id",
             "external_topic_id",
             name="uq_channel_conversation_connection_external",
+        ),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_channel_conversations_project", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_channel_conversations_owner", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id"],
+            ["project_memberships.project_id", "project_memberships.user_id"],
+            name="fk_channel_conversations_project_membership",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "connection_id"],
+            ["channel_connections.project_id", "channel_connections.owner_user_id", "channel_connections.id"],
+            name="fk_channel_conversations_private_connection",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id"],
+            ["threads_meta.project_id", "threads_meta.owner_user_id", "threads_meta.thread_id"],
+            name="fk_channel_conversations_private_thread",
+            ondelete="CASCADE",
         ),
     )

@@ -23,6 +23,18 @@ from deerflow.persistence.channel_connections.model import (
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.migration_ledger.model import MigrationLedgerRow
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.private_work import (
+    PrivateArtifactRow,
+    PrivateFileChunkRow,
+    PrivateFileRow,
+    PrivateWorkCutoverStateRow,
+    PrivateWorkMigrationLedgerRow,
+    PrivateWorkMigrationRunRow,
+    RunAssetVersionRow,
+    RunMcpGrantSnapshotRow,
+    UserProjectMemoryFactRow,
+    UserProjectMemoryRow,
+)
 from deerflow.persistence.projects.invitation_model import ProjectInvitationRow
 from deerflow.persistence.projects.invitation_rate_limit_model import (
     ProjectInvitationRateLimitRow,
@@ -77,10 +89,18 @@ __all__ = [
     "ProjectInvitationRateLimitRow",
     "ProjectMembershipRow",
     "ProjectRow",
+    "PrivateArtifactRow",
+    "PrivateFileChunkRow",
+    "PrivateFileRow",
+    "PrivateWorkCutoverStateRow",
+    "PrivateWorkMigrationLedgerRow",
+    "PrivateWorkMigrationRunRow",
     "ProjectSystemAgentBindingRow",
     "ProjectSystemMcpBindingRow",
     "ProjectSystemSkillBindingRow",
     "RunEventRow",
+    "RunAssetVersionRow",
+    "RunMcpGrantSnapshotRow",
     "RunRow",
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
@@ -89,4 +109,6 @@ __all__ = [
     "SkillVersionRow",
     "ThreadMetaRow",
     "UserRow",
+    "UserProjectMemoryFactRow",
+    "UserProjectMemoryRow",
 ]

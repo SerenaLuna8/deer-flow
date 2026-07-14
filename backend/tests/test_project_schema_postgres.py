@@ -96,7 +96,7 @@ async def test_upgrade_from_0004_maps_legacy_admin(postgres_database_url: str) -
                     VALUES (:id,:email,'admin',:now,false,0)"""),
                 {"id": str(uuid.uuid4()), "email": "legacy@example.com", "now": datetime.now(UTC)},
             )
-        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await asyncio.to_thread(command.upgrade, cfg, "0005_project_foundation")
         async with engine.connect() as conn:
             assert (await conn.execute(text("SELECT system_role FROM users"))).scalar_one() == "system_admin"
         with pytest.raises(IntegrityError):
@@ -270,7 +270,7 @@ async def test_downgrade_with_project_data_fails_without_mutation(
             assert (await conn.execute(text("SELECT count(*) FROM projects"))).scalar_one() == 1
             assert (await conn.execute(text("SELECT count(*) FROM project_memberships"))).scalar_one() == int(include_membership)
             assert (await conn.execute(text("SELECT system_role FROM users WHERE id=:id"), {"id": user_id})).scalar_one() == "system_admin"
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0007_project_shared_assets"
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0009_project_private_work_finalize"
     finally:
         await engine.dispose()
 
@@ -317,7 +317,7 @@ async def test_upgrade_fails_closed_on_users_role_constraint_definition_drift(
             )
 
         with pytest.raises(Exception, match="constraint definition drift"):
-            await asyncio.to_thread(command.upgrade, cfg, "head")
+            await asyncio.to_thread(command.upgrade, cfg, "0005_project_foundation")
 
         async with engine.connect() as conn:
             assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0004_migration_ledger"
@@ -353,7 +353,7 @@ async def test_upgrade_validates_matching_not_valid_users_role_constraint(
                     CHECK (system_role IN ('system_admin', 'user')) NOT VALID""")
             )
 
-        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await asyncio.to_thread(command.upgrade, cfg, "0005_project_foundation")
 
         async with engine.connect() as conn:
             validated = (
@@ -367,7 +367,7 @@ async def test_upgrade_validates_matching_not_valid_users_role_constraint(
             roles = (await conn.execute(text("SELECT system_role FROM users ORDER BY email"))).scalars().all()
             assert validated is True
             assert roles == ["system_admin", "user"]
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0007_project_shared_assets"
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0005_project_foundation"
     finally:
         await engine.dispose()
 
@@ -399,7 +399,7 @@ async def test_upgrade_rolls_back_when_matching_not_valid_constraint_has_legacy_
             )
 
         with pytest.raises(Exception, match="ck_users_system_role"):
-            await asyncio.to_thread(command.upgrade, cfg, "head")
+            await asyncio.to_thread(command.upgrade, cfg, "0005_project_foundation")
 
         async with engine.connect() as conn:
             roles = (await conn.execute(text("SELECT system_role FROM users ORDER BY email"))).scalars().all()

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Index, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import JSON, DateTime, ForeignKeyConstraint, Index, String, Text, UniqueConstraint, Uuid
+from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from deerflow.persistence.base import Base
 
@@ -16,10 +17,9 @@ class RunEventRow(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     run_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    # Owner of the conversation this event belongs to. Nullable for data
-    # created before auth was introduced; populated by auth middleware on
-    # new writes and by the boot-time orphan migration on existing rows.
-    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    user_id = synonym("owner_user_id")
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
     category: Mapped[str] = mapped_column(String(16), nullable=False)
     # "message" | "trace" | "lifecycle"
@@ -30,6 +30,21 @@ class RunEventRow(Base):
 
     __table_args__ = (
         UniqueConstraint("thread_id", "seq", name="uq_events_thread_seq"),
+        UniqueConstraint("project_id", "owner_user_id", "thread_id", "run_id", "seq", name="uq_run_events_private_seq"),
         Index("ix_events_thread_cat_seq", "thread_id", "category", "seq"),
         Index("ix_events_run", "thread_id", "run_id", "seq"),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_run_events_project", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_run_events_owner", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id"],
+            ["project_memberships.project_id", "project_memberships.user_id"],
+            name="fk_run_events_project_membership",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id", "run_id"],
+            ["runs.project_id", "runs.owner_user_id", "runs.thread_id", "runs.run_id"],
+            name="fk_run_events_private_run",
+            ondelete="CASCADE",
+        ),
     )

@@ -70,6 +70,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from deerflow.config.runtime_paths import runtime_home
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,6 +98,17 @@ _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
 # Connection acquisition remains bounded by the engine's configured pool_timeout.
 _EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS = 5_000
 _EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS = 10_000
+
+_PRIVATE_WORK_FINAL_REVISION = "0009_project_private_work_finalize"
+_LEGACY_PRIVATE_WORK_DB_TABLES: tuple[str, ...] = (
+    "threads_meta",
+    "runs",
+    "run_events",
+    "feedback",
+    "channel_connections",
+    "channel_oauth_states",
+    "channel_conversations",
+)
 
 
 # Tables created by ``0001_baseline.upgrade()``. The legacy branch restricts
@@ -227,6 +240,61 @@ def _decide_state(state: dict[str, bool]) -> str:
     return "legacy"
 
 
+def _requires_explicit_private_work_migration(revision: str, has_legacy_source: bool) -> bool:
+    """Return whether ordinary startup must stop at the M4 staged boundary."""
+    if not has_legacy_source or revision == _PRIVATE_WORK_FINAL_REVISION:
+        return False
+    try:
+        revision_number = int(revision.split("_", 1)[0])
+    except (TypeError, ValueError):
+        return True
+    return revision_number < 9
+
+
+def _filesystem_has_legacy_private_source(home: Path) -> bool:
+    """Probe known private-work paths without exposing names or contents."""
+    if not home.exists():
+        return False
+    memory_candidates = [home / "memory.json"]
+    memory_candidates.extend(home.glob("agents/*/memory.json"))
+    memory_candidates.extend(home.glob("users/*/memory.json"))
+    memory_candidates.extend(home.glob("users/*/agents/*/memory.json"))
+    if any(path.is_file() or path.is_symlink() for path in memory_candidates):
+        return True
+
+    for user_data in home.glob("users/*/threads/*/user-data"):
+        for directory_name in ("uploads", "workspace", "outputs"):
+            directory = user_data / directory_name
+            if directory.is_dir() and any(path.is_file() or path.is_symlink() for path in directory.rglob("*")):
+                return True
+    return False
+
+
+def _database_has_legacy_private_source_sync(sync_conn: Any) -> bool:
+    inspector = sa_inspect(sync_conn)
+    present = set(inspector.get_table_names())
+    for table in _LEGACY_PRIVATE_WORK_DB_TABLES:
+        if table in present and sync_conn.execute(text(f'SELECT EXISTS (SELECT 1 FROM "{table}" LIMIT 1)')).scalar_one():  # noqa: S608 - fixed table allowlist
+            return True
+    return False
+
+
+async def _write_empty_install_cutover_marker(engine: AsyncEngine) -> None:
+    async with engine.begin() as conn:
+        database_has_source = await conn.run_sync(_database_has_legacy_private_source_sync)
+        if database_has_source:
+            raise RuntimeError("private-work empty-install probe found a database source")
+        await conn.execute(
+            text(
+                """INSERT INTO private_work_cutover_state
+                (id, stage, migration_run_id, empty_domain_probe_complete,
+                 checkpoint_marker_probe_complete, cutover_at, updated_at)
+                VALUES (1, 'cutover_complete', NULL, true, true, now(), now())
+                ON CONFLICT (id) DO NOTHING"""
+            )
+        )
+
+
 def _run_create_all_sync(sync_conn: Any) -> None:
     """Create all DeerFlow-owned tables on *sync_conn*."""
     # Import here to ensure all model classes are registered with Base.metadata.
@@ -238,6 +306,17 @@ def _run_create_all_sync(sync_conn: Any) -> None:
         logger.debug("deerflow.persistence.models not found; bootstrap will create empty schema")
 
     Base.metadata.create_all(sync_conn)
+    # M4's descriptive revision identifiers exceed Alembic's historical
+    # VARCHAR(32) default. Empty installs create the control table explicitly;
+    # existing installs are widened by revision 0008.
+    sync_conn.execute(
+        text(
+            """CREATE TABLE IF NOT EXISTS alembic_version (
+                version_num VARCHAR(64) NOT NULL,
+                CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+            )"""
+        )
+    )
 
 
 def _run_baseline_create_all_sync(sync_conn: Any) -> None:
@@ -428,6 +507,10 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
                 await conn.run_sync(_run_create_all_sync)
             try:
                 await _run_alembic_offload(_stamp, cfg, head)
+                has_filesystem_source = await asyncio.to_thread(_filesystem_has_legacy_private_source, runtime_home())
+                if has_filesystem_source:
+                    raise RuntimeError("private-work empty-install probe found a filesystem source")
+                await _write_empty_install_cutover_marker(engine)
             except BaseException:
                 # This invocation proved the DeerFlow-owned schema was empty
                 # before create_all. Restore that state so a failed stamp never
@@ -438,6 +521,11 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
                 raise
 
         elif decision == "legacy":
+            async with engine.connect() as conn:
+                database_has_source = await conn.run_sync(_database_has_legacy_private_source_sync)
+            filesystem_has_source = await asyncio.to_thread(_filesystem_has_legacy_private_source, runtime_home())
+            if database_has_source or filesystem_has_source:
+                raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
             logger.info(
                 "bootstrap: branch=legacy -> create_all (backfill missing baseline tables) + stamp %s + upgrade head (%s)",
                 _BASELINE_REVISION,
@@ -460,6 +548,15 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
 
         elif decision == "versioned":
             logger.info("bootstrap: branch=versioned -> upgrade head (%s)", head)
+            async with engine.connect() as conn:
+                current_revision = await conn.scalar(text("SELECT version_num FROM alembic_version"))
+                database_has_source = await conn.run_sync(_database_has_legacy_private_source_sync)
+            filesystem_has_source = await asyncio.to_thread(_filesystem_has_legacy_private_source, runtime_home())
+            if _requires_explicit_private_work_migration(
+                str(current_revision),
+                database_has_source or filesystem_has_source,
+            ):
+                raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
             await _run_alembic_offload(_upgrade, cfg, "head")
 
         else:  # pragma: no cover -- defensive

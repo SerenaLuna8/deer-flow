@@ -36,7 +36,17 @@ def test_filter_excludes_langgraph_checkpoint_tables() -> None:
 
 
 def test_filter_includes_deerflow_tables() -> None:
-    for owned in ("runs", "threads_meta", "feedback", "users", "channel_connections"):
+    for owned in (
+        "runs",
+        "threads_meta",
+        "feedback",
+        "users",
+        "channel_connections",
+        "files",
+        "file_chunks",
+        "run_asset_versions",
+        "private_work_cutover_state",
+    ):
         assert include_object(_table(owned), owned, "table", True, None) is True
 
 

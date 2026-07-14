@@ -3,16 +3,133 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import text
+from alembic import command as alembic_command
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.projects.bootstrap import bootstrap_default_project
 from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
 from app.projects.models import BootstrapStatus
+from deerflow.persistence.bootstrap import (
+    _filesystem_has_legacy_private_source,
+    _get_alembic_config,
+    _requires_explicit_private_work_migration,
+    bootstrap_schema,
+)
+
+
+@pytest.mark.parametrize(
+    ("revision", "has_legacy_source", "expected"),
+    [
+        ("0007_project_shared_assets", True, True),
+        ("0008_project_private_work_expand", True, True),
+        ("0007_project_shared_assets", False, False),
+        ("0009_project_private_work_finalize", True, False),
+    ],
+)
+def test_private_work_staged_boundary_requires_explicit_migration(
+    revision: str,
+    has_legacy_source: bool,
+    expected: bool,
+) -> None:
+    assert _requires_explicit_private_work_migration(revision, has_legacy_source) is expected
+
+
+def test_private_work_filesystem_probe_detects_only_legacy_private_sources(tmp_path: Path) -> None:
+    assert _filesystem_has_legacy_private_source(tmp_path) is False
+
+    unrelated = tmp_path / "cache" / "state.json"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text("{}")
+    assert _filesystem_has_legacy_private_source(tmp_path) is False
+
+    workspace = tmp_path / "users" / "owner" / "threads" / "thread" / "user-data" / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "content.txt").write_text("legacy")
+    assert _filesystem_has_legacy_private_source(tmp_path) is True
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_gateway_bootstrap_does_not_cross_m4_boundary_with_legacy_source(
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    engine = create_async_engine(postgres_database_url)
+    try:
+        cfg = _get_alembic_config(engine)
+        await asyncio.to_thread(alembic_command.upgrade, cfg, "0007_project_shared_assets")
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO threads_meta
+                    (thread_id,user_id,status,metadata_json,created_at,updated_at)
+                    VALUES ('legacy-thread','legacy-owner','idle','{}'::jsonb,now(),now())"""
+                )
+            )
+
+        with pytest.raises(RuntimeError, match="make migrate-private-work"):
+            await bootstrap_schema(engine)
+
+        async with engine.connect() as connection:
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            columns = await connection.run_sync(lambda sync_connection: {column["name"] for column in inspect(sync_connection).get_columns("threads_meta")})
+        assert revision == "0007_project_shared_assets"
+        assert "project_id" not in columns
+        assert "owner_user_id" not in columns
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_gateway_bootstrap_rejects_pre_alembic_private_rows_before_schema_changes(
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """CREATE TABLE threads_meta (
+                        thread_id VARCHAR PRIMARY KEY,
+                        user_id VARCHAR NOT NULL,
+                        status VARCHAR NOT NULL,
+                        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                        updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+                    )"""
+                )
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO threads_meta
+                    (thread_id,user_id,status,metadata_json,created_at,updated_at)
+                    VALUES ('legacy-thread','legacy-owner','idle','{}'::jsonb,now(),now())"""
+                )
+            )
+
+        with pytest.raises(RuntimeError, match="make migrate-private-work"):
+            await bootstrap_schema(engine)
+
+        async with engine.connect() as connection:
+            tables = await connection.run_sync(lambda sync_connection: set(inspect(sync_connection).get_table_names()))
+            columns = await connection.run_sync(lambda sync_connection: {column["name"] for column in inspect(sync_connection).get_columns("threads_meta")})
+        assert tables == {"threads_meta"}
+        assert "project_id" not in columns
+        assert "owner_user_id" not in columns
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
