@@ -151,6 +151,9 @@ class PrivateFileRow(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now, server_default=text("now()"))
+    # Revision 0010 adds this column after the original 0008/0009 file catalog.
+    # Keep ORM create_all column order identical to the staged Alembic upgrade.
+    source_file_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     __table_args__ = (
         *_scope_constraints("files"),
@@ -166,12 +169,20 @@ class PrivateFileRow(Base):
             name="fk_files_created_by_private_run",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id", "source_file_id"],
+            ["files.project_id", "files.owner_user_id", "files.thread_id", "files.id"],
+            name="fk_files_private_source",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint("project_id", "owner_user_id", "thread_id", "id", name="uq_files_private_scope"),
         CheckConstraint("kind IN ('upload', 'workspace', 'output')", name="ck_files_kind"),
         CheckConstraint("status IN ('staging', 'ready', 'deleted')", name="ck_files_status"),
         CheckConstraint("size >= 0", name="ck_files_size"),
         CheckConstraint("version >= 1", name="ck_files_version"),
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="ck_files_sha256"),
+        CheckConstraint("source_file_id IS NULL OR source_file_id <> id", name="ck_files_source_not_self"),
+        CheckConstraint("source_file_id IS NULL OR kind = 'workspace'", name="ck_files_source_kind"),
         CheckConstraint(
             "logical_path <> '' AND left(logical_path, 1) <> '/' AND logical_path !~ '(^|/)\\.\\.(/|$)' AND logical_path !~ '^[A-Za-z]:'",
             name="ck_files_logical_path",
@@ -207,6 +218,8 @@ class PrivateFileChunkRow(Base):
     __table_args__ = (
         CheckConstraint("chunk_index >= 0", name="ck_file_chunks_index"),
         CheckConstraint("size >= 0", name="ck_file_chunks_size"),
+        CheckConstraint("size = octet_length(content)", name="ck_file_chunks_content_size"),
+        CheckConstraint("size > 0 AND size <= 1048576", name="ck_file_chunks_bounded_size"),
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="ck_file_chunks_sha256"),
     )
 

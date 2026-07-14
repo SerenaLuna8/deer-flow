@@ -321,7 +321,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; `POST /branches` - create a new main-thread branch from a completed assistant turn checkpoint. Workspace files are not checkpointed, so the branch only best-effort copies the current workspace when branching from the **latest** turn (`workspace_clone_mode="current_thread_best_effort"`); branching from an older/historical turn skips the copy (`workspace_clone_mode="skipped_historical_turn"`) so the branch never inherits files that only exist in a later timeline; `GET /goal`, `PUT /goal`, `DELETE /goal` - read, set, and clear the active thread goal; `POST /compact` - manually summarize older active context into `summary_text` and retain the recent message window, blocked while a run is in flight; unexpected failures are logged server-side and return a generic 500 detail |
-| **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
+| **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (HTML/XHTML/SVG, JavaScript/ECMAScript, XML, and PDF, after lowercasing and removing parameters) are always forced as download attachments to reduce content-sniffing/script risk; `?download=true` still forces download for other file types |
 | **Suggestions** (`/api/suggestions`) | `GET /config` - returns global suggestions config boolean; `POST /threads/{id}/suggestions` - generate follow-up questions; rich list/block model content is normalized and inline reasoning (`<think>...</think>`, including unclosed/truncated blocks from reasoning models like MiniMax-M3) is stripped before JSON parsing |
 | **Input Polish** (`/api/input-polish`) | `POST /` - rewrite a composer draft before it is sent. This is a short authenticated `runs:create` LLM request using `input_polish` config; it does not create a LangGraph run, persist a message, or modify thread state. Shares the non-graph one-shot LLM path (`deerflow.utils.oneshot_llm.run_oneshot_llm`) with the suggestions route so model build + Langfuse metadata + invoke stay in one place; validates the same stripped view of the draft it sends to the model, and preserves literal `<think>` substrings in the rewrite (`strip_think_blocks(truncate_unclosed=False)`) |
 | **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `POST /regenerate/prepare` - prepare clean input + checkpoint metadata for regenerating the latest assistant answer; `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated messages `{data, has_more}`; `GET /{rid}/events` - full event stream; `GET /{rid}/workspace-changes` - workspace/output file change summary and optional diffs; `GET /../messages` - thread messages with feedback; `GET /../token-usage` - aggregate tokens |
@@ -1151,6 +1151,47 @@ envelope、key ID、nonce、ciphertext、storage locator。asset/closure/generat
 数据库不可用必须在 `PrivateWorkContext` 边界分别映射稳定公开错误并携带真实 request ID；session-bound
 repository 不得伪造 `"unknown"`。snapshot/event/file 的 run 关联必须依靠数据库复合 FK 拒绝 scope
 错配，不能只靠 Python 预检。
+
+M4 项目私有 file/artifact 的唯一 authority 是 PostgreSQL `files/file_chunks/artifacts`。
+`PrivateFileRepository` 的 stage/chunk/finalize/read/list/soft-delete SQL 都绑定
+`project_id + owner_user_id + thread_id`；chunk 固定最大 1 MiB，并在数据库约束和 finalize 时同时
+校验 `size=octet_length(content)`、逐块 SHA-256、连续 index、整文件 size/hash。空文件允许零 chunk。
+`ready` 后 bytes/metadata 不可修改；显式删除只写 `status=deleted/deleted_at`，保留 chunk，并允许同
+logical path 创建递增的新 version。转换结果必须是 `kind=workspace`，通过同 scope/thread 的复合
+self-FK 保存 ready source；普通 upload/output 禁止携带 `source_file_id`。
+
+应用层 upload 不得在等待客户端 async body 时持有数据库 transaction：先短 transaction stage，按
+固定 1 MiB chunk 分批 revalidate/commit，最后在一个 transaction 原子 finalize 全批；取消、限制或
+数据库失败必须用预生成 exact file IDs shield 等待 staging cleanup；HTTP body 普通异常也必须在
+exact cleanup 后脱敏映射为 `PRIVATE_WORK_UNAVAILABLE`，只有 cancellation/BaseException 原样传播；
+finalize 是不可取消的全批原子
+commit point。private 默认 count/single/total 限额分别是 10/100 MiB/100 MiB，legacy HTTP upload
+保持 10/50 MiB/100 MiB。转换在创建 tempfile 或启动 worker 前先重验 `private_work.create`，只在
+`0700` 私有临时目录中写 `0600` source；所有可能创建资源或阻塞 IO 的 thread worker 在取消时必须
+join 后再 cleanup/rethrow。converter 输出通过 anchored directory FD 的
+`O_NOFOLLOW|O_DIRECTORY` 路径遍历和 final `O_NONBLOCK` open，fstat 必须是 `st_nlink=1` regular
+file；同一个已验证 fd 直接分块读取，拒绝 symlink ancestor、hardlink、FIFO、越界和 TOCTOU path
+swap。读取先以 active scoped Thread join 验证 ready row 与完整首个有界 page，再用 keyset 小页和
+短 session 流式输出，不得让慢 consumer 持有 idle transaction；每页重验 membership 和 Thread 的
+`deleted_at/frozen_at`，任何 chunk/whole-file
+tamper 都以固定 `PRIVATE_WORK_UNAVAILABLE` fail closed 且不回显 logical/host path。
+`list_ready` 明确列 Thread 内全部 ready kinds（upload/workspace/output），按
+`(logical_path, version, id)` keyset 稳定升序且 limit 只能为 1..100；读取需要
+`private_work.read_own`，soft-delete own ready file 也使用 `private_work.read_own`；不存在、跨 scope
+或非 ready 统一 404，Viewer 可列出、下载和软删除自己的 ready file，但仍不能 upload/convert。
+写入和读取的 MIME 必须是严格有界 ASCII type/subtype/parameter syntax；响应文件名必须清除全部
+Unicode category C 字符、使用 RFC 5987 编码并写
+`X-Content-Type-Options: nosniff`；HTML/XHTML/SVG、JavaScript/ECMAScript、XML 和 PDF（去参数并
+lower 后判断）一律 attachment，artifact metadata 不能把 active file MIME 降级为 inline。
+
+Task 7 只提供 Task 11 可挂载的 authority/service/streaming primitives：不得在此阶段挂项目 routes，
+也不得接入 Task 8 sandbox restore/finalizer。既有 `/api/threads/{thread_id}/uploads` 与
+`/api/artifacts` 在 Task 11/12 cutover 前继续使用 owner-scoped host directories；legacy 与 private
+默认限额保持独立，并通过纯 `app.upload_contracts` helper 共享 limit 解析；legacy 的 host `path`
+response schema 只搬入该纯模块供原 router re-export，不得作为未来 project/private response。安全
+header helper 仍可共享，但既有路由不能被误写成 PostgreSQL 项目入口。Thread
+delete/freeze 对 file/artifact 的跨资源标记归 Task 8 `thread_service` 集成；Task 7 已保证 inactive
+Thread join 后任何 file/artifact bytes 都不可读。
 
 项目 HTTP API 统一挂载 `/api/projects`，使用 request-scoped session 与认证 dependency；
 项目 path 只接受 UUID，项目专属的 path/query/body 校验统一返回

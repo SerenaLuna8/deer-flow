@@ -29,6 +29,7 @@ from deerflow.persistence.bootstrap import (
         ("0007_project_shared_assets", True),
         ("0008_project_private_work_expand", True),
         ("0009_project_private_work_finalize", False),
+        ("0010_private_file_source", False),
         ("0010_unknown_future_revision", True),
     ],
 )

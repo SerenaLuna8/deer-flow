@@ -3,23 +3,20 @@ import logging
 import mimetypes
 import zipfile
 from pathlib import Path
-from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app.gateway.authz import require_permission
 from app.gateway.path_utils import resolve_thread_virtual_path
+from app.private_work.file_streaming import (
+    ACTIVE_CONTENT_MIME_TYPES,
+    safe_download_headers,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
-
-ACTIVE_CONTENT_MIME_TYPES = {
-    "text/html",
-    "application/xhtml+xml",
-    "image/svg+xml",
-}
 
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
@@ -27,11 +24,19 @@ _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
 
 def _build_content_disposition(disposition_type: str, filename: str) -> str:
     """Build an RFC 5987 encoded Content-Disposition header value."""
-    return f"{disposition_type}; filename*=UTF-8''{quote(filename)}"
+    return safe_download_headers(
+        filename,
+        media_type="application/octet-stream",
+        download=disposition_type == "attachment",
+    )["Content-Disposition"]
 
 
 def _build_attachment_headers(filename: str, extra_headers: dict[str, str] | None = None) -> dict[str, str]:
-    headers = {"Content-Disposition": _build_content_disposition("attachment", filename)}
+    headers = safe_download_headers(
+        filename,
+        media_type="application/octet-stream",
+        download=True,
+    )
     if extra_headers:
         headers.update(extra_headers)
     return headers

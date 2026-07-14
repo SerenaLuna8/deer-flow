@@ -9,10 +9,20 @@ from pathlib import Path
 from typing import BinaryIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
+from app.upload_contracts import (
+    LEGACY_UPLOAD_DEFAULTS,
+    UploadLimits,
+    UploadListResponse,
+    UploadResponse,
+    get_uploads_config_value,
+    resolve_upload_limits,
+)
+from app.upload_contracts import (
+    UploadedFileInfo as UploadedFileInfo,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -41,9 +51,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
 
 UPLOAD_CHUNK_SIZE = 8192
-DEFAULT_MAX_FILES = 10
-DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
-DEFAULT_MAX_TOTAL_SIZE = 100 * 1024 * 1024
+DEFAULT_MAX_FILES = LEGACY_UPLOAD_DEFAULTS.max_files
+DEFAULT_MAX_FILE_SIZE = LEGACY_UPLOAD_DEFAULTS.max_file_size
+DEFAULT_MAX_TOTAL_SIZE = LEGACY_UPLOAD_DEFAULTS.max_total_size
 
 
 @dataclass(slots=True)
@@ -51,47 +61,6 @@ class _UploadTempFile:
     file_path: Path
     temp_path: Path
     handle: BinaryIO
-
-
-class UploadedFileInfo(BaseModel):
-    """Uploaded file metadata exposed by upload and list APIs."""
-
-    filename: str
-    size: int
-    path: str
-    virtual_path: str
-    artifact_url: str
-    extension: str | None = None
-    modified: float | None = None
-    original_filename: str | None = None
-    markdown_file: str | None = None
-    markdown_path: str | None = None
-    markdown_virtual_path: str | None = None
-    markdown_artifact_url: str | None = None
-
-
-class UploadResponse(BaseModel):
-    """Response model for file upload."""
-
-    success: bool
-    files: list[UploadedFileInfo]
-    message: str
-    skipped_files: list[str] = Field(default_factory=list)
-
-
-class UploadListResponse(BaseModel):
-    """Response model for uploaded file listing."""
-
-    files: list[UploadedFileInfo]
-    count: int
-
-
-class UploadLimits(BaseModel):
-    """Application-level upload limits exposed to clients."""
-
-    max_files: int
-    max_file_size: int
-    max_total_size: int
 
 
 def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
@@ -135,36 +104,8 @@ def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
     return bool(getattr(sandbox_provider, "uses_thread_data_mounts", False))
 
 
-def _get_uploads_config_value(app_config: AppConfig, key: str, default: object) -> object:
-    """Read a value from the uploads config, supporting dict and attribute access."""
-    uploads_cfg = getattr(app_config, "uploads", None)
-    if isinstance(uploads_cfg, dict):
-        return uploads_cfg.get(key, default)
-    return getattr(uploads_cfg, key, default)
-
-
-def _get_upload_limit(app_config: AppConfig, key: str, default: int, *, legacy_key: str | None = None) -> int:
-    try:
-        value = _get_uploads_config_value(app_config, key, None)
-        if value is None and legacy_key is not None:
-            value = _get_uploads_config_value(app_config, legacy_key, None)
-        if value is None:
-            value = default
-        limit = int(value)
-        if limit <= 0:
-            raise ValueError
-        return limit
-    except Exception:
-        logger.warning("Invalid uploads.%s value; falling back to %d", key, default)
-        return default
-
-
 def _get_upload_limits(app_config: AppConfig) -> UploadLimits:
-    return UploadLimits(
-        max_files=_get_upload_limit(app_config, "max_files", DEFAULT_MAX_FILES, legacy_key="max_file_count"),
-        max_file_size=_get_upload_limit(app_config, "max_file_size", DEFAULT_MAX_FILE_SIZE, legacy_key="max_single_file_size"),
-        max_total_size=_get_upload_limit(app_config, "max_total_size", DEFAULT_MAX_TOTAL_SIZE),
-    )
+    return resolve_upload_limits(app_config, defaults=LEGACY_UPLOAD_DEFAULTS)
 
 
 def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
@@ -288,7 +229,7 @@ def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
     uploads.auto_convert_documents in config.yaml.
     """
     try:
-        raw = _get_uploads_config_value(app_config, "auto_convert_documents", False)
+        raw = get_uploads_config_value(app_config, "auto_convert_documents", False)
         if isinstance(raw, str):
             return raw.strip().lower() in {"1", "true", "yes", "on"}
         return bool(raw)

@@ -102,7 +102,12 @@ _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
 _EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS = 5_000
 _EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS = 10_000
 
-_PRIVATE_WORK_FINAL_REVISION = "0009_project_private_work_finalize"
+_PRIVATE_WORK_SAFE_REVISIONS = frozenset(
+    {
+        "0009_project_private_work_finalize",
+        "0010_private_file_source",
+    }
+)
 _PRIVATE_WORK_PRE_EXPAND_REVISION = "0007_project_shared_assets"
 _LEGACY_PRIVATE_WORK_DB_TABLES: tuple[str, ...] = (
     "threads_meta",
@@ -420,7 +425,7 @@ def _decide_state(state: dict[str, bool]) -> str:
 
 def _requires_explicit_private_work_migration(revision: str) -> bool:
     """Return whether ordinary startup must stop at the M4 staged boundary."""
-    return revision != _PRIVATE_WORK_FINAL_REVISION
+    return revision not in _PRIVATE_WORK_SAFE_REVISIONS
 
 
 def _filesystem_has_legacy_private_source(home: Path) -> bool:

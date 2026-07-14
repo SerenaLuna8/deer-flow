@@ -99,6 +99,30 @@ def test_m4_models_register_final_private_work_schema() -> None:
     assert {"project_id", "owner_user_id", "agent_asset_id", "agent_scope"} <= thread_columns
     assert "user_id" not in thread_columns
 
+    files = Base.metadata.tables["files"]
+    assert files.c.source_file_id.nullable is True
+    file_constraints = {constraint.name: constraint for constraint in files.constraints}
+    source_fk = file_constraints["fk_files_private_source"]
+    assert tuple(column.name for column in source_fk.columns) == (
+        "project_id",
+        "owner_user_id",
+        "thread_id",
+        "source_file_id",
+    )
+    assert tuple(element.target_fullname for element in source_fk.elements) == (
+        "files.project_id",
+        "files.owner_user_id",
+        "files.thread_id",
+        "files.id",
+    )
+    assert source_fk.ondelete == "RESTRICT"
+    checks = {constraint.name: str(constraint.sqltext) for constraint in files.constraints if getattr(constraint, "sqltext", None) is not None}
+    assert "source_file_id" in checks["ck_files_source_not_self"]
+    assert "workspace" in checks["ck_files_source_kind"]
+    chunk_checks = {constraint.name: str(constraint.sqltext) for constraint in Base.metadata.tables["file_chunks"].constraints if getattr(constraint, "sqltext", None) is not None}
+    assert "octet_length" in chunk_checks["ck_file_chunks_content_size"]
+    assert "1048576" in chunk_checks["ck_file_chunks_bounded_size"]
+
     for table_name in (
         "threads_meta",
         "runs",
@@ -169,16 +193,16 @@ def test_m4_models_install_composite_scope_constraints_without_snapshot_secrets(
         assert not any(fragment in column for fragment in forbidden_fragments for column in columns)
 
 
-def test_m4_finalize_revision_is_alembic_head() -> None:
-    migration = importlib.import_module("deerflow.persistence.migrations.versions.0009_project_private_work_finalize")
+def test_private_file_source_revision_is_alembic_head() -> None:
+    migration = importlib.import_module("deerflow.persistence.migrations.versions.0010_private_file_source")
     cfg = AlembicConfig()
     cfg.set_main_option(
         "script_location",
         str(Path(migration.__file__).resolve().parents[1]),
     )
 
-    assert migration.revision == "0009_project_private_work_finalize"
-    assert migration.down_revision == "0008_project_private_work_expand"
+    assert migration.revision == "0010_private_file_source"
+    assert migration.down_revision == "0009_project_private_work_finalize"
     assert ScriptDirectory.from_config(cfg).get_current_head() == migration.revision
 
 
@@ -264,7 +288,7 @@ async def test_m4_finalize_schema_has_private_scope_and_composite_fks(
         assert marker.empty_domain_probe_complete is True
         assert marker.checkpoint_marker_probe_complete is True
         assert marker.cutover_at is not None
-        assert revision == "0009_project_private_work_finalize"
+        assert revision == "0010_private_file_source"
     finally:
         await engine.dispose()
 
@@ -518,7 +542,9 @@ async def test_0009_downgrade_rejects_scoped_channel_rows_before_schema_changes(
             revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
             unique_constraints = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_unique_constraints("channel_connections"))
         final_identity = next(constraint for constraint in unique_constraints if constraint["name"] == "uq_channel_connection_owner_provider_identity")
-        assert revision == "0009_project_private_work_finalize"
+        # PostgreSQL rolls back the complete downgrade transaction, including
+        # the preceding 0010 downgrade, when 0009 rejects scoped channel rows.
+        assert revision == "0010_private_file_source"
         assert final_identity["column_names"] == [
             "project_id",
             "owner_user_id",
@@ -638,7 +664,7 @@ async def test_0009_finalizes_completed_empty_domain_migration_and_downgrades_sa
 
         await asyncio.to_thread(command.upgrade, cfg, "head")
         async with engine.connect() as connection:
-            assert (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == migration.revision
+            assert (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0010_private_file_source"
             thread_columns = await connection.run_sync(lambda sync: {item["name"]: item for item in inspect(sync).get_columns("threads_meta")})
         assert thread_columns["project_id"]["nullable"] is False
         assert thread_columns["owner_user_id"]["nullable"] is False
