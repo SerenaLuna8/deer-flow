@@ -151,16 +151,18 @@ def resolve_runtime_user_id(runtime: object | None) -> str:
          the only source that survives boundaries where the contextvar may have
          been lost (background tasks scheduled outside the request task,
          worker pools that don't copy_context, future cross-process drivers).
-      2. The ``_current_user`` ContextVar — set by the auth middleware at
+      2. The trusted runtime-storage override — an execution-only filesystem
+         bucket installed for internal channel runs.
+      3. The repository ``_current_user`` ContextVar — set by the auth middleware at
          request entry. Reliable for in-task work; copied by ``asyncio``
          child tasks and by ``ContextThreadPoolExecutor``.
-      3. ``DEFAULT_USER_ID`` — last-resort fallback so unauthenticated
+      4. ``DEFAULT_USER_ID`` — last-resort fallback so unauthenticated
          CLI / migration / test paths keep working without raising.
 
-    Tools that persist user-scoped state (custom agents, memory, uploads)
-    MUST call this instead of ``get_effective_user_id()`` directly so they
-    benefit from the runtime.context channel that ``setup_agent`` already
-    relies on.
+    This helper is for execution-scoped tools and middleware. Repository and
+    persistence ownership or authorization MUST NOT use the runtime-storage
+    identity (or this helper); those consumers must use ``get_current_user()``
+    or ``resolve_user_id()`` instead.
     """
     context = getattr(runtime, "context", None)
     if isinstance(context, dict):

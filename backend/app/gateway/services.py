@@ -720,16 +720,6 @@ async def start_run(
     if model_name is not None and not isinstance(model_name, str):
         model_name = str(model_name)
 
-    # Validate model against the allowlist when a model_name is provided.
-    if model_name:
-        app_config = get_app_config()
-        resolved = app_config.get_model_config(model_name)
-        if resolved is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Model {model_name!r} is not in the configured model allowlist",
-            )
-
     owner_user_id = get_trusted_internal_owner_user_id(request)
     runtime_user_id = get_trusted_internal_runtime_user_id(request)
     # Stateless run endpoints carry thread_id in the request *body*, so the
@@ -754,6 +744,16 @@ async def start_run(
             allowed = await run_ctx.thread_store.check_access(thread_id, owner_user_id)
         if not allowed:
             raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    # Validate model against the allowlist only after thread authorization.
+    if model_name:
+        app_config = get_app_config()
+        resolved = app_config.get_model_config(model_name)
+        if resolved is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_name!r} is not in the configured model allowlist",
+            )
 
     agent_factory = resolve_agent_factory(body.assistant_id)
     command = getattr(body, "command", None)
