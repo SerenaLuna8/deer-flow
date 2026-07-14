@@ -1050,6 +1050,10 @@ user/project/owner/membership/role/capability/system-role/runtime `user_role`/pr
 Mapping，其他形状在 lifecycle dependency、run/thread persistence、saver 与 worker 前以不回显输入的
 固定 400 拒绝；合法 Mapping 只清洗一次并在 persistence/saver/live 间复用。两来源并存时 typed
 `body.checkpoint` 覆盖 configurable 的 checkpoint ID/namespace/map，消除 reserved-field 歧义。
+stateless 与 thread-scoped 的 stream/wait handler 必须在 thread ID 解析和任何 runtime singleton
+读取前调用同一 pure preflight；`_resolve_thread_id()` 自身也不得在未验证 configurable shape 时
+调用 `.get()`。direct apply defense 即使 canonical checkpoint ID 为空，也必须先把 normalized config
+和 reserved-field removals 安装到调用方 config 后再返回。
 `start_run()` 在创建 run/thread record 前生成 authority-sanitized
 metadata/config/body-context 副本，并一致用于持久化、API response 与 live config；secret redaction
 发生在 authority sanitize 之后。graph input/messages 不经过该递归清洗，消息 `role` 是合法数据。

@@ -169,9 +169,33 @@ class _NormalizedCheckpointControl:
     checkpoint_id: str | None
     checkpoint_ns: str
     checkpoint_map: dict[str, object] | None
+    present: bool
+
+
+def preflight_run_create(body: Any, thread_id: str | None = None) -> None:
+    """Validate run-control shapes without reading dependencies or mutating input."""
+
+    raw_config = getattr(body, "config", None)
+    if raw_config is not None and not isinstance(raw_config, Mapping):
+        raise HTTPException(status_code=400, detail="request config must be an object")
+    raw_configurable = raw_config.get("configurable") if isinstance(raw_config, Mapping) else None
+    if raw_configurable is not None and not isinstance(raw_configurable, Mapping):
+        raise HTTPException(status_code=400, detail="request config configurable must be an object")
+    if isinstance(raw_configurable, Mapping):
+        _require_checkpoint_map_mapping(raw_configurable.get("checkpoint_map"))
+
+    checkpoint = getattr(body, "checkpoint", None)
+    if checkpoint is not None:
+        if not isinstance(checkpoint, Mapping):
+            raise HTTPException(status_code=400, detail="checkpoint must be an object")
+        _require_checkpoint_map_mapping(checkpoint.get("checkpoint_map"))
+        checkpoint_thread_id = checkpoint.get("thread_id")
+        if thread_id is not None and checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
+            raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")
 
 
 def _normalize_run_checkpoint_inputs(body: Any, thread_id: str) -> tuple[dict[str, object] | None, _NormalizedCheckpointControl]:
+    preflight_run_create(body, thread_id)
     raw_config = getattr(body, "config", None)
     raw_configurable: Mapping[str, object] = {}
     if isinstance(raw_config, Mapping):
@@ -229,7 +253,23 @@ def _normalize_run_checkpoint_inputs(body: Any, thread_id: str) -> tuple[dict[st
         normalized_config["configurable"] = normalized_configurable
         sanitized_config = normalized_config
 
-    return sanitized_config, _NormalizedCheckpointControl(checkpoint_id, checkpoint_ns, checkpoint_map)
+    return sanitized_config, _NormalizedCheckpointControl(checkpoint_id, checkpoint_ns, checkpoint_map, has_checkpoint_control)
+
+
+def _install_checkpoint_control(config: dict[str, Any], checkpoint_control: _NormalizedCheckpointControl, thread_id: str) -> None:
+    if not checkpoint_control.present:
+        return
+    configurable = config.setdefault("configurable", {})
+    if not isinstance(configurable, dict):
+        raise HTTPException(status_code=400, detail="request config configurable must be an object")
+    for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map"):
+        configurable.pop(key, None)
+    configurable["thread_id"] = thread_id
+    if checkpoint_control.checkpoint_id is not None:
+        configurable["checkpoint_id"] = checkpoint_control.checkpoint_id
+    configurable["checkpoint_ns"] = checkpoint_control.checkpoint_ns
+    if checkpoint_control.checkpoint_map is not None:
+        configurable["checkpoint_map"] = checkpoint_control.checkpoint_map
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -568,10 +608,10 @@ async def apply_checkpoint_to_run_config(
     thread_id: str,
     request: Request,
     checkpoint_control: _NormalizedCheckpointControl | None = None,
-) -> None:
+) -> dict[str, Any]:
     """Validate an optional run checkpoint and attach it to RunnableConfig."""
     if checkpoint_control is None:
-        _, checkpoint_control = _normalize_run_checkpoint_inputs(
+        normalized_config, checkpoint_control = _normalize_run_checkpoint_inputs(
             SimpleNamespace(
                 config=config,
                 checkpoint=getattr(body, "checkpoint", None),
@@ -579,12 +619,16 @@ async def apply_checkpoint_to_run_config(
             ),
             thread_id,
         )
+        config.clear()
+        if normalized_config is not None:
+            config.update(normalized_config)
+    _install_checkpoint_control(config, checkpoint_control, thread_id)
     checkpoint_id = checkpoint_control.checkpoint_id
     checkpoint_ns = checkpoint_control.checkpoint_ns
     checkpoint_map = checkpoint_control.checkpoint_map
 
     if not checkpoint_id:
-        return
+        return config
 
     read_config: dict[str, Any] = {
         "configurable": {
@@ -605,14 +649,7 @@ async def apply_checkpoint_to_run_config(
     if checkpoint_tuple is None:
         raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found")
 
-    configurable = config.setdefault("configurable", {})
-    if not isinstance(configurable, dict):
-        raise HTTPException(status_code=400, detail="request config configurable must be an object")
-    configurable["thread_id"] = thread_id
-    configurable["checkpoint_ns"] = checkpoint_ns
-    configurable["checkpoint_id"] = str(checkpoint_id)
-    if checkpoint_map is not None:
-        configurable["checkpoint_map"] = checkpoint_map
+    return config
 
 
 # ---------------------------------------------------------------------------

@@ -712,6 +712,57 @@ def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
     assert "missing" in exc.value.detail
 
 
+@pytest.mark.parametrize("case", ["config-only-no-id", "typed-clears-config"])
+def test_apply_checkpoint_installs_canonical_control_before_no_id_return(case: str):
+    import asyncio
+    import copy
+    from types import SimpleNamespace
+
+    from app.gateway.services import apply_checkpoint_to_run_config
+
+    class NeverCheckpointer:
+        calls = 0
+
+        async def aget_tuple(self, config):
+            self.calls += 1
+            raise AssertionError("checkpoint without canonical id reached saver")
+
+    checkpointer = NeverCheckpointer()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer)))
+    config = {
+        "configurable": {
+            "thread_id": "thread-1",
+            "checkpoint_id": "config-old" if case == "typed-clears-config" else None,
+            "checkpoint_ns": "config-ns",
+            "checkpoint_map": {"": "config-map", "project_id": "attacker"},
+            "safe": "kept",
+        }
+    }
+    body = SimpleNamespace(
+        config=None,
+        checkpoint=(
+            {
+                "checkpoint_ns": "typed-empty",
+                "checkpoint_map": {"": "typed-map", "role": "admin"},
+            }
+            if case == "typed-clears-config"
+            else None
+        ),
+        checkpoint_id=None,
+    )
+    original_body = copy.deepcopy(body)
+
+    returned = asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
+
+    assert returned is config
+    assert config["configurable"]["safe"] == "kept"
+    assert "checkpoint_id" not in config["configurable"]
+    assert config["configurable"]["checkpoint_ns"] == ("typed-empty" if case == "typed-clears-config" else "config-ns")
+    assert config["configurable"]["checkpoint_map"] == {"": "typed-map" if case == "typed-clears-config" else "config-map"}
+    assert checkpointer.calls == 0
+    assert body == original_body
+
+
 def test_context_merges_into_configurable():
     """Context values must be merged into config['configurable'] by start_run.
 
@@ -1109,6 +1160,69 @@ def test_start_run_rejects_configurable_checkpoint_map_before_lifecycle_dependen
     assert exc_info.value.detail == "checkpoint.checkpoint_map must be an object"
     assert "secret-authority" not in str(exc_info.value.detail)
     assert lifecycle_state.accesses == 0
+
+
+@pytest.mark.parametrize(
+    "route_name",
+    ["stateless_stream", "stateless_wait", "thread_stream", "thread_wait"],
+)
+@pytest.mark.parametrize(
+    ("config", "detail"),
+    [
+        pytest.param({"configurable": ["bad"]}, "request config configurable must be an object", id="configurable"),
+        pytest.param(
+            {"configurable": {"checkpoint_map": [{"project_id": "secret-authority"}]}},
+            "checkpoint.checkpoint_map must be an object",
+            id="checkpoint-map",
+        ),
+    ],
+)
+def test_run_routes_preflight_before_thread_or_runtime_resolution(
+    _stub_app_config,
+    route_name: str,
+    config,
+    detail: str,
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.routers.runs import stateless_stream, stateless_wait
+    from app.gateway.routers.thread_runs import RunCreateRequest, stream_run, wait_run
+
+    class NeverRuntimeState:
+        accesses = 0
+
+        def __getattr__(self, name):
+            self.accesses += 1
+            raise AssertionError(f"malformed run input reached runtime dependency {name}")
+
+    runtime_state = NeverRuntimeState()
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(),
+        app=SimpleNamespace(state=runtime_state),
+        _deerflow_test_bypass_auth=True,
+    )
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "safe input"}]},
+        config=config,
+    )
+    route = {
+        "stateless_stream": lambda: stateless_stream(body=body, request=request),
+        "stateless_wait": lambda: stateless_wait(body=body, request=request),
+        "thread_stream": lambda: stream_run(thread_id="thread-1", body=body, request=request),
+        "thread_wait": lambda: wait_run(thread_id="thread-1", body=body, request=request),
+    }[route_name]
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(route())
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == detail
+    assert "secret-authority" not in str(exc_info.value.detail)
+    assert runtime_state.accesses == 0
 
 
 @pytest.mark.parametrize("typed_checkpoint", [False, True], ids=["config-only", "typed-overrides"])
