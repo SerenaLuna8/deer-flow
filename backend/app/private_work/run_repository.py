@@ -9,7 +9,6 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.private_work.errors import PrivateWorkConflict
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
@@ -43,6 +42,10 @@ class PrivateRunRecord:
     updated_at: datetime
 
 
+class PrivateRunConflict(Exception):
+    """Session-bound invariant failure; public boundaries supply request IDs."""
+
+
 class PrivateRunRepository:
     """Session-bound run repository whose every statement carries private scope."""
 
@@ -52,11 +55,11 @@ class PrivateRunRepository:
     @staticmethod
     def coordinates(scope: PrivateResourceScope) -> tuple[uuid.UUID, str]:
         if type(scope) is not PrivateResourceScope:
-            raise PrivateWorkConflict("unknown")
+            raise PrivateRunConflict
         try:
             return uuid.UUID(scope.project_id), str(uuid.UUID(scope.owner_user_id))
         except (TypeError, ValueError):
-            raise PrivateWorkConflict("unknown") from None
+            raise PrivateRunConflict from None
 
     @classmethod
     def predicates(cls, scope: PrivateResourceScope):
@@ -104,7 +107,7 @@ class PrivateRunRepository:
             )
         ).scalar_one_or_none()
         if thread_exists is None:
-            raise PrivateWorkConflict("unknown")
+            raise PrivateRunConflict
         now = datetime.now(UTC)
         row = RunRow(
             run_id=request.run_id,
@@ -124,7 +127,7 @@ class PrivateRunRepository:
             self.session.add(row)
             await self.session.flush()
         except IntegrityError:
-            raise PrivateWorkConflict("unknown") from None
+            raise PrivateRunConflict from None
         return self.record(row)
 
     async def get(

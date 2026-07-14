@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import uuid
@@ -8,10 +9,15 @@ from dataclasses import dataclass
 import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
-from app.private_work.errors import PrivateWorkConflict
+from app.private_work.error_mapping import private_work_http_exception
+from app.private_work.errors import (
+    PrivateWorkAssetStale,
+    PrivateWorkConflict,
+    PrivateWorkUnavailable,
+)
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.snapshot_repository import RunSnapshotRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
@@ -36,8 +42,11 @@ class SnapshotScenario:
     mcp_id: uuid.UUID
     mcp_version_id: uuid.UUID
     slot_id: uuid.UUID
+    alternate_slot_id: uuid.UUID
     grant_id: uuid.UUID
+    credential_id: uuid.UUID
     credential_version_id: uuid.UUID
+    envelope_id: uuid.UUID
     generation: int
 
     @property
@@ -71,6 +80,7 @@ async def snapshot_scenario(migrated_postgres_database_url):
     mcp_id = uuid.uuid4()
     mcp_version_id = uuid.uuid4()
     slot_id = uuid.uuid4()
+    alternate_slot_id = uuid.uuid4()
     credential_id = uuid.uuid4()
     credential_version_id = uuid.uuid4()
     envelope_id = uuid.uuid4()
@@ -201,6 +211,14 @@ async def snapshot_scenario(migrated_postgres_database_url):
         )
         await session.execute(
             text(
+                """INSERT INTO mcp_version_credential_slots
+                (id,mcp_server_version_id,name,purpose,payload_schema,required)
+                VALUES (:id,:version_id,'alternate','alternate auth','{}'::jsonb,false)"""
+            ),
+            {"id": alternate_slot_id, "version_id": mcp_version_id},
+        )
+        await session.execute(
+            text(
                 """INSERT INTO credential_grants
                 (id,mcp_server_version_id,credential_slot_id,credential_version_id,
                  status,version,created_by_user_id)
@@ -258,8 +276,11 @@ async def snapshot_scenario(migrated_postgres_database_url):
         mcp_id=mcp_id,
         mcp_version_id=mcp_version_id,
         slot_id=slot_id,
+        alternate_slot_id=alternate_slot_id,
         grant_id=grant_id,
+        credential_id=credential_id,
         credential_version_id=credential_version_id,
+        envelope_id=envelope_id,
         generation=generation,
     )
     try:
@@ -325,23 +346,35 @@ async def test_snapshot_transaction_rolls_back_stale_or_secret_bearing_admission
     repository = RunSnapshotRepository(scenario.seed.factory)
     stale_run_id = str(uuid.uuid4())
     stale = dataclasses.replace(scenario.resolved_agent, checksum="d" * 64)
-    with pytest.raises(PrivateWorkConflict):
+    with pytest.raises(PrivateWorkAssetStale) as stale_error:
         await repository.create_run_with_snapshot(
             scenario.seed.owner_a,
             scenario.thread_id,
             PrivateRunCreate(run_id=stale_run_id),
             stale,
         )
+    _assert_public_error(
+        stale_error.value,
+        code="PRIVATE_WORK_ASSET_STALE",
+        message="Private work asset is stale.",
+        request_id=scenario.seed.owner_a.request_id,
+    )
     secret_run_id = str(uuid.uuid4())
-    with pytest.raises(PrivateWorkConflict):
+    with pytest.raises(PrivateWorkConflict) as secret_error:
         await repository.create_run_with_snapshot(
             scenario.seed.owner_a,
             scenario.thread_id,
             PrivateRunCreate(run_id=secret_run_id, kwargs={"key_id": "must-not-persist"}),
             scenario.resolved_agent,
         )
+    _assert_public_error(
+        secret_error.value,
+        code="PRIVATE_WORK_CONFLICT",
+        message="Private work conflict.",
+        request_id=scenario.seed.owner_a.request_id,
+    )
     generation_run_id = str(uuid.uuid4())
-    with pytest.raises(PrivateWorkConflict):
+    with pytest.raises(PrivateWorkAssetStale) as generation_error:
         await repository.create_run_with_snapshot(
             scenario.seed.owner_a,
             scenario.thread_id,
@@ -351,9 +384,452 @@ async def test_snapshot_transaction_rolls_back_stale_or_secret_bearing_admission
                 catalog_generation=scenario.generation + 1,
             ),
         )
+    _assert_public_error(
+        generation_error.value,
+        code="PRIVATE_WORK_ASSET_STALE",
+        message="Private work asset is stale.",
+        request_id=scenario.seed.owner_a.request_id,
+    )
     async with scenario.seed.factory() as session:
         count = (await session.execute(select(RunRow.run_id).where(RunRow.run_id.in_((stale_run_id, secret_run_id, generation_run_id))))).all()
         assert count == []
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_snapshot_true_run_conflict_uses_context_request_id(
+    snapshot_scenario: SnapshotScenario,
+) -> None:
+    scenario = snapshot_scenario
+
+    with pytest.raises(PrivateWorkConflict) as captured:
+        await RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+            scenario.seed.owner_a,
+            f"missing-{uuid.uuid4()}",
+            PrivateRunCreate(),
+            scenario.resolved_agent,
+        )
+
+    _assert_public_error(
+        captured.value,
+        code="PRIVATE_WORK_CONFLICT",
+        message="Private work conflict.",
+        request_id=scenario.seed.owner_a.request_id,
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_snapshot_database_unavailable_is_stable_and_sanitized(
+    snapshot_scenario: SnapshotScenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = snapshot_scenario
+
+    async def unavailable(*_args, **_kwargs):
+        raise OperationalError(
+            "SELECT ciphertext FROM credential_envelopes",
+            {"credential_version_id": str(scenario.credential_version_id)},
+            RuntimeError("database-url-with-secret"),
+        )
+
+    monkeypatch.setattr(RunSnapshotRepository, "_agent", unavailable)
+
+    with pytest.raises(PrivateWorkUnavailable) as captured:
+        await RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+            scenario.seed.owner_a,
+            scenario.thread_id,
+            PrivateRunCreate(),
+            scenario.resolved_agent,
+        )
+
+    _assert_public_error(
+        captured.value,
+        code="PRIVATE_WORK_UNAVAILABLE",
+        message="Private work is unavailable.",
+        request_id=scenario.seed.owner_a.request_id,
+    )
+
+
+def _assert_public_error(error, *, code: str, message: str, request_id: str) -> None:
+    assert error.code == code
+    assert error.public_message == message
+    assert error.request_id == request_id
+    mapped = private_work_http_exception(error)
+    assert mapped.detail == {
+        "code": code,
+        "message": message,
+        "request_id": request_id,
+    }
+    serialized = json.dumps(mapped.detail).lower()
+    for forbidden in (
+        "select ",
+        "credential_versions",
+        "snapshot-key",
+        "top-secret-ciphertext",
+        "storage_locator",
+    ):
+        assert forbidden not in serialized
+
+
+async def _current_generation(scenario: SnapshotScenario) -> int:
+    async with scenario.seed.factory() as session:
+        return int((await session.execute(text("SELECT generation FROM asset_catalog_state WHERE id=1"))).scalar_one())
+
+
+async def _insert_credential_material(
+    scenario: SnapshotScenario,
+    *,
+    scope: str,
+    project_id: uuid.UUID | None,
+    payload_schema: str,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    credential_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    owner_id = str(scenario.seed.owner_a.user_id)
+    async with scenario.seed.factory() as session, session.begin():
+        await session.execute(
+            text(
+                """INSERT INTO credentials
+                (id,scope,project_id,name,display_name,credential_type,status,version,
+                 created_by_user_id)
+                VALUES (:id,:scope,:project_id,:name,'Alternate Credential','token',
+                        'active',1,:owner)"""
+            ),
+            {
+                "id": credential_id,
+                "scope": scope,
+                "project_id": project_id,
+                "name": f"alternate-{credential_id.hex[:8]}",
+                "owner": owner_id,
+            },
+        )
+        await session.execute(
+            text(
+                """INSERT INTO credential_versions
+                (id,credential_id,version_number,status,payload_schema_version,
+                 payload_schema,created_by_user_id)
+                VALUES (:id,:credential_id,1,'active',1,CAST(:payload_schema AS jsonb),
+                        :owner)"""
+            ),
+            {
+                "id": version_id,
+                "credential_id": credential_id,
+                "payload_schema": payload_schema,
+                "owner": owner_id,
+            },
+        )
+        await session.execute(
+            text("UPDATE credentials SET current_version_id=:version_id WHERE id=:id"),
+            {"version_id": version_id, "id": credential_id},
+        )
+        await session.execute(
+            text(
+                """INSERT INTO credential_envelopes
+                (id,credential_version_id,envelope_generation,key_id,nonce,ciphertext,
+                 is_active,created_by_user_id,activated_at)
+                VALUES (:id,:version_id,1,'alternate-key',:nonce,:ciphertext,true,
+                        :owner,now())"""
+            ),
+            {
+                "id": uuid.uuid4(),
+                "version_id": version_id,
+                "nonce": b"a" * 12,
+                "ciphertext": b"a" * 16,
+                "owner": owner_id,
+            },
+        )
+        await session.execute(
+            text(
+                """UPDATE credential_grants
+                SET credential_version_id=:version_id
+                WHERE id=:grant_id"""
+            ),
+            {"version_id": version_id, "grant_id": scenario.grant_id},
+        )
+    return credential_id, version_id
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_snapshot_accepts_active_grant_pinned_to_retired_version(
+    snapshot_scenario: SnapshotScenario,
+) -> None:
+    scenario = snapshot_scenario
+    async with scenario.seed.factory() as session, session.begin():
+        await session.execute(
+            text(
+                """UPDATE credential_versions
+                SET status='retired', retired_at=now()
+                WHERE id=:version_id"""
+            ),
+            {"version_id": scenario.credential_version_id},
+        )
+    resolved = dataclasses.replace(
+        scenario.resolved_agent,
+        catalog_generation=await _current_generation(scenario),
+    )
+    repository = RunSnapshotRepository(scenario.seed.factory)
+
+    run = await repository.create_run_with_snapshot(
+        scenario.seed.owner_a,
+        scenario.thread_id,
+        PrivateRunCreate(),
+        resolved,
+    )
+
+    grants = await repository.list_mcp_grants(scenario.seed.owner_a, run.run_id)
+    assert tuple(row.credential_version_id for row in grants) == (scenario.credential_version_id,)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_snapshot_rejects_inactive_or_missing_active_envelope(
+    snapshot_scenario: SnapshotScenario,
+) -> None:
+    scenario = snapshot_scenario
+    run_id = str(uuid.uuid4())
+    async with scenario.seed.factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE credential_envelopes SET is_active=false WHERE id=:id"),
+            {"id": scenario.envelope_id},
+        )
+    resolved = dataclasses.replace(
+        scenario.resolved_agent,
+        catalog_generation=await _current_generation(scenario),
+    )
+
+    with pytest.raises(PrivateWorkAssetStale) as captured:
+        await RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+            scenario.seed.owner_a,
+            scenario.thread_id,
+            PrivateRunCreate(run_id=run_id),
+            resolved,
+        )
+
+    _assert_public_error(
+        captured.value,
+        code="PRIVATE_WORK_ASSET_STALE",
+        message="Private work asset is stale.",
+        request_id=scenario.seed.owner_a.request_id,
+    )
+    async with scenario.seed.factory() as session:
+        assert await session.get(RunRow, run_id) is None
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_snapshot_rejects_credential_scope_mismatch(
+    snapshot_scenario: SnapshotScenario,
+) -> None:
+    scenario = snapshot_scenario
+    await _insert_credential_material(
+        scenario,
+        scope="system",
+        project_id=None,
+        payload_schema="{}",
+    )
+    resolved = dataclasses.replace(
+        scenario.resolved_agent,
+        catalog_generation=await _current_generation(scenario),
+    )
+
+    with pytest.raises(PrivateWorkAssetStale) as captured:
+        await RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+            scenario.seed.owner_a,
+            scenario.thread_id,
+            PrivateRunCreate(),
+            resolved,
+        )
+
+    _assert_public_error(
+        captured.value,
+        code="PRIVATE_WORK_ASSET_STALE",
+        message="Private work asset is stale.",
+        request_id=scenario.seed.owner_a.request_id,
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_snapshot_rejects_slot_payload_schema_mismatch(
+    snapshot_scenario: SnapshotScenario,
+) -> None:
+    scenario = snapshot_scenario
+    await _insert_credential_material(
+        scenario,
+        scope="project",
+        project_id=scenario.seed.owner_a.project_id,
+        payload_schema='{"env":["OTHER_TOKEN"]}',
+    )
+    resolved = dataclasses.replace(
+        scenario.resolved_agent,
+        catalog_generation=await _current_generation(scenario),
+    )
+
+    with pytest.raises(PrivateWorkAssetStale) as captured:
+        await RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+            scenario.seed.owner_a,
+            scenario.thread_id,
+            PrivateRunCreate(),
+            resolved,
+        )
+
+    _assert_public_error(
+        captured.value,
+        code="PRIVATE_WORK_ASSET_STALE",
+        message="Private work asset is stale.",
+        request_id=scenario.seed.owner_a.request_id,
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_snapshot_credential_closure_locks_serialize_repin(
+    snapshot_scenario: SnapshotScenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.private_work.snapshot_repository as snapshot_module
+    from app.shared_assets.credential_closure import lock_mcp_credential_closures
+
+    scenario = snapshot_scenario
+    closure_locked = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    repin_attempted = asyncio.Event()
+    repin_committed = asyncio.Event()
+
+    async def pause_after_closure(*args, **kwargs):
+        closures = await lock_mcp_credential_closures(*args, **kwargs)
+        closure_locked.set()
+        await release_snapshot.wait()
+        return closures
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "lock_mcp_credential_closures",
+        pause_after_closure,
+    )
+
+    async def repin() -> None:
+        repin_attempted.set()
+        async with scenario.seed.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE credential_grants
+                    SET credential_slot_id=:slot_id
+                    WHERE id=:grant_id"""
+                ),
+                {
+                    "slot_id": scenario.alternate_slot_id,
+                    "grant_id": scenario.grant_id,
+                },
+            )
+        repin_committed.set()
+
+    snapshot_task = asyncio.create_task(
+        RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+            scenario.seed.owner_a,
+            scenario.thread_id,
+            PrivateRunCreate(),
+            scenario.resolved_agent,
+        )
+    )
+    repin_task = None
+    try:
+        await asyncio.wait_for(closure_locked.wait(), timeout=5)
+        repin_task = asyncio.create_task(repin())
+        await asyncio.wait_for(repin_attempted.wait(), timeout=5)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(repin_task), timeout=0.2)
+        assert not repin_committed.is_set()
+        release_snapshot.set()
+        run, _ = await asyncio.wait_for(
+            asyncio.gather(snapshot_task, repin_task),
+            timeout=10,
+        )
+        grants = await RunSnapshotRepository(scenario.seed.factory).list_mcp_grants(scenario.seed.owner_a, run.run_id)
+        assert tuple(row.credential_slot_id for row in grants) == (scenario.slot_id,)
+    finally:
+        release_snapshot.set()
+        pending = [task for task in (snapshot_task, repin_task) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_snapshot_credential_closure_locks_serialize_revoke(
+    snapshot_scenario: SnapshotScenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.private_work.snapshot_repository as snapshot_module
+    from app.shared_assets.credential_closure import lock_mcp_credential_closures
+
+    scenario = snapshot_scenario
+    closure_locked = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    revoke_attempted = asyncio.Event()
+    revoke_committed = asyncio.Event()
+
+    async def pause_after_closure(*args, **kwargs):
+        closures = await lock_mcp_credential_closures(*args, **kwargs)
+        closure_locked.set()
+        await release_snapshot.wait()
+        return closures
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "lock_mcp_credential_closures",
+        pause_after_closure,
+    )
+
+    async def revoke() -> None:
+        revoke_attempted.set()
+        async with scenario.seed.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE credentials
+                    SET status='revoked'
+                    WHERE id=:credential_id"""
+                ),
+                {"credential_id": scenario.credential_id},
+            )
+        revoke_committed.set()
+
+    snapshot_task = asyncio.create_task(
+        RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+            scenario.seed.owner_a,
+            scenario.thread_id,
+            PrivateRunCreate(),
+            scenario.resolved_agent,
+        )
+    )
+    revoke_task = None
+    try:
+        await asyncio.wait_for(closure_locked.wait(), timeout=5)
+        revoke_task = asyncio.create_task(revoke())
+        await asyncio.wait_for(revoke_attempted.wait(), timeout=5)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(revoke_task), timeout=0.2)
+        assert not revoke_committed.is_set()
+        release_snapshot.set()
+        run, _ = await asyncio.wait_for(
+            asyncio.gather(snapshot_task, revoke_task),
+            timeout=10,
+        )
+        assert await RunSnapshotRepository(scenario.seed.factory).list_mcp_grants(
+            scenario.seed.owner_a,
+            run.run_id,
+        )
+    finally:
+        release_snapshot.set()
+        pending = [task for task in (snapshot_task, revoke_task) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 @pytest.mark.postgres

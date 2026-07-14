@@ -1103,9 +1103,14 @@ event 与 feedback 写入先查 scoped parent run，再由 parent 派生 project
 显式 `list_inflight_trusted_unscoped()`。`RunSnapshotRepository.create_run_with_snapshot()` 在单个
 PostgreSQL transaction 中写 run、`run_asset_versions` 和 `run_mcp_grant_snapshots`：root Agent 固定
 order 0，随后按 resolver 的 Skill、MCP 稳定顺序写 exact version/checksum/catalog generation；grant
-snapshot 只含 MCP version、slot、grant、credential-version UUID，绝不读取或持久化 envelope、key ID、
-nonce、ciphertext、storage locator。snapshot/event/file 的 run 关联必须依靠数据库复合 FK 拒绝
-scope 错配，不能只靠 Python 预检。
+closure 必须直接复用 M3 `lock_mcp_credential_closures(..., load_envelopes=False)` 的全局锁序与完整
+校验，允许 active grant 固定到 active/retired semantic version，同时要求 active envelope、MCP/credential
+精确同 scope/project 及 slot/version schema 相等；只能从返回的 locked materials 写 ID，不能另写一套
+弱化查询。grant snapshot 只含 MCP version、slot、grant、credential-version UUID，绝不读取或持久化
+envelope、key ID、nonce、ciphertext、storage locator。asset/closure/generation stale、真实 run conflict 和
+数据库不可用必须在 `PrivateWorkContext` 边界分别映射稳定公开错误并携带真实 request ID；session-bound
+repository 不得伪造 `"unknown"`。snapshot/event/file 的 run 关联必须依靠数据库复合 FK 拒绝 scope
+错配，不能只靠 Python 预检。
 
 项目 HTTP API 统一挂载 `/api/projects`，使用 request-scoped session 与认证 dependency；
 项目 path 只接受 UUID，项目专属的 path/query/body 校验统一返回

@@ -279,9 +279,10 @@ def _completed_run(
     }
 
 
-async def _seed_run(store, *, run_id: str, model_name: str | None, completion: dict) -> None:
-    await store.put(run_id, thread_id=_THREAD, status="pending", model_name=model_name)
-    await store.update_run_completion(run_id, **completion)
+async def _seed_run(store, *, run_id: str, model_name: str | None, completion: dict, scope=None) -> None:
+    scope_kwargs = {} if scope is None else {"scope": scope}
+    await store.put(run_id, thread_id=_THREAD, status="pending", model_name=model_name, **scope_kwargs)
+    await store.update_run_completion(run_id, **completion, **scope_kwargs)
 
 
 _RUN_FIXTURES = [
@@ -322,9 +323,9 @@ _RUN_FIXTURES = [
 ]
 
 
-async def _seed_all(store) -> None:
+async def _seed_all(store, *, scope=None) -> None:
     for fix in _RUN_FIXTURES:
-        await _seed_run(store, run_id=fix["run_id"], model_name=fix["model_name"], completion=fix["completion"])
+        await _seed_run(store, run_id=fix["run_id"], model_name=fix["model_name"], completion=fix["completion"], scope=scope)
 
 
 def _assert_aggregate_shape(agg: dict) -> None:
@@ -359,28 +360,29 @@ async def test_memory_store_by_model_invariant_and_fallback():
 
 
 async def _make_sql_repo(database_url):
-    from deerflow.config.database_config import DatabaseConfig
-    from deerflow.persistence.engine import get_session_factory, init_engine
+    from support.m4_private_threads import seed_m4_thread_database
 
-    await init_engine(DatabaseConfig(url=database_url))
-    return RunRepository(get_session_factory())
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
 
-
-async def _close_sql_engine() -> None:
-    from deerflow.persistence.engine import close_engine
-
-    await close_engine()
+    seed = await seed_m4_thread_database(database_url)
+    await ThreadMetaRepository(seed.factory).create(
+        _THREAD,
+        scope=seed.owner_a_scope,
+        agent_asset_id=seed.project_agent_id,
+        agent_scope="project",
+    )
+    return seed, RunRepository(seed.factory)
 
 
 @pytest.mark.anyio
 async def test_sql_store_by_model_invariant_and_fallback(migrated_postgres_database_url):
-    repo = await _make_sql_repo(migrated_postgres_database_url)
+    seed, repo = await _make_sql_repo(migrated_postgres_database_url)
     try:
-        await _seed_all(repo)
-        agg = await repo.aggregate_tokens_by_thread(_THREAD)
+        await _seed_all(repo, scope=seed.owner_a_scope)
+        agg = await repo.aggregate_tokens_by_thread(_THREAD, scope=seed.owner_a_scope)
         _assert_aggregate_shape(agg)
     finally:
-        await _close_sql_engine()
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio
@@ -388,26 +390,27 @@ async def test_memory_and_sql_stores_agree(migrated_postgres_database_url):
     """Memory and SQL stores must return byte-identical aggregations so
     behavior does not silently diverge based on database.backend choice."""
     mem = MemoryRunStore()
-    sql = await _make_sql_repo(migrated_postgres_database_url)
+    seed, sql = await _make_sql_repo(migrated_postgres_database_url)
     try:
         await _seed_all(mem)
-        await _seed_all(sql)
+        await _seed_all(sql, scope=seed.owner_a_scope)
         mem_agg = await mem.aggregate_tokens_by_thread(_THREAD)
-        sql_agg = await sql.aggregate_tokens_by_thread(_THREAD)
+        sql_agg = await sql.aggregate_tokens_by_thread(_THREAD, scope=seed.owner_a_scope)
         assert mem_agg == sql_agg
     finally:
-        await _close_sql_engine()
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio
 async def test_include_active_picks_up_running_progress_snapshot(migrated_postgres_database_url):
     """``update_run_progress`` must persist ``token_usage_by_model`` so the
     ``include_active=true`` view of /token-usage reflects in-flight tokens."""
-    repo = await _make_sql_repo(migrated_postgres_database_url)
+    seed, repo = await _make_sql_repo(migrated_postgres_database_url)
+    scope = seed.owner_a_scope
     try:
-        await repo.put("run-active", thread_id=_THREAD, status="pending")
+        await repo.put("run-active", thread_id=_THREAD, status="pending", scope=scope)
         # Transition to running so update_run_progress' status guard fires.
-        await repo.update_status("run-active", "running")
+        await repo.update_status("run-active", "running", scope=scope)
         await repo.update_run_progress(
             "run-active",
             total_tokens=70,
@@ -417,18 +420,19 @@ async def test_include_active_picks_up_running_progress_snapshot(migrated_postgr
             token_usage_by_model={
                 "lead-model": {"input_tokens": 40, "output_tokens": 30, "total_tokens": 70},
             },
+            scope=scope,
         )
         # Default (completed-only) excludes running runs.
-        completed_only = await repo.aggregate_tokens_by_thread(_THREAD)
+        completed_only = await repo.aggregate_tokens_by_thread(_THREAD, scope=scope)
         assert completed_only["total_runs"] == 0
         assert completed_only["by_model"] == {}
 
-        active = await repo.aggregate_tokens_by_thread(_THREAD, include_active=True)
+        active = await repo.aggregate_tokens_by_thread(_THREAD, include_active=True, scope=scope)
         assert active["total_runs"] == 1
         assert active["by_model"] == {"lead-model": {"tokens": 70, "runs": 1}}
         assert active["total_tokens"] == 70
     finally:
-        await _close_sql_engine()
+        await seed.engine.dispose()
 
 
 # ---------------------------------------------------------------------------

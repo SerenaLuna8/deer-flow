@@ -1,465 +1,238 @@
-"""Cross-user isolation tests — non-negotiable safety gate.
+"""Cross-owner isolation tests for final-schema private work.
 
-Mirrors TC-API-17..20 from backend/docs/AUTH_TEST_PLAN.md. A failure
-here means users can see each other's data; PR must not merge.
-
-Architecture note
------------------
-These tests bypass the HTTP layer and exercise the storage-layer
-owner filter directly by switching the ``user_context`` contextvar
-between two users. The safety property under test is:
-
-  After a repository write with user_id=A, a subsequent read with
-  user_id=B must not return the row, and vice versa.
-
-The HTTP layer is covered by test_auth_middleware.py, which proves
-that a request cookie reaches the ``set_current_user`` call. Together
-the two suites prove the full chain:
-
-  cookie → middleware → contextvar → repository → isolation
-
-Every test in this file opts out of the autouse contextvar fixture
-(``@pytest.mark.no_auto_user``) so it can set the contextvar to the
-specific users it cares about.
+Every product-path call carries an issued ``project_id + owner_user_id`` scope.
+The only unscoped read is exercised through the named trusted migration adapter.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
+from support.m4_private_threads import seed_m4_thread_database
 
-from deerflow.runtime.user_context import (
-    reset_current_user,
-    set_current_user,
-)
-
-USER_A = SimpleNamespace(id="user-a", email="a@test.local")
-USER_B = SimpleNamespace(id="user-b", email="b@test.local")
+from deerflow.persistence.feedback import FeedbackRepository
+from deerflow.persistence.run import RunRepository
+from deerflow.persistence.thread_meta import ThreadMetaRepository, TrustedUnscopedThreadMetaStore
+from deerflow.runtime.events.store.db import DbRunEventStore
 
 
-async def _make_engines(database_url):
-    """Initialize the shared engine against a per-test PostgreSQL database.
-
-    Returns a cleanup coroutine the caller should await at the end.
-    """
-    from deerflow.config.database_config import DatabaseConfig
-    from deerflow.persistence.engine import close_engine, init_engine
-
-    await init_engine(DatabaseConfig(url=database_url))
-    return close_engine
-
-
-def _as_user(user):
-    """Context manager-like helper that set/reset the contextvar."""
-
-    class _Ctx:
-        def __enter__(self):
-            self._token = set_current_user(user)
-            return user
-
-        def __exit__(self, *exc):
-            reset_current_user(self._token)
-
-    return _Ctx()
-
-
-# ── TC-API-17 — threads_meta isolation ────────────────────────────────────
+async def _seed_private_data(database_url):
+    seed = await seed_m4_thread_database(database_url)
+    thread_repo = ThreadMetaRepository(seed.factory)
+    run_repo = RunRepository(seed.factory)
+    for thread_id, scope in (
+        ("t-alpha", seed.owner_a_scope),
+        ("t-beta", seed.owner_b_scope),
+    ):
+        await thread_repo.create(
+            thread_id,
+            display_name=f"{thread_id} private thread",
+            scope=scope,
+            agent_asset_id=seed.project_agent_id,
+            agent_scope="project",
+        )
+    for run_id, thread_id, scope in (
+        ("run-a1", "t-alpha", seed.owner_a_scope),
+        ("run-a2", "t-alpha", seed.owner_a_scope),
+        ("run-b1", "t-beta", seed.owner_b_scope),
+    ):
+        await run_repo.put(run_id, thread_id=thread_id, scope=scope)
+    return seed
 
 
 @pytest.mark.anyio
-@pytest.mark.no_auto_user
 async def test_thread_meta_cross_user_isolation(migrated_postgres_database_url):
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.thread_meta import ThreadMetaRepository
-
-    cleanup = await _make_engines(migrated_postgres_database_url)
+    seed = await _seed_private_data(migrated_postgres_database_url)
     try:
-        repo = ThreadMetaRepository(get_session_factory())
+        repo = ThreadMetaRepository(seed.factory)
+        a_view = await repo.get("t-alpha", scope=seed.owner_a_scope)
+        assert a_view is not None
+        assert a_view["display_name"] == "t-alpha private thread"
+        assert await repo.get("t-beta", scope=seed.owner_a_scope) is None
+        assert [row["thread_id"] for row in await repo.search(scope=seed.owner_a_scope)] == ["t-alpha"]
 
-        # User A creates a thread.
-        with _as_user(USER_A):
-            await repo.create("t-alpha", display_name="A's private thread")
-
-        # User B creates a thread.
-        with _as_user(USER_B):
-            await repo.create("t-beta", display_name="B's private thread")
-
-        # User A must see only A's thread.
-        with _as_user(USER_A):
-            a_view = await repo.get("t-alpha")
-            assert a_view is not None
-            assert a_view["display_name"] == "A's private thread"
-
-            # CRITICAL: User A must NOT see B's thread.
-            leaked = await repo.get("t-beta")
-            assert leaked is None, f"User A leaked User B's thread: {leaked}"
-
-            # Search should only return A's threads.
-            results = await repo.search()
-            assert [r["thread_id"] for r in results] == ["t-alpha"]
-
-        # User B must see only B's thread.
-        with _as_user(USER_B):
-            b_view = await repo.get("t-beta")
-            assert b_view is not None
-            assert b_view["display_name"] == "B's private thread"
-
-            leaked = await repo.get("t-alpha")
-            assert leaked is None, f"User B leaked User A's thread: {leaked}"
-
-            results = await repo.search()
-            assert [r["thread_id"] for r in results] == ["t-beta"]
+        b_view = await repo.get("t-beta", scope=seed.owner_b_scope)
+        assert b_view is not None
+        assert b_view["display_name"] == "t-beta private thread"
+        assert await repo.get("t-alpha", scope=seed.owner_b_scope) is None
+        assert [row["thread_id"] for row in await repo.search(scope=seed.owner_b_scope)] == ["t-beta"]
     finally:
-        await cleanup()
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio
-@pytest.mark.no_auto_user
 async def test_thread_meta_cross_user_mutation_denied(migrated_postgres_database_url):
-    """User B cannot update or delete a thread owned by User A."""
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.thread_meta import ThreadMetaRepository
-
-    cleanup = await _make_engines(migrated_postgres_database_url)
+    seed = await _seed_private_data(migrated_postgres_database_url)
     try:
-        repo = ThreadMetaRepository(get_session_factory())
+        repo = ThreadMetaRepository(seed.factory)
+        await repo.update_display_name("t-alpha", "hacked", scope=seed.owner_b_scope)
+        row = await repo.get("t-alpha", scope=seed.owner_a_scope)
+        assert row is not None
+        assert row["display_name"] == "t-alpha private thread"
 
-        with _as_user(USER_A):
-            await repo.create("t-alpha", display_name="original")
-
-        # User B tries to rename A's thread — must be a no-op.
-        with _as_user(USER_B):
-            await repo.update_display_name("t-alpha", "hacked")
-
-        # Verify the row is unchanged from A's perspective.
-        with _as_user(USER_A):
-            row = await repo.get("t-alpha")
-            assert row is not None
-            assert row["display_name"] == "original"
-
-        # User B tries to delete A's thread — must be a no-op.
-        with _as_user(USER_B):
-            await repo.delete("t-alpha")
-
-        # A's thread still exists.
-        with _as_user(USER_A):
-            row = await repo.get("t-alpha")
-            assert row is not None
+        await repo.delete("t-alpha", scope=seed.owner_b_scope)
+        assert await repo.get("t-alpha", scope=seed.owner_a_scope) is not None
     finally:
-        await cleanup()
-
-
-# ── TC-API-18 — runs isolation ────────────────────────────────────────────
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio
-@pytest.mark.no_auto_user
 async def test_runs_cross_user_isolation(migrated_postgres_database_url):
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.run import RunRepository
-
-    cleanup = await _make_engines(migrated_postgres_database_url)
+    seed = await _seed_private_data(migrated_postgres_database_url)
     try:
-        repo = RunRepository(get_session_factory())
+        repo = RunRepository(seed.factory)
+        assert await repo.get("run-a1", scope=seed.owner_a_scope) is not None
+        assert await repo.get("run-b1", scope=seed.owner_a_scope) is None
+        a_runs = await repo.list_by_thread("t-alpha", scope=seed.owner_a_scope)
+        assert {row["run_id"] for row in a_runs} == {"run-a1", "run-a2"}
+        assert await repo.list_by_thread("t-beta", scope=seed.owner_a_scope) == []
 
-        with _as_user(USER_A):
-            await repo.put("run-a1", thread_id="t-alpha")
-            await repo.put("run-a2", thread_id="t-alpha")
-
-        with _as_user(USER_B):
-            await repo.put("run-b1", thread_id="t-beta")
-
-        # User A must see only A's runs.
-        with _as_user(USER_A):
-            r = await repo.get("run-a1")
-            assert r is not None
-            assert r["run_id"] == "run-a1"
-
-            leaked = await repo.get("run-b1")
-            assert leaked is None, "User A leaked User B's run"
-
-            a_runs = await repo.list_by_thread("t-alpha")
-            assert {r["run_id"] for r in a_runs} == {"run-a1", "run-a2"}
-
-            # Listing B's thread from A's perspective: empty
-            empty = await repo.list_by_thread("t-beta")
-            assert empty == []
-
-        # User B must see only B's runs.
-        with _as_user(USER_B):
-            leaked = await repo.get("run-a1")
-            assert leaked is None, "User B leaked User A's run"
-
-            b_runs = await repo.list_by_thread("t-beta")
-            assert [r["run_id"] for r in b_runs] == ["run-b1"]
+        assert await repo.get("run-a1", scope=seed.owner_b_scope) is None
+        b_runs = await repo.list_by_thread("t-beta", scope=seed.owner_b_scope)
+        assert [row["run_id"] for row in b_runs] == ["run-b1"]
     finally:
-        await cleanup()
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio
-@pytest.mark.no_auto_user
 async def test_runs_cross_user_delete_denied(migrated_postgres_database_url):
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.run import RunRepository
-
-    cleanup = await _make_engines(migrated_postgres_database_url)
+    seed = await _seed_private_data(migrated_postgres_database_url)
     try:
-        repo = RunRepository(get_session_factory())
-
-        with _as_user(USER_A):
-            await repo.put("run-a1", thread_id="t-alpha")
-
-        # User B tries to delete A's run — no-op.
-        with _as_user(USER_B):
-            await repo.delete("run-a1")
-
-        # A's run still exists.
-        with _as_user(USER_A):
-            row = await repo.get("run-a1")
-            assert row is not None
+        repo = RunRepository(seed.factory)
+        await repo.delete("run-a1", scope=seed.owner_b_scope)
+        assert await repo.get("run-a1", scope=seed.owner_a_scope) is not None
     finally:
-        await cleanup()
-
-
-# ── TC-API-19 — run_events isolation (CRITICAL: content leak) ─────────────
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio
-@pytest.mark.no_auto_user
 async def test_run_events_cross_user_isolation(migrated_postgres_database_url):
-    """run_events holds raw conversation content — most sensitive leak vector."""
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.runtime.events.store.db import DbRunEventStore
-
-    cleanup = await _make_engines(migrated_postgres_database_url)
+    """Conversation content never crosses the explicit owner boundary."""
+    seed = await _seed_private_data(migrated_postgres_database_url)
     try:
-        store = DbRunEventStore(get_session_factory())
-
-        with _as_user(USER_A):
+        store = DbRunEventStore(seed.factory)
+        for event_type, content in (
+            ("human_message", "User A private question"),
+            ("ai_message", "User A private answer"),
+        ):
             await store.put(
                 thread_id="t-alpha",
                 run_id="run-a1",
-                event_type="human_message",
+                event_type=event_type,
                 category="message",
-                content="User A private question",
+                content=content,
+                scope=seed.owner_a_scope,
             )
-            await store.put(
-                thread_id="t-alpha",
-                run_id="run-a1",
-                event_type="ai_message",
-                category="message",
-                content="User A private answer",
-            )
+        await store.put(
+            thread_id="t-beta",
+            run_id="run-b1",
+            event_type="human_message",
+            category="message",
+            content="User B private question",
+            scope=seed.owner_b_scope,
+        )
 
-        with _as_user(USER_B):
-            await store.put(
-                thread_id="t-beta",
-                run_id="run-b1",
-                event_type="human_message",
-                category="message",
-                content="User B private question",
-            )
+        a_contents = [row["content"] for row in await store.list_messages("t-alpha", scope=seed.owner_a_scope)]
+        assert a_contents == ["User A private question", "User A private answer"]
+        assert await store.list_messages("t-beta", scope=seed.owner_a_scope) == []
+        assert await store.list_events("t-beta", "run-b1", scope=seed.owner_a_scope) == []
+        assert await store.count_messages("t-beta", scope=seed.owner_a_scope) == 0
 
-        # User A must see only A's events — CRITICAL.
-        with _as_user(USER_A):
-            msgs = await store.list_messages("t-alpha")
-            contents = [m["content"] for m in msgs]
-            assert "User A private question" in contents
-            assert "User A private answer" in contents
-            # CRITICAL: User B's content must not appear.
-            assert "User B private question" not in contents
-
-            # Attempt to read B's thread by guessing thread_id.
-            leaked = await store.list_messages("t-beta")
-            assert leaked == [], f"User A leaked User B's messages: {leaked}"
-
-            leaked_events = await store.list_events("t-beta", "run-b1")
-            assert leaked_events == [], "User A leaked User B's events"
-
-            # count_messages must also be zero for B's thread from A's view.
-            count = await store.count_messages("t-beta")
-            assert count == 0
-
-        # User B must see only B's events.
-        with _as_user(USER_B):
-            msgs = await store.list_messages("t-beta")
-            contents = [m["content"] for m in msgs]
-            assert "User B private question" in contents
-            assert "User A private question" not in contents
-            assert "User A private answer" not in contents
-
-            count = await store.count_messages("t-alpha")
-            assert count == 0
+        b_contents = [row["content"] for row in await store.list_messages("t-beta", scope=seed.owner_b_scope)]
+        assert b_contents == ["User B private question"]
+        assert await store.count_messages("t-alpha", scope=seed.owner_b_scope) == 0
     finally:
-        await cleanup()
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio
-@pytest.mark.no_auto_user
 async def test_run_events_cross_user_delete_denied(migrated_postgres_database_url):
-    """User B cannot delete User A's event stream."""
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.runtime.events.store.db import DbRunEventStore
-
-    cleanup = await _make_engines(migrated_postgres_database_url)
+    seed = await _seed_private_data(migrated_postgres_database_url)
     try:
-        store = DbRunEventStore(get_session_factory())
-
-        with _as_user(USER_A):
-            await store.put(
-                thread_id="t-alpha",
-                run_id="run-a1",
-                event_type="human_message",
-                category="message",
-                content="hello",
-            )
-
-        # User B tries to wipe A's thread events.
-        with _as_user(USER_B):
-            removed = await store.delete_by_thread("t-alpha")
-            assert removed == 0, f"User B deleted {removed} of User A's events"
-
-        # A's events still exist.
-        with _as_user(USER_A):
-            count = await store.count_messages("t-alpha")
-            assert count == 1
+        store = DbRunEventStore(seed.factory)
+        await store.put(
+            thread_id="t-alpha",
+            run_id="run-a1",
+            event_type="human_message",
+            category="message",
+            content="hello",
+            scope=seed.owner_a_scope,
+        )
+        assert await store.delete_by_thread("t-alpha", scope=seed.owner_b_scope) == 0
+        assert await store.count_messages("t-alpha", scope=seed.owner_a_scope) == 1
     finally:
-        await cleanup()
-
-
-# ── TC-API-20 — feedback isolation ────────────────────────────────────────
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio
-@pytest.mark.no_auto_user
 async def test_feedback_cross_user_isolation(migrated_postgres_database_url):
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.feedback import FeedbackRepository
-
-    cleanup = await _make_engines(migrated_postgres_database_url)
+    seed = await _seed_private_data(migrated_postgres_database_url)
     try:
-        repo = FeedbackRepository(get_session_factory())
+        repo = FeedbackRepository(seed.factory)
+        a_feedback = await repo.create(
+            run_id="run-a1",
+            thread_id="t-alpha",
+            rating=1,
+            comment="A liked this",
+            scope=seed.owner_a_scope,
+        )
+        b_feedback = await repo.create(
+            run_id="run-b1",
+            thread_id="t-beta",
+            rating=-1,
+            comment="B disliked this",
+            scope=seed.owner_b_scope,
+        )
 
-        # User A submits positive feedback.
-        with _as_user(USER_A):
-            a_feedback = await repo.create(
-                run_id="run-a1",
-                thread_id="t-alpha",
-                rating=1,
-                comment="A liked this",
-            )
-
-        # User B submits negative feedback.
-        with _as_user(USER_B):
-            b_feedback = await repo.create(
-                run_id="run-b1",
-                thread_id="t-beta",
-                rating=-1,
-                comment="B disliked this",
-            )
-
-        # User A must see only A's feedback.
-        with _as_user(USER_A):
-            retrieved = await repo.get(a_feedback["feedback_id"])
-            assert retrieved is not None
-            assert retrieved["comment"] == "A liked this"
-
-            # CRITICAL: cannot read B's feedback by id.
-            leaked = await repo.get(b_feedback["feedback_id"])
-            assert leaked is None, "User A leaked User B's feedback"
-
-            # list_by_run for B's run must be empty.
-            empty = await repo.list_by_run("t-beta", "run-b1")
-            assert empty == []
-
-        # User B must see only B's feedback.
-        with _as_user(USER_B):
-            leaked = await repo.get(a_feedback["feedback_id"])
-            assert leaked is None, "User B leaked User A's feedback"
-
-            b_list = await repo.list_by_run("t-beta", "run-b1")
-            assert len(b_list) == 1
-            assert b_list[0]["comment"] == "B disliked this"
+        assert (await repo.get(a_feedback["feedback_id"], scope=seed.owner_a_scope))["comment"] == "A liked this"
+        assert await repo.get(b_feedback["feedback_id"], scope=seed.owner_a_scope) is None
+        assert await repo.list_by_run("t-beta", "run-b1", scope=seed.owner_a_scope) == []
+        assert await repo.get(a_feedback["feedback_id"], scope=seed.owner_b_scope) is None
+        b_list = await repo.list_by_run("t-beta", "run-b1", scope=seed.owner_b_scope)
+        assert [row["comment"] for row in b_list] == ["B disliked this"]
     finally:
-        await cleanup()
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio
-@pytest.mark.no_auto_user
 async def test_feedback_cross_user_delete_denied(migrated_postgres_database_url):
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.feedback import FeedbackRepository
-
-    cleanup = await _make_engines(migrated_postgres_database_url)
+    seed = await _seed_private_data(migrated_postgres_database_url)
     try:
-        repo = FeedbackRepository(get_session_factory())
-
-        with _as_user(USER_A):
-            fb = await repo.create(run_id="run-a1", thread_id="t-alpha", rating=1)
-
-        # User B tries to delete A's feedback — must return False (no-op).
-        with _as_user(USER_B):
-            deleted = await repo.delete(fb["feedback_id"])
-            assert deleted is False, "User B deleted User A's feedback"
-
-        # A's feedback still retrievable.
-        with _as_user(USER_A):
-            row = await repo.get(fb["feedback_id"])
-            assert row is not None
+        repo = FeedbackRepository(seed.factory)
+        feedback = await repo.create(
+            run_id="run-a1",
+            thread_id="t-alpha",
+            rating=1,
+            scope=seed.owner_a_scope,
+        )
+        assert await repo.delete(feedback["feedback_id"], scope=seed.owner_b_scope) is False
+        assert await repo.get(feedback["feedback_id"], scope=seed.owner_a_scope) is not None
     finally:
-        await cleanup()
+        await seed.engine.dispose()
 
 
-# ── Regression: AUTO sentinel without contextvar must raise ───────────────
+@pytest.mark.anyio
+async def test_product_repositories_without_scope_fail_closed(migrated_postgres_database_url):
+    seed = await _seed_private_data(migrated_postgres_database_url)
+    try:
+        run_repo = RunRepository(seed.factory)
+        event_store = DbRunEventStore(seed.factory)
+        feedback_repo = FeedbackRepository(seed.factory)
+        assert await run_repo.get("run-a1") is None
+        assert await run_repo.list_by_thread("t-alpha") == []
+        assert await event_store.list_messages("t-alpha") == []
+        assert await feedback_repo.get("anything") is None
+    finally:
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
-async def test_repository_without_context_raises(migrated_postgres_database_url):
-    """Defense-in-depth: calling repo methods without a user context errors."""
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.thread_meta import ThreadMetaRepository
-
-    cleanup = await _make_engines(migrated_postgres_database_url)
+async def test_trusted_unscoped_adapter_is_explicit(migrated_postgres_database_url):
+    """Cutover code can scan all rows only through the named trusted adapter."""
+    seed = await _seed_private_data(migrated_postgres_database_url)
     try:
-        repo = ThreadMetaRepository(get_session_factory())
-        # Contextvar is explicitly unset under @pytest.mark.no_auto_user.
-        with pytest.raises(RuntimeError, match="no user context is set"):
-            await repo.get("anything")
+        trusted = TrustedUnscopedThreadMetaStore(ThreadMetaRepository(seed.factory))
+        rows = await trusted.search(user_id=None)
+        assert {row["thread_id"] for row in rows} == {"t-alpha", "t-beta"}
     finally:
-        await cleanup()
-
-
-# ── Escape hatch: explicit user_id=None bypasses filter (for migration) ──
-
-
-@pytest.mark.anyio
-@pytest.mark.no_auto_user
-async def test_explicit_none_bypasses_filter(migrated_postgres_database_url):
-    """Migration scripts pass user_id=None to see all rows regardless of owner."""
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.thread_meta import ThreadMetaRepository
-
-    cleanup = await _make_engines(migrated_postgres_database_url)
-    try:
-        repo = ThreadMetaRepository(get_session_factory())
-
-        # Seed data as two different users.
-        with _as_user(USER_A):
-            await repo.create("t-alpha")
-        with _as_user(USER_B):
-            await repo.create("t-beta")
-
-        # Migration-style read: no contextvar, explicit None bypass.
-        all_rows = await repo.search(user_id=None)
-        thread_ids = {r["thread_id"] for r in all_rows}
-        assert thread_ids == {"t-alpha", "t-beta"}
-
-        # Explicit get with None does not apply the filter either.
-        row_a = await repo.get("t-alpha", user_id=None)
-        assert row_a is not None
-        row_b = await repo.get("t-beta", user_id=None)
-        assert row_b is not None
-    finally:
-        await cleanup()
+        await seed.engine.dispose()
