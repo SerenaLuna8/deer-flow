@@ -113,6 +113,9 @@ M3 不提供运行或开始对话入口。旧 `/workspace/{agents,skills,tools}`
 的 loading/error 必须与空列表区分，并提供安全错误文案和重试。secret-bearing 字段不得进入 TanStack
 cache、响应或错误；用户在 password control 中输入的值提交后必须立即清空，不得继续在 DOM 中
 残留或被 UI 回显。
+M3 的前端交付到此为止：`/admin/assets`、四类项目资产页和旧入口只读 catalog 已接入，但
+项目 Thread、run、file、Memory、automation 仍没有项目与 owner 双重隔离；不得从这些页面增加
+运行入口或把当前界面描述为完整多用户 SaaS。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie

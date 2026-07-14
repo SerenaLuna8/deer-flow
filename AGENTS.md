@@ -67,12 +67,12 @@ Persistence configuration is PostgreSQL-only: `database.url` resolves from
 `checkpointer` section is rejected. ORM sessions, schema bootstrap, LangGraph
 checkpointers, and LangGraph stores are all PostgreSQL implementations; runtime
 startup validates but never creates the target database.
-M1/M2 不使用 PostgreSQL RLS。应用授权依赖认证身份、不可变 `ProjectContext` 和强制作用域
+M1/M2/M3 不使用 PostgreSQL RLS。应用授权依赖认证身份、不可变 `ProjectContext` 和强制作用域
 repository；应用连接使用普通非 superuser role，只有显式 setup/migration 脚本属于 trusted
 operations。登录后 `/workspace` 是没有项目级侧栏的多项目卡片工作空间；进入
 `/projects/{project_slug}` 后才显示项目菜单。M2 邀请只生成一次性 fragment 链接，不发送
 邮件；成员退出/移除和项目删除只记录 30 天窗口，不物理清除私有或项目数据。Thread、run、
-file、memory、automation 尚未完成项目与 owner 双重隔离，因此 M2 仍不能作为完整多用户
+file、Memory、automation 尚未完成项目与 owner 双重隔离，因此 M3 仍不能作为完整多用户
 SaaS 发布。
 
 Scheduled-task note:
@@ -147,7 +147,8 @@ These apply repo-wide; module guides own the module-specific detail.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **PostgreSQL release gate** — `.github/workflows/project-foundation-postgres-tests.yml`
-  固定运行 M1 cutover、M1 isolation 和 M2 governance 三个真实 PostgreSQL 集成文件；每个
+  固定运行 M1 cutover、M1 isolation、M2 governance 和 M3 shared-assets 四个真实 PostgreSQL
+  集成文件；每个
   测试使用临时 `deerflow_test_*` 数据库。缺少 `POSTGRES_TEST_URL` 只能在本地明确 skip，
   CI 必须在进入 pytest 前硬失败。
 - **M3 asset cutover 运维** — `migrate-assets` 扫描 repo 默认/system Agent、`skills/public`、

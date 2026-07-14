@@ -329,6 +329,11 @@ submit/approve 流程发布；Credential 页面不提供明文查看或复制，
 相同 eligibility 口径的 envelope 聚合状态。该状态接口只返回 eligible/current/pending 数量
 与状态，不暴露 key ID 或 envelope 存储字段。
 
+进入项目后，`/projects/{project_slug}/{agents,skills,mcp,credentials}` 分别展示系统资产与项目
+资产；系统资产只允许按 capability 固定、升级、回退或停用 binding，项目资产保留独立版本历史。
+旧 `/workspace/{agents,skills,tools}` 仅作为 PostgreSQL 系统 catalog 的只读兼容入口，不再承担
+文件配置式写入。所有 M3 项目页都不提供运行或开始对话入口。
+
 完成 catalog cutover 后，系统 Agent、Skill 与 MCP 的运行时和旧版 GET 接口只读取 PostgreSQL
 已发布版本；旧文件即使仍存在也不会回退使用。旧版文件写接口统一返回
 `409 ASSET_CATALOG_CUTOVER`，请改用 `/admin/assets` 管理系统资产。
@@ -338,8 +343,9 @@ M3 的兼容运行不会构造项目运行身份：credential materialization �
 
 #### M3 共享资产迁移与 credential 轮换
 
-迁移不会随应用启动自动执行。先设置 `DATABASE_URL` 与 credential keyring，先 dry-run 核对脱敏
-inventory，再进入维护窗口执行：
+迁移不会随应用启动自动执行。`DATABASE_URL` 指向资产权威 PostgreSQL 数据库；credential keyring
+只从以下两个环境变量读取，数据库只保存带 key ID 的 AES-GCM envelope，不保存主密钥。先 dry-run
+核对脱敏 inventory，再进入维护窗口执行：
 
 ```bash
 export DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID='m3-current'

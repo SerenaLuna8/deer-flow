@@ -1,4 +1,4 @@
-name: Project Foundation PostgreSQL Gates
+name: M1, M2 and M3 PostgreSQL Gates
 
 on:
   push:
@@ -25,6 +25,7 @@ permissions:
 
 jobs:
   postgres-release-gates:
+    name: M1, M2 and M3 PostgreSQL gates
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -93,13 +94,14 @@ jobs:
             exit 1
           fi
 
-      - name: Run M1 and M2 PostgreSQL isolation gates
+      - name: Run M1, M2 and M3 PostgreSQL isolation gates
         working-directory: backend
         run: >-
           uv run pytest
           tests/integration/test_m1_postgres_cutover.py
           tests/integration/test_project_isolation_postgres.py
           tests/integration/test_m2_project_governance_postgres.py
+          tests/integration/test_m3_shared_assets_postgres.py
           -q
 
       - name: Run PostgreSQL scripts and project lint gates

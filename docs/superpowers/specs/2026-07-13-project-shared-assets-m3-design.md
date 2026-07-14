@@ -1,7 +1,7 @@
 # M3 系统与项目共享资产专项设计
 
 - 日期：2026-07-13
-- 状态：已确认，待实施
+- 状态：已实施并验证
 - 对应总体设计：`2026-07-12-project-first-saas-design.md`
 - 里程碑：M3 — Agent、Skill、MCP version 与 credential approval
 - 数据库：PostgreSQL-only
@@ -318,11 +318,14 @@ project -> asset -> asset version -> credential -> credential version -> grant
 - `/{kind}/{asset_id}/archive`
 - `/{kind}/{asset_id}/suspend`
 - `/credentials/{credential_id}/versions`
-- `/credentials/{credential_id}/rotate`
+- `/credentials/{credential_id}/replace`
+- `/credentials/{credential_id}/revoke`
+- `/credentials/rotation-status`（仅系统资产前缀）
 
 项目共享资产 override 使用独立前缀 `/api/admin/projects/{project_id}/assets`，复用对应 Agent、Skill、MCP 和 credential/grant 操作，不伪装成项目成员请求。
 
-所有平台管理端点只接受 `system_admin`。项目 override 响应必须返回 `actor_scope=system_override`。
+所有平台管理端点只接受 `system_admin`。项目 override 使用独立治理 context，不伪装 membership，
+响应继续使用与系统资产相同的严格脱敏 read model。
 
 ### 10.2 项目 API
 
@@ -377,6 +380,7 @@ resolve_project_asset_snapshot(
 
 ```python
 materialize_mcp_secrets(
+    context: ProjectContext,
     resolved: ResolvedMcpSnapshot,
 ) -> MaterializedMcpSecrets
 ```
@@ -436,6 +440,14 @@ M3 页面不提供运行按钮。现有 legacy `/workspace/agents`、`/workspace
 
 keyring JSON 的 value 必须解码为 32-byte key。配置日志只报告 key ID 数量和 active key ID，不打印 key、长度错误原值或 JSON。
 
+`DATABASE_URL` 指向 credential envelope 与资产 catalog 的权威 PostgreSQL 数据库；主密钥只存在于
+进程环境，不写入数据库或仓库。运维环境必须同时配置：
+
+```bash
+export DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID='m3-current'
+export DEER_FLOW_CREDENTIAL_KEYRING_JSON='{"m3-current":"<32-byte-key-base64>"}'
+```
+
 显式脚本：`make rotate-credentials`，支持：
 
 - `--dry-run`
@@ -448,9 +460,19 @@ keyring JSON 的 value 必须解码为 32-byte key。配置日志只报告 key I
 
 rotation 为同一 credential version 新建 envelope；验证成功后切换 active envelope。旧 envelope 在确认窗口内保留为 retired，不参与正常解析。未知 key ID、认证失败或 payload schema 失败统一安全失败，不自动尝试猜测。
 
+```bash
+make rotate-credentials ARGS="--dry-run --key-id m3-next --batch-size 100"
+make rotate-credentials ARGS="--execute --key-id m3-next --batch-size 100"
+```
+
 ## 15. 资产迁移与 cutover
 
 显式命令：`make migrate-assets`。
+
+```bash
+make migrate-assets ARGS="--dry-run --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
+make migrate-assets ARGS="--execute --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
+```
 
 ### 15.1 来源
 

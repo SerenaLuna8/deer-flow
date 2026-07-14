@@ -103,7 +103,10 @@ async function json(route: Route, body: unknown, status = 200) {
   });
 }
 
-async function mockAdminAssets(page: Page) {
+async function mockAdminAssets(
+  page: Page,
+  { seedCredential = false }: { seedCredential?: boolean } = {},
+) {
   const mcpWorkflowRequests: {
     submit: { expected_asset_version: number } | null;
     approve: {
@@ -119,8 +122,37 @@ async function mockAdminAssets(page: Page) {
   let mcpState = structuredClone(mcp);
   let workflowStatus: McpVersion["workflow_status"] = "draft";
   let directMcpVersion: McpVersion | null = null;
-  let credential: AdminCredential | null = null;
-  let credentialVersions: CredentialVersion[] = [];
+  let credential: AdminCredential | null = seedCredential
+    ? {
+        id: CREDENTIAL_ID,
+        scope: "system",
+        project_id: null,
+        name: "github-token",
+        display_name: "GitHub Token",
+        credential_type: "token",
+        status: "active",
+        current_version_id: "20000000-0000-4000-8000-000000000005",
+        version: 1,
+        created_by_user_id: "system-admin",
+        created_at: "2026-07-13T09:00:00+00:00",
+        updated_at: "2026-07-13T09:00:00+00:00",
+      }
+    : null;
+  let credentialVersions: CredentialVersion[] = seedCredential
+    ? [
+        {
+          id: "20000000-0000-4000-8000-000000000005",
+          credential_id: CREDENTIAL_ID,
+          version_number: 1,
+          status: "active",
+          payload_schema_version: 1,
+          payload_schema: { headers: ["Authorization"] },
+          supersedes_version_id: null,
+          created_by_user_id: "system-admin",
+          created_at: "2026-07-13T09:00:00+00:00",
+        },
+      ]
+    : [];
 
   await page.route(/\/api\/admin\/assets(?:\/.*)?$/, async (route) => {
     const request = route.request();
@@ -569,7 +601,9 @@ async function mockAdminAssets(page: Page) {
 test("system admin creates an asset and MCP credential slots require approval", async ({
   page,
 }) => {
-  const mcpWorkflowRequests = await mockAdminAssets(page);
+  const mcpWorkflowRequests = await mockAdminAssets(page, {
+    seedCredential: true,
+  });
 
   await page.goto("/admin/assets");
   await expect(page).toHaveURL(/\/admin\/assets\/agents$/);
@@ -600,8 +634,8 @@ test("system admin creates an asset and MCP credential slots require approval", 
   await mcpCard.getByRole("button", { name: "批准并发布" }).click();
   const approveDialog = page.getByRole("dialog", { name: "批准 MCP 版本" });
   await approveDialog
-    .getByLabel("github-token Credential 版本 ID")
-    .fill("20000000-0000-4000-8000-000000000005");
+    .getByLabel("github-token Credential")
+    .selectOption("20000000-0000-4000-8000-000000000005");
   await approveDialog.getByRole("button", { name: "批准并发布" }).click();
   await expect(mcpCard.getByText("已发布", { exact: true })).toBeVisible();
   await expect(mcpCard.getByRole("button", { name: "发布版本" })).toHaveCount(

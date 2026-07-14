@@ -129,7 +129,7 @@ async def test_m2_schema_has_governance_constraints(
         } <= _foreign_key_targets(invitation_fks)
         pending_email_index = next(index for index in invitation_indexes if index["name"] == "uq_project_invitations_pending_email")
         assert pending_email_index["unique"] is True
-        assert version == "0006_project_governance"
+        assert version == "0007_project_shared_assets"
         assert "project_invitations" in Base.metadata.tables
         assert persistence_models.ProjectInvitationRow.__tablename__ == ("project_invitations")
         assert persistence_models.ProjectInvitationRateLimitRow.__tablename__ == ("project_invitation_rate_limits")
@@ -179,7 +179,7 @@ async def test_m1_database_upgrades_to_m2_without_losing_project_data(
                 },
             )
 
-        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await asyncio.to_thread(command.upgrade, cfg, "0006_project_governance")
 
         async with engine.connect() as conn:
             project = (

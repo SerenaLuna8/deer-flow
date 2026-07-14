@@ -181,6 +181,31 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    覆盖，也不会创建或跳转 Thread。
    Thread、run、file、memory、automation 尚未完成项目与 owner 双重隔离，因此 M1 不能
    作为完整多用户 SaaS 发布；M2 完成项目治理后仍不能作为完整多用户 SaaS 发布。
+
+   M3 把 Agent、Skill、MCP 和 Credential 的系统级、项目级定义迁入 PostgreSQL。平台管理员
+   通过 `/admin/assets` 管理系统资产；进入项目后，
+   `/projects/<project_slug>/{agents,skills,mcp,credentials}` 分别显示系统资产与项目资产，系统
+   binding 固定到明确 version。旧 `/workspace/{agents,skills,tools}` 只保留 PostgreSQL 系统
+   catalog 的只读兼容视图。所有 M3 项目页都不提供运行或开始对话入口；项目 Thread、run、file、
+   Memory、automation 仍未完成项目与 owner 双重隔离，因此 M3 也不能作为完整多用户 SaaS 发布。
+
+   共享资产迁移和 credential 轮换只通过显式命令执行，不会在应用启动时自动运行。
+   `DATABASE_URL` 指向资产权威 PostgreSQL 数据库；主密钥只从环境变量读取，数据库仅保存
+   AES-GCM envelope：
+
+   ```bash
+   export DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID='m3-current'
+   export DEER_FLOW_CREDENTIAL_KEYRING_JSON='{"m3-current":"<32-byte-key-base64>"}'
+   make migrate-assets ARGS="--dry-run --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
+   make migrate-assets ARGS="--execute --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
+   make rotate-credentials ARGS="--dry-run --key-id m3-next --batch-size 100"
+   ```
+
+   `owner-map.json` 必须显式把项目来源映射到 active default project；未解析 owner、依赖或 scope
+   时迁移会 fail closed。轮换前 keyring 必须同时保留旧 key 与新的 32-byte key，并把目标
+   `m3-next` 设为 active；日志和报告只包含脱敏统计与 key ID，不输出 key material、明文、
+   ciphertext 或 nonce。
+
    为避免误删项目，项目表或成员关系表存在数据时，数据库会拒绝降级到 0004；必须先按
    运维方案迁出数据，不能依赖 downgrade 自动删除。
 

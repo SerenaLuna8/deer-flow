@@ -6,10 +6,13 @@ as a nested mapping). Each bundled skill is checked individually so the
 failure message identifies the exact file.
 """
 
+import mimetypes
 from pathlib import Path
 
 import pytest
 
+from app.shared_assets.models import SkillArchiveFile
+from app.shared_assets.skill_service import _analyze_skill_files
 from deerflow.skills.validation import _validate_skill_frontmatter
 
 SKILLS_PUBLIC_DIR = Path(__file__).resolve().parents[2] / "skills" / "public"
@@ -25,6 +28,27 @@ def test_bundled_skill_frontmatter_is_valid(skill_dir: Path) -> None:
     valid, msg, name = _validate_skill_frontmatter(skill_dir)
     assert valid, f"{skill_dir.relative_to(SKILLS_PUBLIC_DIR)}: {msg}"
     assert name, f"{skill_dir.relative_to(SKILLS_PUBLIC_DIR)}: no name extracted"
+
+
+@pytest.mark.parametrize(
+    "skill_dir",
+    BUNDLED_SKILL_DIRS,
+    ids=lambda p: str(p.relative_to(SKILLS_PUBLIC_DIR)),
+)
+def test_bundled_skill_is_importable_by_m3_catalog(skill_dir: Path) -> None:
+    files = tuple(
+        SkillArchiveFile(
+            path=path.relative_to(skill_dir).as_posix(),
+            content=path.read_bytes(),
+            media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        )
+        for path in sorted(skill_dir.rglob("*"))
+        if path.is_file()
+    )
+
+    preview = _analyze_skill_files(files, "bundled-skill-m3-import")
+
+    assert preview.files == files
 
 
 def test_skills_public_dir_has_skills() -> None:

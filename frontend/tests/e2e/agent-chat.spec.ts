@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import {
   handleRunStream,
@@ -14,16 +14,59 @@ const MOCK_AGENTS = [
   },
 ];
 
+const SYSTEM_AGENT = {
+  id: "10000000-0000-4000-8000-000000000001",
+  scope: "system",
+  project_id: null,
+  slug: "research-agent",
+  display_name: "Research Agent",
+  status: "active",
+  current_published_version_id: "10000000-0000-4000-8000-000000000002",
+  version: 1,
+  created_by_user_id: "system-admin",
+  created_at: "2026-07-13T00:00:00Z",
+  updated_at: "2026-07-13T00:00:00Z",
+};
+
+async function mockSystemAgentCatalog(page: Page) {
+  let requestCount = 0;
+  await page.route("**/api/assets/catalog/agents", async (route) => {
+    requestCount += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [SYSTEM_AGENT],
+        request_id: "catalog-agents",
+      }),
+    });
+  });
+  return () => requestCount;
+}
+
 test.describe("Agent chat", () => {
-  test("agent gallery page loads and shows agents", async ({ page }) => {
-    mockLangGraphAPI(page, { agents: MOCK_AGENTS });
+  test("legacy Agent gallery is a read-only system catalog for administrators", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+    const getRequestCount = await mockSystemAgentCatalog(page);
 
     await page.goto("/workspace/agents");
 
-    // The agent card should appear with the agent name
-    await expect(page.getByText("test-agent")).toBeVisible({
+    await expect(page.getByText("系统 Agent", { exact: true })).toBeVisible({
       timeout: 15_000,
     });
+    await expect(page.getByText(SYSTEM_AGENT.display_name)).toBeVisible();
+    await expect(page.getByText(SYSTEM_AGENT.slug)).toBeVisible();
+    await expect.poll(getRequestCount).toBe(1);
+
+    await expect(
+      page.getByRole("button", { name: /create|edit|enable/i }),
+    ).toHaveCount(0);
+    await expect(page.getByRole("switch")).toHaveCount(0);
+    await expect(
+      page.getByRole("link", { name: "前往平台资产管理" }),
+    ).toHaveAttribute("href", "/admin/assets");
   });
 
   test("agent chat page loads with input box", async ({ page }) => {

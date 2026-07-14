@@ -270,7 +270,7 @@ async def test_downgrade_with_project_data_fails_without_mutation(
             assert (await conn.execute(text("SELECT count(*) FROM projects"))).scalar_one() == 1
             assert (await conn.execute(text("SELECT count(*) FROM project_memberships"))).scalar_one() == int(include_membership)
             assert (await conn.execute(text("SELECT system_role FROM users WHERE id=:id"), {"id": user_id})).scalar_one() == "system_admin"
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0006_project_governance"
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0007_project_shared_assets"
     finally:
         await engine.dispose()
 
@@ -367,7 +367,7 @@ async def test_upgrade_validates_matching_not_valid_users_role_constraint(
             roles = (await conn.execute(text("SELECT system_role FROM users ORDER BY email"))).scalars().all()
             assert validated is True
             assert roles == ["system_admin", "user"]
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0006_project_governance"
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0007_project_shared_assets"
     finally:
         await engine.dispose()
 

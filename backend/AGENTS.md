@@ -705,12 +705,15 @@ digest 写 migration ledger；引用行保留原 source key，并以归一化后
 首次写被吸收 users ledger 前还必须确认目标库不存在其 legacy 原 id；若已存在且没有匹配
 的 `reconciled` ledger，users 事务立即回滚，禁止把既有目标用户静默吸收。
 
-**M1/M2 PostgreSQL 发布门禁**：`tests/integration/test_m1_postgres_cutover.py` 串联
+**M1/M2/M3 PostgreSQL 发布门禁**：`tests/integration/test_m1_postgres_cutover.py` 串联
 inventory、backup、0004→SQLite migration→head、完整 runtime schema、默认项目 bootstrap
 与来源不变性；`tests/integration/test_project_isolation_postgres.py` 验证跨项目/账户 API、
 `ProjectContext` 和 repository scope；`tests/integration/test_m2_project_governance_postgres.py`
 使用两个项目验证成员/邀请跨项目读取和 mutation 统一 404 且零写入，并发邀请只能成功兑换
-一次，双 Admin 并发降级不能绕过最后一名 active Admin 保护。三个文件只复用
+一次，双 Admin 并发降级不能绕过最后一名 active Admin 保护；
+`tests/integration/test_m3_shared_assets_postgres.py` 串联系统 catalog 发布、固定 binding、精确
+version resolver、MCP 审批隔离、跨项目 404、suspend 和 credential revoke fail-closed。
+四个文件只复用
 `POSTGRES_TEST_URL` 创建随机
 `deerflow_test_*` 数据库，缺变量才 skip，连接或清理失败必须 fail。CI 入口为
 `.github/workflows/project-foundation-postgres-tests.yml`，CI 缺少 `POSTGRES_TEST_URL` 时必须在

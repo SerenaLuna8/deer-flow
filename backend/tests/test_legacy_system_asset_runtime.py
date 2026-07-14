@@ -190,9 +190,11 @@ async def test_mcp_runtime_uses_database_definition_without_extensions_file() ->
 @pytest.mark.asyncio
 async def test_mcp_runtime_materializes_secret_once_only_for_client_construction() -> None:
     from deerflow.assets.catalog import set_asset_catalog_provider
+    from deerflow.mcp import cache
     from deerflow.mcp.client import build_servers_config
     from deerflow.mcp.tools import get_mcp_tools
 
+    cache.reset_mcp_tools_cache()
     secret = "one-construction-only"
     snapshot = _mcp_snapshot(credential_grant_ids=(uuid.uuid4(),))
     snapshot = replace(
@@ -257,8 +259,6 @@ async def test_mcp_runtime_materializes_secret_once_only_for_client_construction
     assert token_manager_type.call_args.args[0]["catalog-mcp"].client_secret == secret
     from_file.assert_not_called()
     assert secret not in repr(snapshot)
-    from deerflow.mcp import cache
-
     assert cache._mcp_tools_cache is None
 
 
