@@ -123,8 +123,11 @@ class PrivateThreadRepository:
         *,
         scope: PrivateResourceScope,
         thread_id: str,
+        lock: bool = False,
     ) -> PrivateThreadRecord | None:
         statement = select(ThreadMetaRow).where(*self._active_scope(scope, thread_id))
+        if lock:
+            statement = statement.with_for_update(of=ThreadMetaRow)
         row = (await self.session.execute(statement)).scalar_one_or_none()
         return None if row is None else self._record(row)
 
@@ -244,10 +247,19 @@ class PrivateThreadRepository:
         )
         await self.session.execute(statement)
 
-    async def compensate_create(
+    async def purge_compensated_create(
         self,
         *,
         scope: PrivateResourceScope,
         thread_id: str,
     ) -> None:
-        await self.session.execute(delete(ThreadMetaRow).where(*self._active_scope(scope, thread_id)))
+        project_id, owner_user_id = self._coordinates(scope)
+        await self.session.execute(
+            delete(ThreadMetaRow).where(
+                ThreadMetaRow.thread_id == thread_id,
+                ThreadMetaRow.project_id == project_id,
+                ThreadMetaRow.owner_user_id == owner_user_id,
+                ThreadMetaRow.deleted_at.is_not(None),
+                ThreadMetaRow.checkpoint_delete_status == "complete",
+            )
+        )

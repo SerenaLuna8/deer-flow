@@ -34,7 +34,10 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.utils import sanitize_log_param
 from app.private_work.context import strip_private_client_fields
+from app.private_work.error_mapping import private_work_http_exception
+from app.private_work.errors import PrivateWorkCutover
 from deerflow.config.app_config import get_app_config
+from deerflow.persistence.thread_meta import LegacyThreadCreateAuthorityUnavailable
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -56,6 +59,7 @@ from deerflow.runtime.user_context import (
     set_current_user,
     set_runtime_storage_user_id,
 )
+from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -768,14 +772,6 @@ async def start_run(
         assistant_id=body.assistant_id,
         client_fields_sanitized=True,
     )
-    await apply_checkpoint_to_run_config(
-        config,
-        body=body,
-        thread_id=thread_id,
-        request=request,
-        checkpoint_control=checkpoint_control,
-    )
-
     # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
     # The ``context`` field is a custom extension for the langgraph-compat layer
     # that carries agent configuration (model_name, thinking_enabled, etc.).
@@ -798,6 +794,54 @@ async def start_run(
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
+        # A run must never reach raw checkpoint validation, durable run
+        # admission, or graph launch without a final-schema authority row.
+        # Production intentionally has no guessed legacy project/Agent; until
+        # cutover supplies explicit authority, missing rows fail closed with a
+        # stable 409 instead of becoming cross-user raw state.
+        existing = await run_ctx.thread_store.get(thread_id)
+        created_authority = False
+        if existing is None and owner_user_id:
+            unscoped_existing = await run_ctx.thread_store.get(thread_id, user_id=None)
+            if unscoped_existing is not None:
+                if unscoped_existing.get("user_id") != owner_user_id:
+                    await run_ctx.thread_store.update_owner(
+                        thread_id,
+                        owner_user_id,
+                        user_id=None,
+                    )
+                existing = await run_ctx.thread_store.get(thread_id)
+        if existing is None:
+            try:
+                existing = await run_ctx.thread_store.create(
+                    thread_id,
+                    assistant_id=body.assistant_id,
+                    metadata=sanitized_metadata,
+                )
+                created_authority = True
+            except LegacyThreadCreateAuthorityUnavailable:
+                raise private_work_http_exception(PrivateWorkCutover(get_current_trace_id() or generate_trace_id())) from None
+
+        try:
+            await apply_checkpoint_to_run_config(
+                config,
+                body=body,
+                thread_id=thread_id,
+                request=request,
+                checkpoint_control=checkpoint_control,
+            )
+        except Exception:
+            if created_authority:
+                try:
+                    await run_ctx.thread_store.delete(thread_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to compensate thread authority for %s",
+                        sanitize_log_param(thread_id),
+                        exc_info=True,
+                    )
+            raise
+
         try:
             async with goal_thread_lock(thread_id):
                 record = await run_mgr.create_or_reject(
@@ -818,27 +862,12 @@ async def start_run(
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
 
-        # Upsert thread metadata so the thread appears in /threads/search,
-        # even for threads that were never explicitly created via POST /threads
-        # (e.g. stateless runs).
+        # Admission already required a durable authority row. Status remains a
+        # denormalized UI hint, so a status-only failure is non-fatal.
         try:
-            existing = await run_ctx.thread_store.get(thread_id)
-            if existing is None and owner_user_id:
-                unscoped_existing = await run_ctx.thread_store.get(thread_id, user_id=None)
-                if unscoped_existing is not None:
-                    if unscoped_existing.get("user_id") != owner_user_id:
-                        await run_ctx.thread_store.update_owner(thread_id, owner_user_id, user_id=None)
-                    existing = await run_ctx.thread_store.get(thread_id)
-            if existing is None:
-                await run_ctx.thread_store.create(
-                    thread_id,
-                    assistant_id=body.assistant_id,
-                    metadata=sanitized_metadata,
-                )
-            else:
-                await run_ctx.thread_store.update_status(thread_id, "running")
+            await run_ctx.thread_store.update_status(thread_id, "running")
         except Exception:
-            logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
+            logger.warning("Failed to update thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
         storage_context_token = None
         if runtime_user_id is not None:

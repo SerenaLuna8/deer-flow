@@ -1077,14 +1077,22 @@ create/get/search/check-access/update/delete SQL 必须把 `project_id`、`owner
 `TrustedUnscopedThreadMetaStore`，final schema 下 trusted create 还必须在 adapter 构造时给出
 project、Agent 和 membership-version authority，禁止猜默认 project/Agent。项目 checkpoint 只能从
 `ProjectScopedCheckpointer.for_context()` 取得；sync/async get/tuple/list/put/put-writes/delete 每次先
-重验 scoped Thread，写入服务端 `deerflow_private_scope={project_id, owner_user_id}` marker，读取和
-list 每项同时核验 thread ID 与 marker。删除顺序固定为先将 Thread 标记 deleted +
+按 project → membership → Thread 锁序取得 PostgreSQL row lock，并在 raw saver IO 完成前保持
+同一 transaction，从而让多 worker 的 read/write/delete 与 membership revoke 串行；写入服务端
+`deerflow_private_scope={project_id, owner_user_id}` marker，读取和 list 每项同时核验 thread ID 与
+marker。Viewer 对自己的既有 Thread 可读取和删除，但 create/branch/put/put-writes 仍要求
+`private_work.create`。删除顺序固定为先将 Thread 标记 deleted +
 `checkpoint_delete_status=pending`，再调用 raw saver；raw 删除失败保留不可见并标记
 `retry_required`，成功标记 `complete`。Gateway production lifespan 只把 raw saver 放在私有
 `app.state._raw_checkpointer`；`get_checkpointer` 仅供 legacy，项目模块不得 import/call，项目依赖使用
-`get_project_checkpointer`。create 固定锁序为 project → membership，再验 `private_work.create` 与
-Agent 可执行性、写 Thread、写 root checkpoint；root 失败补偿物理删除 row。branch 的文件复制只
-保留 PostgreSQL authority hook，禁止读取宿主 Thread 目录。
+`get_project_checkpointer`。legacy delete 也必须经该 getter 取得 production raw saver，先保留不可见
+tombstone，再记录 `complete/retry_required`，不得物理删除唯一 authority row；tombstone/frozen row
+在 permissive legacy access check 中仍然 fail closed。production legacy factory 不猜 project/Agent，
+缺少显式 create authority 时，POST Thread 与 stateless run 必须在 checkpoint 校验、run admission 和
+graph launch 前返回稳定 `409 PRIVATE_WORK_CUTOVER`。create 固定锁序为 project → membership，再验
+`private_work.create` 与 Agent 可执行性、写 Thread、写 root checkpoint；root write 失败或结果不确定
+时先补偿删除 raw checkpoint，branch 同时回滚 PostgreSQL authority hook；只有两者成功才物理清除
+补偿 tombstone，失败则保留 `retry_required`。branch 禁止读取宿主 Thread 目录。
 
 项目 HTTP API 统一挂载 `/api/projects`，使用 request-scoped session 与认证 dependency；
 项目 path 只接受 UUID，项目专属的 path/query/body 校验统一返回

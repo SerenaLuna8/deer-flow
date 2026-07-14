@@ -40,6 +40,7 @@ class ThreadMetaRepository(ThreadMetaStore):
                 (
                     ThreadMetaRow.project_id == uuid.UUID(scope.project_id),
                     ThreadMetaRow.owner_user_id == scope.owner_user_id,
+                    ThreadMetaRow.frozen_at.is_(None),
                 )
             )
         elif resolved_user_id is not None:
@@ -141,19 +142,25 @@ class ThreadMetaRepository(ThreadMetaStore):
           made every other user appear to "own" it.
         """
         async with self._sf() as session:
-            statement = select(ThreadMetaRow.owner_user_id).where(
-                *self._thread_predicate(
-                    thread_id,
-                    None if scope is None else user_id,
-                    scope,
-                )
-            )
-            row_owner = (await session.execute(statement)).scalar_one_or_none()
             if scope is not None:
+                statement = select(ThreadMetaRow.owner_user_id).where(*self._thread_predicate(thread_id, user_id, scope))
+                row_owner = (await session.execute(statement)).scalar_one_or_none()
                 return row_owner is not None and user_id == scope.owner_user_id
-            if row_owner is None:
+
+            # Query by identity before applying active-state filters. A durable
+            # tombstone must never collapse into the permissive "untracked
+            # legacy thread" case used by read-only compatibility routes.
+            statement = select(
+                ThreadMetaRow.owner_user_id,
+                ThreadMetaRow.deleted_at,
+                ThreadMetaRow.frozen_at,
+            ).where(ThreadMetaRow.thread_id == thread_id)
+            row = (await session.execute(statement)).one_or_none()
+            if row is None:
                 return not require_existing
-            return row_owner == user_id
+            if row.deleted_at is not None or row.frozen_at is not None:
+                return False
+            return row.owner_user_id == user_id
 
     async def search(
         self,
@@ -176,6 +183,7 @@ class ThreadMetaRepository(ThreadMetaStore):
             stmt = stmt.where(
                 ThreadMetaRow.project_id == uuid.UUID(scope.project_id),
                 ThreadMetaRow.owner_user_id == scope.owner_user_id,
+                ThreadMetaRow.frozen_at.is_(None),
             )
         if resolved_user_id is not None:
             stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
@@ -282,3 +290,78 @@ class ThreadMetaRepository(ThreadMetaStore):
         async with self._sf() as session:
             await session.execute(sql_delete(ThreadMetaRow).where(*self._thread_predicate(thread_id, resolved_user_id, scope)))
             await session.commit()
+
+    async def mark_deleted(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
+    ) -> bool:
+        resolved_user_id = (
+            None
+            if scope is not None
+            else resolve_user_id(
+                user_id,
+                method_name="ThreadMetaRepository.mark_deleted",
+            )
+        )
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(ThreadMetaRow)
+                .where(*self._thread_predicate(thread_id, resolved_user_id, scope))
+                .values(
+                    deleted_at=now,
+                    checkpoint_delete_status="pending",
+                    updated_at=now,
+                    version=ThreadMetaRow.version + 1,
+                )
+                .returning(ThreadMetaRow.thread_id)
+            )
+            await session.commit()
+            return result.scalar_one_or_none() is not None
+
+    async def set_checkpoint_delete_status(
+        self,
+        thread_id: str,
+        status: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
+    ) -> bool:
+        if status not in {"pending", "complete", "retry_required"}:
+            raise ValueError("invalid checkpoint delete status")
+        resolved_user_id = (
+            None
+            if scope is not None
+            else resolve_user_id(
+                user_id,
+                method_name="ThreadMetaRepository.set_checkpoint_delete_status",
+            )
+        )
+        predicate = [
+            ThreadMetaRow.thread_id == thread_id,
+            ThreadMetaRow.deleted_at.is_not(None),
+        ]
+        if scope is not None:
+            predicate.extend(
+                (
+                    ThreadMetaRow.project_id == uuid.UUID(scope.project_id),
+                    ThreadMetaRow.owner_user_id == scope.owner_user_id,
+                )
+            )
+        elif resolved_user_id is not None:
+            predicate.append(ThreadMetaRow.owner_user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(ThreadMetaRow)
+                .where(*predicate)
+                .values(
+                    checkpoint_delete_status=status,
+                    updated_at=datetime.now(UTC),
+                )
+                .returning(ThreadMetaRow.thread_id)
+            )
+            await session.commit()
+            return result.scalar_one_or_none() is not None

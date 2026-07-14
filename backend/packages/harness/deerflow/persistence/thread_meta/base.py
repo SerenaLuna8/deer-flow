@@ -27,6 +27,10 @@ class InvalidMetadataFilterError(ValueError):
     """Raised when all client-supplied metadata filter keys are rejected."""
 
 
+class LegacyThreadCreateAuthorityUnavailable(RuntimeError):
+    """Raised when a legacy create has no explicit final-schema authority."""
+
+
 class ThreadMetaStore(abc.ABC):
     @abc.abstractmethod
     async def create(
@@ -143,6 +147,29 @@ class ThreadMetaStore(abc.ABC):
     ) -> None:
         pass
 
+    @abc.abstractmethod
+    async def mark_deleted(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
+    ) -> bool:
+        """Persist an invisible checkpoint-cleanup tombstone."""
+        pass
+
+    @abc.abstractmethod
+    async def set_checkpoint_delete_status(
+        self,
+        thread_id: str,
+        status: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
+    ) -> bool:
+        """Update cleanup state on an already tombstoned thread."""
+        pass
+
 
 class TrustedUnscopedThreadMetaStore:
     """Explicit compatibility boundary for legacy, non-project thread routes."""
@@ -166,7 +193,7 @@ class TrustedUnscopedThreadMetaStore:
         from deerflow.runtime.user_context import resolve_user_id
 
         if self._create_project_id is None or self._create_agent_asset_id is None or self._create_agent_scope not in {"system", "project"}:
-            raise RuntimeError("trusted legacy thread creation requires explicit final-schema authority")
+            raise LegacyThreadCreateAuthorityUnavailable("trusted legacy thread creation requires explicit final-schema authority")
         user_id = kwargs.get("user_id", AUTO)
         owner_user_id = resolve_user_id(
             user_id,
@@ -207,3 +234,9 @@ class TrustedUnscopedThreadMetaStore:
 
     async def delete(self, *args: Any, **kwargs: Any) -> None:
         await self._store.delete(*args, **kwargs)
+
+    async def mark_deleted(self, *args: Any, **kwargs: Any) -> bool:
+        return await self._store.mark_deleted(*args, **kwargs)
+
+    async def set_checkpoint_delete_status(self, *args: Any, **kwargs: Any) -> bool:
+        return await self._store.set_checkpoint_delete_status(*args, **kwargs)

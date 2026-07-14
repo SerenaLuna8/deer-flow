@@ -43,6 +43,13 @@ class BranchAuthorityCopyHook(Protocol):
         target_thread_id: str,
     ) -> None: ...
 
+    async def rollback_branch_authority(
+        self,
+        scope: PrivateResourceScope,
+        source_thread_id: str,
+        target_thread_id: str,
+    ) -> None: ...
+
 
 class PrivateThreadService:
     """Authority transaction boundary for project-owned threads."""
@@ -291,7 +298,11 @@ class PrivateThreadService:
                     target_thread_id,
                 )
         except Exception as exc:
-            await self._compensate_create(context, target_thread_id)
+            await self._compensate_create(
+                context,
+                target_thread_id,
+                source_thread_id=source_thread_id,
+            )
             if isinstance(exc, PrivateWorkError):
                 raise
             raise PrivateWorkUnavailable(context.request_id) from None
@@ -301,16 +312,45 @@ class PrivateThreadService:
         self,
         context: PrivateWorkContext,
         thread_id: str,
+        *,
+        source_thread_id: str | None = None,
     ) -> None:
+        checkpoint_clean = True
+        try:
+            await self._project_scoped_checkpointer.for_context(context).adelete_thread(thread_id, expected_version=1)
+        except Exception:
+            checkpoint_clean = False
+
+        authority_clean = True
+        if source_thread_id is not None and self._branch_copy_hook is not None:
+            try:
+                await self._branch_copy_hook.rollback_branch_authority(
+                    context.resource_scope,
+                    source_thread_id,
+                    thread_id,
+                )
+            except Exception:
+                authority_clean = False
+
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    await PrivateThreadRepository(session).compensate_create(
-                        scope=context.resource_scope,
-                        thread_id=thread_id,
-                    )
+                    repository = PrivateThreadRepository(session)
+                    if checkpoint_clean and authority_clean:
+                        await repository.purge_compensated_create(
+                            scope=context.resource_scope,
+                            thread_id=thread_id,
+                        )
+                    else:
+                        await repository.set_checkpoint_delete_status(
+                            scope=context.resource_scope,
+                            thread_id=thread_id,
+                            status="retry_required",
+                        )
         except Exception:
             raise PrivateWorkUnavailable(context.request_id) from None
+        if not checkpoint_clean or not authority_clean:
+            raise PrivateWorkUnavailable(context.request_id)
 
     @staticmethod
     def _checkpoint_config(

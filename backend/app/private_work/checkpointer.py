@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from typing import Any, TypeVar, cast
 
 from langchain_core.runnables import RunnableConfig
@@ -149,13 +150,12 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         if marker != self._scope_marker:
             raise PrivateWorkNotFound(self._context.request_id)
 
-    async def _require_active(
+    @asynccontextmanager
+    async def _locked_active(
         self,
         thread_id: str,
         capability: Capability,
-        *,
-        lock: bool = False,
-    ) -> None:
+    ) -> AsyncIterator[None]:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -163,14 +163,16 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                         session,
                         self._context,
                         capability,
-                        lock=lock,
+                        lock=True,
                     )
                     record = await PrivateThreadRepository(session).get(
                         scope=self._context.resource_scope,
                         thread_id=thread_id,
+                        lock=True,
                     )
                     if record is None:
                         raise PrivateWorkNotFound(self._context.request_id)
+                    yield
         except PrivateWorkError:
             raise
         except DBAPIError:
@@ -178,17 +180,20 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         thread_id = self._thread_id(config)
-        await self._require_active(thread_id, Capability.PRIVATE_WORK_READ_OWN)
         clean_config = self._sanitize_config(config, thread_id=thread_id)
-        try:
-            item = await self._raw.aget_tuple(clean_config)
-        except PrivateWorkError:
-            raise
-        except Exception:
-            raise PrivateWorkUnavailable(self._context.request_id) from None
-        if item is not None:
-            self._validate_marker(item, thread_id=thread_id)
-        return item
+        async with self._locked_active(
+            thread_id,
+            Capability.PRIVATE_WORK_READ_OWN,
+        ):
+            try:
+                item = await self._raw.aget_tuple(clean_config)
+            except PrivateWorkError:
+                raise
+            except Exception:
+                raise PrivateWorkUnavailable(self._context.request_id) from None
+            if item is not None:
+                self._validate_marker(item, thread_id=thread_id)
+            return item
 
     async def aget(self, config: RunnableConfig) -> Checkpoint | None:
         item = await self.aget_tuple(config)
@@ -203,7 +208,6 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         limit: int | None = None,
     ) -> AsyncIterator[CheckpointTuple]:
         thread_id = self._thread_id(config)
-        await self._require_active(thread_id, Capability.PRIVATE_WORK_READ_OWN)
         clean_config = self._sanitize_config(config, thread_id=thread_id)
         clean_before = None if before is None else self._sanitize_config(before, thread_id=thread_id)
         clean_filter = (
@@ -214,19 +218,23 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 _drop_marker(strip_private_client_fields(filter)),
             )
         )
-        try:
-            async for item in self._raw.alist(
-                clean_config,
-                filter=clean_filter,
-                before=clean_before,
-                limit=limit,
-            ):
-                self._validate_marker(item, thread_id=thread_id)
-                yield item
-        except PrivateWorkError:
-            raise
-        except Exception:
-            raise PrivateWorkUnavailable(self._context.request_id) from None
+        async with self._locked_active(
+            thread_id,
+            Capability.PRIVATE_WORK_READ_OWN,
+        ):
+            try:
+                async for item in self._raw.alist(
+                    clean_config,
+                    filter=clean_filter,
+                    before=clean_before,
+                    limit=limit,
+                ):
+                    self._validate_marker(item, thread_id=thread_id)
+                    yield item
+            except PrivateWorkError:
+                raise
+            except Exception:
+                raise PrivateWorkUnavailable(self._context.request_id) from None
 
     async def aput(
         self,
@@ -236,23 +244,26 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         thread_id = self._thread_id(config)
-        await self._require_active(thread_id, Capability.PRIVATE_WORK_CREATE)
-        try:
-            written_config = await self._raw.aput(
-                self._sanitize_config(config, thread_id=thread_id),
-                checkpoint,
-                self._sanitize_metadata(metadata),
-                new_versions,
-            )
-            item = await self._raw.aget_tuple(written_config)
-            if item is None:
-                raise PrivateWorkNotFound(self._context.request_id)
-            self._validate_marker(item, thread_id=thread_id)
-            return written_config
-        except PrivateWorkError:
-            raise
-        except Exception:
-            raise PrivateWorkUnavailable(self._context.request_id) from None
+        async with self._locked_active(
+            thread_id,
+            Capability.PRIVATE_WORK_CREATE,
+        ):
+            try:
+                written_config = await self._raw.aput(
+                    self._sanitize_config(config, thread_id=thread_id),
+                    checkpoint,
+                    self._sanitize_metadata(metadata),
+                    new_versions,
+                )
+                item = await self._raw.aget_tuple(written_config)
+                if item is None:
+                    raise PrivateWorkNotFound(self._context.request_id)
+                self._validate_marker(item, thread_id=thread_id)
+                return written_config
+            except PrivateWorkError:
+                raise
+            except Exception:
+                raise PrivateWorkUnavailable(self._context.request_id) from None
 
     async def aput_writes(
         self,
@@ -262,23 +273,26 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         task_path: str = "",
     ) -> None:
         thread_id = self._thread_id(config)
-        await self._require_active(thread_id, Capability.PRIVATE_WORK_CREATE)
         clean_config = self._sanitize_config(config, thread_id=thread_id)
-        try:
-            item = await self._raw.aget_tuple(clean_config)
-            if item is None:
-                raise PrivateWorkNotFound(self._context.request_id)
-            self._validate_marker(item, thread_id=thread_id)
-            await self._raw.aput_writes(
-                clean_config,
-                writes,
-                task_id,
-                task_path,
-            )
-        except PrivateWorkError:
-            raise
-        except Exception:
-            raise PrivateWorkUnavailable(self._context.request_id) from None
+        async with self._locked_active(
+            thread_id,
+            Capability.PRIVATE_WORK_CREATE,
+        ):
+            try:
+                item = await self._raw.aget_tuple(clean_config)
+                if item is None:
+                    raise PrivateWorkNotFound(self._context.request_id)
+                self._validate_marker(item, thread_id=thread_id)
+                await self._raw.aput_writes(
+                    clean_config,
+                    writes,
+                    task_id,
+                    task_path,
+                )
+            except PrivateWorkError:
+                raise
+            except Exception:
+                raise PrivateWorkUnavailable(self._context.request_id) from None
 
     async def adelete_thread(
         self,
@@ -293,13 +307,14 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                     await self._revalidator.require(
                         session,
                         context,
-                        Capability.PRIVATE_WORK_CREATE,
+                        Capability.PRIVATE_WORK_READ_OWN,
                         lock=True,
                     )
                     repository = PrivateThreadRepository(session)
                     record = await repository.get(
                         scope=context.resource_scope,
                         thread_id=thread_id,
+                        lock=True,
                     )
                     if record is None:
                         raise PrivateWorkNotFound(context.request_id)
@@ -334,7 +349,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         except Exception:
             raise PrivateWorkUnavailable(self._context.request_id) from None
 
-    def _run_sync(self, coroutine) -> _T:
+    def _run_sync(self, coroutine_factory: Callable[[], Awaitable[_T]]) -> _T:
         if not self._owner_loop.is_running():
             raise PrivateWorkUnavailable(self._context.request_id)
         try:
@@ -345,14 +360,17 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             raise PrivateWorkUnavailable(self._context.request_id)
         return cast(
             _T,
-            asyncio.run_coroutine_threadsafe(coroutine, self._owner_loop).result(),
+            asyncio.run_coroutine_threadsafe(
+                coroutine_factory(),
+                self._owner_loop,
+            ).result(),
         )
 
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
-        return self._run_sync(self.aget_tuple(config))
+        return self._run_sync(lambda: self.aget_tuple(config))
 
     def get(self, config: RunnableConfig) -> Checkpoint | None:
-        return self._run_sync(self.aget(config))
+        return self._run_sync(lambda: self.aget(config))
 
     def list(
         self,
@@ -373,7 +391,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 )
             ]
 
-        return iter(self._run_sync(collect()))
+        return iter(self._run_sync(collect))
 
     def put(
         self,
@@ -382,7 +400,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        return self._run_sync(self.aput(config, checkpoint, metadata, new_versions))
+        return self._run_sync(lambda: self.aput(config, checkpoint, metadata, new_versions))
 
     def put_writes(
         self,
@@ -391,7 +409,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        self._run_sync(self.aput_writes(config, writes, task_id, task_path))
+        self._run_sync(lambda: self.aput_writes(config, writes, task_id, task_path))
 
     def delete_thread(
         self,
@@ -399,4 +417,9 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         *,
         expected_version: int | None = None,
     ) -> None:
-        self._run_sync(self.adelete_thread(thread_id, expected_version=expected_version))
+        self._run_sync(
+            lambda: self.adelete_thread(
+                thread_id,
+                expected_version=expected_version,
+            )
+        )

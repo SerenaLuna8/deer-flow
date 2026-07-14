@@ -1,7 +1,7 @@
 import asyncio
 import re
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -148,6 +148,9 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
     (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
     app = make_authed_test_app()
+    app.state.thread_store.mark_deleted = AsyncMock(return_value=True)
+    app.state.thread_store.set_checkpoint_delete_status = AsyncMock(return_value=True)
+    app.state.checkpointer = InMemorySaver()
     app.include_router(threads.router)
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):

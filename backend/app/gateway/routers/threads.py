@@ -27,8 +27,11 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
+from app.private_work.error_mapping import private_work_http_exception
+from app.private_work.errors import PrivateWorkCutover, PrivateWorkUnavailable
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
+from deerflow.persistence.thread_meta import LegacyThreadCreateAuthorityUnavailable
 from deerflow.runtime import serialize_channel_values_for_api
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
@@ -45,11 +48,16 @@ from deerflow.runtime.goal import (
     write_thread_goal,
 )
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.trace_context import generate_trace_id, get_current_trace_id
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.time import coerce_iso, now_iso
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
+
+
+def _private_work_http_error(error_type: type[PrivateWorkCutover | PrivateWorkUnavailable]) -> HTTPException:
+    return private_work_http_exception(error_type(get_current_trace_id() or generate_trace_id()))
 
 
 # Metadata keys that the server controls; clients are not allowed to set
@@ -452,6 +460,8 @@ async def _ensure_thread_for_goal(thread_id: str, request: Request) -> None:
     if record is None:
         try:
             await thread_store.create(thread_id, metadata={}, **thread_owner_kwargs)
+        except LegacyThreadCreateAuthorityUnavailable:
+            raise _private_work_http_error(PrivateWorkCutover) from None
         except Exception:
             logger.exception("Failed to create thread_meta for goal thread %s", sanitize_log_param(thread_id))
             raise HTTPException(status_code=500, detail="Failed to create thread") from None
@@ -473,32 +483,59 @@ async def _ensure_thread_for_goal(thread_id: str, request: Request) -> None:
 async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread.
 
-    Cleans DeerFlow-managed thread directories, removes checkpoint data,
-    and removes the PostgreSQL ``thread_meta`` row.
+    Cleans DeerFlow-managed thread directories and checkpoint data while
+    retaining a durable, invisible PostgreSQL authority tombstone.
     """
     from app.gateway.deps import get_thread_store
 
-    # Clean local filesystem
-    response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
-
-    # Remove checkpoints (best-effort)
-    checkpointer = getattr(request.app.state, "checkpointer", None)
-    if checkpointer is not None:
-        try:
-            if hasattr(checkpointer, "adelete_thread"):
-                await checkpointer.adelete_thread(thread_id)
-        except Exception:
-            logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
-
-    # Remove thread_meta row (best-effort) so the deleted thread no longer
-    # appears in /threads/search.
+    paths = get_paths()
+    user_id = get_effective_user_id()
     try:
-        thread_store = get_thread_store(request)
-        await thread_store.delete(thread_id)
-    except Exception:
-        logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
+        paths.thread_dir(thread_id, user_id=user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    return response
+    thread_store = get_thread_store(request)
+    try:
+        marked = await thread_store.mark_deleted(thread_id)
+    except Exception:
+        logger.exception(
+            "Failed to tombstone thread %s",
+            sanitize_log_param(thread_id),
+        )
+        raise _private_work_http_error(PrivateWorkUnavailable) from None
+    if not marked:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    checkpointer = get_checkpointer(request)
+    try:
+        await checkpointer.adelete_thread(thread_id)
+    except Exception:
+        logger.exception(
+            "Failed to delete checkpoints for thread %s",
+            sanitize_log_param(thread_id),
+        )
+        try:
+            await thread_store.set_checkpoint_delete_status(
+                thread_id,
+                "retry_required",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to record checkpoint cleanup retry for thread %s",
+                sanitize_log_param(thread_id),
+            )
+        raise _private_work_http_error(PrivateWorkUnavailable) from None
+
+    try:
+        await thread_store.set_checkpoint_delete_status(thread_id, "complete")
+    except Exception:
+        logger.exception(
+            "Failed to complete checkpoint cleanup for thread %s",
+            sanitize_log_param(thread_id),
+        )
+        raise _private_work_http_error(PrivateWorkUnavailable) from None
+    return _delete_thread_data(thread_id, paths=paths, user_id=user_id)
 
 
 @router.post("", response_model=ThreadResponse)
@@ -545,6 +582,8 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             **thread_owner_kwargs,
             metadata=body.metadata,
         )
+    except LegacyThreadCreateAuthorityUnavailable:
+        raise _private_work_http_error(PrivateWorkCutover) from None
     except Exception:
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
@@ -634,14 +673,6 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
         }
     )
 
-    write_config = {"configurable": {"thread_id": new_thread_id, "checkpoint_ns": ""}}
-    new_versions = dict(checkpoint.get("channel_versions", {}) or {})
-    try:
-        await checkpointer.aput(write_config, checkpoint, metadata, new_versions)
-    except Exception:
-        logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
-        raise HTTPException(status_code=500, detail="Failed to create branch") from None
-
     try:
         await thread_store.create(
             new_thread_id,
@@ -650,8 +681,19 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
             metadata=branch_metadata,
             **thread_owner_kwargs,
         )
+    except LegacyThreadCreateAuthorityUnavailable:
+        raise _private_work_http_error(PrivateWorkCutover) from None
     except Exception:
         logger.exception("Failed to write branch thread_meta for %s", sanitize_log_param(new_thread_id))
+        raise HTTPException(status_code=500, detail="Failed to create branch") from None
+
+    write_config = {"configurable": {"thread_id": new_thread_id, "checkpoint_ns": ""}}
+    new_versions = dict(checkpoint.get("channel_versions", {}) or {})
+    try:
+        await checkpointer.aput(write_config, checkpoint, metadata, new_versions)
+    except Exception:
+        logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
+        await thread_store.delete(new_thread_id, **thread_owner_kwargs)
         raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
     if branch_from_latest_turn:

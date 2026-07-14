@@ -47,6 +47,13 @@ class MemoryThreadMetaStore(ThreadMetaStore):
     ) -> bool:
         return scope is None or (record.get("project_id") == scope.project_id and record.get("user_id") == scope.owner_user_id)
 
+    @staticmethod
+    def _is_active_scope_record(
+        record: dict,
+        scope: PrivateResourceScope | None,
+    ) -> bool:
+        return record.get("deleted_at") is None and record.get("frozen_at") is None
+
     async def create(
         self,
         thread_id: str,
@@ -74,6 +81,10 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             "project_id": None if scope is None else scope.project_id,
             "agent_asset_id": None if agent_asset_id is None else str(agent_asset_id),
             "agent_scope": agent_scope,
+            "frozen_at": None,
+            "deleted_at": None,
+            "checkpoint_delete_status": "not_requested",
+            "version": 1,
         }
         await self._store.aput(THREADS_NS, thread_id, record)
         return record
@@ -90,7 +101,7 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             scope.owner_user_id if scope is not None else user_id,
             "MemoryThreadMetaStore.get",
         )
-        if record is None or not self._matches_scope(record, scope):
+        if record is None or not self._matches_scope(record, scope) or not self._is_active_scope_record(record, scope):
             return None
         return record
 
@@ -115,6 +126,8 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         if scope is not None:
             filter_dict["project_id"] = scope.project_id
             filter_dict["user_id"] = scope.owner_user_id
+            filter_dict["deleted_at"] = None
+            filter_dict["frozen_at"] = None
 
         items = await self._store.asearch(
             THREADS_NS,
@@ -122,7 +135,7 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             limit=limit,
             offset=offset,
         )
-        return [self._item_to_dict(item) for item in items]
+        return [self._item_to_dict(item) for item in items if self._is_active_scope_record(item.value, scope)]
 
     async def check_access(
         self,
@@ -135,9 +148,11 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         item = await self._store.aget(THREADS_NS, thread_id)
         if item is None:
             return False if scope is not None else not require_existing
+        if not self._is_active_scope_record(item.value, scope):
+            return False
         record_user_id = item.value.get("user_id")
         if scope is not None:
-            return record_user_id == user_id == scope.owner_user_id and item.value.get("project_id") == scope.project_id
+            return record_user_id == user_id == scope.owner_user_id and item.value.get("project_id") == scope.project_id and self._is_active_scope_record(item.value, scope)
         if record_user_id is None:
             return True
         return record_user_id == user_id
@@ -155,10 +170,12 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             scope.owner_user_id if scope is not None else user_id,
             "MemoryThreadMetaStore.update_display_name",
         )
-        if record is None or not self._matches_scope(record, scope):
+        if record is None or not self._matches_scope(record, scope) or not self._is_active_scope_record(record, scope):
             return
         record["display_name"] = display_name
         record["updated_at"] = now_iso()
+        if scope is not None:
+            record["version"] = int(record.get("version", 1)) + 1
         await self._store.aput(THREADS_NS, thread_id, record)
 
     async def update_status(
@@ -174,10 +191,12 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             scope.owner_user_id if scope is not None else user_id,
             "MemoryThreadMetaStore.update_status",
         )
-        if record is None or not self._matches_scope(record, scope):
+        if record is None or not self._matches_scope(record, scope) or not self._is_active_scope_record(record, scope):
             return
         record["status"] = status
         record["updated_at"] = now_iso()
+        if scope is not None:
+            record["version"] = int(record.get("version", 1)) + 1
         await self._store.aput(THREADS_NS, thread_id, record)
 
     async def update_metadata(
@@ -193,12 +212,14 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             scope.owner_user_id if scope is not None else user_id,
             "MemoryThreadMetaStore.update_metadata",
         )
-        if record is None or not self._matches_scope(record, scope):
+        if record is None or not self._matches_scope(record, scope) or not self._is_active_scope_record(record, scope):
             return
         merged = dict(record.get("metadata") or {})
         merged.update(metadata)
         record["metadata"] = merged
         record["updated_at"] = now_iso()
+        if scope is not None:
+            record["version"] = int(record.get("version", 1)) + 1
         await self._store.aput(THREADS_NS, thread_id, record)
 
     async def update_owner(
@@ -230,9 +251,53 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             scope.owner_user_id if scope is not None else user_id,
             "MemoryThreadMetaStore.delete",
         )
-        if record is None or not self._matches_scope(record, scope):
+        if record is None or not self._matches_scope(record, scope) or not self._is_active_scope_record(record, scope):
             return
         await self._store.adelete(THREADS_NS, thread_id)
+
+    async def mark_deleted(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
+    ) -> bool:
+        record = await self._get_owned_record(
+            thread_id,
+            scope.owner_user_id if scope is not None else user_id,
+            "MemoryThreadMetaStore.mark_deleted",
+        )
+        if record is None or not self._matches_scope(record, scope) or not self._is_active_scope_record(record, scope):
+            return False
+        now = now_iso()
+        record["deleted_at"] = now
+        record["checkpoint_delete_status"] = "pending"
+        record["updated_at"] = now
+        record["version"] = int(record.get("version", 1)) + 1
+        await self._store.aput(THREADS_NS, thread_id, record)
+        return True
+
+    async def set_checkpoint_delete_status(
+        self,
+        thread_id: str,
+        status: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
+    ) -> bool:
+        if status not in {"pending", "complete", "retry_required"}:
+            raise ValueError("invalid checkpoint delete status")
+        record = await self._get_owned_record(
+            thread_id,
+            scope.owner_user_id if scope is not None else user_id,
+            "MemoryThreadMetaStore.set_checkpoint_delete_status",
+        )
+        if record is None or record.get("deleted_at") is None or not self._matches_scope(record, scope):
+            return False
+        record["checkpoint_delete_status"] = status
+        record["updated_at"] = now_iso()
+        await self._store.aput(THREADS_NS, thread_id, record)
+        return True
 
     @staticmethod
     def _item_to_dict(item) -> dict[str, Any]:
@@ -245,6 +310,16 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             "display_name": val.get("display_name"),
             "status": val.get("status", "idle"),
             "metadata": val.get("metadata", {}),
+            "project_id": val.get("project_id"),
+            "agent_asset_id": val.get("agent_asset_id"),
+            "agent_scope": val.get("agent_scope"),
+            "frozen_at": val.get("frozen_at"),
+            "deleted_at": val.get("deleted_at"),
+            "checkpoint_delete_status": val.get(
+                "checkpoint_delete_status",
+                "not_requested",
+            ),
+            "version": val.get("version", 1),
             # ``coerce_iso`` heals legacy unix-second values written by
             # earlier Gateway versions that called ``str(time.time())``.
             "created_at": coerce_iso(val.get("created_at", "")),

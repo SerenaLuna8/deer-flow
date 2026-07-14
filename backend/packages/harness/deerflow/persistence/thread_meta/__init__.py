@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from deerflow.persistence.thread_meta.base import (
     InvalidMetadataFilterError,
+    LegacyThreadCreateAuthorityUnavailable,
     ThreadMetaStore,
     TrustedUnscopedThreadMetaStore,
 )
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "InvalidMetadataFilterError",
+    "LegacyThreadCreateAuthorityUnavailable",
     "MemoryThreadMetaStore",
     "ThreadMetaRepository",
     "ThreadMetaRow",

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import copy
-import inspect
+import gc
+import warnings
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -216,6 +220,47 @@ class _FailingDeleteSaver(InMemorySaver):
         raise RuntimeError("raw saver unavailable")
 
 
+class _PauseableSaver(InMemorySaver):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pause_put = False
+        self.pause_put_writes = False
+        self.pause_get = False
+        self.pause_list = False
+        self.raw_entered = asyncio.Event()
+        self.raw_release = asyncio.Event()
+        self.delete_entered = asyncio.Event()
+
+    async def aput(self, *args, **kwargs):
+        if self.pause_put:
+            self.raw_entered.set()
+            await self.raw_release.wait()
+        return await super().aput(*args, **kwargs)
+
+    async def aput_writes(self, *args, **kwargs) -> None:
+        if self.pause_put_writes:
+            self.raw_entered.set()
+            await self.raw_release.wait()
+        await super().aput_writes(*args, **kwargs)
+
+    async def aget_tuple(self, *args, **kwargs):
+        if self.pause_get:
+            self.raw_entered.set()
+            await self.raw_release.wait()
+        return await super().aget_tuple(*args, **kwargs)
+
+    async def alist(self, *args, **kwargs):
+        if self.pause_list:
+            self.raw_entered.set()
+            await self.raw_release.wait()
+        async for item in super().alist(*args, **kwargs):
+            yield item
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        self.delete_entered.set()
+        await super().adelete_thread(thread_id)
+
+
 @pytest.mark.asyncio
 @pytest.mark.postgres
 async def test_scoped_checkpointer_delete_hides_thread_before_raw_delete_and_marks_retry(
@@ -250,6 +295,129 @@ async def test_scoped_checkpointer_delete_hides_thread_before_raw_delete_and_mar
         ).one()
     assert row.deleted_at is not None
     assert row.checkpoint_delete_status == "retry_required"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+@pytest.mark.parametrize("operation", ["put", "put_writes"])
+async def test_scoped_writer_and_delete_are_serialized_by_postgres_thread_lock(
+    seed: M4ThreadSeed,
+    operation: str,
+) -> None:
+    from app.private_work.checkpointer import ProjectScopedCheckpointer
+
+    record = await _create_thread(seed, f"concurrent-{operation}-thread")
+    raw = _PauseableSaver()
+    config = await _raw_checkpoint(
+        raw,
+        record.thread_id,
+        {
+            "project_id": str(seed.owner_a.project_id),
+            "owner_user_id": str(seed.owner_a.user_id),
+        },
+    )
+    wrapper = ProjectScopedCheckpointer(raw, seed.factory).for_context(seed.owner_a)
+    if operation == "put":
+        raw.pause_put = True
+        writer = asyncio.create_task(
+            wrapper.aput(
+                config,
+                empty_checkpoint(),
+                {"source": "loop", "step": 0, "parents": {}},
+                {},
+            )
+        )
+    else:
+        raw.pause_put_writes = True
+        writer = asyncio.create_task(
+            wrapper.aput_writes(
+                config,
+                [("messages", "concurrent")],
+                "concurrent-task",
+            )
+        )
+
+    await asyncio.wait_for(raw.raw_entered.wait(), timeout=2)
+    deleter = asyncio.create_task(wrapper.adelete_thread(record.thread_id, expected_version=record.version))
+    await asyncio.sleep(0.05)
+    delete_reached_raw_early = raw.delete_entered.is_set()
+    raw.raw_release.set()
+    await writer
+    await deleter
+
+    assert delete_reached_raw_early is False
+    assert await raw.aget_tuple(_config(record.thread_id)) is None
+    async with seed.engine.connect() as connection:
+        status = await connection.scalar(
+            text(
+                """SELECT checkpoint_delete_status FROM threads_meta
+                WHERE thread_id=:thread_id"""
+            ),
+            {"thread_id": record.thread_id},
+        )
+    assert status == "complete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+@pytest.mark.parametrize("operation", ["get", "list"])
+async def test_scoped_read_and_membership_revoke_are_serialized_and_revalidated(
+    seed: M4ThreadSeed,
+    operation: str,
+) -> None:
+    from app.private_work.checkpointer import ProjectScopedCheckpointer
+
+    record = await _create_thread(seed, f"concurrent-{operation}-thread")
+    raw = _PauseableSaver()
+    await _raw_checkpoint(
+        raw,
+        record.thread_id,
+        {
+            "project_id": str(seed.owner_a.project_id),
+            "owner_user_id": str(seed.owner_a.user_id),
+        },
+    )
+    wrapper = ProjectScopedCheckpointer(raw, seed.factory).for_context(seed.owner_a)
+    if operation == "get":
+        raw.pause_get = True
+        reader = asyncio.create_task(wrapper.aget_tuple(_config(record.thread_id)))
+    else:
+        raw.pause_list = True
+
+        async def collect():
+            return [item async for item in wrapper.alist(_config(record.thread_id))]
+
+        reader = asyncio.create_task(collect())
+
+    await asyncio.wait_for(raw.raw_entered.wait(), timeout=2)
+
+    async def revoke_membership() -> None:
+        async with seed.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE project_memberships
+                    SET status='removed', version=version+1
+                    WHERE id=:membership_id"""
+                ),
+                {"membership_id": seed.owner_a.membership_id},
+            )
+
+    revoker = asyncio.create_task(revoke_membership())
+    await asyncio.sleep(0.05)
+    revoke_committed_early = revoker.done()
+    raw.raw_release.set()
+    await reader
+    await revoker
+
+    assert revoke_committed_early is False
+    if operation == "get":
+        raw.pause_get = False
+        with pytest.raises(PrivateWorkNotFound):
+            await wrapper.aget_tuple(_config(record.thread_id))
+    else:
+        raw.pause_list = False
+        with pytest.raises(PrivateWorkNotFound):
+            _ = [item async for item in wrapper.alist(_config(record.thread_id))]
 
 
 @pytest.mark.asyncio
@@ -297,12 +465,180 @@ async def test_scoped_checkpointer_covers_sync_and_async_saver_surface(
     raw.get_next_version.assert_called_once_with(None, None)
 
 
-def test_project_modules_cannot_import_raw_checkpointer() -> None:
-    from app.gateway import deps
-    from app.private_work import checkpointer, thread_service
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_scoped_checkpointer_covers_real_async_postgres_saver_and_loop_bridges(
+    seed: M4ThreadSeed,
+    migrated_postgres_database_url: str,
+) -> None:
+    from app.private_work.checkpointer import (
+        PRIVATE_SCOPE_MARKER,
+        ProjectScopedCheckpointer,
+    )
+    from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 
-    assert "get_checkpointer" not in inspect.getsource(checkpointer)
-    assert "get_checkpointer" not in inspect.getsource(thread_service)
-    deps_source = inspect.getsource(deps)
-    assert "def get_project_checkpointer" in deps_source
-    assert "project_scoped_checkpointer.for_context" in deps_source
+    record = await _create_thread(seed, "postgres-saver-thread")
+    bad_record = await _create_thread(seed, "postgres-marker-thread")
+    provider_config = SimpleNamespace(
+        database=SimpleNamespace(
+            checkpointer_url=migrated_postgres_database_url.replace(
+                "postgresql+asyncpg://",
+                "postgresql://",
+            )
+        )
+    )
+    async with make_checkpointer(provider_config) as raw:
+        wrapper = ProjectScopedCheckpointer(raw, seed.factory).for_context(seed.owner_a)
+        config = _config(record.thread_id)
+        checkpoint = empty_checkpoint()
+        written = await wrapper.aput(
+            config,
+            checkpoint,
+            {"source": "input", "step": -1, "parents": {}},
+            {},
+        )
+        await wrapper.aput_writes(
+            written,
+            [("messages", "async-postgres")],
+            "async-postgres-task",
+        )
+        assert await wrapper.aget(written) is not None
+        assert await wrapper.aget_tuple(written) is not None
+        assert [item async for item in wrapper.alist(config)]
+
+        assert await asyncio.to_thread(wrapper.get, written) is not None
+        assert await asyncio.to_thread(wrapper.get_tuple, written) is not None
+        assert await asyncio.to_thread(lambda: list(wrapper.list(config)))
+        sync_written = await asyncio.to_thread(
+            wrapper.put,
+            written,
+            copy.deepcopy(checkpoint),
+            {"source": "loop", "step": 0, "parents": {}},
+            {},
+        )
+        await asyncio.to_thread(
+            wrapper.put_writes,
+            sync_written,
+            [("messages", "sync-postgres")],
+            "sync-postgres-task",
+        )
+
+        async def call_sync_from_another_running_loop():
+            return wrapper.get_tuple(sync_written)
+
+        bridged = await asyncio.to_thread(lambda: asyncio.run(call_sync_from_another_running_loop()))
+        assert bridged is not None
+
+        await raw.aput(
+            _config(bad_record.thread_id),
+            empty_checkpoint(),
+            {
+                "source": "input",
+                "step": -1,
+                "parents": {},
+                PRIVATE_SCOPE_MARKER: {
+                    "project_id": str(seed.project_b_owner_a.project_id),
+                    "owner_user_id": str(seed.owner_a.user_id),
+                },
+            },
+            {},
+        )
+        with pytest.raises(PrivateWorkNotFound):
+            await wrapper.aget_tuple(_config(bad_record.thread_id))
+
+        await asyncio.to_thread(
+            wrapper.delete_thread,
+            bad_record.thread_id,
+            expected_version=bad_record.version,
+        )
+        assert await raw.aget_tuple(_config(bad_record.thread_id)) is None
+
+        await wrapper.adelete_thread(
+            record.thread_id,
+            expected_version=record.version,
+        )
+        assert await raw.aget_tuple(_config(record.thread_id)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_scoped_checkpointer_owner_loop_sync_misuse_has_no_unawaited_coroutine_warning(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.checkpointer import ProjectScopedCheckpointer
+
+    await _create_thread(seed, "owner-loop-sync-thread")
+    wrapper = ProjectScopedCheckpointer(InMemorySaver(), seed.factory).for_context(seed.owner_a)
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        with pytest.raises(PrivateWorkUnavailable):
+            wrapper.get_tuple(_config("owner-loop-sync-thread"))
+        gc.collect()
+
+    assert not [warning for warning in captured if issubclass(warning.category, RuntimeWarning) and "was never awaited" in str(warning.message)]
+
+
+def _attribute_path(node: ast.AST) -> tuple[str, ...]:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return tuple(reversed(parts))
+
+
+def test_project_modules_cannot_import_raw_checkpointer() -> None:
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    restricted = sorted(
+        {
+            *app_root.joinpath("private_work").rglob("*.py"),
+            *app_root.joinpath("projects").rglob("*.py"),
+        }
+    )
+    forbidden_deps = {"get_checkpointer", "get_run_context"}
+    violations: list[str] = []
+
+    for path in restricted:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "app.gateway.deps":
+                        violations.append(f"{path.relative_to(app_root)}:{node.lineno} imports gateway deps module")
+            elif isinstance(node, ast.ImportFrom) and node.module == "app.gateway.deps":
+                for alias in node.names:
+                    if alias.name in forbidden_deps:
+                        violations.append(f"{path.relative_to(app_root)}:{node.lineno} imports {alias.name}")
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr in forbidden_deps:
+                    violations.append(f"{path.relative_to(app_root)}:{node.lineno} calls raw dependency")
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr" and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and node.args[1].value in forbidden_deps:
+                violations.append(f"{path.relative_to(app_root)}:{node.lineno} resolves raw dependency dynamically")
+
+    # Raw app-state access has one exact infrastructure allowlist: deps.py
+    # constructs and serves the legacy saver. Every current/future project
+    # module must go through get_project_checkpointer instead.
+    raw_allowlist = {app_root / "gateway" / "deps.py"}
+    for path in sorted(app_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            raw_access = False
+            if isinstance(node, ast.Attribute):
+                attr_path = _attribute_path(node)
+                raw_access = node.attr == "_raw_checkpointer" or attr_path[-2:] == (
+                    "state",
+                    "checkpointer",
+                )
+            elif (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr" and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and node.args[1].value in {"_raw_checkpointer", "checkpointer"}
+            ):
+                raw_access = _attribute_path(node.args[0])[-1:] == ("state",)
+            if raw_access and path not in raw_allowlist:
+                violations.append(f"{path.relative_to(app_root)}:{node.lineno} accesses raw app state")
+
+    assert violations == []
+
+    deps_tree = ast.parse((app_root / "gateway" / "deps.py").read_text(encoding="utf-8"))
+    assert any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "get_project_checkpointer" for node in ast.walk(deps_tree))

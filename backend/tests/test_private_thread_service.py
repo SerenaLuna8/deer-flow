@@ -126,13 +126,24 @@ async def test_private_thread_service_create_requires_capability_and_executable_
                 thread_id="viewer-owned-thread",
                 agent=ThreadAgentRef(seed.project_agent_id, "project"),
             )
-    with pytest.raises(PrivateWorkForbidden):
+    await service.delete(
+        seed.viewer,
+        viewer_thread.thread_id,
+        expected_version=viewer_thread.version,
+    )
+    assert await service.get(seed.viewer, viewer_thread.thread_id) is None
+
+    owner_thread = await service.create(
+        seed.owner_a,
+        thread_id="owner-thread-hidden-from-viewer",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    with pytest.raises(PrivateWorkNotFound):
         await service.delete(
             seed.viewer,
-            viewer_thread.thread_id,
-            expected_version=viewer_thread.version,
+            owner_thread.thread_id,
+            expected_version=owner_thread.version,
         )
-    assert await service.get(seed.viewer, viewer_thread.thread_id) == viewer_thread
 
     with pytest.raises(PrivateWorkNotFound):
         await service.create(
@@ -152,6 +163,21 @@ async def test_private_thread_service_create_requires_capability_and_executable_
 class _FailingRootSaver(InMemorySaver):
     async def aput(self, *_args, **_kwargs):
         raise RuntimeError("root checkpoint unavailable")
+
+
+class _WriteThenRaiseSaver(InMemorySaver):
+    def __init__(self, *, cleanup_fails: bool = False) -> None:
+        super().__init__()
+        self.cleanup_fails = cleanup_fails
+
+    async def aput(self, *args, **kwargs):
+        await super().aput(*args, **kwargs)
+        raise RuntimeError("checkpoint commit result was ambiguous")
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        if self.cleanup_fails:
+            raise RuntimeError("checkpoint cleanup unavailable")
+        await super().adelete_thread(thread_id)
 
 
 @pytest.mark.asyncio
@@ -179,6 +205,63 @@ async def test_private_thread_service_compensates_row_when_root_checkpoint_fails
     assert count == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_service_cleans_ambiguous_root_checkpoint_before_row(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.thread_repository import ThreadAgentRef
+
+    raw = _WriteThenRaiseSaver()
+    service, _raw, _scoped = _service(seed, raw)
+    with pytest.raises(PrivateWorkUnavailable):
+        await service.create(
+            seed.owner_a,
+            thread_id="ambiguous-root-thread",
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+
+    assert await raw.aget_tuple({"configurable": {"thread_id": "ambiguous-root-thread", "checkpoint_ns": ""}}) is None
+    async with seed.engine.connect() as connection:
+        assert await connection.scalar(text("SELECT count(*) FROM threads_meta WHERE thread_id='ambiguous-root-thread'")) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_service_keeps_retry_tombstone_when_ambiguous_cleanup_fails(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.thread_repository import ThreadAgentRef
+
+    raw = _WriteThenRaiseSaver(cleanup_fails=True)
+    service, _raw, _scoped = _service(seed, raw)
+    with pytest.raises(PrivateWorkUnavailable):
+        await service.create(
+            seed.owner_a,
+            thread_id="ambiguous-cleanup-thread",
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+
+    async with seed.engine.connect() as connection:
+        row = (
+            await connection.execute(
+                text(
+                    """SELECT deleted_at, checkpoint_delete_status
+                    FROM threads_meta WHERE thread_id='ambiguous-cleanup-thread'"""
+                )
+            )
+        ).one()
+    assert row.deleted_at is not None
+    assert row.checkpoint_delete_status == "retry_required"
+
+    with pytest.raises(PrivateWorkConflict):
+        await service.create(
+            seed.owner_a,
+            thread_id="ambiguous-cleanup-thread",
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+
+
 class _BranchCopyHook:
     def __init__(self) -> None:
         self.calls: list[tuple[object, str, str]] = []
@@ -190,6 +273,37 @@ class _BranchCopyHook:
         target_thread_id: str,
     ) -> None:
         self.calls.append((scope, source_thread_id, target_thread_id))
+
+    async def rollback_branch_authority(
+        self,
+        scope,
+        source_thread_id: str,
+        target_thread_id: str,
+    ) -> None:
+        return None
+
+
+class _FailingBranchCopyHook(_BranchCopyHook):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rollback_calls: list[tuple[object, str, str]] = []
+
+    async def copy_branch_authority(
+        self,
+        scope,
+        source_thread_id: str,
+        target_thread_id: str,
+    ) -> None:
+        await super().copy_branch_authority(scope, source_thread_id, target_thread_id)
+        raise RuntimeError("authority copy failed after a partial copy")
+
+    async def rollback_branch_authority(
+        self,
+        scope,
+        source_thread_id: str,
+        target_thread_id: str,
+    ) -> None:
+        self.rollback_calls.append((scope, source_thread_id, target_thread_id))
 
 
 @pytest.mark.asyncio
@@ -229,6 +343,42 @@ async def test_private_thread_service_branch_uses_database_authority_copy_hook_o
     assert branch.metadata["branch_parent_thread_id"] == source.thread_id
     assert hook.calls == [(seed.owner_a_scope, source.thread_id, branch.thread_id)]
     assert await service.get(seed.owner_a, branch.thread_id) == branch
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_service_branch_rolls_back_checkpoint_and_authority_hook(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.thread_repository import ThreadAgentRef
+
+    hook = _FailingBranchCopyHook()
+    service, raw, scoped = _service(seed, branch_copy_hook=hook)
+    source = await service.create(
+        seed.owner_a,
+        thread_id="failed-branch-source",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    source_config = await scoped.for_context(seed.owner_a).aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        empty_checkpoint(),
+        {"source": "loop", "step": 0, "parents": {}},
+        {},
+    )
+
+    with pytest.raises(PrivateWorkUnavailable):
+        await service.branch(
+            seed.owner_a,
+            source_thread_id=source.thread_id,
+            target_thread_id="failed-branch-target",
+            checkpoint_id=source_config["configurable"]["checkpoint_id"],
+            expected_source_version=source.version,
+        )
+
+    assert hook.rollback_calls == [(seed.owner_a_scope, source.thread_id, "failed-branch-target")]
+    assert await raw.aget_tuple({"configurable": {"thread_id": "failed-branch-target", "checkpoint_ns": ""}}) is None
+    async with seed.engine.connect() as connection:
+        assert await connection.scalar(text("SELECT count(*) FROM threads_meta WHERE thread_id='failed-branch-target'")) == 0
 
 
 def test_private_thread_service_does_not_read_host_thread_directories() -> None:

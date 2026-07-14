@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from langgraph.store.memory import InMemoryStore
 from sqlalchemy import text
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
@@ -192,6 +193,52 @@ async def test_harness_thread_store_project_path_requires_full_scope_in_sql(
             scope=seed.owner_a_scope,
         )
     ] == ["harness-scoped-thread"]
+
+    async with seed.engine.begin() as connection:
+        await connection.execute(
+            text(
+                """UPDATE threads_meta SET frozen_at=now()
+                WHERE thread_id='harness-scoped-thread'"""
+            )
+        )
+    assert await repository.get("harness-scoped-thread", scope=seed.owner_a_scope) is None
+    assert await repository.search(scope=seed.owner_a_scope) == []
+    assert (
+        await repository.check_access(
+            "harness-scoped-thread",
+            str(seed.owner_a.user_id),
+            scope=seed.owner_a_scope,
+        )
+        is False
+    )
+    await repository.update_status(
+        "harness-scoped-thread",
+        "error",
+        scope=seed.owner_a_scope,
+    )
+    await repository.delete(
+        "harness-scoped-thread",
+        scope=seed.owner_a_scope,
+    )
+    async with seed.engine.connect() as connection:
+        frozen_status = (
+            await connection.execute(
+                text(
+                    """SELECT status, deleted_at FROM threads_meta
+                    WHERE thread_id='harness-scoped-thread'"""
+                )
+            )
+        ).one()
+    assert frozen_status.status == "busy"
+    assert frozen_status.deleted_at is None
+
+    async with seed.engine.begin() as connection:
+        await connection.execute(
+            text(
+                """UPDATE threads_meta SET frozen_at=NULL
+                WHERE thread_id='harness-scoped-thread'"""
+            )
+        )
     await repository.delete(
         "harness-scoped-thread",
         scope=seed.owner_b_scope,
@@ -214,6 +261,53 @@ async def test_harness_thread_store_project_path_requires_full_scope_in_sql(
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_memory_thread_store_scope_path_excludes_frozen_and_deleted_records() -> None:
+    from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
+    from deerflow.runtime.private_scope import PrivateResourceScope
+
+    owner_id = str(uuid.uuid4())
+    scope = PrivateResourceScope(
+        project_id=str(uuid.uuid4()),
+        owner_user_id=owner_id,
+        membership_version=1,
+    )
+    store = InMemoryStore()
+    repository = MemoryThreadMetaStore(store)
+    created = await repository.create(
+        "memory-frozen-thread",
+        scope=scope,
+        agent_asset_id=uuid.uuid4(),
+        agent_scope="project",
+    )
+    assert created["version"] == 1
+
+    frozen = dict(created)
+    frozen["frozen_at"] = "2026-07-14T00:00:00+00:00"
+    await store.aput(THREADS_NS, "memory-frozen-thread", frozen)
+    assert await repository.get("memory-frozen-thread", scope=scope) is None
+    assert await repository.search(scope=scope) == []
+    assert (
+        await repository.check_access(
+            "memory-frozen-thread",
+            owner_id,
+            scope=scope,
+        )
+        is False
+    )
+    await repository.update_status("memory-frozen-thread", "busy", scope=scope)
+    await repository.delete("memory-frozen-thread", scope=scope)
+    untouched = await store.aget(THREADS_NS, "memory-frozen-thread")
+    assert untouched is not None
+    assert untouched.value["status"] == "idle"
+
+    deleted = dict(created)
+    deleted["deleted_at"] = "2026-07-14T00:00:00+00:00"
+    await store.aput(THREADS_NS, "memory-frozen-thread", deleted)
+    assert await repository.get("memory-frozen-thread", scope=scope) is None
+    assert await repository.search(scope=scope) == []
 
 
 def test_private_thread_repository_has_no_fetch_then_python_scope_checks() -> None:
