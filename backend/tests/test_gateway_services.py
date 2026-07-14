@@ -1063,6 +1063,165 @@ def test_start_run_request_model_rejects_non_mapping_checkpoint_before_persisten
     assert run_manager.calls == 0
 
 
+@pytest.mark.parametrize(
+    "checkpoint_map",
+    [
+        pytest.param([{"project_id": "secret-authority"}], id="list"),
+        pytest.param(({"__private_scope": {"role": "secret-authority"}},), id="tuple"),
+        pytest.param("secret-authority", id="scalar"),
+    ],
+)
+def test_start_run_rejects_configurable_checkpoint_map_before_lifecycle_dependencies(
+    _stub_app_config,
+    checkpoint_map,
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+
+    class NeverLifecycleState:
+        accesses = 0
+
+        def __getattr__(self, name):
+            self.accesses += 1
+            raise AssertionError(f"invalid checkpoint map reached lifecycle dependency {name}")
+
+    lifecycle_state = NeverLifecycleState()
+    request = SimpleNamespace(headers={}, state=SimpleNamespace(), app=SimpleNamespace(state=lifecycle_state))
+    body = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "safe input"}]},
+        config={
+            "configurable": {
+                "checkpoint_id": "ckpt-config",
+                "checkpoint_map": checkpoint_map,
+            }
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(start_run(body, "thread-invalid-config-checkpoint", request))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "checkpoint.checkpoint_map must be an object"
+    assert "secret-authority" not in str(exc_info.value.detail)
+    assert lifecycle_state.accesses == 0
+
+
+@pytest.mark.parametrize("typed_checkpoint", [False, True], ids=["config-only", "typed-overrides"])
+def test_start_run_normalizes_checkpoint_control_for_persistence_saver_and_live(
+    _stub_app_config,
+    typed_checkpoint: bool,
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+
+    class CaptureRunManager:
+        def __init__(self):
+            self.create_kwargs = None
+
+        async def create_or_reject(self, thread_id, assistant_id, **kwargs):
+            self.create_kwargs = kwargs
+            return SimpleNamespace(run_id="run-checkpoint-control", thread_id=thread_id, assistant_id=assistant_id, task=None)
+
+    class CaptureCheckpointer:
+        def __init__(self):
+            self.seen_config = None
+
+        async def aget_tuple(self, config):
+            self.seen_config = config
+            return SimpleNamespace(config=config, checkpoint={"channel_values": {}})
+
+    class ExistingThreadStore:
+        async def get(self, thread_id, **kwargs):
+            return {"thread_id": thread_id}
+
+        async def update_status(self, thread_id, status):
+            return None
+
+    async def _scenario():
+        run_manager = CaptureRunManager()
+        checkpointer = CaptureCheckpointer()
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=checkpointer,
+            store=None,
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=ExistingThreadStore(),
+        )
+        request = SimpleNamespace(headers={}, state=SimpleNamespace(), app=SimpleNamespace(state=state))
+        body = RunCreateRequest(
+            input={"messages": [{"role": "user", "content": "safe input"}]},
+            config={
+                "configurable": {
+                    "checkpoint_id": "ckpt-config",
+                    "checkpoint_ns": "config-ns",
+                    "checkpoint_map": {
+                        "": "ckpt-config",
+                        "nested": [{"project_id": "attacker", "safe": "config-map"}],
+                    },
+                    "safe_option": "kept",
+                }
+            },
+            checkpoint=(
+                {
+                    "checkpoint_id": "ckpt-typed",
+                    "checkpoint_ns": "typed-ns",
+                    "checkpoint_map": {
+                        "": "ckpt-typed",
+                        "nested": [{"__private_scope": {}, "safe": "typed-map"}],
+                    },
+                }
+                if typed_checkpoint
+                else None
+            ),
+        )
+        captured = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "thread-checkpoint-control", request)
+            await record.task
+
+        return run_manager.create_kwargs, checkpointer.seen_config, captured["config"]
+
+    create_kwargs, saver_config, live_config = asyncio.run(_scenario())
+    expected_id = "ckpt-typed" if typed_checkpoint else "ckpt-config"
+    expected_ns = "typed-ns" if typed_checkpoint else "config-ns"
+    expected_map = {
+        "": expected_id,
+        "nested": [{"safe": "typed-map" if typed_checkpoint else "config-map"}],
+    }
+    persisted_configurable = create_kwargs["kwargs"]["config"]["configurable"]
+    saver_configurable = saver_config["configurable"]
+    live_configurable = live_config["configurable"]
+
+    assert persisted_configurable["checkpoint_id"] == expected_id
+    assert persisted_configurable["checkpoint_ns"] == expected_ns
+    assert persisted_configurable["checkpoint_map"] == expected_map
+    assert persisted_configurable["safe_option"] == "kept"
+    assert saver_configurable["checkpoint_id"] == expected_id
+    assert saver_configurable["checkpoint_ns"] == expected_ns
+    assert live_configurable["checkpoint_id"] == expected_id
+    assert live_configurable["checkpoint_ns"] == expected_ns
+    assert persisted_configurable["checkpoint_map"] is saver_configurable["checkpoint_map"]
+    assert saver_configurable["checkpoint_map"] is live_configurable["checkpoint_map"]
+
+
 def test_start_run_sanitizes_live_persisted_and_response_run_control_without_touching_input(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
@@ -1183,7 +1342,15 @@ def test_start_run_sanitizes_live_persisted_and_response_run_control_without_tou
             "safe_context": "kept",
             "nested": [{"safe": "context"}],
         },
-        "configurable": {"safe_configurable": "kept"},
+        "configurable": {
+            "safe_configurable": "kept",
+            "checkpoint_id": "ckpt-1",
+            "checkpoint_ns": "safe-ns",
+            "checkpoint_map": {
+                "": "ckpt-1",
+                "nested": [{"safe": "checkpoint"}],
+            },
+        },
         "metadata": {"safe_config_metadata": "kept"},
     }
 

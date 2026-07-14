@@ -1045,9 +1045,12 @@ identity 和完整字段快照登记，`resource_scope` 与 revalidator 在读�
 这是应用消费边界的 provenance 约束，不宣称能阻止任意 trusted reflective code。客户端
 `body.config` 的 context/configurable/metadata 与 `body.context` 中所有嵌套的
 user/project/owner/membership/role/capability/system-role/runtime `user_role`/project-context 和双下划线内部字段，
-必须在进入 runtime 前递归丢弃；client checkpoint map 必须是 Mapping，其他形状在 run/thread
-持久化或 saver lookup 前以不回显输入的固定 400 拒绝；合法 Mapping 在 saver lookup 与写入 live
-configurable 前只清洗一次并复用。`start_run()` 在创建 run/thread record 前生成 authority-sanitized
+必须在进入 runtime 前递归丢弃。`body.checkpoint.checkpoint_map` 与
+`body.config.configurable.checkpoint_map` 进入同一个 pre-dependency normalization boundary：map 必须是
+Mapping，其他形状在 lifecycle dependency、run/thread persistence、saver 与 worker 前以不回显输入的
+固定 400 拒绝；合法 Mapping 只清洗一次并在 persistence/saver/live 间复用。两来源并存时 typed
+`body.checkpoint` 覆盖 configurable 的 checkpoint ID/namespace/map，消除 reserved-field 歧义。
+`start_run()` 在创建 run/thread record 前生成 authority-sanitized
 metadata/config/body-context 副本，并一致用于持久化、API response 与 live config；secret redaction
 发生在 authority sanitize 之后。graph input/messages 不经过该递归清洗，消息 `role` 是合法数据。
 身份仅由后续服务端认证或 trusted internal owner 注入。harness 只接收不含 role/capability 的

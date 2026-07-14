@@ -12,6 +12,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -161,6 +162,74 @@ def _require_checkpoint_map_mapping(checkpoint_map: object) -> Mapping[str, obje
     if not isinstance(checkpoint_map, Mapping):
         raise HTTPException(status_code=400, detail=_CHECKPOINT_MAP_VALIDATION_DETAIL)
     return checkpoint_map
+
+
+@dataclass(frozen=True)
+class _NormalizedCheckpointControl:
+    checkpoint_id: str | None
+    checkpoint_ns: str
+    checkpoint_map: dict[str, object] | None
+
+
+def _normalize_run_checkpoint_inputs(body: Any, thread_id: str) -> tuple[dict[str, object] | None, _NormalizedCheckpointControl]:
+    raw_config = getattr(body, "config", None)
+    raw_configurable: Mapping[str, object] = {}
+    if isinstance(raw_config, Mapping):
+        configurable_value = raw_config.get("configurable")
+        if configurable_value is not None:
+            if not isinstance(configurable_value, Mapping):
+                raise HTTPException(status_code=400, detail="request config configurable must be an object")
+            raw_configurable = configurable_value
+    _require_checkpoint_map_mapping(raw_configurable.get("checkpoint_map"))
+
+    sanitized_config = strip_private_client_fields(raw_config) if isinstance(raw_config, Mapping) else raw_config
+    sanitized_configurable = sanitized_config.get("configurable") if isinstance(sanitized_config, Mapping) else None
+    if not isinstance(sanitized_configurable, Mapping):
+        sanitized_configurable = {}
+
+    checkpoint_id = sanitized_configurable.get("checkpoint_id")
+    checkpoint_id = str(checkpoint_id) if checkpoint_id else None
+    checkpoint_ns_value = sanitized_configurable.get("checkpoint_ns")
+    checkpoint_ns = str(checkpoint_ns_value) if checkpoint_ns_value is not None else ""
+    checkpoint_map_value = sanitized_configurable.get("checkpoint_map")
+    checkpoint_map = dict(checkpoint_map_value) if isinstance(checkpoint_map_value, Mapping) else None
+    has_checkpoint_control = any(key in raw_configurable for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map"))
+
+    checkpoint = getattr(body, "checkpoint", None)
+    if checkpoint is not None:
+        if not isinstance(checkpoint, Mapping):
+            raise HTTPException(status_code=400, detail="checkpoint must be an object")
+        checkpoint_thread_id = checkpoint.get("thread_id")
+        if checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
+            raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")
+        typed_checkpoint_map = _require_checkpoint_map_mapping(checkpoint.get("checkpoint_map"))
+        checkpoint_map = strip_private_client_fields(typed_checkpoint_map) if typed_checkpoint_map is not None else None
+        raw_checkpoint_id = checkpoint.get("checkpoint_id")
+        body_checkpoint_id = getattr(body, "checkpoint_id", None)
+        checkpoint_id = str(raw_checkpoint_id or body_checkpoint_id) if raw_checkpoint_id or body_checkpoint_id else None
+        raw_checkpoint_ns = checkpoint.get("checkpoint_ns")
+        checkpoint_ns = str(raw_checkpoint_ns) if raw_checkpoint_ns is not None else ""
+        has_checkpoint_control = True
+    else:
+        body_checkpoint_id = getattr(body, "checkpoint_id", None)
+        if body_checkpoint_id:
+            checkpoint_id = str(body_checkpoint_id)
+            has_checkpoint_control = True
+
+    if has_checkpoint_control:
+        normalized_config = dict(sanitized_config) if isinstance(sanitized_config, Mapping) else {}
+        normalized_configurable = dict(sanitized_configurable)
+        for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map"):
+            normalized_configurable.pop(key, None)
+        if checkpoint_id is not None:
+            normalized_configurable["checkpoint_id"] = checkpoint_id
+        normalized_configurable["checkpoint_ns"] = checkpoint_ns
+        if checkpoint_map is not None:
+            normalized_configurable["checkpoint_map"] = checkpoint_map
+        normalized_config["configurable"] = normalized_configurable
+        sanitized_config = normalized_config
+
+    return sanitized_config, _NormalizedCheckpointControl(checkpoint_id, checkpoint_ns, checkpoint_map)
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -381,6 +450,7 @@ def build_run_config(
     metadata: dict[str, Any] | None,
     *,
     assistant_id: str | None = None,
+    client_fields_sanitized: bool = False,
 ) -> dict[str, Any]:
     """Build a RunnableConfig dict for the agent.
 
@@ -399,7 +469,7 @@ def build_run_config(
     the LangGraph Platform-compatible HTTP API and the IM channel path behave
     identically.
     """
-    if request_config:
+    if request_config and not client_fields_sanitized:
         request_config = strip_private_client_fields(request_config)
     if metadata:
         metadata = strip_private_client_fields(metadata)
@@ -484,7 +554,10 @@ def build_run_config(
             runtime_context["agent_name"] = effective_agent_name
         config.setdefault("run_name", resolve_root_run_name(config, normalized))
     if metadata:
-        config.setdefault("metadata", {}).update(metadata)
+        existing_metadata = config.get("metadata")
+        merged_metadata = dict(existing_metadata) if isinstance(existing_metadata, Mapping) else {}
+        merged_metadata.update(metadata)
+        config["metadata"] = merged_metadata
     return config
 
 
@@ -494,28 +567,21 @@ async def apply_checkpoint_to_run_config(
     body: Any,
     thread_id: str,
     request: Request,
+    checkpoint_control: _NormalizedCheckpointControl | None = None,
 ) -> None:
     """Validate an optional run checkpoint and attach it to RunnableConfig."""
-    checkpoint = getattr(body, "checkpoint", None)
-    checkpoint_id = getattr(body, "checkpoint_id", None)
-    checkpoint_ns = ""
-    checkpoint_map = None
-
-    if checkpoint:
-        if not isinstance(checkpoint, Mapping):
-            raise HTTPException(status_code=400, detail="checkpoint must be an object")
-        checkpoint_thread_id = checkpoint.get("thread_id")
-        if checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
-            raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")
-        raw_checkpoint_id = checkpoint.get("checkpoint_id")
-        if raw_checkpoint_id:
-            checkpoint_id = str(raw_checkpoint_id)
-        raw_checkpoint_ns = checkpoint.get("checkpoint_ns")
-        if raw_checkpoint_ns is not None:
-            checkpoint_ns = str(raw_checkpoint_ns)
-        checkpoint_map = _require_checkpoint_map_mapping(checkpoint.get("checkpoint_map"))
-        if checkpoint_map is not None:
-            checkpoint_map = strip_private_client_fields(checkpoint_map)
+    if checkpoint_control is None:
+        _, checkpoint_control = _normalize_run_checkpoint_inputs(
+            SimpleNamespace(
+                config=config,
+                checkpoint=getattr(body, "checkpoint", None),
+                checkpoint_id=getattr(body, "checkpoint_id", None),
+            ),
+            thread_id,
+        )
+    checkpoint_id = checkpoint_control.checkpoint_id
+    checkpoint_ns = checkpoint_control.checkpoint_ns
+    checkpoint_map = checkpoint_control.checkpoint_map
 
     if not checkpoint_id:
         return
@@ -571,11 +637,7 @@ async def start_run(
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
-    checkpoint = getattr(body, "checkpoint", None)
-    if checkpoint is not None:
-        if not isinstance(checkpoint, Mapping):
-            raise HTTPException(status_code=400, detail="checkpoint must be an object")
-        _require_checkpoint_map_mapping(checkpoint.get("checkpoint_map"))
+    sanitized_config, checkpoint_control = _normalize_run_checkpoint_inputs(body, thread_id)
 
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
@@ -583,8 +645,6 @@ async def start_run(
 
     raw_metadata = getattr(body, "metadata", None)
     sanitized_metadata = strip_private_client_fields(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
-    raw_config = getattr(body, "config", None)
-    sanitized_config = strip_private_client_fields(raw_config) if isinstance(raw_config, Mapping) else raw_config
     raw_body_context = getattr(body, "context", None)
     sanitized_body_context = strip_private_client_fields(raw_body_context) if isinstance(raw_body_context, Mapping) else {}
 
@@ -680,8 +740,20 @@ async def start_run(
             graph_input = Command(resume=command["resume"])
         else:
             graph_input = normalize_input(body.input)
-        config = build_run_config(thread_id, sanitized_config, sanitized_metadata, assistant_id=body.assistant_id)
-        await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
+        config = build_run_config(
+            thread_id,
+            sanitized_config,
+            sanitized_metadata,
+            assistant_id=body.assistant_id,
+            client_fields_sanitized=True,
+        )
+        await apply_checkpoint_to_run_config(
+            config,
+            body=body,
+            thread_id=thread_id,
+            request=request,
+            checkpoint_control=checkpoint_control,
+        )
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
         # The ``context`` field is a custom extension for the langgraph-compat layer
