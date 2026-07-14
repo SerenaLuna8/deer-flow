@@ -17,7 +17,6 @@ class RunEventRow(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     run_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     user_id = synonym("owner_user_id")
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -27,6 +26,7 @@ class RunEventRow(Base):
     event_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
     seq: Mapped[int] = mapped_column(nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
 
     __table_args__ = (
         UniqueConstraint("thread_id", "seq", name="uq_events_thread_seq"),

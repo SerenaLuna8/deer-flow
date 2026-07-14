@@ -17,7 +17,6 @@ class RunRow(Base):
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     assistant_id: Mapped[str | None] = mapped_column(String(128))
-    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     user_id = synonym("owner_user_id")
     status: Mapped[str] = mapped_column(String(20), default="pending")
@@ -47,12 +46,13 @@ class RunRow(Base):
     # Follow-up association
     follow_up_to_run_id: Mapped[str | None] = mapped_column(String(64))
 
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     authorization_cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     authorization_cancel_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     finalization_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
-
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     __table_args__ = (
         Index("ix_runs_thread_status", "thread_id", "status"),

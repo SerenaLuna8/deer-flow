@@ -17,7 +17,6 @@ class FeedbackRow(Base):
     feedback_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     user_id = synonym("owner_user_id")
     message_id: Mapped[str | None] = mapped_column(String(64))
@@ -31,6 +30,7 @@ class FeedbackRow(Base):
     # Optional text feedback from the user
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
 
     __table_args__ = (
         UniqueConstraint("project_id", "owner_user_id", "thread_id", "run_id", name="uq_feedback_private_run_owner"),

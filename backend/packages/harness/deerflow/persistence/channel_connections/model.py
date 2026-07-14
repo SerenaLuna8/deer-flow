@@ -19,7 +19,6 @@ class ChannelConnectionRow(Base):
     __tablename__ = "channel_connections"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="connected")
@@ -38,6 +37,7 @@ class ChannelConnectionRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
@@ -98,7 +98,6 @@ class ChannelOAuthStateRow(Base):
     __tablename__ = "channel_oauth_states"
 
     state_hash: Mapped[str] = mapped_column(String(128), primary_key=True)
-    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     code_verifier_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -109,6 +108,7 @@ class ChannelOAuthStateRow(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
 
     __table_args__ = (
         ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_channel_oauth_states_project", ondelete="RESTRICT"),
@@ -126,7 +126,6 @@ class ChannelConversationRow(Base):
     __tablename__ = "channel_conversations"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     connection_id: Mapped[str] = mapped_column(
         String(64),
         ForeignKey("channel_connections.id", ondelete="CASCADE"),
@@ -140,6 +139,7 @@ class ChannelConversationRow(Base):
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
 
     __table_args__ = (
         UniqueConstraint(

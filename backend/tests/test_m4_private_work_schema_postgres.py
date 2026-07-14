@@ -30,6 +30,16 @@ M4_TABLES = {
     "private_work_cutover_state",
 }
 
+M4_CATALOG_TABLES = M4_TABLES | {
+    "threads_meta",
+    "runs",
+    "run_events",
+    "feedback",
+    "channel_connections",
+    "channel_oauth_states",
+    "channel_conversations",
+}
+
 
 def _normalize_catalog_value(value) -> str | None:
     if value is None:
@@ -40,7 +50,7 @@ def _normalize_catalog_value(value) -> str | None:
 def _private_work_catalog(sync_connection) -> dict[str, dict]:
     inspector = inspect(sync_connection)
     catalog: dict[str, dict] = {}
-    for table in sorted(M4_TABLES):
+    for table in sorted(M4_CATALOG_TABLES):
         catalog[table] = {
             "columns": tuple(
                 (
