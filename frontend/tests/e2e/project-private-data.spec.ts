@@ -63,7 +63,9 @@ const memory = {
       category: "preference",
       confidence: 0.9,
       createdAt: "2026-07-15T00:00:00Z",
-      source: "manual",
+      source: "legacy-source",
+      sourceThreadId: "20000000-0000-4000-8000-000000000001",
+      sourceRunId: "21000000-0000-4000-8000-000000000001",
     },
   ],
 };
@@ -193,6 +195,10 @@ test("project Memory loads and exports from the project route", async ({
 
   await page.goto("/projects/research-lab/memory");
   await expect(page.getByText("Ship runnable versions first.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "View" })).toHaveAttribute(
+    "href",
+    "/projects/research-lab/chats/20000000-0000-4000-8000-000000000001",
+  );
   await page.getByRole("button", { name: "Manage memory" }).click();
   await page.getByRole("menuitem", { name: "Export memory" }).click();
 

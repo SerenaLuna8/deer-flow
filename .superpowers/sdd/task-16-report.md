@@ -1,6 +1,6 @@
 # Task 16 Implementation Report
 
-Status: **DONE — awaiting parent review**
+Status: **DONE — frozen review findings repaired**
 
 ## Delivered
 
@@ -19,13 +19,33 @@ Status: **DONE — awaiting parent review**
 - Navigation/file behavior RED: **2 files / 6 tests, 3 failed / 3 passed**. GREEN: **2 files / 6 tests passed**, followed by a clean TypeScript check.
 - Focused Playwright GREEN: **8/8 passed** across project private data and project chat.
 
+### Frozen Review Repair Wave
+
+The parent review was frozen at **1 Critical + 4 Important** findings, all repaired in this single concentrated wave:
+
+1. **Critical — Memory fact provenance:** strict project Memory parsing and the shared `MemoryFact` type now accept only the backend-valid optional `sourceThreadId` and `sourceRunId` fields. List, export and import are covered with a real-shaped fixture; unknown fields remain rejected.
+2. **Important — Memory source routing:** the shared fact list accepts an injected source-link resolver. Workspace keeps `pathOfThread`; project Memory emits `/projects/{encoded_slug}/chats/{encoded_source}` and prefers `sourceThreadId` over legacy `source`.
+3. **Important — artifact query ownership:** project artifact content queries now live below the account/project private-work root and are removed on scope transition, while workspace retains its legacy query key and retry behavior.
+4. **Important — artifact transport and states:** artifact loading uses the authenticated fetch wrapper, checks HTTP status through the normalized gateway error path and exposes loading/public-error/unavailable UI states without rendering error bodies as content. Project artifact queries disable retries so the public failure state is prompt; workspace defaults are preserved.
+5. **Important — Memory mutation lifecycle:** project mutation keys are scope-owned; in-flight work receives an abort signal and scope disposal aborts it. A mount/scope generation guard prevents deferred callbacks from recreating old cache state, and mutation variables/cache entries are removed on transition.
+
+Repair-wave TDD evidence:
+
+- Frozen-finding RED: **4 files / 14 tests, 6 failed / 8 passed**.
+- Artifact retry compatibility RED: **1 file / 4 tests, 1 failed / 3 passed**; fixed with project-only retry suppression.
+- Repair GREEN: **4 files / 16 tests passed**.
+- Initial repaired Playwright run exposed one delayed 503 state while React Query retried; after the scoped retry fix, the final project private-data/chat run was **9/9 passed**.
+
 ## Verification
 
-- `pnpm exec playwright test tests/e2e/project-private-data.spec.ts tests/e2e/project-private-chat.spec.ts` — **8 passed**.
-- Required focused unit command — **114 files / 824 tests passed, 0 skipped**. Rstest treats the forwarded directory arguments as a full-suite invocation, so the observed count is the full suite.
-- `pnpm test -- --run` — **114 files / 824 tests passed, 0 skipped**.
+- Repair-focused unit command — **4 files / 16 tests passed, 0 skipped**.
+- `pnpm exec playwright test tests/e2e/project-private-chat.spec.ts tests/e2e/project-private-data.spec.ts` — **9 passed**.
+- Required focused unit command — **115 files / 832 tests passed, 0 skipped**. Rstest treats the forwarded directory arguments as a full-suite invocation, so the observed count is the full suite.
+- `pnpm test -- --run` — **115 files / 832 tests passed, 0 skipped**.
 - `pnpm check` — ESLint and TypeScript passed.
 - `git diff --check` — passed.
+
+All source gates above were rerun after the final source/lint adjustment. This report was updated only after those gates completed; the Markdown-only report edit did not require rerunning source tests.
 
 ## Contract Decisions and Staged Backlog
 
@@ -37,3 +57,4 @@ Status: **DONE — awaiting parent review**
 ## Commit
 
 - `feat: add project memory connections and files` (final SHA reported in the handoff because a commit cannot embed its own SHA).
+- `fix: close project private data gaps` (repair SHA reported in the handoff because a commit cannot embed its own SHA).

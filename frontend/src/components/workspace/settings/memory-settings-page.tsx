@@ -31,6 +31,7 @@ import {
   MemoryOverview,
   MemorySummaryDisclosure,
   MemoryToolbar,
+  type MemorySourceThreadHref,
 } from "@/components/workspace/settings/memory/memory-workbench";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
@@ -187,9 +188,11 @@ export function MemorySettingsPage() {
 export function MemorySettingsView({
   controller,
   permissions,
+  sourceThreadHref,
 }: {
   controller: MemorySettingsController;
   permissions: MemorySettingsPermissions;
+  sourceThreadHref?: MemorySourceThreadHref;
 }) {
   const { t } = useI18n();
   const {
@@ -591,6 +594,7 @@ export function MemorySettingsView({
                     onDelete={
                       permissions.canDelete ? setFactToDelete : undefined
                     }
+                    sourceThreadHref={sourceThreadHref}
                   />
                 ) : null}
 

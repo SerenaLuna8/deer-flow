@@ -24,4 +24,19 @@ export type PrivateWorkAccess = {
   apiBaseURL: string;
   queryKeyPrefix: readonly unknown[];
   reconnectOnMount: boolean | (() => RunMetadataStorage);
+  runAbortable?<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T>;
+  isActive?(): boolean;
 };
+
+export function runPrivateWorkAbortable<T>(
+  access: PrivateWorkAccess,
+  operation: (signal?: AbortSignal) => Promise<T>,
+) {
+  return access.runAbortable
+    ? access.runAbortable((signal) => operation(signal))
+    : operation();
+}
+
+export function isPrivateWorkAccessActive(access: PrivateWorkAccess) {
+  return access.isActive?.() ?? true;
+}

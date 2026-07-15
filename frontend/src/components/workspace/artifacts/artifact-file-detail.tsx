@@ -199,7 +199,7 @@ export function ArtifactFileDetail({
     isSupportPreview,
     toolResult,
   });
-  const { content, url } = useArtifactContent({
+  const { content, url, isLoading, error } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
     enabled:
@@ -207,7 +207,19 @@ export function ArtifactFileDetail({
       !isWriteFile &&
       (privateWork.scope === null || projectURL !== null),
     url: openURL ?? undefined,
+    privateWork,
   });
+
+  const artifactContentState =
+    isCodeFile && !isWriteFile
+      ? privateWork.scope !== null && projectURL === null
+        ? "unavailable"
+        : isLoading
+          ? "loading"
+          : error
+            ? "error"
+            : null
+      : null;
 
   const displayContent = content ?? "";
   const isWritingFile = isWriteFile && toolResult === undefined;
@@ -380,31 +392,48 @@ export function ArtifactFileDetail({
         </div>
       </ArtifactHeader>
       <ArtifactContent className="p-0">
-        {artifactViewState.canPreview &&
-          viewMode === "preview" &&
-          (language === "markdown" || language === "html") && (
-            <ArtifactFilePreview
-              content={visibleContent}
-              language={language ?? "text"}
-              scrollKey={filepathFromProps}
-              url={url}
-            />
-          )}
-        {isCodeFile && viewMode === "code" && (
-          <CodeEditor
-            className="size-full resize-none rounded-none border-none"
-            value={visibleContent ?? ""}
-            readonly
-          />
-        )}
-        {!isCodeFile && canPreviewInBrowser && openURL && (
-          <iframe className="size-full" src={openURL} />
-        )}
-        {!isCodeFile && !canPreviewInBrowser && (
-          <ArtifactDownloadFallback
-            filepath={filepath}
-            downloadURL={downloadURL}
-          />
+        {artifactContentState ? (
+          <div className="flex size-full items-center justify-center p-6">
+            <p
+              role={artifactContentState === "loading" ? "status" : "alert"}
+              className="text-muted-foreground text-sm"
+            >
+              {artifactContentState === "loading"
+                ? "Loading file…"
+                : artifactContentState === "error"
+                  ? "Unable to load file."
+                  : "File preview is unavailable."}
+            </p>
+          </div>
+        ) : (
+          <>
+            {artifactViewState.canPreview &&
+              viewMode === "preview" &&
+              (language === "markdown" || language === "html") && (
+                <ArtifactFilePreview
+                  content={visibleContent}
+                  language={language ?? "text"}
+                  scrollKey={filepathFromProps}
+                  url={url}
+                />
+              )}
+            {isCodeFile && viewMode === "code" && (
+              <CodeEditor
+                className="size-full resize-none rounded-none border-none"
+                value={visibleContent ?? ""}
+                readonly
+              />
+            )}
+            {!isCodeFile && canPreviewInBrowser && openURL && (
+              <iframe className="size-full" src={openURL} />
+            )}
+            {!isCodeFile && !canPreviewInBrowser && (
+              <ArtifactDownloadFallback
+                filepath={filepath}
+                downloadURL={downloadURL}
+              />
+            )}
+          </>
         )}
       </ArtifactContent>
     </Artifact>

@@ -1,5 +1,8 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
+import { throwGatewayApiError } from "@/core/api/errors";
+import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+
 import type { AgentThreadState } from "../threads";
 
 import { buildWriteFileDraftContent } from "./preview";
@@ -10,11 +13,13 @@ export async function loadArtifactContent({
   threadId,
   isMock,
   url: explicitURL,
+  signal,
 }: {
   filepath: string;
   threadId: string;
   isMock?: boolean;
   url?: string;
+  signal?: AbortSignal;
 }) {
   let enhancedFilepath = filepath;
   if (filepath.endsWith(".skill")) {
@@ -23,7 +28,12 @@ export async function loadArtifactContent({
   const url =
     explicitURL ??
     urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
-  const response = await fetch(url);
+  const response = signal
+    ? await fetchWithAuth(url, { signal })
+    : await fetchWithAuth(url);
+  if (!response.ok) {
+    await throwGatewayApiError(response, "Failed to load artifact content");
+  }
   const text = await response.text();
   return { content: text, url };
 }

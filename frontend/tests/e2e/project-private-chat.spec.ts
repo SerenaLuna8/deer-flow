@@ -100,6 +100,7 @@ type MockPrivateWorkOptions = {
   metadataStatus?: number;
   stateMessages?: unknown[];
   stateArtifacts?: string[];
+  artifactFileStatus?: number;
 };
 
 async function json(route: Route, body: unknown, status = 200) {
@@ -215,6 +216,13 @@ async function mockPrivateWork(
       ]);
     }
     if (path.endsWith(`/threads/${THREAD_ID}/files/${PROJECT_FILE_ID}`)) {
+      if (options.artifactFileStatus) {
+        return json(
+          route,
+          { detail: "private artifact storage failure" },
+          options.artifactFileStatus,
+        );
+      }
       return route.fulfill({
         status: 200,
         contentType: "text/markdown",
@@ -346,6 +354,24 @@ test("project artifacts load only through the scoped project file surface", asyn
     );
 
   expect(legacyArtifactRequests).toEqual([]);
+});
+
+test("project artifact failures show a public error instead of the response body", async ({
+  page,
+}) => {
+  await mockPrivateWork(page, true, {
+    stateMessages: projectArtifactMessages,
+    stateArtifacts: [PRESENTED_ARTIFACT_PATH],
+    artifactFileStatus: 503,
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await page.getByText("presented-report.md").click();
+
+  await expect(page.getByText("Unable to load file.")).toBeVisible();
+  await expect(page.getByText("private artifact storage failure")).toHaveCount(
+    0,
+  );
 });
 
 test("viewer can delete an owned thread but cannot create or run project work", async ({

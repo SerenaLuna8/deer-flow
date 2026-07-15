@@ -57,6 +57,12 @@ import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 import { cn } from "@/lib/utils";
 
+export type MemorySourceThreadHref = (fact: MemoryFact) => string;
+
+export function defaultMemorySourceThreadHref(fact: MemoryFact) {
+  return pathOfThread(fact.sourceThreadId ?? fact.source);
+}
+
 export function MemoryHeaderActions(props: {
   t: Translations;
   isImporting: boolean;
@@ -297,8 +303,9 @@ function MemoryFactRow(props: {
   onEdit?: () => void;
   onDelete?: () => void;
   disabled: boolean;
+  sourceThreadHref: MemorySourceThreadHref;
 }): React.ReactNode {
-  const { fact, t, onEdit, onDelete, disabled } = props;
+  const { fact, t, onEdit, onDelete, disabled, sourceThreadHref } = props;
   const { key } = confidenceToLevelKey(fact.confidence);
   const confidenceText = t.settings.memory.markdown.table.confidenceLevel[key];
   const visual = getMemoryCategoryVisual(fact.category);
@@ -331,7 +338,7 @@ function MemoryFactRow(props: {
               t.settings.memory.manualFactSource
             ) : (
               <Link
-                href={pathOfThread(fact.source)}
+                href={sourceThreadHref(fact)}
                 className="text-primary font-medium underline-offset-4 hover:underline"
               >
                 {t.settings.memory.markdown.table.view}
@@ -382,8 +389,16 @@ export function MemoryFactList(props: {
   isDeleting: boolean;
   onEdit?: (fact: MemoryFact) => void;
   onDelete?: (fact: MemoryFact) => void;
+  sourceThreadHref?: MemorySourceThreadHref;
 }): React.ReactNode {
-  const { facts, t, isDeleting, onEdit, onDelete } = props;
+  const {
+    facts,
+    t,
+    isDeleting,
+    onEdit,
+    onDelete,
+    sourceThreadHref = defaultMemorySourceThreadHref,
+  } = props;
 
   return (
     <section
@@ -409,6 +424,7 @@ export function MemoryFactList(props: {
               onEdit={onEdit ? () => onEdit(fact) : undefined}
               onDelete={onDelete ? () => onDelete(fact) : undefined}
               disabled={isDeleting}
+              sourceThreadHref={sourceThreadHref}
             />
           ))
         ) : (

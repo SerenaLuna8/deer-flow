@@ -41,14 +41,31 @@ export class PrivateWorkScopeRegistry {
     const key = scopeKey(parsed);
     let access = this.entries.get(key);
     if (!access) {
-      access = {
+      const nextAccess: PrivateWorkAccess = {
         scope: parsed,
         client: getProjectAPIClient(parsed),
         apiBaseURL: projectPrivateWorkBaseURL(parsed.projectId),
         queryKeyPrefix: privateWorkRoot(parsed),
         reconnectOnMount: () => projectReconnectStorage(parsed),
+        runAbortable: async <T>(
+          operation: (signal: AbortSignal) => Promise<T>,
+        ) => {
+          if (this.entries.get(key) !== nextAccess) {
+            const error = new Error("Private-work scope is inactive");
+            error.name = "AbortError";
+            throw error;
+          }
+          const controller = this.createAbortController(parsed);
+          try {
+            return await operation(controller.signal);
+          } finally {
+            this.releaseAbortController(parsed, controller);
+          }
+        },
+        isActive: () => this.entries.get(key) === nextAccess,
       };
-      this.entries.set(key, access);
+      access = nextAccess;
+      this.entries.set(key, nextAccess);
     }
     return access;
   }
@@ -64,6 +81,18 @@ export class PrivateWorkScopeRegistry {
     controllers.add(controller);
     this.abortControllers.set(key, controllers);
     return controller;
+  }
+
+  private releaseAbortController(
+    scope: ProjectClientScope,
+    controller: AbortController,
+  ): void {
+    const key = scopeKey(scope);
+    const controllers = this.abortControllers.get(key);
+    controllers?.delete(controller);
+    if (controllers?.size === 0) {
+      this.abortControllers.delete(key);
+    }
   }
 
   dispose(scope: ProjectClientScope): void {

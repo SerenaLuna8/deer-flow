@@ -71,6 +71,48 @@ beforeEach(() => {
 });
 
 describe("project memory adapter", () => {
+  test("parses backend fact provenance for list, export, and import", async () => {
+    const memoryWithProvenance = {
+      ...memory,
+      facts: [
+        {
+          ...memory.facts[0]!,
+          source: "thread-source",
+          sourceThreadId: "thread-source",
+          sourceRunId: "run-source",
+        },
+      ],
+    };
+    mockedFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          namespace: "default",
+          version: 3,
+          memory: memoryWithProvenance,
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(memoryWithProvenance))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          namespace: "default",
+          version: 4,
+          memory: memoryWithProvenance,
+        }),
+      );
+
+    await expect(loadProjectMemory(access)).resolves.toMatchObject({
+      memory: {
+        facts: [{ sourceThreadId: "thread-source", sourceRunId: "run-source" }],
+      },
+    });
+    await expect(exportProjectMemory(access)).resolves.toMatchObject({
+      facts: [{ sourceThreadId: "thread-source", sourceRunId: "run-source" }],
+    });
+    await expect(
+      importProjectMemory(access, 3, memoryWithProvenance),
+    ).resolves.toMatchObject({ version: 4 });
+  });
+
   test("uses account/project query keys and exact project memory paths", async () => {
     mockedFetch
       .mockResolvedValueOnce(
@@ -117,6 +159,28 @@ describe("project memory adapter", () => {
       } as unknown as UserMemory),
     ).rejects.toThrow();
     expect(mockedFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps provenance fields whitelisted without passing through unknown fact fields", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        namespace: "default",
+        version: 3,
+        memory: {
+          ...memory,
+          facts: [
+            {
+              ...memory.facts[0]!,
+              sourceThreadId: "thread-source",
+              sourceRunId: "run-source",
+              leaked: true,
+            },
+          ],
+        },
+      }),
+    );
+
+    await expect(loadProjectMemory(access)).rejects.toThrow();
   });
 
   test("denies every project Memory mutation for a Viewer", () => {

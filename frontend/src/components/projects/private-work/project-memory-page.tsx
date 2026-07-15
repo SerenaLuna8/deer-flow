@@ -1,30 +1,61 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef } from "react";
 
 import {
   MemorySettingsView,
   type MemorySettingsController,
 } from "@/components/workspace/settings/memory-settings-page";
+import type { MemoryFact } from "@/core/memory/types";
 import {
   deleteProjectMemoryFact,
   exportProjectMemory,
   importProjectMemory,
   loadProjectMemory,
   projectMemoryPermissions,
+  projectMemoryMutationKey,
   projectMemoryQueryKey,
   reloadProjectMemory,
   updateProjectMemoryFact,
   type ProjectMemorySnapshot,
 } from "@/core/private-work/memory";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import {
+  isPrivateWorkAccessActive,
+  runPrivateWorkAbortable,
+} from "@/core/private-work/types";
 import type { Project } from "@/core/projects/types";
+
+export function projectMemorySourceThreadHref(
+  projectSlug: string,
+  fact: MemoryFact,
+) {
+  const sourceThreadId = fact.sourceThreadId ?? fact.source;
+  return `/projects/${encodeURIComponent(projectSlug)}/chats/${encodeURIComponent(sourceThreadId)}`;
+}
 
 export function ProjectMemoryPage({ project }: { project: Project }) {
   const privateWork = usePrivateWorkAccess();
   const queryClient = useQueryClient();
   const scope = privateWork.scope;
   const permissions = projectMemoryPermissions(project.capabilities);
+  const generation = useMemo(
+    () =>
+      Symbol(
+        `project-memory-generation:${scope?.accountId ?? "none"}:${scope?.projectId ?? "none"}`,
+      ),
+    [scope],
+  );
+  const currentGeneration = useRef(generation);
+  currentGeneration.current = generation;
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, [scope?.accountId, scope?.projectId]);
   if (!scope) {
     throw new Error("Project Memory requires an entered project scope");
   }
@@ -35,20 +66,35 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
     enabled: permissions.canRead,
   });
   const setSnapshot = (snapshot: ProjectMemorySnapshot) => {
+    if (
+      !mounted.current ||
+      currentGeneration.current !== generation ||
+      !isPrivateWorkAccessActive(privateWork)
+    ) {
+      return;
+    }
     queryClient.setQueryData(queryKey, snapshot);
   };
   const reloadMemory = useMutation({
-    mutationFn: () => reloadProjectMemory(privateWork),
+    mutationKey: projectMemoryMutationKey(scope, "reload"),
+    mutationFn: () =>
+      runPrivateWorkAbortable(privateWork, (signal) =>
+        reloadProjectMemory(privateWork, signal),
+      ),
     onSuccess: setSnapshot,
   });
   const importMemory = useMutation({
+    mutationKey: projectMemoryMutationKey(scope, "import"),
     mutationFn: async (memory: NonNullable<typeof query.data>["memory"]) => {
       if (!query.data) throw new Error("Project Memory is unavailable");
-      return importProjectMemory(privateWork, query.data.version, memory);
+      return runPrivateWorkAbortable(privateWork, (signal) =>
+        importProjectMemory(privateWork, query.data.version, memory, signal),
+      );
     },
     onSuccess: setSnapshot,
   });
   const updateMemoryFact = useMutation({
+    mutationKey: projectMemoryMutationKey(scope, "update-fact"),
     mutationFn: async ({
       factId,
       input,
@@ -57,19 +103,30 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
       input: { content?: string; category?: string; confidence?: number };
     }) => {
       if (!query.data) throw new Error("Project Memory is unavailable");
-      return updateProjectMemoryFact(
-        privateWork,
-        factId,
-        query.data.version,
-        input,
+      return runPrivateWorkAbortable(privateWork, (signal) =>
+        updateProjectMemoryFact(
+          privateWork,
+          factId,
+          query.data.version,
+          input,
+          signal,
+        ),
       );
     },
     onSuccess: setSnapshot,
   });
   const deleteMemoryFact = useMutation({
+    mutationKey: projectMemoryMutationKey(scope, "delete-fact"),
     mutationFn: async (factId: string) => {
       if (!query.data) throw new Error("Project Memory is unavailable");
-      return deleteProjectMemoryFact(privateWork, factId, query.data.version);
+      return runPrivateWorkAbortable(privateWork, (signal) =>
+        deleteProjectMemoryFact(
+          privateWork,
+          factId,
+          query.data.version,
+          signal,
+        ),
+      );
     },
     onSuccess: setSnapshot,
   });
@@ -88,6 +145,9 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
   return (
     <div className="mx-auto w-full max-w-6xl p-6 lg:p-8">
       <MemorySettingsView
+        sourceThreadHref={(fact) =>
+          projectMemorySourceThreadHref(project.slug, fact)
+        }
         controller={controller}
         permissions={{
           canAdd: false,

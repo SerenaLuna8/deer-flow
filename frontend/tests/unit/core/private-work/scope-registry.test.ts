@@ -27,6 +27,43 @@ function makeSessionStorage() {
 }
 
 describe("project private-work scope registry", () => {
+  test("drops a deferred scoped mutation without recreating its old query", async () => {
+    const registry = createPrivateWorkScopeRegistry();
+    const access = registry.acquire(A_P1);
+    const queryClient = new QueryClient();
+    let resolveMutation!: (value: string) => void;
+    const deferred = new Promise<string>((resolve) => {
+      resolveMutation = resolve;
+    });
+    let aborted = false;
+    const queryKey = [...privateWorkRoot(A_P1), "memory", "default"];
+    const mutation = queryClient.getMutationCache().build(queryClient, {
+      mutationKey: [...privateWorkRoot(A_P1), "memory", "reload"],
+      mutationFn: (_variables: { expectedVersion: number }) =>
+        access.runAbortable!(async (signal) => {
+          signal.addEventListener("abort", () => {
+            aborted = true;
+          });
+          return deferred;
+        }),
+      onSuccess: (value) => {
+        if (access.isActive?.() ?? true) {
+          queryClient.setQueryData(queryKey, value);
+        }
+      },
+    });
+    const pending = mutation.execute({ expectedVersion: 3 });
+    expect(mutation.state.variables).toEqual({ expectedVersion: 3 });
+
+    await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
+    expect(aborted).toBe(true);
+    resolveMutation("late-old-project");
+    await pending;
+
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+    expect(queryClient.getQueryData(queryKey)).toBeUndefined();
+  });
+
   test("cancels in-flight work before removing scope state", async () => {
     const order: string[] = [];
     const registry = createPrivateWorkScopeRegistry();

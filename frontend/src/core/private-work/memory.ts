@@ -43,6 +43,8 @@ export const userMemorySchema = z
           confidence: z.number().min(0).max(1),
           createdAt: z.string(),
           source: z.string(),
+          sourceThreadId: z.string().optional(),
+          sourceRunId: z.string().optional(),
         })
         .strict(),
     ),
@@ -89,6 +91,13 @@ function namespacePath(baseURL: string, path = "") {
 
 export function projectMemoryQueryKey(scope: ProjectClientScope) {
   return privateWorkQueryKey(scope, "memory", "default");
+}
+
+export function projectMemoryMutationKey(
+  scope: ProjectClientScope,
+  action: "reload" | "import" | "update-fact" | "delete-fact",
+) {
+  return privateWorkQueryKey(scope, "memory", "default", "mutation", action);
 }
 
 export function projectMemoryPermissions(capabilities: readonly Capability[]) {

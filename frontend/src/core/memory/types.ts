@@ -5,6 +5,8 @@ export interface MemoryFact {
   confidence: number;
   createdAt: string;
   source: string;
+  sourceThreadId?: string;
+  sourceRunId?: string;
 }
 
 export interface MemoryFactInput {
