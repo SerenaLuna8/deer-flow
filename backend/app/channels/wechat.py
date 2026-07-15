@@ -26,6 +26,7 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.private_work.errors import PrivateWorkError
 
 logger = logging.getLogger(__name__)
 
@@ -661,28 +662,41 @@ class WechatChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, *, chat_id: str, context_token: str, code: str) -> bool:
-        if self._connection_repo is None or not code:
+        connection_service = self.config.get("connection_service")
+        if (self._connection_repo is None and connection_service is None) or not code:
             return False
-
-        state = await self._connection_repo.consume_oauth_state(provider="wechat", state=code)
-        if state is None:
-            await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
-            return True
 
         if not chat_id:
             await self._send_connection_reply(chat_id, context_token, "WeChat connection could not be completed from this message.")
             return True
 
-        await self._connection_repo.upsert_connection(
-            owner_user_id=state["owner_user_id"],
-            provider="wechat",
-            external_account_id=chat_id,
-            workspace_id=chat_id,
-            metadata={
-                "context_token": context_token,
-            },
-            status="connected",
-        )
+        metadata = {"context_token": context_token}
+        if connection_service is not None:
+            try:
+                await connection_service.complete_callback(
+                    "wechat",
+                    code,
+                    chat_id,
+                    chat_id,
+                    metadata=metadata,
+                    status="connected",
+                )
+            except PrivateWorkError:
+                await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
+                return True
+        else:
+            state = await self._connection_repo.consume_oauth_state(provider="wechat", state=code)
+            if state is None:
+                await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
+                return True
+            await self._connection_repo.upsert_connection(
+                owner_user_id=state["owner_user_id"],
+                provider="wechat",
+                external_account_id=chat_id,
+                workspace_id=chat_id,
+                metadata=metadata,
+                status="connected",
+            )
         await self._send_connection_reply(chat_id, context_token, "WeChat connected to DeerFlow.")
         return True
 

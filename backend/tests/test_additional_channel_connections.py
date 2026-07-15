@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from support.m4_channel_connections import make_m4_channel_connection_runtime
 
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage
@@ -41,182 +39,195 @@ def test_pending_connect_code_is_none_when_connections_disabled():
 
 
 _DATABASE_URL: str | None = None
-_OWNED_ENGINES = []
 
 
 @pytest_asyncio.fixture()
 async def _postgres_database(migrated_postgres_database_url):
     global _DATABASE_URL
     _DATABASE_URL = migrated_postgres_database_url
-    _OWNED_ENGINES.clear()
     try:
         yield
     finally:
-        for engine in _OWNED_ENGINES:
-            await engine.dispose()
-        _OWNED_ENGINES.clear()
         _DATABASE_URL = None
 
 
-async def _make_repo(_tmp_path, _name: str):
-    from deerflow.persistence.channel_connections import ChannelConnectionRepository
-
+async def _make_runtime(name: str):
     assert _DATABASE_URL is not None
-    engine = create_async_engine(_DATABASE_URL, poolclass=NullPool)
-    _OWNED_ENGINES.append(engine)
-    repo = ChannelConnectionRepository(async_sessionmaker(engine, expire_on_commit=False))
-    repo.close = engine.dispose  # type: ignore[method-assign]
-    return repo
-
-
-async def _seed_state(repo, provider: str, state: str, owner_user_id: str = "deerflow-user-1") -> None:
-    await repo.create_oauth_state(
-        owner_user_id=owner_user_id,
-        provider=provider,
-        state=state,
-        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    return await make_m4_channel_connection_runtime(
+        _DATABASE_URL,
+        cipher_key=f"{name}-secret",
     )
 
 
-def test_feishu_connect_command_binds_identity(tmp_path, _postgres_database):
+def test_feishu_connect_command_binds_identity(_postgres_database):
     import anyio
 
     from app.channels.feishu import FeishuChannel
 
     async def go():
-        repo = await _make_repo(tmp_path, "feishu")
-        state = "feishu-bind-code"
-        await _seed_state(repo, "feishu", state)
-        channel = FeishuChannel(
-            bus=MessageBus(),
-            config={"app_id": "app", "app_secret": "secret", "connection_repo": repo},
-        )
-        channel._reply_card = AsyncMock()
+        runtime = await _make_runtime("feishu")
+        try:
+            state = await runtime.begin_connect("feishu")
+            channel = FeishuChannel(
+                bus=MessageBus(),
+                config={
+                    "app_id": "app",
+                    "app_secret": "secret",
+                    "connection_repo": runtime.repository,
+                    "connection_service": runtime.service,
+                },
+            )
+            channel._reply_card = AsyncMock()
 
-        handled = await channel._bind_connection_from_connect_code(
-            message_id="om-message-1",
-            chat_id="oc-chat-1",
-            user_id="ou-user-1",
-            code=state,
-        )
+            handled = await channel._bind_connection_from_connect_code(
+                message_id="om-message-1",
+                chat_id="oc-chat-1",
+                user_id="ou-user-1",
+                code=state,
+            )
 
-        connections = await repo.list_connections("deerflow-user-1")
-        assert handled is True
-        assert len(connections) == 1
-        assert connections[0]["provider"] == "feishu"
-        assert connections[0]["external_account_id"] == "ou-user-1"
-        assert connections[0]["workspace_id"] == "oc-chat-1"
-        channel._reply_card.assert_awaited_once_with("om-message-1", "Feishu connected to DeerFlow.")
-        await repo.close()
+            connections = await runtime.list_connections()
+            assert handled is True
+            assert len(connections) == 1
+            runtime.assert_owner_a_scope(connections[0])
+            assert connections[0]["provider"] == "feishu"
+            assert connections[0]["external_account_id"] == "ou-user-1"
+            assert connections[0]["workspace_id"] == "oc-chat-1"
+            channel._reply_card.assert_awaited_once_with("om-message-1", "Feishu connected to DeerFlow.")
+        finally:
+            await runtime.seed.engine.dispose()
 
     anyio.run(go)
 
 
-def test_dingtalk_connect_command_binds_identity(tmp_path, _postgres_database):
+def test_dingtalk_connect_command_binds_identity(_postgres_database):
     import anyio
 
     from app.channels.dingtalk import _CONVERSATION_TYPE_GROUP, DingTalkChannel
 
     async def go():
-        repo = await _make_repo(tmp_path, "dingtalk")
-        state = "dingtalk-bind-code"
-        await _seed_state(repo, "dingtalk", state)
-        channel = DingTalkChannel(
-            bus=MessageBus(),
-            config={"client_id": "client", "client_secret": "secret", "connection_repo": repo},
-        )
-        channel._send_connection_reply = AsyncMock()
+        runtime = await _make_runtime("dingtalk")
+        try:
+            state = await runtime.begin_connect("dingtalk")
+            channel = DingTalkChannel(
+                bus=MessageBus(),
+                config={
+                    "client_id": "client",
+                    "client_secret": "secret",
+                    "connection_repo": runtime.repository,
+                    "connection_service": runtime.service,
+                },
+            )
+            channel._send_connection_reply = AsyncMock()
 
-        handled = await channel._bind_connection_from_connect_code(
-            conversation_type=_CONVERSATION_TYPE_GROUP,
-            sender_staff_id="staff-user-1",
-            sender_nick="Alice",
-            conversation_id="cid-group-1",
-            code=state,
-        )
+            handled = await channel._bind_connection_from_connect_code(
+                conversation_type=_CONVERSATION_TYPE_GROUP,
+                sender_staff_id="staff-user-1",
+                sender_nick="Alice",
+                conversation_id="cid-group-1",
+                code=state,
+            )
 
-        connections = await repo.list_connections("deerflow-user-1")
-        assert handled is True
-        assert len(connections) == 1
-        assert connections[0]["provider"] == "dingtalk"
-        assert connections[0]["external_account_id"] == "staff-user-1"
-        assert connections[0]["external_account_name"] == "Alice"
-        assert connections[0]["workspace_id"] == "cid-group-1"
-        channel._send_connection_reply.assert_awaited_once()
-        await repo.close()
+            connections = await runtime.list_connections()
+            assert handled is True
+            assert len(connections) == 1
+            runtime.assert_owner_a_scope(connections[0])
+            assert connections[0]["provider"] == "dingtalk"
+            assert connections[0]["external_account_id"] == "staff-user-1"
+            assert connections[0]["external_account_name"] == "Alice"
+            assert connections[0]["workspace_id"] == "cid-group-1"
+            channel._send_connection_reply.assert_awaited_once()
+        finally:
+            await runtime.seed.engine.dispose()
 
     anyio.run(go)
 
 
-def test_wechat_connect_command_binds_identity(tmp_path, _postgres_database):
+def test_wechat_connect_command_binds_identity(_postgres_database):
     import anyio
 
     from app.channels.wechat import WechatChannel
 
     async def go():
-        repo = await _make_repo(tmp_path, "wechat")
-        state = "wechat-bind-code"
-        await _seed_state(repo, "wechat", state)
-        channel = WechatChannel(
-            bus=MessageBus(),
-            config={"bot_token": "token", "connection_repo": repo},
-        )
-        channel._send_connection_reply = AsyncMock()
+        runtime = await _make_runtime("wechat")
+        try:
+            state = await runtime.begin_connect("wechat")
+            channel = WechatChannel(
+                bus=MessageBus(),
+                config={
+                    "bot_token": "token",
+                    "connection_repo": runtime.repository,
+                    "connection_service": runtime.service,
+                },
+            )
+            channel._send_connection_reply = AsyncMock()
 
-        handled = await channel._bind_connection_from_connect_code(
-            chat_id="wx-user-1",
-            context_token="ctx-1",
-            code=state,
-        )
+            handled = await channel._bind_connection_from_connect_code(
+                chat_id="wx-user-1",
+                context_token="ctx-1",
+                code=state,
+            )
 
-        connections = await repo.list_connections("deerflow-user-1")
-        assert handled is True
-        assert len(connections) == 1
-        assert connections[0]["provider"] == "wechat"
-        assert connections[0]["external_account_id"] == "wx-user-1"
-        assert connections[0]["workspace_id"] == "wx-user-1"
-        channel._send_connection_reply.assert_awaited_once_with("wx-user-1", "ctx-1", "WeChat connected to DeerFlow.")
-        await repo.close()
+            connections = await runtime.list_connections()
+            assert handled is True
+            assert len(connections) == 1
+            runtime.assert_owner_a_scope(connections[0])
+            assert connections[0]["provider"] == "wechat"
+            assert connections[0]["external_account_id"] == "wx-user-1"
+            assert connections[0]["workspace_id"] == "wx-user-1"
+            channel._send_connection_reply.assert_awaited_once_with("wx-user-1", "ctx-1", "WeChat connected to DeerFlow.")
+        finally:
+            await runtime.seed.engine.dispose()
 
     anyio.run(go)
 
 
-def test_wecom_connect_command_binds_identity(tmp_path, _postgres_database):
+def test_wecom_connect_command_binds_identity(_postgres_database):
     import anyio
 
     from app.channels.wecom import WeComChannel
 
     async def go():
-        repo = await _make_repo(tmp_path, "wecom")
-        state = "wecom-bind-code"
-        await _seed_state(repo, "wecom", state)
-        channel = WeComChannel(
-            bus=MessageBus(),
-            config={"bot_id": "bot", "bot_secret": "secret", "connection_repo": repo},
-        )
-        channel._ws_client = MagicMock()
-        channel._ws_client.reply = AsyncMock()
-        frame = {"body": {"aibotid": "bot-1", "chattype": "single"}}
+        runtime = await _make_runtime("wecom")
+        try:
+            state = await runtime.begin_connect("wecom")
+            channel = WeComChannel(
+                bus=MessageBus(),
+                config={
+                    "bot_id": "bot",
+                    "bot_secret": "secret",
+                    "connection_repo": runtime.repository,
+                    "connection_service": runtime.service,
+                },
+            )
+            channel._ws_client = MagicMock()
+            channel._ws_client.reply = AsyncMock()
+            frame = {"body": {"aibotid": "bot-1", "chattype": "single"}}
 
-        handled = await channel._bind_connection_from_connect_code(
-            frame=frame,
-            user_id="wecom-user-1",
-            code=state,
-        )
+            handled = await channel._bind_connection_from_connect_code(
+                frame=frame,
+                user_id="wecom-user-1",
+                code=state,
+            )
 
-        connections = await repo.list_connections("deerflow-user-1")
-        assert handled is True
-        assert len(connections) == 1
-        assert connections[0]["provider"] == "wecom"
-        assert connections[0]["external_account_id"] == "wecom-user-1"
-        assert connections[0]["workspace_id"] == "bot-1"
-        channel._ws_client.reply.assert_awaited_once_with(frame, {"msgtype": "text", "text": {"content": "WeCom connected to DeerFlow."}})
-        await repo.close()
+            connections = await runtime.list_connections()
+            assert handled is True
+            assert len(connections) == 1
+            runtime.assert_owner_a_scope(connections[0])
+            assert connections[0]["provider"] == "wecom"
+            assert connections[0]["external_account_id"] == "wecom-user-1"
+            assert connections[0]["workspace_id"] == "bot-1"
+            channel._ws_client.reply.assert_awaited_once_with(
+                frame,
+                {"msgtype": "text", "text": {"content": "WeCom connected to DeerFlow."}},
+            )
+        finally:
+            await runtime.seed.engine.dispose()
 
     anyio.run(go)
 
 
-def test_additional_channels_attach_owner_identity(tmp_path, _postgres_database):
+def test_additional_channels_attach_project_identity(_postgres_database):
     import anyio
 
     from app.channels.dingtalk import _CONVERSATION_TYPE_GROUP, DingTalkChannel
@@ -225,39 +236,35 @@ def test_additional_channels_attach_owner_identity(tmp_path, _postgres_database)
     from app.channels.wecom import WeComChannel
 
     async def go():
-        repo = await _make_repo(tmp_path, "additional-identity")
-        await repo.upsert_connection(
-            owner_user_id="deerflow-user-1",
-            provider="feishu",
-            external_account_id="ou-user-1",
-            workspace_id="oc-chat-1",
-        )
-        await repo.upsert_connection(
-            owner_user_id="deerflow-user-1",
-            provider="dingtalk",
-            external_account_id="staff-user-1",
-            workspace_id="cid-group-1",
-        )
-        await repo.upsert_connection(
-            owner_user_id="deerflow-user-1",
-            provider="wechat",
-            external_account_id="wx-user-1",
-            workspace_id="wx-user-1",
-        )
-        await repo.upsert_connection(
-            owner_user_id="deerflow-user-1",
-            provider="wecom",
-            external_account_id="wecom-user-1",
-            workspace_id="bot-1",
-        )
+        runtime = await _make_runtime("additional-identity")
+        repo = runtime.repository
+        for provider, external_account_id, workspace_id in (
+            ("feishu", "ou-user-1", "oc-chat-1"),
+            ("dingtalk", "staff-user-1", "cid-group-1"),
+            ("wechat", "wx-user-1", "wx-user-1"),
+            ("wecom", "wecom-user-1", "bot-1"),
+        ):
+            connection = await repo.upsert_connection(
+                scope=runtime.seed.owner_a_scope,
+                provider=provider,
+                external_account_id=external_account_id,
+                workspace_id=workspace_id,
+            )
+            runtime.assert_owner_a_scope(connection)
 
         cases = [
             (
-                FeishuChannel(bus=MessageBus(), config={"connection_repo": repo}),
+                FeishuChannel(
+                    bus=MessageBus(),
+                    config={"connection_repo": repo, "connection_service": runtime.service},
+                ),
                 InboundMessage(channel_name="feishu", chat_id="oc-chat-1", user_id="ou-user-1", text="hello"),
             ),
             (
-                DingTalkChannel(bus=MessageBus(), config={"connection_repo": repo}),
+                DingTalkChannel(
+                    bus=MessageBus(),
+                    config={"connection_repo": repo, "connection_service": runtime.service},
+                ),
                 InboundMessage(
                     channel_name="dingtalk",
                     chat_id="cid-group-1",
@@ -270,11 +277,17 @@ def test_additional_channels_attach_owner_identity(tmp_path, _postgres_database)
                 ),
             ),
             (
-                WechatChannel(bus=MessageBus(), config={"connection_repo": repo}),
+                WechatChannel(
+                    bus=MessageBus(),
+                    config={"connection_repo": repo, "connection_service": runtime.service},
+                ),
                 InboundMessage(channel_name="wechat", chat_id="wx-user-1", user_id="wx-user-1", text="hello"),
             ),
             (
-                WeComChannel(bus=MessageBus(), config={"connection_repo": repo}),
+                WeComChannel(
+                    bus=MessageBus(),
+                    config={"connection_repo": repo, "connection_service": runtime.service},
+                ),
                 InboundMessage(
                     channel_name="wecom",
                     chat_id="wecom-user-1",
@@ -287,7 +300,8 @@ def test_additional_channels_attach_owner_identity(tmp_path, _postgres_database)
 
         for channel, inbound in cases:
             attached = await channel._attach_connection_identity(inbound)
-            assert attached.owner_user_id == "deerflow-user-1"
+            assert attached.owner_user_id == runtime.seed.owner_a_scope.owner_user_id
+            assert attached.project_id == runtime.seed.owner_a_scope.project_id
             assert attached.connection_id
             assert (
                 attached.workspace_id
@@ -299,6 +313,6 @@ def test_additional_channels_attach_owner_identity(tmp_path, _postgres_database)
                 }[channel.name]
             )
 
-        await repo.close()
+        await runtime.seed.engine.dispose()
 
     anyio.run(go)

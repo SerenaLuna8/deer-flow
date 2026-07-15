@@ -84,6 +84,56 @@ def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
     return ChannelConnectionRepository(session_factory)
 
 
+def _make_project_connection_service(connection_repo: Any | None):
+    if connection_repo is None:
+        return None
+    session_factory = getattr(connection_repo, "session_factory", None)
+    if session_factory is None:
+        logger.warning("Channel connection repository has no session factory; project callback service is unavailable")
+        return None
+    from app.private_work.connection_service import ProjectConnectionService
+
+    return ProjectConnectionService(
+        session_factory,
+        repository=connection_repo,
+    )
+
+
+def _make_project_inbound_dispatcher(
+    connection_repo: Any | None,
+    gateway_app: Any | None,
+):
+    if connection_repo is None or gateway_app is None:
+        return None
+    session_factory = getattr(connection_repo, "session_factory", None)
+    scoped_checkpointer = getattr(
+        getattr(gateway_app, "state", None),
+        "project_scoped_checkpointer",
+        None,
+    )
+    if session_factory is None or scoped_checkpointer is None:
+        logger.warning("Project inbound channel runtime dependencies are unavailable")
+        return None
+
+    from app.private_work.connection_inbound import (
+        ConnectionInboundResolver,
+        ProjectInboundDispatcher,
+        build_gateway_project_run_launcher,
+    )
+    from app.private_work.thread_service import PrivateThreadService
+
+    thread_service = PrivateThreadService(session_factory, scoped_checkpointer)
+    resolver = ConnectionInboundResolver(
+        repository=connection_repo,
+        session_factory=session_factory,
+        thread_service=thread_service,
+    )
+    return ProjectInboundDispatcher(
+        resolver,
+        build_gateway_project_run_launcher(app=gateway_app),
+    )
+
+
 class ChannelService:
     """Manages the lifecycle of all configured IM channels.
 
@@ -96,11 +146,18 @@ class ChannelService:
         channels_config: dict[str, Any] | None = None,
         *,
         connection_repo: Any | None = None,
+        connection_service: Any | None = None,
         require_bound_identity: bool = False,
+        gateway_app: Any | None = None,
     ) -> None:
         self.bus = MessageBus()
         self.store = ChannelStore()
         self._connection_repo = connection_repo
+        self._connection_service = connection_service or _make_project_connection_service(connection_repo)
+        private_inbound_dispatcher = _make_project_inbound_dispatcher(
+            connection_repo,
+            gateway_app,
+        )
         config = dict(channels_config or {})
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
@@ -115,6 +172,7 @@ class ChannelService:
             channel_sessions=channel_sessions,
             connection_repo=connection_repo,
             require_bound_identity=require_bound_identity,
+            private_inbound_dispatcher=private_inbound_dispatcher,
         )
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
@@ -122,7 +180,12 @@ class ChannelService:
         self._readiness_locks: dict[str, asyncio.Lock] = {}
 
     @classmethod
-    def from_app_config(cls, app_config: AppConfig | None = None) -> ChannelService:
+    def from_app_config(
+        cls,
+        app_config: AppConfig | None = None,
+        *,
+        gateway_app: Any | None = None,
+    ) -> ChannelService:
         """Create a ChannelService from the application config."""
         if app_config is None:
             from deerflow.config.app_config import get_app_config
@@ -137,10 +200,12 @@ class ChannelService:
         connection_config = getattr(app_config, "channel_connections", None)
         connections_enabled = connection_config is not None and getattr(connection_config, "enabled", False)
         require_bound_identity = bool(connections_enabled and getattr(connection_config, "require_bound_identity", True))
+        connection_repo = _make_connection_repo(connection_config)
         return cls(
             channels_config=channels_config,
-            connection_repo=_make_connection_repo(connection_config),
+            connection_repo=connection_repo,
             require_bound_identity=require_bound_identity,
+            gateway_app=gateway_app,
         )
 
     async def start(self) -> None:
@@ -328,6 +393,8 @@ class ChannelService:
             config["channel_store"] = self.store
             if self._connection_repo is not None:
                 config["connection_repo"] = self._connection_repo
+            if self._connection_service is not None:
+                config["connection_service"] = self._connection_service
             channel = channel_cls(bus=self.bus, config=config)
             self._channels[name] = channel
             await channel.start()
@@ -407,14 +474,22 @@ def get_channel_service() -> ChannelService | None:
     return _channel_service
 
 
-async def start_channel_service(app_config: AppConfig | None = None) -> ChannelService:
+async def start_channel_service(
+    app_config: AppConfig | None = None,
+    *,
+    app: Any | None = None,
+) -> ChannelService:
     """Create and start the global ChannelService from app config."""
     global _channel_service
     if _channel_service is not None:
         return _channel_service
     # from_app_config reads the JSON channel store and runtime config files;
     # keep that disk IO off the event loop.
-    _channel_service = await asyncio.to_thread(ChannelService.from_app_config, app_config)
+    _channel_service = await asyncio.to_thread(
+        ChannelService.from_app_config,
+        app_config,
+        gateway_app=app,
+    )
     await _channel_service.start()
     return _channel_service
 

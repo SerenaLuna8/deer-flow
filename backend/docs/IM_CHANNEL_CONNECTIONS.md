@@ -1,6 +1,6 @@
 # IM Channel Connections
 
-DeerFlow supports user-owned IM channel bindings for Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom. The feature reuses the existing `channels.*` runtime configuration, so it works in local and private deployments with the same outbound transports already supported by DeerFlow.
+DeerFlow supports project-and-owner-scoped IM channel bindings for Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom. The feature reuses the existing `channels.*` runtime configuration, so it works in local and private deployments with the same outbound transports already supported by DeerFlow.
 
 No public IP, OAuth callback URL, or provider webhook is required in this implementation.
 
@@ -77,7 +77,7 @@ channel_connections:
     enabled: true
 ```
 
-`channel_connections` does not duplicate provider secrets. It only controls the browser-facing connect UI and stores per-user binding records. Telegram needs `bot_username` only so the frontend can open a deep link.
+`channel_connections` does not duplicate provider secrets. It controls provider availability while the project API stores binding records under an exact project and owner. Telegram needs `bot_username` only so the frontend can open a deep link.
 
 When `channel_connections.enabled` and `require_bound_identity` are true, auth-enabled deployments reject ordinary unbound IM messages before creating a DeerFlow thread or run. Users must connect the channel from DeerFlow Settings first. Auth-disabled local mode still routes channel messages to the auth-disabled default user, and legacy open-bot behavior can be restored explicitly with `require_bound_identity: false`.
 
@@ -85,29 +85,36 @@ Upgrade note: existing auth-enabled deployments that already have `channel_conne
 
 ## Connect Flow
 
+A project-aware client begins a binding with
+`POST /api/projects/{project_id}/connections/{provider}/connect`, supplying the
+selected Agent asset reference. The response contains the one-time code (and a
+Telegram deep link when applicable). List and disconnect use
+`GET /api/projects/{project_id}/connections` and
+`DELETE /api/projects/{project_id}/connections/{connection_id}`.
+
 Telegram:
 
 - The frontend creates a short one-time code.
 - The Connect button opens `https://t.me/<bot_username>?start=<code>`.
-- The existing Telegram long-polling worker receives `/start <code>` and binds that Telegram chat/user to the current DeerFlow user.
+- The existing Telegram long-polling worker receives `/start <code>` and binds that Telegram chat/user to the selected DeerFlow project and owner.
 
 Slack:
 
 - The frontend creates a short one-time code.
 - The UI shows `Send /connect <code> to the DeerFlow Slack bot.`
-- The existing Slack Socket Mode worker receives the message and binds the Slack user/team to the current DeerFlow user.
+- The existing Slack Socket Mode worker receives the message and binds the Slack user/team to the selected DeerFlow project and owner.
 
 Discord:
 
 - The frontend creates a short one-time code.
 - The UI shows `Send /connect <code> to the DeerFlow Discord bot.`
-- The existing Discord Gateway worker receives the message and binds the Discord user/guild to the current DeerFlow user.
+- The existing Discord Gateway worker receives the message and binds the Discord user/guild to the selected DeerFlow project and owner.
 
 Feishu/Lark, DingTalk, WeChat, and WeCom:
 
 - The frontend creates a short one-time code.
 - The UI shows `Send /connect <code> to the DeerFlow <Provider> bot.`
-- The already-running long-connection or polling worker receives the message and binds the platform user/workspace identity to the current DeerFlow user.
+- The already-running long-connection or polling worker receives the message and binds the platform identity to the selected DeerFlow project and owner.
 
 Codes use 128 bits of randomness, expire after 10 minutes, and are single-use.
 
@@ -117,12 +124,12 @@ For providers with an `allowed_users` allowlist (Telegram, Slack, DingTalk, WeCh
 
 Connection records live in SQL tables under `deerflow.persistence.channel_connections`:
 
-- `channel_connections`: owner user, provider identity, workspace/guild/team, status, metadata.
-- `channel_oauth_states`: one-time connect codes and Telegram deep-link state.
-- `channel_conversations`: connection-scoped IM conversation to DeerFlow thread mapping.
+- `channel_connections`: project, owner user, provider identity, workspace/guild/team, status, and server-owned Agent metadata.
+- `channel_oauth_states`: project-and-owner-scoped one-time connect codes and Telegram deep-link state.
+- `channel_conversations`: project-and-owner-scoped IM conversation to private DeerFlow Thread mapping.
 - `channel_credentials`: reserved for future provider-token flows, not used by the local/private binding flow.
 
-Incoming messages that resolve to a connection carry `connection_id`, `owner_user_id`, and `workspace_id`. `ChannelManager` uses `owner_user_id` as the DeerFlow run user id and preserves the raw platform user id as `channel_user_id`.
+For ordinary bound text, the persisted external identity lookup is the only source of project and owner. The resolver rechecks active membership, creates or reuses a private Thread, and launches the existing Gateway run lifecycle through `start_private_run`. The raw platform user id remains the runtime-only `channel_user_id`. The first runnable project path returns final text; project attachment and incremental streaming delivery are deferred.
 
 Runtime provider credentials are deployment-level bot secrets, not user-owned
 connection credentials. They can come from `channels.*` in `config.yaml` or

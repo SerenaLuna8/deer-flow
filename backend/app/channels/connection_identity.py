@@ -15,7 +15,12 @@ async def attach_connection_identity(
     workspace_id: str | None,
     fallback_without_workspace: bool = False,
 ) -> InboundMessage:
-    """Attach connection metadata to an inbound message when a persisted binding exists."""
+    """Copy server lookup hints onto an inbound message.
+
+    These mutable fields are for routing/display compatibility only. The
+    private-work resolver independently re-resolves the connection and remains
+    the sole project/owner authority before creating a Thread or run.
+    """
     if repo is None:
         return inbound
 
@@ -38,6 +43,7 @@ async def attach_connection_identity(
 
         inbound.connection_id = connection["id"]
         inbound.owner_user_id = connection["owner_user_id"]
+        inbound.project_id = connection.get("project_id")
         inbound.workspace_id = connection.get("workspace_id")
         return inbound
 

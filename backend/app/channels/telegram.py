@@ -11,6 +11,7 @@ from typing import Any
 from app.channels.base import Channel
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.private_work.errors import PrivateWorkError
 
 logger = logging.getLogger(__name__)
 
@@ -397,31 +398,41 @@ class TelegramChannel(Channel):
         return str(getattr(user, "id", ""))
 
     async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:
-        if self._connection_repo is None or not state_token:
+        connection_service = self.config.get("connection_service")
+        if (self._connection_repo is None and connection_service is None) or not state_token:
             return False
 
-        state = await self._connection_repo.consume_oauth_state(provider="telegram", state=state_token)
-        if state is None:
-            await update.message.reply_text("Telegram connection link is invalid or expired.")
-            return True
-
-        owner_user_id = state["owner_user_id"]
         user_id = str(update.effective_user.id)
         chat_id = str(update.effective_chat.id)
-        connection = await self._connection_repo.upsert_connection(
-            owner_user_id=owner_user_id,
-            provider="telegram",
-            external_account_id=user_id,
-            external_account_name=self._telegram_display_name(update.effective_user),
-            workspace_id=chat_id,
-            workspace_name=None,
-            metadata={
+        fields = {
+            "external_account_name": self._telegram_display_name(update.effective_user),
+            "workspace_name": None,
+            "metadata": {
                 "chat_id": chat_id,
                 "chat_type": update.effective_chat.type,
                 "telegram_username": getattr(update.effective_user, "username", None),
             },
-            status="connected",
-        )
+            "status": "connected",
+        }
+        if connection_service is not None:
+            try:
+                connection = await connection_service.complete_callback("telegram", state_token, user_id, chat_id, **fields)
+            except PrivateWorkError:
+                await update.message.reply_text("Telegram connection link is invalid or expired.")
+                return True
+        else:
+            state = await self._connection_repo.consume_oauth_state(provider="telegram", state=state_token)
+            if state is None:
+                await update.message.reply_text("Telegram connection link is invalid or expired.")
+                return True
+            connection = await self._connection_repo.upsert_connection(
+                owner_user_id=state["owner_user_id"],
+                provider="telegram",
+                external_account_id=user_id,
+                workspace_id=chat_id,
+                **fields,
+            )
+        owner_user_id = connection.get("owner_user_id", "unknown")
         logger.info("[Telegram] bound chat=%s user=%s to DeerFlow user=%s connection=%s", chat_id, user_id, owner_user_id, connection["id"])
         await update.message.reply_text("Telegram connected to DeerFlow.")
         return True

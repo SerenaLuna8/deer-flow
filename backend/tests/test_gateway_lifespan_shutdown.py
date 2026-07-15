@@ -38,8 +38,10 @@ async def _run_lifespan_with_hanging_stop() -> float:
     startup_config.memory.token_counting = "char"
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
+    started_with_apps = []
 
-    async def fake_start(_startup_config):
+    async def fake_start(_startup_config, *, app):
+        started_with_apps.append(app)
         return fake_service
 
     close_oidc_service = AsyncMock()
@@ -59,6 +61,7 @@ async def _run_lifespan_with_hanging_stop() -> float:
         elapsed = loop.time() - start
 
     close_oidc_service.assert_awaited_once()
+    assert started_with_apps == [app]
     assert _SHUTDOWN_HOOK_TIMEOUT_SECONDS < 30.0, "Timeout constant must stay modest"
     return elapsed
 
@@ -86,7 +89,8 @@ async def _run_lifespan_with_upload_staging_cleanup():
     close_oidc_service = AsyncMock()
     stop_channel_service = AsyncMock()
 
-    async def fake_start(_startup_config):
+    async def fake_start(_startup_config, *, app):
+        del app
         return fake_service
 
     with (

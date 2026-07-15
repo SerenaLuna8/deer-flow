@@ -28,6 +28,7 @@ from app.gateway.routers import (
     memory,
     models,
     project_assets,
+    project_connections,
     project_invitations,
     project_lifecycle,
     project_members,
@@ -273,7 +274,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.channels.service import start_channel_service
 
-            channel_service = await start_channel_service(startup_config)
+            channel_service = await start_channel_service(startup_config, app=app)
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
@@ -464,6 +465,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(project_lifecycle.router)
     app.include_router(project_assets.catalog_router)
     app.include_router(project_assets.project_router)
+    app.include_router(project_connections.router)
     app.include_router(admin_assets.admin_router)
     app.include_router(admin_assets.admin_project_router)
 

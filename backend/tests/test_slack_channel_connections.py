@@ -3,87 +3,59 @@
 from __future__ import annotations
 
 import sys
-from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from support.m4_channel_connections import make_m4_channel_connection_runtime
 
 from app.channels.message_bus import MessageBus, OutboundMessage
-
-_DATABASE_URL: str | None = None
-_OWNED_ENGINES = []
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 
-@pytest_asyncio.fixture()
-async def _postgres_database(migrated_postgres_database_url):
-    global _DATABASE_URL
-    _DATABASE_URL = migrated_postgres_database_url
-    _OWNED_ENGINES.clear()
-    try:
-        yield
-    finally:
-        for engine in _OWNED_ENGINES:
-            await engine.dispose()
-        _OWNED_ENGINES.clear()
-        _DATABASE_URL = None
-
-
-async def _make_repo(_tmp_path):
-    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
-
-    assert _DATABASE_URL is not None
-    engine = create_async_engine(_DATABASE_URL, poolclass=NullPool)
-    _OWNED_ENGINES.append(engine)
-    repo = ChannelConnectionRepository(
-        async_sessionmaker(engine, expire_on_commit=False),
-        cipher=ChannelCredentialCipher.from_key("slack-secret"),
-    )
-    repo.close = engine.dispose  # type: ignore[method-assign]
-    return repo
-
-
-def test_slack_connect_command_binds_socket_mode_identity(tmp_path, _postgres_database):
+def test_slack_connect_command_binds_socket_mode_identity(migrated_postgres_database_url):
     import anyio
 
     from app.channels.slack import SlackChannel
 
     async def go():
-        repo = await _make_repo(tmp_path)
-        state = "slack-bind-code"
-        await repo.create_oauth_state(
-            owner_user_id="deerflow-user-1",
-            provider="slack",
-            state=state,
-            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        runtime = await make_m4_channel_connection_runtime(
+            migrated_postgres_database_url,
+            cipher_key="slack-secret",
         )
-        channel = SlackChannel(
-            bus=MessageBus(),
-            config={"bot_token": "xoxb-operator", "app_token": "xapp-operator", "connection_repo": repo},
-        )
-        channel._web_client = MagicMock()
+        try:
+            state = await runtime.begin_connect("slack")
+            channel = SlackChannel(
+                bus=MessageBus(),
+                config={
+                    "bot_token": "xoxb-operator",
+                    "app_token": "xapp-operator",
+                    "connection_repo": runtime.repository,
+                    "connection_service": runtime.service,
+                },
+            )
+            channel._web_client = MagicMock()
 
-        handled = await channel._bind_connection_from_connect_code(
-            event={
-                "user": "U123",
-                "channel": "C123",
-                "ts": "1710000000.000100",
-            },
-            team_id="T123",
-            code=state,
-        )
+            handled = await channel._bind_connection_from_connect_code(
+                event={
+                    "user": "U123",
+                    "channel": "C123",
+                    "ts": "1710000000.000100",
+                },
+                team_id="T123",
+                code=state,
+            )
 
-        connections = await repo.list_connections("deerflow-user-1")
-        assert handled is True
-        assert len(connections) == 1
-        assert connections[0]["provider"] == "slack"
-        assert connections[0]["external_account_id"] == "U123"
-        assert connections[0]["workspace_id"] == "T123"
-        assert connections[0]["metadata"]["channel_id"] == "C123"
-        channel._web_client.chat_postMessage.assert_called_once()
-        await repo.close()
+            connections = await runtime.list_connections()
+            assert handled is True
+            assert len(connections) == 1
+            runtime.assert_owner_a_scope(connections[0])
+            assert connections[0]["provider"] == "slack"
+            assert connections[0]["external_account_id"] == "U123"
+            assert connections[0]["workspace_id"] == "T123"
+            assert connections[0]["metadata"]["channel_id"] == "C123"
+            channel._web_client.chat_postMessage.assert_called_once()
+        finally:
+            await runtime.seed.engine.dispose()
 
     anyio.run(go)
 
@@ -106,16 +78,25 @@ def test_slack_send_uses_connection_bot_token_when_connection_id_is_present():
             },
         )
 
+        scope = PrivateResourceScope(
+            project_id="11111111-1111-4111-8111-111111111111",
+            owner_user_id="22222222-2222-4222-8222-222222222222",
+            membership_version=3,
+        )
         msg = OutboundMessage(
             channel_name="slack",
             chat_id="C123",
             thread_id="thread-1",
             text="hello",
             connection_id="connection-1",
+            private_scope=scope,
         )
         await channel.send(msg)
 
-        repo.get_credentials.assert_awaited_once_with("connection-1")
+        repo.get_credentials.assert_awaited_once_with(
+            scope=scope,
+            connection_id="connection-1",
+        )
         web_client_factory.assert_called_once_with(token="xoxb-connection-token")
         web_client.chat_postMessage.assert_called_once()
 

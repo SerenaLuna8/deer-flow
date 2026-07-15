@@ -17,6 +17,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.private_work.errors import PrivateWorkError
 
 logger = logging.getLogger(__name__)
 
@@ -342,13 +343,9 @@ class WeComChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, *, frame: dict[str, Any], user_id: str, code: str) -> bool:
-        if self._connection_repo is None or not code:
+        connection_service = self.config.get("connection_service")
+        if (self._connection_repo is None and connection_service is None) or not code:
             return False
-
-        state = await self._connection_repo.consume_oauth_state(provider="wecom", state=code)
-        if state is None:
-            await self._send_connection_reply(frame, "WeCom connection code is invalid or expired.")
-            return True
 
         if not user_id:
             await self._send_connection_reply(frame, "WeCom connection could not be completed from this message.")
@@ -356,17 +353,33 @@ class WeComChannel(Channel):
 
         body = frame.get("body", {}) or {}
         workspace_id = str(body.get("aibotid") or "") or None
-        await self._connection_repo.upsert_connection(
-            owner_user_id=state["owner_user_id"],
-            provider="wecom",
-            external_account_id=user_id,
-            workspace_id=workspace_id,
-            metadata={
-                "aibotid": workspace_id,
-                "chattype": body.get("chattype"),
-            },
-            status="connected",
-        )
+        metadata = {"aibotid": workspace_id, "chattype": body.get("chattype")}
+        if connection_service is not None:
+            try:
+                await connection_service.complete_callback(
+                    "wecom",
+                    code,
+                    user_id,
+                    workspace_id,
+                    metadata=metadata,
+                    status="connected",
+                )
+            except PrivateWorkError:
+                await self._send_connection_reply(frame, "WeCom connection code is invalid or expired.")
+                return True
+        else:
+            state = await self._connection_repo.consume_oauth_state(provider="wecom", state=code)
+            if state is None:
+                await self._send_connection_reply(frame, "WeCom connection code is invalid or expired.")
+                return True
+            await self._connection_repo.upsert_connection(
+                owner_user_id=state["owner_user_id"],
+                provider="wecom",
+                external_account_id=user_id,
+                workspace_id=workspace_id,
+                metadata=metadata,
+                status="connected",
+            )
         await self._send_connection_reply(frame, "WeCom connected to DeerFlow.")
         return True
 

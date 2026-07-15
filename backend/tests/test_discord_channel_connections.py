@@ -2,34 +2,31 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.m4_channel_connections import make_m4_channel_connection_runtime
 
 from app.channels.discord import DiscordChannel
 from app.channels.message_bus import InboundMessage, MessageBus
 
 
 @pytest.fixture
-async def repo(migrated_postgres_database_url):
-    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
-
-    engine = create_async_engine(migrated_postgres_database_url)
+async def runtime(migrated_postgres_database_url):
+    runtime = await make_m4_channel_connection_runtime(
+        migrated_postgres_database_url,
+        cipher_key="discord-secret",
+    )
     try:
-        yield ChannelConnectionRepository(
-            async_sessionmaker(engine, expire_on_commit=False),
-            cipher=ChannelCredentialCipher.from_key("discord-secret"),
-        )
+        yield runtime
     finally:
-        await engine.dispose()
+        await runtime.seed.engine.dispose()
 
 
 @pytest.mark.anyio
-async def test_discord_inbound_attaches_owner_identity_from_user_level_connection(repo):
-    connection = await repo.upsert_connection(
-        owner_user_id="alice",
+async def test_discord_inbound_attaches_project_identity(runtime):
+    connection = await runtime.repository.upsert_connection(
+        scope=runtime.seed.owner_a_scope,
         provider="discord",
         external_account_id="987",
         external_account_name="Alice",
@@ -37,7 +34,11 @@ async def test_discord_inbound_attaches_owner_identity_from_user_level_connectio
     )
     channel = DiscordChannel(
         bus=MessageBus(),
-        config={"bot_token": "discord-bot", "connection_repo": repo},
+        config={
+            "bot_token": "discord-bot",
+            "connection_repo": runtime.repository,
+            "connection_service": runtime.service,
+        },
     )
     inbound = InboundMessage(
         channel_name="discord",
@@ -48,23 +49,23 @@ async def test_discord_inbound_attaches_owner_identity_from_user_level_connectio
 
     attached = await channel._attach_connection_identity(inbound, guild_id="G123")
 
+    runtime.assert_owner_a_scope(connection)
     assert attached.connection_id == connection["id"]
-    assert attached.owner_user_id == "alice"
+    assert attached.owner_user_id == runtime.seed.owner_a_scope.owner_user_id
+    assert attached.project_id == runtime.seed.owner_a_scope.project_id
     assert attached.workspace_id is None
 
 
 @pytest.mark.anyio
-async def test_discord_connect_command_binds_gateway_identity(repo):
-    state = "discord-bind-code"
-    await repo.create_oauth_state(
-        owner_user_id="deerflow-user-1",
-        provider="discord",
-        state=state,
-        expires_at=datetime.now(UTC) + timedelta(minutes=5),
-    )
+async def test_discord_connect_command_binds_gateway_identity(runtime):
+    state = await runtime.begin_connect("discord")
     channel = DiscordChannel(
         bus=MessageBus(),
-        config={"bot_token": "discord-bot", "connection_repo": repo},
+        config={
+            "bot_token": "discord-bot",
+            "connection_repo": runtime.repository,
+            "connection_service": runtime.service,
+        },
     )
     message = MagicMock()
     message.author.id = 987
@@ -76,9 +77,10 @@ async def test_discord_connect_command_binds_gateway_identity(repo):
 
     handled = await channel._bind_connection_from_connect_code(message, state)
 
-    connections = await repo.list_connections("deerflow-user-1")
+    connections = await runtime.list_connections()
     assert handled is True
     assert len(connections) == 1
+    runtime.assert_owner_a_scope(connections[0])
     assert connections[0]["provider"] == "discord"
     assert connections[0]["external_account_id"] == "987"
     assert connections[0]["external_account_name"] == "Alice"

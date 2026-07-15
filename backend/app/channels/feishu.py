@@ -22,6 +22,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.private_work.errors import PrivateWorkError
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
@@ -855,29 +856,41 @@ class FeishuChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, *, message_id: str, chat_id: str, user_id: str, code: str) -> bool:
-        if self._connection_repo is None or not code:
+        connection_service = self.config.get("connection_service")
+        if (self._connection_repo is None and connection_service is None) or not code:
             return False
-
-        state = await self._connection_repo.consume_oauth_state(provider="feishu", state=code)
-        if state is None:
-            await self._reply_card(message_id, "Feishu connection code is invalid or expired.")
-            return True
 
         if not user_id or not chat_id:
             await self._reply_card(message_id, "Feishu connection could not be completed from this message.")
             return True
 
-        await self._connection_repo.upsert_connection(
-            owner_user_id=state["owner_user_id"],
-            provider="feishu",
-            external_account_id=user_id,
-            workspace_id=chat_id,
-            metadata={
-                "chat_id": chat_id,
-                "message_id": message_id,
-            },
-            status="connected",
-        )
+        metadata = {"chat_id": chat_id, "message_id": message_id}
+        if connection_service is not None:
+            try:
+                await connection_service.complete_callback(
+                    "feishu",
+                    code,
+                    user_id,
+                    chat_id,
+                    metadata=metadata,
+                    status="connected",
+                )
+            except PrivateWorkError:
+                await self._reply_card(message_id, "Feishu connection code is invalid or expired.")
+                return True
+        else:
+            state = await self._connection_repo.consume_oauth_state(provider="feishu", state=code)
+            if state is None:
+                await self._reply_card(message_id, "Feishu connection code is invalid or expired.")
+                return True
+            await self._connection_repo.upsert_connection(
+                owner_user_id=state["owner_user_id"],
+                provider="feishu",
+                external_account_id=user_id,
+                workspace_id=chat_id,
+                metadata=metadata,
+                status="connected",
+            )
         await self._reply_card(message_id, "Feishu connected to DeerFlow.")
         return True
 

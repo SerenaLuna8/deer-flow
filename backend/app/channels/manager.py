@@ -30,6 +30,8 @@ from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 from app.gateway.internal_auth import create_internal_auth_headers
+from app.private_work.connection_inbound import ProjectInboundDispatcher
+from app.private_work.errors import PrivateWorkNotFound
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.goal import parse_goal_command
@@ -806,6 +808,7 @@ class ChannelManager:
         channel_sessions: dict[str, Any] | None = None,
         connection_repo: Any | None = None,
         require_bound_identity: bool = False,
+        private_inbound_dispatcher: ProjectInboundDispatcher | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -817,6 +820,7 @@ class ChannelManager:
         self._channel_sessions = dict(channel_sessions or {})
         self._connection_repo = connection_repo
         self._require_bound_identity = require_bound_identity
+        self._private_inbound_dispatcher = private_inbound_dispatcher
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
         # Per-conversation locks so concurrent inbound messages for the same
@@ -1160,6 +1164,11 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
         try:
+            if self._should_dispatch_project_inbound(msg):
+                async with self._semaphore:
+                    await self._handle_project_inbound_chat(msg)
+                return
+
             # Non-command chat can be rejected before it consumes a semaphore
             # slot. Commands are handled below because provider adapters consume
             # binding commands before manager dispatch, and _handle_command()
@@ -1205,6 +1214,55 @@ class ChannelManager:
             await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
+
+    def _should_dispatch_project_inbound(self, msg: InboundMessage) -> bool:
+        if self._private_inbound_dispatcher is None or not self._require_bound_identity or msg.msg_type != InboundMessageType.CHAT:
+            return False
+        policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
+        return policy is None or policy.requires_bound_identity
+
+    async def _handle_project_inbound_chat(self, msg: InboundMessage) -> None:
+        dispatcher = self._private_inbound_dispatcher
+        if dispatcher is None:
+            return
+        try:
+            result = await dispatcher.dispatch(msg)
+        except PrivateWorkNotFound:
+            await self._reject_unbound_channel_message(
+                msg,
+                bound_identity_rejection=_BoundIdentityRejection(),
+            )
+            return
+
+        response_text = _extract_response_text(result.state)
+        artifacts = _extract_artifacts(result.state)
+        if not response_text:
+            response_text = "(No response from agent)"
+        resolved = result.resolved
+        metadata = _response_metadata(
+            msg.metadata,
+            pending_clarification=_has_current_turn_clarification(result.state),
+        )
+        metadata["project_id"] = str(resolved.context.project_id)
+        logger.info(
+            "[Manager] project inbound completed: thread_id=%s, response_len=%d, deferred_artifacts=%d",
+            resolved.thread_id,
+            len(response_text),
+            len(artifacts),
+        )
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=resolved.thread_id,
+                text=response_text,
+                thread_ts=msg.thread_ts,
+                connection_id=resolved.connection_id,
+                owner_user_id=str(resolved.context.user_id),
+                private_scope=resolved.context.resource_scope,
+                metadata=metadata,
+            )
+        )
 
     async def _get_bound_identity_rejection(self, msg: InboundMessage) -> _BoundIdentityRejection | None:
         """Return None when *msg* may proceed; otherwise return rejection routing hints.

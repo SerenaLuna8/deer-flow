@@ -14,6 +14,7 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.private_work.errors import PrivateWorkError
 
 logger = logging.getLogger(__name__)
 
@@ -481,13 +482,9 @@ class DiscordChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, message, code: str) -> bool:
-        if self._connection_repo is None or not code:
+        connection_service = self.config.get("connection_service")
+        if (self._connection_repo is None and connection_service is None) or not code:
             return False
-
-        state = await self._connection_repo.consume_oauth_state(provider="discord", state=code)
-        if state is None:
-            await self._send_connection_reply(message, "Discord connection code is invalid or expired.")
-            return True
 
         guild = getattr(message, "guild", None)
         channel = getattr(message, "channel", None)
@@ -498,19 +495,33 @@ class DiscordChannel(Channel):
             return True
 
         guild_id = str(getattr(guild, "id", "") or "") or None
-        await self._connection_repo.upsert_connection(
-            owner_user_id=state["owner_user_id"],
-            provider="discord",
-            external_account_id=user_id,
-            external_account_name=getattr(author, "display_name", None) or getattr(author, "name", None),
-            workspace_id=guild_id,
-            workspace_name=getattr(guild, "name", None) if guild is not None else None,
-            metadata={
+        fields = {
+            "external_account_name": getattr(author, "display_name", None) or getattr(author, "name", None),
+            "workspace_name": getattr(guild, "name", None) if guild is not None else None,
+            "metadata": {
                 "guild_id": guild_id,
                 "channel_id": str(getattr(channel, "id", "") or ""),
             },
-            status="connected",
-        )
+            "status": "connected",
+        }
+        if connection_service is not None:
+            try:
+                await connection_service.complete_callback("discord", code, user_id, guild_id, **fields)
+            except PrivateWorkError:
+                await self._send_connection_reply(message, "Discord connection code is invalid or expired.")
+                return True
+        else:
+            state = await self._connection_repo.consume_oauth_state(provider="discord", state=code)
+            if state is None:
+                await self._send_connection_reply(message, "Discord connection code is invalid or expired.")
+                return True
+            await self._connection_repo.upsert_connection(
+                owner_user_id=state["owner_user_id"],
+                provider="discord",
+                external_account_id=user_id,
+                workspace_id=guild_id,
+                **fields,
+            )
         await self._send_connection_reply(message, "Discord connected to DeerFlow.")
         return True
 

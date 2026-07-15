@@ -12,6 +12,7 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.private_work.errors import PrivateWorkError
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +207,11 @@ class SlackChannel(Channel):
             logger.warning("[Slack] failed to resolve bot user id; app mention text may include the bot mention", exc_info=True)
 
     async def _get_web_client_for_message(self, msg: OutboundMessage):
-        if msg.connection_id and self._connection_repo is not None:
-            credentials = await self._connection_repo.get_credentials(msg.connection_id)
+        if msg.connection_id and msg.private_scope is not None and self._connection_repo is not None:
+            credentials = await self._connection_repo.get_credentials(
+                scope=msg.private_scope,
+                connection_id=msg.connection_id,
+            )
             access_token = credentials.get("access_token") if credentials else None
             if not access_token:
                 return self._web_client
@@ -369,32 +373,44 @@ class SlackChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, *, event: dict, team_id: str, code: str) -> bool:
-        if self._connection_repo is None or not code:
+        connection_service = self.config.get("connection_service")
+        if (self._connection_repo is None and connection_service is None) or not code:
             return False
 
         channel_id = str(event.get("channel") or "")
         thread_ts = str(event.get("thread_ts") or event.get("ts") or "")
-        state = await self._connection_repo.consume_oauth_state(provider="slack", state=code)
-        if state is None:
-            await self._post_connection_reply(channel_id, "Slack connection code is invalid or expired.", thread_ts)
-            return True
-
         user_id = str(event.get("user") or "")
         if not user_id or not team_id:
             await self._post_connection_reply(channel_id, "Slack connection could not be completed from this message.", thread_ts)
             return True
 
-        await self._connection_repo.upsert_connection(
-            owner_user_id=state["owner_user_id"],
-            provider="slack",
-            external_account_id=user_id,
-            workspace_id=team_id,
-            metadata={
-                "team_id": team_id,
-                "channel_id": channel_id,
-            },
-            status="connected",
-        )
+        metadata = {"team_id": team_id, "channel_id": channel_id}
+        if connection_service is not None:
+            try:
+                await connection_service.complete_callback(
+                    "slack",
+                    code,
+                    user_id,
+                    team_id,
+                    metadata=metadata,
+                    status="connected",
+                )
+            except PrivateWorkError:
+                await self._post_connection_reply(channel_id, "Slack connection code is invalid or expired.", thread_ts)
+                return True
+        else:
+            state = await self._connection_repo.consume_oauth_state(provider="slack", state=code)
+            if state is None:
+                await self._post_connection_reply(channel_id, "Slack connection code is invalid or expired.", thread_ts)
+                return True
+            await self._connection_repo.upsert_connection(
+                owner_user_id=state["owner_user_id"],
+                provider="slack",
+                external_account_id=user_id,
+                workspace_id=team_id,
+                metadata=metadata,
+                status="connected",
+            )
         await self._post_connection_reply(channel_id, "Slack connected to DeerFlow.", thread_ts)
         return True
 

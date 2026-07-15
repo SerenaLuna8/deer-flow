@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import tempfile
+import uuid
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -3400,6 +3401,139 @@ class _BoundIdentityRepo:
 
 
 class TestChannelManagerBoundIdentityPolicy:
+    def test_project_dispatcher_uses_resolved_scope_and_skips_legacy_sdk(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+        from app.private_work.connection_inbound import (
+            ProjectInboundDispatcher,
+            ResolvedInboundPrivateWork,
+        )
+        from app.private_work.context import PrivateWorkContext
+        from app.projects.capabilities import capabilities_for
+        from app.projects.context import ProjectContext
+        from app.projects.models import ProjectRole
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            owner_id = uuid.uuid4()
+            project_id = uuid.uuid4()
+            context = PrivateWorkContext.from_project(
+                ProjectContext(
+                    user_id=owner_id,
+                    project_id=project_id,
+                    membership_id=uuid.uuid4(),
+                    role=ProjectRole.RUNNER,
+                    capabilities=capabilities_for(ProjectRole.RUNNER),
+                    membership_version=3,
+                    request_id="req-channel-project",
+                )
+            )
+            resolved = ResolvedInboundPrivateWork(
+                context=context,
+                connection_id="server-connection",
+                thread_id="project-thread",
+                created=False,
+            )
+            resolver = SimpleNamespace(resolve=AsyncMock(return_value=resolved))
+            launcher = AsyncMock(
+                return_value={
+                    "messages": [
+                        {"type": "human", "content": "question"},
+                        {"type": "ai", "content": "project answer"},
+                    ]
+                }
+            )
+            dispatcher = ProjectInboundDispatcher(resolver, launcher)
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                require_bound_identity=True,
+                private_inbound_dispatcher=dispatcher,
+            )
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager.start()
+            try:
+                inbound = InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    text="question",
+                    workspace_id="T123",
+                    topic_id="1710000000.000100",
+                    owner_user_id="forged-owner",
+                    project_id=str(uuid.uuid4()),
+                    connection_id="forged-connection",
+                )
+                await manager._handle_message(inbound)
+            finally:
+                await manager.stop()
+
+            launcher.assert_awaited_once_with(context, "project-thread", inbound)
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
+            mock_client.runs.create.assert_not_called()
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == "project answer"
+            assert outbound_received[0].thread_id == "project-thread"
+            assert outbound_received[0].connection_id == "server-connection"
+            assert outbound_received[0].owner_user_id == str(owner_id)
+            assert outbound_received[0].private_scope == context.resource_scope
+            assert outbound_received[0].metadata["project_id"] == str(project_id)
+
+        _run(go())
+
+    def test_project_dispatcher_not_found_uses_unbound_message(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+        from app.private_work.connection_inbound import ProjectInboundDispatcher
+        from app.private_work.errors import PrivateWorkNotFound
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            resolver = SimpleNamespace(resolve=AsyncMock(side_effect=PrivateWorkNotFound("req-unbound")))
+            launcher = AsyncMock()
+            bus = MessageBus()
+            manager = ChannelManager(
+                bus=bus,
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                require_bound_identity=True,
+                private_inbound_dispatcher=ProjectInboundDispatcher(resolver, launcher),
+            )
+            manager._client = _make_mock_langgraph_client()
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager.start()
+            try:
+                await manager._handle_message(
+                    InboundMessage(
+                        channel_name="slack",
+                        chat_id="C123",
+                        user_id="U-platform",
+                        text="question",
+                    )
+                )
+            finally:
+                await manager.stop()
+
+            launcher.assert_not_awaited()
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+
+        _run(go())
+
     def test_unbound_auth_enabled_chat_is_rejected_before_thread_or_run_creation(self, monkeypatch):
         from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
 
@@ -3847,96 +3981,6 @@ class TestChannelManagerBoundIdentityPolicy:
                 CHANNEL_RUN_POLICY.pop("webhook-fixture", None)
             else:
                 CHANNEL_RUN_POLICY["webhook-fixture"] = original
-
-
-class TestChannelManagerConnectionRouting:
-    def test_connection_scoped_conversations_do_not_share_threads(self, tmp_path, monkeypatch, migrated_postgres_database_url):
-        from app.channels.manager import ChannelManager
-        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
-
-        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
-        repo_context = None
-
-        async def go():
-            nonlocal repo_context
-            repo_context = _channel_connection_repo(migrated_postgres_database_url)
-            repo = await repo_context.__aenter__()
-            alice = await repo.upsert_connection(
-                owner_user_id="alice",
-                provider="slack",
-                external_account_id="U-alice",
-                workspace_id="T1",
-            )
-            bob = await repo.upsert_connection(
-                owner_user_id="bob",
-                provider="slack",
-                external_account_id="U-bob",
-                workspace_id="T1",
-            )
-
-            bus = MessageBus()
-            store = ChannelStore(path=tmp_path / "legacy-store.json")
-            manager = ChannelManager(bus=bus, store=store, connection_repo=repo)
-            mock_client = _make_mock_langgraph_client()
-            mock_client.threads.create = AsyncMock(
-                side_effect=[
-                    {"thread_id": "thread-alice"},
-                    {"thread_id": "thread-bob"},
-                ]
-            )
-            manager._client = mock_client
-
-            await manager._handle_chat(
-                InboundMessage(
-                    channel_name="slack",
-                    chat_id="C-shared",
-                    user_id="U-alice",
-                    owner_user_id="alice",
-                    connection_id=alice["id"],
-                    text="hello",
-                    thread_ts="1710000000.000100",
-                    topic_id="1710000000.000100",
-                )
-            )
-            await manager._handle_chat(
-                InboundMessage(
-                    channel_name="slack",
-                    chat_id="C-shared",
-                    user_id="U-bob",
-                    owner_user_id="bob",
-                    connection_id=bob["id"],
-                    text="hello",
-                    thread_ts="1710000000.000100",
-                    topic_id="1710000000.000100",
-                )
-            )
-
-            assert await repo.get_thread_id(alice["id"], "C-shared", "1710000000.000100") == "thread-alice"
-            assert await repo.get_thread_id(bob["id"], "C-shared", "1710000000.000100") == "thread-bob"
-            assert store.list_entries() == []
-
-            first_context = mock_client.runs.wait.call_args_list[0].kwargs["context"]
-            second_context = mock_client.runs.wait.call_args_list[1].kwargs["context"]
-            assert first_context["user_id"] == "alice"
-            assert first_context["channel_user_id"] == "U-alice"
-            assert second_context["user_id"] == "bob"
-            assert second_context["channel_user_id"] == "U-bob"
-
-            first_create_headers = mock_client.threads.create.call_args_list[0].kwargs["headers"]
-            second_create_headers = mock_client.threads.create.call_args_list[1].kwargs["headers"]
-            assert first_create_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "alice"
-            assert second_create_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "bob"
-
-            first_run_headers = mock_client.runs.wait.call_args_list[0].kwargs["headers"]
-            second_run_headers = mock_client.runs.wait.call_args_list[1].kwargs["headers"]
-            assert first_run_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "alice"
-            assert second_run_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "bob"
-
-        try:
-            _run(go())
-        finally:
-            if repo_context is not None:
-                _run(repo_context.__aexit__(None, None, None))
 
 
 # ---------------------------------------------------------------------------

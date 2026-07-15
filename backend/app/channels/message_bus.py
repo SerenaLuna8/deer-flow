@@ -11,6 +11,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from deerflow.runtime.private_scope import PrivateResourceScope
+
 logger = logging.getLogger(__name__)
 
 PENDING_CLARIFICATION_METADATA_KEY = "pending_clarification"
@@ -49,6 +51,9 @@ class InboundMessage:
             legacy global ``channel_name:chat_id[:topic_id]`` key.
         owner_user_id: DeerFlow user id that owns the channel connection.
             Platform user ids stay in ``user_id``.
+        project_id: Optional project id copied from a server-side connection
+            lookup for routing display only. It is not private-work authority;
+            the inbound resolver re-resolves project and owner from persistence.
         workspace_id: Optional external workspace/guild/team id.
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
@@ -64,6 +69,7 @@ class InboundMessage:
     topic_id: str | None = None
     connection_id: str | None = None
     owner_user_id: str | None = None
+    project_id: str | None = None
     workspace_id: str | None = None
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -107,6 +113,8 @@ class OutboundMessage:
         connection_id: Optional DeerFlow channel connection id used for
             connection-specific outbound credentials.
         owner_user_id: DeerFlow user id that owns the channel connection.
+        private_scope: Server-resolved project/owner coordinates for scoped
+            outbound persistence lookups.
         created_at: Unix timestamp.
     """
 
@@ -120,6 +128,7 @@ class OutboundMessage:
     thread_ts: str | None = None
     connection_id: str | None = None
     owner_user_id: str | None = None
+    private_scope: PrivateResourceScope | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 

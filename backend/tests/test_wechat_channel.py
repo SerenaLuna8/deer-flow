@@ -11,9 +11,6 @@ from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
-
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 
 
@@ -366,25 +363,17 @@ def test_allowed_users_filter_blocks_non_whitelisted_sender():
 
 
 def test_connect_code_bypasses_allowed_users_filter(migrated_postgres_database_url):
+    from support.m4_channel_connections import make_m4_channel_connection_runtime
+
     from app.channels.wechat import WechatChannel
-    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
 
     async def go():
-        from datetime import UTC, datetime, timedelta
-
-        engine = create_async_engine(migrated_postgres_database_url, poolclass=NullPool)
+        runtime = await make_m4_channel_connection_runtime(
+            migrated_postgres_database_url,
+            cipher_key="wechat-secret",
+        )
         try:
-            repo = ChannelConnectionRepository(
-                async_sessionmaker(engine, expire_on_commit=False),
-                cipher=ChannelCredentialCipher.from_key("wechat-secret"),
-            )
-            code = "wechat-bind-code"
-            await repo.create_oauth_state(
-                owner_user_id="deerflow-user-1",
-                provider="wechat",
-                state=code,
-                expires_at=datetime.now(UTC) + timedelta(minutes=5),
-            )
+            code = await runtime.begin_connect("wechat")
 
             bus = MessageBus()
             published = []
@@ -398,7 +387,12 @@ def test_connect_code_bypasses_allowed_users_filter(migrated_postgres_database_u
             # /connect code must still bootstrap their first bind.
             channel = WechatChannel(
                 bus=bus,
-                config={"bot_token": "test-token", "allowed_users": ["allowed-user"], "connection_repo": repo},
+                config={
+                    "bot_token": "test-token",
+                    "allowed_users": ["allowed-user"],
+                    "connection_repo": runtime.repository,
+                    "connection_service": runtime.service,
+                },
             )
             channel._send_connection_reply = AsyncMock()  # type: ignore[method-assign]
 
@@ -411,15 +405,16 @@ def test_connect_code_bypasses_allowed_users_filter(migrated_postgres_database_u
                 }
             )
 
-            connections = await repo.list_connections("deerflow-user-1")
+            connections = await runtime.list_connections()
             assert len(connections) == 1
+            runtime.assert_owner_a_scope(connections[0])
             assert connections[0]["provider"] == "wechat"
             assert connections[0]["external_account_id"] == "blocked-user"
             # The connect-code reply was sent and no normal inbound was published.
             channel._send_connection_reply.assert_awaited_once()
             assert published == []
         finally:
-            await engine.dispose()
+            await runtime.seed.engine.dispose()
 
     _run(go())
 

@@ -17,6 +17,7 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.private_work.errors import PrivateWorkError
 
 logger = logging.getLogger(__name__)
 
@@ -491,18 +492,9 @@ class DingTalkChannel(Channel):
         conversation_id: str,
         code: str,
     ) -> bool:
-        if self._connection_repo is None or not code:
+        connection_service = self.config.get("connection_service")
+        if (self._connection_repo is None and connection_service is None) or not code:
             return False
-
-        state = await self._connection_repo.consume_oauth_state(provider="dingtalk", state=code)
-        if state is None:
-            await self._send_connection_reply(
-                conversation_type,
-                sender_staff_id,
-                conversation_id,
-                "DingTalk connection code is invalid or expired.",
-            )
-            return True
 
         if not sender_staff_id:
             await self._send_connection_reply(
@@ -513,18 +505,43 @@ class DingTalkChannel(Channel):
             )
             return True
 
-        await self._connection_repo.upsert_connection(
-            owner_user_id=state["owner_user_id"],
-            provider="dingtalk",
-            external_account_id=sender_staff_id,
-            external_account_name=sender_nick or None,
-            workspace_id=self._connection_workspace_id(conversation_type, conversation_id),
-            metadata={
+        workspace_id = self._connection_workspace_id(conversation_type, conversation_id)
+        fields = {
+            "external_account_name": sender_nick or None,
+            "metadata": {
                 "conversation_type": conversation_type,
                 "conversation_id": conversation_id,
             },
-            status="connected",
-        )
+            "status": "connected",
+        }
+        if connection_service is not None:
+            try:
+                await connection_service.complete_callback("dingtalk", code, sender_staff_id, workspace_id, **fields)
+            except PrivateWorkError:
+                await self._send_connection_reply(
+                    conversation_type,
+                    sender_staff_id,
+                    conversation_id,
+                    "DingTalk connection code is invalid or expired.",
+                )
+                return True
+        else:
+            state = await self._connection_repo.consume_oauth_state(provider="dingtalk", state=code)
+            if state is None:
+                await self._send_connection_reply(
+                    conversation_type,
+                    sender_staff_id,
+                    conversation_id,
+                    "DingTalk connection code is invalid or expired.",
+                )
+                return True
+            await self._connection_repo.upsert_connection(
+                owner_user_id=state["owner_user_id"],
+                provider="dingtalk",
+                external_account_id=sender_staff_id,
+                workspace_id=workspace_id,
+                **fields,
+            )
         await self._send_connection_reply(
             conversation_type,
             sender_staff_id,
