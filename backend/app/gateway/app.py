@@ -226,6 +226,56 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
     return migrated
 
 
+async def _start_scheduled_task_service(app: FastAPI, *, enabled: bool) -> bool:
+    """Start polling only after the automation cutover boundary is open."""
+
+    if not enabled:
+        return False
+    service = getattr(app.state, "scheduled_task_service", None)
+    guard = getattr(app.state, "automation_cutover_guard", None)
+    if service is None or guard is None:
+        logger.warning("Automation scheduler unavailable: code=AUTOMATION_UNAVAILABLE")
+        return False
+    from app.gateway.deps import _should_reconcile_orphaned_runs
+
+    if not _should_reconcile_orphaned_runs():
+        logger.warning("Automation scheduler not started: code=AUTOMATION_UNAVAILABLE")
+        return False
+    from app.automations.errors import AutomationError
+
+    try:
+        await guard.require_project_open()
+        await service.start()
+    except AutomationError as error:
+        logger.warning("Automation scheduler not started: code=%s", error.code)
+        return False
+    except Exception as error:  # noqa: BLE001 - startup remains fail-closed
+        logger.error(
+            "Automation scheduler not started: error_type=%s",
+            type(error).__name__,
+        )
+        return False
+    return True
+
+
+async def _stop_scheduled_task_service(app: FastAPI) -> None:
+    service = getattr(app.state, "scheduled_task_service", None)
+    if service is None:
+        return
+    try:
+        await asyncio.wait_for(service.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "Automation scheduler shutdown exceeded %.1fs; proceeding with worker exit.",
+            _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+        )
+    except Exception as error:  # noqa: BLE001 - shutdown must continue
+        logger.error(
+            "Automation scheduler shutdown failed: error_type=%s",
+            type(error).__name__,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -289,6 +339,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
 
+        await _start_scheduled_task_service(
+            app,
+            enabled=startup_config.scheduler.enabled,
+        )
+
         # Start IM channel service if any channels are configured
         try:
             from app.channels.service import start_channel_service
@@ -298,26 +353,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
-        try:
-            from app.gateway.services import launch_scheduled_thread_run
-            from app.scheduler import ScheduledTaskService
-
-            if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
-                scheduled_task_service = ScheduledTaskService(
-                    task_repo=app.state.scheduled_task_repo,
-                    task_run_repo=app.state.scheduled_task_run_repo,
-                    launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs),
-                    poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
-                    lease_seconds=startup_config.scheduler.lease_seconds,
-                    max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
-                )
-                app.state.scheduled_task_service = scheduled_task_service
-                if startup_config.scheduler.enabled:
-                    await scheduled_task_service.start()
-        except Exception:
-            logger.exception("Failed to initialize scheduled task service")
-
         yield
+
+        # Cancel scheduler work before channels and before the runtime context
+        # begins draining/closing its database and checkpointer dependencies.
+        await _stop_scheduled_task_service(app)
 
         try:
             await auth.close_oidc_service()
@@ -339,12 +379,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.exception("Failed to stop channel service")
-
-        if getattr(app.state, "scheduled_task_service", None) is not None:
-            try:
-                await app.state.scheduled_task_service.stop()
-            except Exception:
-                logger.exception("Failed to stop scheduled task service")
 
     logger.info("Shutting down API Gateway")
 

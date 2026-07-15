@@ -194,6 +194,64 @@ class ScheduledTaskRepository:
         ).scalar_one_or_none()
         return None if row is None else self.record(row)
 
+    async def lock_for_automation_outcome(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+    ) -> ScheduledTaskRecord | None:
+        """Lock a definition while a durable occurrence outcome is applied.
+
+        Frozen and soft-deleted definitions still own their historical
+        occurrences, so completion settlement must not filter them out.
+        """
+
+        row = (
+            await self.session.execute(
+                sa.select(ScheduledTaskRow)
+                .where(
+                    ScheduledTaskRow.id == task_id,
+                    *self.predicates(scope),
+                )
+                .with_for_update(of=ScheduledTaskRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def record_automation_outcome(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+        *,
+        outcome: str,
+        error_code: str | None,
+        occurred_at: datetime,
+        terminal_status: str | None,
+    ) -> ScheduledTaskRecord | None:
+        """Record one terminal occurrence without consuming the user CAS version."""
+
+        values: dict[str, object] = {
+            "last_run_at": occurred_at,
+            "last_outcome": outcome,
+            "last_error_code": error_code,
+            "run_count": ScheduledTaskRow.run_count + 1,
+            "updated_at": occurred_at,
+        }
+        if terminal_status is not None:
+            values["status"] = terminal_status
+            values["next_run_at"] = None
+        row = (
+            await self.session.execute(
+                sa.update(ScheduledTaskRow)
+                .where(
+                    ScheduledTaskRow.id == task_id,
+                    *self.predicates(scope),
+                )
+                .values(**values)
+                .returning(ScheduledTaskRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
     async def advance_after_reservation(
         self,
         scope: PrivateResourceScope,

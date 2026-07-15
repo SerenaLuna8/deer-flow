@@ -306,14 +306,41 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.persistence.thread_meta import make_thread_store
 
         app.state.thread_store = make_thread_store(sf)
-        # M5 repositories are session-bound and accept only an exact
-        # PrivateResourceScope. They are constructed inside project service
-        # transactions; never hand them to the legacy user-scoped router or
-        # scheduler, which still passes naked user/task identifiers. Task 7
-        # installs the new occurrence orchestrator and Task 9 owns the stable
-        # legacy cutover response.
+        # M5 repositories are session-bound and accept only an exact private
+        # scope. The orchestration singletons all share this one factory; the
+        # legacy router never receives a user-scoped repository adapter.
         app.state.scheduled_task_repo = None
         app.state.scheduled_task_run_repo = None
+        from app.automations.cutover import AutomationCutoverGuard
+        from app.automations.dispatcher import AutomationDispatcher
+        from app.automations.occurrences import AutomationOccurrenceService
+        from app.automations.readiness import AutomationReadinessService
+        from app.automations.reconciliation import AutomationReconciler
+        from app.scheduler import ScheduledTaskService
+        from deerflow.config.scheduler_config import SchedulerConfig
+
+        scheduler_config = getattr(config, "scheduler", None)
+        effective_scheduler_config = scheduler_config or SchedulerConfig()
+        app.state.automation_cutover_guard = AutomationCutoverGuard(sf)
+        app.state.automation_readiness_service = AutomationReadinessService()
+        app.state.automation_occurrence_service = AutomationOccurrenceService(
+            sf,
+            max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
+        )
+        app.state.automation_reconciler = AutomationReconciler(sf)
+        app.state.automation_dispatcher = AutomationDispatcher(
+            sf,
+            thread_service=app.state.private_thread_service,
+        )
+        app.state.scheduled_task_service = ScheduledTaskService(
+            app=app,
+            occurrences=app.state.automation_occurrence_service,
+            dispatcher=app.state.automation_dispatcher,
+            reconciler=app.state.automation_reconciler,
+            poll_interval_seconds=effective_scheduler_config.poll_interval_seconds,
+            lease_seconds=effective_scheduler_config.lease_seconds,
+            max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
+        )
 
         # Legacy run event store. The store and the matching
         # ``run_events_config`` are both frozen at startup so
@@ -339,6 +366,24 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_manager = RunManager(store=app.state.run_store)
         if _should_reconcile_orphaned_runs():
             from deerflow.utils.time import now_iso
+
+            # Automation owns its admitted M4 Runs. Reconcile those first so
+            # generic orphan recovery cannot erase the distinct interrupted
+            # occurrence outcome. Partial test configs without an explicit
+            # scheduler retain the historic generic-recovery behavior.
+            if scheduler_config is not None:
+                from datetime import UTC, datetime
+
+                from app.automations.errors import AutomationError
+
+                try:
+                    await app.state.automation_cutover_guard.require_project_open()
+                    await app.state.automation_reconciler.reconcile_restart(datetime.now(UTC))
+                except AutomationError as error:
+                    logger.warning(
+                        "Automation startup reconciliation skipped: code=%s",
+                        error.code,
+                    )
 
             # Without worker ownership/leases, startup recovery is safe only
             # when this process is the sole worker.
@@ -484,7 +529,7 @@ def get_run_context(request: Request) -> RunContext:
         run_events_config=getattr(request.app.state, "run_events_config", None),
         thread_store=get_thread_store(request),
         app_config=get_config(),
-        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        on_run_completed=(request.app.state.automation_reconciler.handle_run_completion if getattr(request.app.state, "automation_reconciler", None) is not None else None),
     )
 
 

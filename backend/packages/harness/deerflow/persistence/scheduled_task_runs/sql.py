@@ -445,17 +445,40 @@ class ScheduledTaskRunRepository:
         error_code: str | None,
         error_message: str | None,
         finished_at: datetime,
+        thread_id: str | None = None,
+        run_id: str | None = None,
     ) -> bool:
         if status not in TERMINAL_OCCURRENCE_STATUSES:
             raise ValueError("status must be terminal")
+        if (thread_id is None) != (run_id is None):
+            raise ValueError("thread_id and run_id must be supplied together")
+        compatible_links = ()
+        values: dict[str, object] = {}
+        if thread_id is not None and run_id is not None:
+            compatible_links = (
+                sa.or_(
+                    ScheduledTaskRunRow.thread_id.is_(None),
+                    ScheduledTaskRunRow.thread_id == thread_id,
+                ),
+                sa.or_(
+                    ScheduledTaskRunRow.run_id.is_(None),
+                    ScheduledTaskRunRow.run_id == run_id,
+                ),
+            )
+            values.update(
+                thread_id=sa.func.coalesce(ScheduledTaskRunRow.thread_id, thread_id),
+                run_id=sa.func.coalesce(ScheduledTaskRunRow.run_id, run_id),
+            )
         result = await self.session.execute(
             sa.update(ScheduledTaskRunRow)
             .where(
                 ScheduledTaskRunRow.id == occurrence_id,
                 ScheduledTaskRunRow.status.not_in(TERMINAL_OCCURRENCE_STATUSES),
+                *compatible_links,
                 *self.predicates(scope),
             )
             .values(
+                **values,
                 status=status,
                 error_code=error_code,
                 error_message=error_message,
