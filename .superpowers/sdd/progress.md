@@ -1,3 +1,17 @@
+# M5 Subagent-Driven Development Progress
+
+- Plan: `docs/superpowers/plans/2026-07-16-project-automation-m5.md`
+- Branch: `codex/m5-project-automation`
+- Baseline: `2aa87c8ba8e8f03ff2f02e53fc2172100b6f58a6`
+- Worktree: `/Users/jiangfeng/deer-flow/.worktrees/m5-project-automation`
+- Baseline verification: backend `7519 passed, 720 skipped, 10 existing warnings`; frontend `836 passed, 0 skipped`.
+
+## M5 reviewed tasks
+
+No M5 implementation task has completed review yet.
+
+---
+
 # M4 Subagent-Driven Development Progress
 
 - Plan: `docs/superpowers/plans/2026-07-14-project-private-work-m4.md`
