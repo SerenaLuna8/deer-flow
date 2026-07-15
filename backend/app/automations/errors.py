@@ -5,6 +5,7 @@ from typing import ClassVar
 AUTOMATION_ERROR_STATUS = {
     "AUTOMATION_NOT_FOUND": 404,
     "AUTOMATION_FORBIDDEN": 403,
+    "AUTOMATION_INVALID": 422,
     "AUTOMATION_VERSION_CONFLICT": 409,
     "AUTOMATION_ACTIVE_RUN": 409,
     "AUTOMATION_CUTOVER": 409,
@@ -30,6 +31,11 @@ class AutomationNotFound(AutomationError):
 class AutomationForbidden(AutomationError):
     code = "AUTOMATION_FORBIDDEN"
     public_message = "Automation action is forbidden."
+
+
+class AutomationInvalid(AutomationError):
+    code = "AUTOMATION_INVALID"
+    public_message = "Automation request is invalid."
 
 
 class AutomationVersionConflict(AutomationError):
@@ -64,6 +70,7 @@ __all__ = [
     "AutomationCutover",
     "AutomationError",
     "AutomationForbidden",
+    "AutomationInvalid",
     "AutomationNotFound",
     "AutomationUnavailable",
     "AutomationVersionConflict",

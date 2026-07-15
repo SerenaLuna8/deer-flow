@@ -60,6 +60,23 @@ def test_automation_error_mapping_rejects_unknown_subclasses() -> None:
         automation_http_exception(InternalAutomationError("req"))
 
 
+def test_automation_invalid_is_public_stable_422_without_internal_details() -> None:
+    import app.automations as automations
+
+    error = automations.AutomationInvalid("req")
+    error.__cause__ = ValueError("invalid cron provider details")
+
+    response = automation_http_exception(error)
+
+    assert response.status_code == 422
+    assert response.detail == {
+        "code": "AUTOMATION_INVALID",
+        "message": "Automation request is invalid.",
+        "request_id": "req",
+    }
+    assert "provider details" not in repr(response.detail)
+
+
 def test_automation_commands_are_frozen_and_slotted() -> None:
     create = AutomationCreate(
         title="Daily summary",

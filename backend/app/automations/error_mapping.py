@@ -9,6 +9,7 @@ from app.automations.errors import (
     AutomationCutover,
     AutomationError,
     AutomationForbidden,
+    AutomationInvalid,
     AutomationNotFound,
     AutomationUnavailable,
     AutomationVersionConflict,
@@ -17,6 +18,7 @@ from app.automations.errors import (
 _AUTOMATION_ERROR_TYPES = (
     AutomationNotFound,
     AutomationForbidden,
+    AutomationInvalid,
     AutomationVersionConflict,
     AutomationActiveRun,
     AutomationCutover,
