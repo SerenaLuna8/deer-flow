@@ -13,6 +13,7 @@ from langgraph.checkpoint.base import (
     CheckpointMetadata,
     CheckpointTuple,
 )
+from sqlalchemy import update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -30,6 +31,7 @@ from app.private_work.errors import (
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
+from deerflow.persistence.private_work.model import PrivateArtifactRow, PrivateFileRow
 
 PRIVATE_SCOPE_MARKER = "deerflow_private_scope"
 _T = TypeVar("_T")
@@ -204,6 +206,28 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 self._validate_marker(item, thread_id=thread_id)
             return item
 
+    async def aget_tuple_already_authorized(
+        self,
+        config: RunnableConfig,
+        *,
+        session: AsyncSession,
+    ) -> CheckpointTuple | None:
+        """Read through the raw saver while the caller holds the scoped DB locks."""
+
+        if not session.in_transaction():
+            raise PrivateWorkUnavailable(self._context.request_id)
+        thread_id = self._thread_id(config)
+        clean_config = self._sanitize_config(config, thread_id=thread_id)
+        try:
+            item = await self._raw.aget_tuple(clean_config)
+        except PrivateWorkError:
+            raise
+        except Exception:
+            raise PrivateWorkUnavailable(self._context.request_id) from None
+        if item is not None:
+            self._validate_marker(item, thread_id=thread_id)
+        return item
+
     async def aget(self, config: RunnableConfig) -> Checkpoint | None:
         item = await self.aget_tuple(config)
         return None if item is None else item.checkpoint
@@ -332,10 +356,34 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                         raise PrivateWorkNotFound(context.request_id)
                     if expected_version is not None and record.version != expected_version:
                         raise PrivateWorkConflict(context.request_id)
-                    await repository.mark_deleted(
+                    deleted = await repository.mark_deleted(
                         scope=context.resource_scope,
                         thread_id=thread_id,
                         expected_version=record.version,
+                    )
+                    await session.execute(
+                        update(PrivateFileRow)
+                        .where(
+                            PrivateFileRow.project_id == context.project_id,
+                            PrivateFileRow.owner_user_id == str(context.user_id),
+                            PrivateFileRow.thread_id == thread_id,
+                            PrivateFileRow.status != "deleted",
+                        )
+                        .values(
+                            status="deleted",
+                            deleted_at=deleted.deleted_at,
+                            updated_at=deleted.deleted_at,
+                        )
+                    )
+                    await session.execute(
+                        update(PrivateArtifactRow)
+                        .where(
+                            PrivateArtifactRow.project_id == context.project_id,
+                            PrivateArtifactRow.owner_user_id == str(context.user_id),
+                            PrivateArtifactRow.thread_id == thread_id,
+                            PrivateArtifactRow.deleted_at.is_(None),
+                        )
+                        .values(deleted_at=deleted.deleted_at)
                     )
         except PrivateWorkError:
             raise

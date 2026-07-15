@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
 
 from langgraph.checkpoint.base import empty_checkpoint
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -27,6 +28,7 @@ from app.private_work.thread_repository import (
     ThreadAgentRef,
 )
 from app.projects.capabilities import Capability
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
     AgentVersionRow,
@@ -41,6 +43,8 @@ class BranchAuthorityCopyHook(Protocol):
         scope: PrivateResourceScope,
         source_thread_id: str,
         target_thread_id: str,
+        *,
+        session: AsyncSession | None = None,
     ) -> None: ...
 
     async def rollback_branch_authority(
@@ -49,6 +53,17 @@ class BranchAuthorityCopyHook(Protocol):
         source_thread_id: str,
         target_thread_id: str,
     ) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class BranchCheckpointSelection:
+    requested_checkpoint_id: str
+    source_head_checkpoint_id: str | None
+    source_visible_tail_message_id: str | None
+    workspace_clone_mode: Literal[
+        "current_thread_authority_copy",
+        "historical_skip",
+    ]
 
 
 class PrivateThreadService:
@@ -234,14 +249,9 @@ class PrivateThreadService:
     ) -> PrivateThreadRecord:
         context = require_issued_private_work_context(context)
         saver = self._project_scoped_checkpointer.for_context(context)
-        source_item = await saver.aget_tuple(self._checkpoint_config(source_thread_id, checkpoint_id=checkpoint_id))
-        if source_item is None:
-            raise PrivateWorkNotFound(context.request_id)
 
-        branch_metadata = {
-            "branch_parent_thread_id": source_thread_id,
-            "branch_parent_checkpoint_id": checkpoint_id,
-        }
+        record: PrivateThreadRecord
+        source_item: Any
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -255,10 +265,28 @@ class PrivateThreadService:
                     source = await repository.get(
                         scope=context.resource_scope,
                         thread_id=source_thread_id,
+                        lock=True,
                     )
                     if source is None:
                         raise PrivateWorkNotFound(context.request_id)
                     if source.version != expected_source_version:
+                        raise PrivateWorkConflict(context.request_id)
+                    incomplete_run = (
+                        await session.execute(
+                            select(RunRow.run_id)
+                            .where(
+                                RunRow.project_id == context.project_id,
+                                RunRow.owner_user_id == str(context.user_id),
+                                RunRow.thread_id == source_thread_id,
+                                or_(
+                                    RunRow.status.in_(("pending", "running")),
+                                    RunRow.finalization_status == "finalizing",
+                                ),
+                            )
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if incomplete_run is not None:
                         raise PrivateWorkConflict(context.request_id)
                     agent = ThreadAgentRef(
                         asset_id=source.agent_asset_id,
@@ -269,6 +297,35 @@ class PrivateThreadService:
                         context,
                         agent,
                     )
+                    source_item = await saver.aget_tuple_already_authorized(
+                        self._checkpoint_config(
+                            source_thread_id,
+                            checkpoint_id=checkpoint_id,
+                        ),
+                        session=session,
+                    )
+                    if source_item is None or self._checkpoint_tuple_id(source_item) != checkpoint_id:
+                        raise PrivateWorkNotFound(context.request_id)
+                    try:
+                        latest_item = await saver.aget_tuple_already_authorized(
+                            self._checkpoint_config(source_thread_id),
+                            session=session,
+                        )
+                    except PrivateWorkError:
+                        latest_item = None
+                    selection = self._classify_branch_checkpoint(
+                        checkpoint_id,
+                        source_item,
+                        latest_item,
+                    )
+                    branch_metadata = {
+                        "branch_parent_thread_id": source_thread_id,
+                        "branch_parent_checkpoint_id": checkpoint_id,
+                        "branch_source_head_checkpoint_id": selection.source_head_checkpoint_id,
+                        "workspace_clone_mode": selection.workspace_clone_mode,
+                    }
+                    if selection.source_visible_tail_message_id is not None:
+                        branch_metadata["branch_parent_visible_tail_message_id"] = selection.source_visible_tail_message_id
                     record = await repository.create(
                         scope=context.resource_scope,
                         thread_id=target_thread_id,
@@ -276,27 +333,31 @@ class PrivateThreadService:
                         display_name=display_name,
                         metadata=branch_metadata,
                     )
+                    if selection.workspace_clone_mode == "current_thread_authority_copy" and self._branch_copy_hook is not None:
+                        await self._branch_copy_hook.copy_branch_authority(
+                            context.resource_scope,
+                            source_thread_id,
+                            target_thread_id,
+                            session=session,
+                        )
         except PrivateWorkConflict:
             raise PrivateWorkConflict(context.request_id) from None
         except PrivateWorkError:
             raise
-        except DBAPIError:
+        except Exception:
             raise PrivateWorkUnavailable(context.request_id) from None
 
         target_config = self._checkpoint_config(target_thread_id)
+        source_channel_versions = source_item.checkpoint.get("channel_versions", {})
+        if not isinstance(source_channel_versions, Mapping):
+            source_channel_versions = {}
         try:
             await saver.aput(
                 target_config,
                 source_item.checkpoint,
                 source_item.metadata,
-                {},
+                dict(source_channel_versions),
             )
-            if self._branch_copy_hook is not None:
-                await self._branch_copy_hook.copy_branch_authority(
-                    context.resource_scope,
-                    source_thread_id,
-                    target_thread_id,
-                )
         except Exception as exc:
             await self._compensate_create(
                 context,
@@ -307,6 +368,92 @@ class PrivateThreadService:
                 raise
             raise PrivateWorkUnavailable(context.request_id) from None
         return record
+
+    @classmethod
+    def _classify_branch_checkpoint(
+        cls,
+        requested_checkpoint_id: str,
+        requested_item: object,
+        head_item: object | None,
+    ) -> BranchCheckpointSelection:
+        source_head_checkpoint_id = cls._checkpoint_tuple_id(head_item)
+        requested_visible_tail = cls._visible_tail_message(requested_item)
+        head_visible_tail = cls._visible_tail_message(head_item)
+        selected_assistant_id = cls._message_id(requested_visible_tail) if cls._message_type(requested_visible_tail) == "ai" else None
+        head_visible_tail_id = cls._message_id(head_visible_tail)
+        is_current_visible_turn = source_head_checkpoint_id is not None and selected_assistant_id is not None and selected_assistant_id == head_visible_tail_id
+        return BranchCheckpointSelection(
+            requested_checkpoint_id=requested_checkpoint_id,
+            source_head_checkpoint_id=source_head_checkpoint_id,
+            source_visible_tail_message_id=selected_assistant_id,
+            workspace_clone_mode=("current_thread_authority_copy" if is_current_visible_turn else "historical_skip"),
+        )
+
+    @classmethod
+    def _visible_tail_message(cls, item: object | None) -> object | None:
+        if item is None:
+            return None
+        checkpoint = getattr(item, "checkpoint", {}) or {}
+        if not isinstance(checkpoint, Mapping):
+            return None
+        channel_values = checkpoint.get("channel_values", {}) or {}
+        if not isinstance(channel_values, Mapping):
+            return None
+        messages = channel_values.get("messages", []) or []
+        if not isinstance(messages, list):
+            return None
+        for message in reversed(messages):
+            if cls._message_is_visible(message):
+                return message
+        return None
+
+    @classmethod
+    def _message_is_visible(cls, message: object) -> bool:
+        if isinstance(message, Mapping):
+            additional_kwargs = message.get("additional_kwargs", {}) or {}
+        else:
+            additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
+        if isinstance(additional_kwargs, Mapping) and additional_kwargs.get("hide_from_ui") is True:
+            return False
+        return cls._message_type(message) in {"human", "ai"}
+
+    @staticmethod
+    def _message_type(message: object | None) -> str | None:
+        if message is None:
+            return None
+        if isinstance(message, Mapping):
+            value = message.get("type")
+        else:
+            value = getattr(message, "type", None)
+        return value if isinstance(value, str) and value else None
+
+    @staticmethod
+    def _message_id(message: object | None) -> str | None:
+        if message is None:
+            return None
+        if isinstance(message, Mapping):
+            value = message.get("id")
+        else:
+            value = getattr(message, "id", None)
+        return value if isinstance(value, str) and value else None
+
+    @staticmethod
+    def _checkpoint_tuple_id(item: object | None) -> str | None:
+        if item is None:
+            return None
+        config = getattr(item, "config", {}) or {}
+        if isinstance(config, Mapping):
+            configurable = config.get("configurable", {})
+            if isinstance(configurable, Mapping):
+                value = configurable.get("checkpoint_id")
+                if isinstance(value, str):
+                    return value
+        checkpoint = getattr(item, "checkpoint", {}) or {}
+        if isinstance(checkpoint, Mapping):
+            value = checkpoint.get("id")
+            if isinstance(value, str):
+                return value
+        return None
 
     async def _compensate_create(
         self,

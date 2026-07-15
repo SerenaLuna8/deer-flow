@@ -29,6 +29,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
+from deerflow.file_authority import RunFileAuthority
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -59,7 +60,12 @@ from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, get_sandbo
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
-from deerflow.workspace_changes import capture_workspace_snapshot, record_workspace_changes
+from deerflow.workspace_changes import (
+    WORKSPACE_CHANGES_EVENT_TYPE,
+    WORKSPACE_CHANGES_METADATA_KEY,
+    capture_workspace_snapshot,
+    record_workspace_changes,
+)
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .manager import RunManager, RunRecord
@@ -157,7 +163,7 @@ class RunContext:
     private_scope: object | None = field(default=None)
     authorization_checker: Callable[[], Awaitable[None]] | None = field(default=None)
     authorization_boundary: object | None = field(default=None)
-    file_authority: object | None = field(default=None)
+    file_authority: RunFileAuthority | None = field(default=None)
     private_agent_runtime: PrivateAgentRuntime | None = field(default=None)
 
 
@@ -355,6 +361,66 @@ async def run_agent(
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
+    private_files_restored = False
+    private_files_finalized = False
+    private_files_failed = False
+    private_cleanup_cancellation_pending = False
+    private_finalization_result: object | None = None
+
+    async def _abort_private_files() -> None:
+        """Durably fail private finalization before publishing a terminal run."""
+
+        nonlocal private_files_failed, private_cleanup_cancellation_pending
+        authority = ctx.file_authority
+        if authority is None or private_files_finalized or private_files_failed:
+            return
+        task = asyncio.create_task(authority.mark_failed())
+        cancellation_pending = False
+        try:
+            while True:
+                try:
+                    await asyncio.shield(task)
+                    break
+                except asyncio.CancelledError:
+                    if task.cancelled():
+                        raise
+                    cancellation_pending = True
+            task.result()
+        except Exception:
+            logger.warning(
+                "Private file finalization failure marker failed for run %s",
+                run_id,
+                exc_info=True,
+            )
+        finally:
+            private_files_failed = True
+            private_cleanup_cancellation_pending |= cancellation_pending
+
+    async def _finalize_private_files() -> None:
+        nonlocal private_files_finalized, private_finalization_result
+        authority = ctx.file_authority
+        if authority is None or not private_files_restored or private_files_finalized:
+            return
+        await run_manager.set_finalizing(run_id, True)
+        task = asyncio.create_task(authority.finalize())
+        cancellation_pending = False
+        try:
+            while True:
+                try:
+                    await asyncio.shield(task)
+                    break
+                except asyncio.CancelledError:
+                    if task.cancelled():
+                        raise
+                    cancellation_pending = True
+                    continue
+        except BaseException:
+            await _abort_private_files()
+            raise
+        private_finalization_result = task.result()
+        private_files_finalized = True
+        if cancellation_pending:
+            raise asyncio.CancelledError
 
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
@@ -387,7 +453,14 @@ async def run_agent(
         # 1. Mark running
         await run_manager.set_status(run_id, RunStatus.running)
 
-        if event_store is not None:
+        if ctx.file_authority is not None:
+            restore = getattr(ctx.file_authority, "restore", None)
+            if not callable(restore):
+                raise RuntimeError("Private file authority is unavailable")
+            await restore()
+            private_files_restored = True
+
+        if event_store is not None and ctx.file_authority is None:
             workspace_changes_user_id = private_owner_user_id or get_effective_user_id()
             try:
                 pre_run_workspace_snapshot = await capture_workspace_snapshot(
@@ -451,7 +524,7 @@ async def run_agent(
                         host_path=str(ctx.private_agent_runtime.skill_root),
                     ),
                 )
-                if ctx.private_agent_runtime is not None and ctx.app_config is not None
+                if (ctx.file_authority is None and ctx.private_agent_runtime is not None and ctx.app_config is not None)
                 else ()
             ),
             runtime_owner_user_id=private_owner_user_id,
@@ -645,6 +718,7 @@ async def run_agent(
             await run_manager.set_finalizing(run_id, True)
             action = record.abort_action
             if action == "rollback":
+                await _abort_private_files()
                 await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
                 try:
                     await _rollback_to_pre_run_checkpoint(
@@ -659,6 +733,10 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
             else:
+                if action != "authorization_revoked":
+                    await _finalize_private_files()
+                else:
+                    await _abort_private_files()
                 await run_manager.set_status(
                     run_id,
                     RunStatus.interrupted,
@@ -669,14 +747,17 @@ async def run_agent(
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
             error_msg = error_msg or "LLM provider failed after retries"
+            await _abort_private_files()
             await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
         else:
+            await _finalize_private_files()
             await run_manager.set_status(run_id, RunStatus.success)
 
     except asyncio.CancelledError:
         await run_manager.set_finalizing(run_id, True)
         action = record.abort_action
         if action == "rollback":
+            await _abort_private_files()
             await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
             try:
                 await _rollback_to_pre_run_checkpoint(
@@ -691,16 +772,23 @@ async def run_agent(
             except Exception:
                 logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
         else:
+            if action != "authorization_revoked":
+                await _finalize_private_files()
+            else:
+                await _abort_private_files()
             await run_manager.set_status(
                 run_id,
                 RunStatus.interrupted,
                 error=(AUTHORIZATION_REVOKED_REASON if action == "authorization_revoked" else None),
             )
             logger.info("Run %s was cancelled", run_id)
+        if ctx.file_authority is not None:
+            raise
 
     except AuthorizationRevoked:
         record.abort_action = "authorization_revoked"
         record.abort_event.set()
+        await _abort_private_files()
         await run_manager.set_status(
             run_id,
             RunStatus.interrupted,
@@ -718,6 +806,7 @@ async def run_agent(
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
+        await _abort_private_files()
         await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
         await bridge.publish(
             run_id,
@@ -734,7 +823,31 @@ async def run_agent(
         if subagent_events is not None:
             await subagent_events.flush()
 
-        if event_store is not None and pre_run_workspace_snapshot is not None:
+        if event_store is not None and ctx.file_authority is not None:
+            changes = getattr(private_finalization_result, "workspace_changes", None)
+            if isinstance(changes, dict) and changes:
+                created = changes.get("created", [])
+                modified = changes.get("modified", [])
+                deleted = changes.get("deleted", [])
+                if all(isinstance(paths, list) and all(type(path) is str for path in paths) for paths in (created, modified, deleted)):
+                    changed_file_count = len(created) + len(modified) + len(deleted)
+                    try:
+                        await event_store.put(
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            event_type=WORKSPACE_CHANGES_EVENT_TYPE,
+                            category="workspace",
+                            content=f"{changed_file_count} file{'s' if changed_file_count != 1 else ''} changed",
+                            metadata={WORKSPACE_CHANGES_METADATA_KEY: changes},
+                            scope=record.scope,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to record private workspace changes for run %s",
+                            run_id,
+                            exc_info=True,
+                        )
+        elif event_store is not None and pre_run_workspace_snapshot is not None:
             try:
                 await record_workspace_changes(
                     event_store,
@@ -803,6 +916,16 @@ async def run_agent(
             except Exception:
                 logger.warning("Private runtime cleanup failed for run %s", run_id)
 
+        if ctx.file_authority is not None:
+            release = getattr(ctx.file_authority, "release", None)
+            if not callable(release):
+                release = getattr(ctx.file_authority, "close", None)
+            if callable(release):
+                try:
+                    await release()
+                except Exception:
+                    logger.warning("Private file authority cleanup failed for run %s", run_id)
+
         if run_mount_provider is not None and run_mount_user_id is not None and run_mounts:
             try:
                 await run_mount_provider.release_run_scoped_mounts_async(
@@ -819,6 +942,8 @@ async def run_agent(
 
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        if private_cleanup_cancellation_pending:
+            raise asyncio.CancelledError
 
 
 # ---------------------------------------------------------------------------

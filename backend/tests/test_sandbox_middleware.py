@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import get_type_hints
 
 import pytest
@@ -250,6 +251,42 @@ async def test_aafter_agent_delegates_to_super_when_no_sandbox(monkeypatch: pyte
 
     assert result == {"delegated": True}
     assert calls == [(state, runtime)]
+
+
+@pytest.mark.anyio
+async def test_project_mode_reuses_authority_lease_and_never_releases_it() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    authority = SimpleNamespace(sandbox_id="private-authority-sandbox")
+    runtime = Runtime(
+        context={
+            "thread_id": "thread-private",
+            "private_scope": object(),
+            "__file_authority": authority,
+        }
+    )
+    middleware = SandboxMiddleware(lazy_init=True)
+    try:
+        before = await middleware.abefore_agent({}, runtime)
+        after = await middleware.aafter_agent(
+            {"sandbox": {"sandbox_id": "private-authority-sandbox"}},
+            runtime,
+        )
+    finally:
+        reset_sandbox_provider()
+
+    assert before == {"sandbox": {"sandbox_id": "private-authority-sandbox"}}
+    assert after is None
+    assert provider.thread_ids == []
+    assert provider.released_ids == []
+
+
+@pytest.mark.anyio
+async def test_project_mode_missing_authority_lease_fails_closed() -> None:
+    runtime = Runtime(context={"thread_id": "thread-private", "private_scope": object()})
+
+    with pytest.raises(RuntimeError, match="Private file authority"):
+        await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
 
 
 # ---------------------------------------------------------------------------

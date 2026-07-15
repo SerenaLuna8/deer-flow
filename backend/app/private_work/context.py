@@ -53,19 +53,31 @@ _CLIENT_AUTHORITY_FIELDS = frozenset(
 )
 
 
-def strip_private_client_fields(client_fields: Mapping[str, object]) -> dict[str, object]:
+def strip_private_client_fields(
+    client_fields: Mapping[str, object],
+    *,
+    preserve_fields: frozenset[str] = frozenset(),
+) -> dict[str, object]:
     """Recursively drop client fields that could be mistaken for authority."""
 
-    return {key: _strip_private_client_value(value) for key, value in client_fields.items() if isinstance(key, str) and key not in _CLIENT_AUTHORITY_FIELDS and not key.startswith("__")}
+    return {
+        key: _strip_private_client_value(value, preserve_fields=preserve_fields)
+        for key, value in client_fields.items()
+        if isinstance(key, str) and (key not in _CLIENT_AUTHORITY_FIELDS or key in preserve_fields) and not key.startswith("__")
+    }
 
 
-def _strip_private_client_value(value: object) -> object:
+def _strip_private_client_value(
+    value: object,
+    *,
+    preserve_fields: frozenset[str],
+) -> object:
     if isinstance(value, Mapping):
-        return strip_private_client_fields(value)
+        return strip_private_client_fields(value, preserve_fields=preserve_fields)
     if isinstance(value, list):
-        return [_strip_private_client_value(item) for item in value]
+        return [_strip_private_client_value(item, preserve_fields=preserve_fields) for item in value]
     if isinstance(value, tuple):
-        return tuple(_strip_private_client_value(item) for item in value)
+        return tuple(_strip_private_client_value(item, preserve_fields=preserve_fields) for item in value)
     return value
 
 

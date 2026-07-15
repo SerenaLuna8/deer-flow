@@ -193,16 +193,16 @@ def test_m4_models_install_composite_scope_constraints_without_snapshot_secrets(
         assert not any(fragment in column for fragment in forbidden_fragments for column in columns)
 
 
-def test_private_file_source_revision_is_alembic_head() -> None:
-    migration = importlib.import_module("deerflow.persistence.migrations.versions.0010_private_file_source")
+def test_private_artifact_tombstone_revision_is_alembic_head() -> None:
+    migration = importlib.import_module("deerflow.persistence.migrations.versions.0011_private_artifact_tombstone")
     cfg = AlembicConfig()
     cfg.set_main_option(
         "script_location",
         str(Path(migration.__file__).resolve().parents[1]),
     )
 
-    assert migration.revision == "0010_private_file_source"
-    assert migration.down_revision == "0009_project_private_work_finalize"
+    assert migration.revision == "0011_private_artifact_tombstone"
+    assert migration.down_revision == "0010_private_file_source"
     assert ScriptDirectory.from_config(cfg).get_current_head() == migration.revision
 
 
@@ -288,7 +288,7 @@ async def test_m4_finalize_schema_has_private_scope_and_composite_fks(
         assert marker.empty_domain_probe_complete is True
         assert marker.checkpoint_marker_probe_complete is True
         assert marker.cutover_at is not None
-        assert revision == "0010_private_file_source"
+        assert revision == "0011_private_artifact_tombstone"
     finally:
         await engine.dispose()
 
@@ -543,8 +543,8 @@ async def test_0009_downgrade_rejects_scoped_channel_rows_before_schema_changes(
             unique_constraints = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_unique_constraints("channel_connections"))
         final_identity = next(constraint for constraint in unique_constraints if constraint["name"] == "uq_channel_connection_owner_provider_identity")
         # PostgreSQL rolls back the complete downgrade transaction, including
-        # the preceding 0010 downgrade, when 0009 rejects scoped channel rows.
-        assert revision == "0010_private_file_source"
+        # the preceding 0011/0010 downgrades, when 0009 rejects scoped rows.
+        assert revision == "0011_private_artifact_tombstone"
         assert final_identity["column_names"] == [
             "project_id",
             "owner_user_id",
@@ -664,7 +664,7 @@ async def test_0009_finalizes_completed_empty_domain_migration_and_downgrades_sa
 
         await asyncio.to_thread(command.upgrade, cfg, "head")
         async with engine.connect() as connection:
-            assert (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0010_private_file_source"
+            assert (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0011_private_artifact_tombstone"
             thread_columns = await connection.run_sync(lambda sync: {item["name"]: item for item in inspect(sync).get_columns("threads_meta")})
         assert thread_columns["project_id"]["nullable"] is False
         assert thread_columns["owner_user_id"]["nullable"] is False

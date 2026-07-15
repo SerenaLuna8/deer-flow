@@ -12,6 +12,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
+from deerflow.file_authority import require_private_file_authority
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
@@ -49,6 +50,29 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         """
         super().__init__()
         self._lazy_init = lazy_init
+
+    @staticmethod
+    def _private_sandbox_id(runtime: Runtime) -> str | None:
+        authority = require_private_file_authority(runtime.context or {})
+        if authority is None:
+            return None
+        sandbox_id = getattr(authority, "sandbox_id", None)
+        if type(sandbox_id) is not str or not sandbox_id:
+            raise RuntimeError("Private file authority is unavailable")
+        return sandbox_id
+
+    @staticmethod
+    def _private_sandbox_update(
+        state: SandboxMiddlewareState,
+        runtime: Runtime,
+    ) -> dict | None:
+        sandbox_id = SandboxMiddleware._private_sandbox_id(runtime)
+        if sandbox_id is None:
+            return None
+        existing = SandboxMiddleware._read_sandbox_id_from_state(state)
+        if existing is not None and existing != sandbox_id:
+            raise RuntimeError("Private file authority is unavailable")
+        return {"sandbox": {"sandbox_id": sandbox_id}}
 
     @staticmethod
     def _run_mounts(runtime: Runtime) -> tuple[RunScopedReadOnlyMount, ...]:
@@ -102,6 +126,9 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        private_update = self._private_sandbox_update(state, runtime)
+        if private_update is not None:
+            return private_update
         # Skip acquisition if lazy_init is enabled
         if self._lazy_init:
             return super().before_agent(state, runtime)
@@ -123,6 +150,9 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def abefore_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        private_update = self._private_sandbox_update(state, runtime)
+        if private_update is not None:
+            return private_update
         # Skip acquisition if lazy_init is enabled
         if self._lazy_init:
             return await super().abefore_agent(state, runtime)
@@ -145,6 +175,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        private_sandbox_id = self._private_sandbox_id(runtime)
+        if private_sandbox_id is not None:
+            existing = self._read_sandbox_id_from_state(state)
+            if existing is not None and existing != private_sandbox_id:
+                raise RuntimeError("Private file authority is unavailable")
+            return None
         sandbox = state.get("sandbox")
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
@@ -163,6 +199,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        private_sandbox_id = self._private_sandbox_id(runtime)
+        if private_sandbox_id is not None:
+            existing = self._read_sandbox_id_from_state(state)
+            if existing is not None and existing != private_sandbox_id:
+                raise RuntimeError("Private file authority is unavailable")
+            return None
         sandbox = state.get("sandbox")
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]

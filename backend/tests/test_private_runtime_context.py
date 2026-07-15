@@ -970,6 +970,10 @@ async def test_start_private_run_uses_shared_launch_once_after_snapshot(monkeypa
     def launch(**kwargs):
         events.append("launch")
         assert kwargs["run_context"].private_agent_runtime is not None
+        assert kwargs["run_context"].file_authority is not None
+        assert kwargs["run_context"].file_authority._run_scope.context is context
+        assert kwargs["run_context"].file_authority._run_scope.thread_id == persisted.thread_id
+        assert kwargs["run_context"].file_authority._run_scope.run_id == persisted.run_id
         assert kwargs["record"].run_id == persisted.run_id
         assert kwargs["owner_user_id"] == persisted.owner_user_id
         assert kwargs["runtime_user_id"] == persisted.owner_user_id

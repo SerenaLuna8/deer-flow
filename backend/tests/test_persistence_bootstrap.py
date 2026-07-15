@@ -104,16 +104,15 @@ async def test_bootstrap_legacy_database_backfills_baseline_and_upgrades(
             await connection.run_sync(_run_baseline_create_all_sync)
             await connection.execute(text("DROP TABLE channel_conversations CASCADE"))
 
-        with pytest.raises(RuntimeError, match="make migrate-private-work"):
-            await bootstrap_schema(engine)
+        await bootstrap_schema(engine)
 
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0007_project_shared_assets"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == _get_head_revision()
             tables = await connection.run_sync(lambda sync_connection: set(sa_inspect(sync_connection).get_table_names()))
             channel_columns = await connection.run_sync(lambda sync_connection: {column["name"] for column in sa_inspect(sync_connection).get_columns("channel_conversations")})
             assert {"channel_conversations", "projects", "agents"} <= tables
-            assert "project_id" not in channel_columns
-            assert "files" not in tables
+            assert "project_id" in channel_columns
+            assert "files" in tables
         reset.assert_not_called()
     finally:
         await engine.dispose()

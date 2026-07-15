@@ -1,11 +1,23 @@
+import hashlib
 import logging
 import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+from deerflow.private_scope import PrivateResourceScope
+from deerflow.sandbox.exceptions import SandboxRuntimeError
+from deerflow.sandbox.local.local_sandbox import (
+    LocalSandbox,
+    PathMapping,
+    reset_private_projection_root,
+)
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, SandboxProvider
+from deerflow.sandbox.sandbox_provider import (
+    PrivateSandboxLease,
+    RunScopedReadOnlyMount,
+    SandboxProvider,
+    private_sandbox_relative_root,
+)
 from deerflow.skills.storage import user_should_see_legacy_skills
 
 logger = logging.getLogger(__name__)
@@ -79,6 +91,7 @@ class LocalSandboxProvider(SandboxProvider):
         self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
         self._run_sandboxes: OrderedDict[tuple[str, str, str], LocalSandbox] = OrderedDict()
         self._run_sandbox_ids: dict[str, tuple[str, str, str]] = {}
+        self._active_private_runs: dict[tuple[str, str], str] = {}
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
 
@@ -326,6 +339,96 @@ class LocalSandboxProvider(SandboxProvider):
 
         return mappings
 
+    @staticmethod
+    def _build_private_path_mappings(
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+    ) -> list[PathMapping]:
+        from deerflow.config import get_app_config
+        from deerflow.config.paths import get_paths
+
+        paths = get_paths()
+        relative_root = private_sandbox_relative_root(scope, thread_id)
+        thread_root = paths.base_dir / relative_root
+        user_data = thread_root / "user-data"
+        mappings = [
+            PathMapping(_USER_DATA_VIRTUAL_PREFIX, str(user_data), False),
+            PathMapping(f"{_USER_DATA_VIRTUAL_PREFIX}/workspace", str(user_data / "workspace"), False),
+            PathMapping(f"{_USER_DATA_VIRTUAL_PREFIX}/uploads", str(user_data / "uploads"), False),
+            PathMapping(f"{_USER_DATA_VIRTUAL_PREFIX}/outputs", str(user_data / "outputs"), False),
+            PathMapping(_ACP_WORKSPACE_VIRTUAL_PREFIX, str(thread_root / "acp-workspace"), False),
+        ]
+        try:
+            config = get_app_config()
+            custom = paths.user_custom_skills_dir(scope.owner_user_id)
+            custom.mkdir(parents=True, exist_ok=True)
+            mappings.append(PathMapping(f"{config.skills.container_path}/custom", str(custom), True))
+        except Exception as exc:
+            logger.warning("Could not setup private custom skills mount: %s", exc)
+        return mappings
+
+    def acquire_private(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        user_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+    ) -> PrivateSandboxLease:
+        if user_id != scope.owner_user_id or not run_id:
+            raise SandboxRuntimeError("Invalid private sandbox authority")
+        relative_root = private_sandbox_relative_root(scope, thread_id)
+        scope_key = hashlib.sha256(relative_root.encode()).hexdigest()[:24]
+        key = (scope_key, thread_id, run_id)
+        active_key = (scope_key, thread_id)
+        with self._lock:
+            cached = self._run_sandboxes.get(key)
+            if cached is not None:
+                self._run_sandboxes.move_to_end(key)
+                return PrivateSandboxLease(cached.id, run_id, relative_root)
+            active_run_id = self._active_private_runs.get(active_key)
+            if active_run_id is not None:
+                raise SandboxRuntimeError("Private sandbox already has an active run for this thread")
+            self._active_private_runs[active_key] = run_id
+
+        try:
+            from deerflow.config.paths import get_paths
+
+            reset_private_projection_root(get_paths().base_dir, relative_root)
+            mappings = list(self._path_mappings) + self._build_private_path_mappings(
+                thread_id,
+                scope=scope,
+            )
+            if mounts:
+                self.validate_run_scoped_mounts(
+                    thread_id,
+                    user_id=user_id,
+                    mounts=mounts,
+                )
+                mount = mounts[0]
+                skills_prefix = mount.container_path.rstrip("/")
+                mappings = [mapping for mapping in mappings if not (mapping.container_path == skills_prefix or mapping.container_path.startswith(f"{skills_prefix}/"))]
+                mappings.append(
+                    PathMapping(
+                        skills_prefix,
+                        str(Path(mount.host_path).resolve()),
+                        True,
+                    )
+                )
+            sandbox_id = f"local-run:{scope_key}:{thread_id}:{run_id}"
+            candidate = LocalSandbox(sandbox_id, path_mappings=mappings)
+            with self._lock:
+                self._run_sandboxes[key] = candidate
+                self._run_sandbox_ids[candidate.id] = key
+            return PrivateSandboxLease(candidate.id, run_id, relative_root)
+        except BaseException:
+            with self._lock:
+                if self._active_private_runs.get(active_key) == run_id:
+                    self._active_private_runs.pop(active_key, None)
+            raise
+
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
 
@@ -530,6 +633,9 @@ class LocalSandboxProvider(SandboxProvider):
                 key = self._run_sandbox_ids.pop(sandbox_id, None)
                 if key is not None:
                     self._run_sandboxes.pop(key, None)
+                    active_key = (key[0], key[1])
+                    if self._active_private_runs.get(active_key) == key[2]:
+                        self._active_private_runs.pop(active_key, None)
 
     def reset(self) -> None:
         """Drop all cached LocalSandbox instances.
@@ -545,6 +651,7 @@ class LocalSandboxProvider(SandboxProvider):
             self._thread_sandboxes.clear()
             self._run_sandboxes.clear()
             self._run_sandbox_ids.clear()
+            self._active_private_runs.clear()
             _singleton = None
 
     def shutdown(self) -> None:

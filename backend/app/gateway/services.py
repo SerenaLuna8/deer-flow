@@ -44,10 +44,16 @@ from app.private_work.errors import (
     PrivateWorkError,
     PrivateWorkUnavailable,
 )
+from app.private_work.file_finalizer import PrivateFileFinalizer
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.runtime_context import prepare_private_run_config
+from app.private_work.sandbox_files import (
+    PrivateFileRunScope,
+    PrivateRunFileAuthority,
+    PrivateSandboxFileProjection,
+)
 from app.projects.capabilities import Capability
 from deerflow.config.app_config import get_app_config
 from deerflow.persistence.thread_meta import LegacyThreadCreateAuthorityUnavailable
@@ -81,9 +87,24 @@ from deerflow.runtime.user_context import (
     set_current_user,
     set_runtime_storage_user_id,
 )
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_SELECTION_CLIENT_FIELDS = frozenset({"agent_name", "model_name"})
+
+
+def _strip_runtime_client_fields(
+    fields: Mapping[str, object],
+) -> dict[str, object]:
+    """Keep legacy runtime selection inputs while removing private authority."""
+
+    return strip_private_client_fields(
+        fields,
+        preserve_fields=_RUNTIME_SELECTION_CLIENT_FIELDS,
+    )
+
 
 _TERMINAL_RUN_STATUSES = {
     RunStatus.success,
@@ -244,7 +265,12 @@ def preflight_run_create_route[**P, T](func: Callable[P, Awaitable[T]]) -> Calla
     return wrapper
 
 
-def _normalize_run_checkpoint_inputs(body: Any, thread_id: str) -> tuple[dict[str, object] | None, _NormalizedCheckpointControl]:
+def _normalize_run_checkpoint_inputs(
+    body: Any,
+    thread_id: str,
+    *,
+    preserve_runtime_selection: bool = True,
+) -> tuple[dict[str, object] | None, _NormalizedCheckpointControl]:
     preflight_run_create(body, thread_id)
     raw_config = getattr(body, "config", None)
     raw_configurable: Mapping[str, object] = {}
@@ -256,7 +282,7 @@ def _normalize_run_checkpoint_inputs(body: Any, thread_id: str) -> tuple[dict[st
             raw_configurable = configurable_value
     _require_checkpoint_map_mapping(raw_configurable.get("checkpoint_map"))
 
-    sanitized_config = strip_private_client_fields(raw_config) if isinstance(raw_config, Mapping) else raw_config
+    sanitized_config = (_strip_runtime_client_fields(raw_config) if preserve_runtime_selection else strip_private_client_fields(raw_config)) if isinstance(raw_config, Mapping) else raw_config
     sanitized_configurable = sanitized_config.get("configurable") if isinstance(sanitized_config, Mapping) else None
     if not isinstance(sanitized_configurable, Mapping):
         sanitized_configurable = {}
@@ -407,7 +433,7 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     """
     if not context:
         return
-    context = strip_private_client_fields(context)
+    context = _strip_runtime_client_fields(context)
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
     keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
@@ -530,7 +556,7 @@ def build_run_config(
     identically.
     """
     if request_config and not client_fields_sanitized:
-        request_config = strip_private_client_fields(request_config)
+        request_config = _strip_runtime_client_fields(request_config)
     if metadata:
         metadata = strip_private_client_fields(metadata)
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
@@ -753,7 +779,7 @@ async def start_run(
     raw_metadata = getattr(body, "metadata", None)
     sanitized_metadata = strip_private_client_fields(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
     raw_body_context = getattr(body, "context", None)
-    sanitized_body_context = strip_private_client_fields(raw_body_context) if isinstance(raw_body_context, Mapping) else {}
+    sanitized_body_context = _strip_runtime_client_fields(raw_body_context) if isinstance(raw_body_context, Mapping) else {}
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
@@ -980,7 +1006,11 @@ async def start_private_run(
     session_factory = get_session_factory()
     admission_service = admission_service or PrivateRunAdmissionService(session_factory)
     asset_runtime = asset_runtime or PrivateAssetRuntime(session_factory)
-    sanitized_config, checkpoint_control = _normalize_run_checkpoint_inputs(body, thread_id)
+    sanitized_config, checkpoint_control = _normalize_run_checkpoint_inputs(
+        body,
+        thread_id,
+        preserve_runtime_selection=False,
+    )
     raw_metadata = getattr(body, "metadata", None)
     raw_body_context = getattr(body, "context", None)
     config = prepare_private_run_config(
@@ -1036,6 +1066,7 @@ async def start_private_run(
         run_id=admitted.run.run_id,
     )
     private_runtime = None
+    file_authority = None
     record = None
     try:
         base_run_context = get_run_context(request)
@@ -1049,6 +1080,31 @@ async def start_private_run(
         )
         if private_runtime.model_ref != exact_model_name:
             raise PrivateWorkAssetStale(context.request_id)
+        skills_config = getattr(base_run_context.app_config, "skills", None)
+        skill_container_path = getattr(skills_config, "container_path", None)
+        skill_root = getattr(private_runtime, "skill_root", None)
+        authority_mounts = (
+            (
+                RunScopedReadOnlyMount(
+                    run_id=admitted.run.run_id,
+                    container_path=skill_container_path,
+                    host_path=str(skill_root),
+                ),
+            )
+            if isinstance(skill_container_path, str) and skill_root is not None
+            else ()
+        )
+        file_authority = PrivateRunFileAuthority(
+            PrivateFileRunScope(
+                context,
+                thread_id=admitted.thread_id,
+                run_id=admitted.run.run_id,
+                authorization_boundary=authorization_boundary,
+            ),
+            PrivateSandboxFileProjection(session_factory),
+            PrivateFileFinalizer(session_factory),
+            mounts=authority_mounts,
+        )
         run_manager = get_run_manager(request)
         record = await run_manager.register_persisted(
             run_id=admitted.run.run_id,
@@ -1076,6 +1132,7 @@ async def start_private_run(
             thread_store=None,
             private_scope=admitted.opaque_runtime_scope,
             authorization_boundary=authorization_boundary,
+            file_authority=file_authority,
             private_agent_runtime=private_runtime,
         )
         _launch_registered_run(
@@ -1111,6 +1168,11 @@ async def start_private_run(
                 await private_runtime.aclose()
             except Exception:
                 logger.warning("Failed to clean private runtime after launch failure")
+        if file_authority is not None:
+            try:
+                await file_authority.release()
+            except Exception:
+                logger.warning("Failed to clean private file authority after launch failure")
         if isinstance(error, ConflictError):
             raise PrivateWorkConflict(context.request_id) from None
         if isinstance(error, PrivateWorkError):

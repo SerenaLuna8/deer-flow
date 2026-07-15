@@ -4,6 +4,7 @@ import inspect
 
 import pytest
 import pytest_asyncio
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import text
@@ -41,6 +42,13 @@ def _service(seed: M4ThreadSeed, raw=None, *, branch_copy_hook=None):
         raw_saver,
         scoped,
     )
+
+
+def _checkpoint_with_messages(*messages, version: str = "messages-v1"):
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"]["messages"] = list(messages)
+    checkpoint["channel_versions"]["messages"] = version
+    return checkpoint
 
 
 @pytest.mark.asyncio
@@ -180,6 +188,14 @@ class _WriteThenRaiseSaver(InMemorySaver):
         await super().adelete_thread(thread_id)
 
 
+class _FailingLatestHeadSaver(InMemorySaver):
+    async def aget_tuple(self, config):
+        configurable = config.get("configurable", {})
+        if not configurable.get("checkpoint_id"):
+            raise RuntimeError("latest checkpoint lookup unavailable")
+        return await super().aget_tuple(config)
+
+
 @pytest.mark.asyncio
 @pytest.mark.postgres
 async def test_private_thread_service_compensates_row_when_root_checkpoint_fails(
@@ -271,6 +287,8 @@ class _BranchCopyHook:
         scope,
         source_thread_id: str,
         target_thread_id: str,
+        *,
+        session=None,
     ) -> None:
         self.calls.append((scope, source_thread_id, target_thread_id))
 
@@ -283,6 +301,26 @@ class _BranchCopyHook:
         return None
 
 
+class _NoRecursiveScopedRead:
+    """Require both branch selections to use the caller's locked DB session."""
+
+    def __init__(self, delegate) -> None:
+        self._delegate = delegate
+        self.public_get_calls = 0
+        self.locked_get_configs: list[dict[str, object]] = []
+
+    async def aget_tuple(self, config):
+        self.public_get_calls += 1
+        raise AssertionError("branch checkpoint selection escaped the source Thread lock")
+
+    async def aget_tuple_already_authorized(self, config, *, session):
+        self.locked_get_configs.append(config)
+        return await self._delegate.aget_tuple_already_authorized(config, session=session)
+
+    def __getattr__(self, name: str):
+        return getattr(self._delegate, name)
+
+
 class _FailingBranchCopyHook(_BranchCopyHook):
     def __init__(self) -> None:
         super().__init__()
@@ -293,8 +331,15 @@ class _FailingBranchCopyHook(_BranchCopyHook):
         scope,
         source_thread_id: str,
         target_thread_id: str,
+        *,
+        session=None,
     ) -> None:
-        await super().copy_branch_authority(scope, source_thread_id, target_thread_id)
+        await super().copy_branch_authority(
+            scope,
+            source_thread_id,
+            target_thread_id,
+            session=session,
+        )
         raise RuntimeError("authority copy failed after a partial copy")
 
     async def rollback_branch_authority(
@@ -324,11 +369,14 @@ async def test_private_thread_service_branch_uses_database_authority_copy_hook_o
     source_saver = scoped.for_context(seed.owner_a)
     source_config = await source_saver.aput(
         {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
-        empty_checkpoint(),
+        _checkpoint_with_messages(AIMessage(content="done", id="assistant-tail")),
         {"source": "loop", "step": 0, "parents": {}},
-        {},
+        {"messages": "messages-v1"},
     )
     checkpoint_id = source_config["configurable"]["checkpoint_id"]
+
+    branch_saver = _NoRecursiveScopedRead(scoped.for_context(seed.owner_a))
+    scoped.for_context = lambda _context: branch_saver
 
     branch = await service.branch(
         seed.owner_a,
@@ -341,8 +389,283 @@ async def test_private_thread_service_branch_uses_database_authority_copy_hook_o
 
     assert branch.thread_id == "branch-target"
     assert branch.metadata["branch_parent_thread_id"] == source.thread_id
+    assert branch.metadata["workspace_clone_mode"] == "current_thread_authority_copy"
+    assert branch.metadata["branch_source_head_checkpoint_id"] == checkpoint_id
+    assert branch.metadata["branch_parent_visible_tail_message_id"] == "assistant-tail"
     assert hook.calls == [(seed.owner_a_scope, source.thread_id, branch.thread_id)]
+    assert branch_saver.public_get_calls == 0
+    assert len(branch_saver.locked_get_configs) == 2
+    assert branch_saver.locked_get_configs[0]["configurable"]["checkpoint_id"] == checkpoint_id
+    assert "checkpoint_id" not in branch_saver.locked_get_configs[1]["configurable"]
     assert await service.get(seed.owner_a, branch.thread_id) == branch
+    target_item = await _raw.aget_tuple({"configurable": {"thread_id": branch.thread_id, "checkpoint_ns": ""}})
+    assert [message.id for message in target_item.checkpoint["channel_values"]["messages"]] == ["assistant-tail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_service_historical_branch_never_copies_current_authority(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.thread_repository import ThreadAgentRef
+
+    hook = _BranchCopyHook()
+    service, _raw, scoped = _service(seed, branch_copy_hook=hook)
+    source = await service.create(
+        seed.owner_a,
+        thread_id="historical-branch-source",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    saver = scoped.for_context(seed.owner_a)
+    historical = await saver.aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        _checkpoint_with_messages(
+            HumanMessage(content="first", id="human-1"),
+            AIMessage(content="first answer", id="assistant-1"),
+            version="messages-v1",
+        ),
+        {"source": "loop", "step": 0, "parents": {}},
+        {"messages": "messages-v1"},
+    )
+    latest = await saver.aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        _checkpoint_with_messages(
+            HumanMessage(content="first", id="human-1"),
+            AIMessage(content="first answer", id="assistant-1"),
+            HumanMessage(content="second", id="human-2"),
+            AIMessage(content="second answer", id="assistant-2"),
+            version="messages-v2",
+        ),
+        {"source": "loop", "step": 1, "parents": {}},
+        {"messages": "messages-v2"},
+    )
+
+    branch = await service.branch(
+        seed.owner_a,
+        source_thread_id=source.thread_id,
+        target_thread_id="historical-branch-target",
+        checkpoint_id=historical["configurable"]["checkpoint_id"],
+        expected_source_version=source.version,
+    )
+
+    assert hook.calls == []
+    assert branch.metadata["workspace_clone_mode"] == "historical_skip"
+    assert branch.metadata["branch_source_head_checkpoint_id"] == latest["configurable"]["checkpoint_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_metadata_only_head_keeps_visible_assistant_turn_current(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.thread_repository import ThreadAgentRef
+
+    hook = _BranchCopyHook()
+    service, _raw, scoped = _service(seed, branch_copy_hook=hook)
+    source = await service.create(
+        seed.owner_a,
+        thread_id="metadata-head-branch-source",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    saver = scoped.for_context(seed.owner_a)
+    visible_turn = _checkpoint_with_messages(
+        HumanMessage(content="question", id="human-visible"),
+        AIMessage(content="answer", id="assistant-visible"),
+        version="messages-v1",
+    )
+    selected = await saver.aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        visible_turn,
+        {"source": "loop", "step": 0, "parents": {}},
+        {"messages": "messages-v1"},
+    )
+    head = _checkpoint_with_messages(
+        HumanMessage(content="question", id="human-visible"),
+        AIMessage(content="answer", id="assistant-visible"),
+        version="messages-v2",
+    )
+    head["channel_values"]["title"] = "Title updated after the answer"
+    latest = await saver.aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        head,
+        {"source": "loop", "step": 1, "parents": {}},
+        {"messages": "messages-v2"},
+    )
+
+    branch = await service.branch(
+        seed.owner_a,
+        source_thread_id=source.thread_id,
+        target_thread_id="metadata-head-branch-target",
+        checkpoint_id=selected["configurable"]["checkpoint_id"],
+        expected_source_version=source.version,
+    )
+
+    assert hook.calls == [(seed.owner_a_scope, source.thread_id, branch.thread_id)]
+    assert branch.metadata["workspace_clone_mode"] == "current_thread_authority_copy"
+    assert branch.metadata["branch_parent_visible_tail_message_id"] == "assistant-visible"
+    assert branch.metadata["branch_source_head_checkpoint_id"] == latest["configurable"]["checkpoint_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+@pytest.mark.parametrize(
+    ("run_status", "finalization_status"),
+    (("running", "pending"), ("success", "finalizing")),
+)
+async def test_private_thread_branch_rejects_active_or_finalizing_source_run(
+    seed: M4ThreadSeed,
+    run_status: str,
+    finalization_status: str,
+) -> None:
+    from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
+    from app.private_work.thread_repository import ThreadAgentRef
+
+    hook = _BranchCopyHook()
+    service, _raw, scoped = _service(seed, branch_copy_hook=hook)
+    source = await service.create(
+        seed.owner_a,
+        thread_id=f"incomplete-run-source-{run_status}",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    selected = await scoped.for_context(seed.owner_a).aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        _checkpoint_with_messages(AIMessage(content="done", id="assistant-tail")),
+        {"source": "loop", "step": 0, "parents": {}},
+        {"messages": "messages-v1"},
+    )
+    async with seed.factory() as session, session.begin():
+        run = await PrivateRunRepository(session).create(
+            scope=seed.owner_a_scope,
+            thread_id=source.thread_id,
+            request=PrivateRunCreate(status=run_status),
+        )
+        await session.execute(
+            text(
+                """UPDATE runs SET finalization_status=:finalization_status
+                WHERE run_id=:run_id"""
+            ),
+            {
+                "run_id": run.run_id,
+                "finalization_status": finalization_status,
+            },
+        )
+
+    target_thread_id = f"incomplete-run-target-{run_status}"
+    with pytest.raises(PrivateWorkConflict):
+        await service.branch(
+            seed.owner_a,
+            source_thread_id=source.thread_id,
+            target_thread_id=target_thread_id,
+            checkpoint_id=selected["configurable"]["checkpoint_id"],
+            expected_source_version=source.version,
+        )
+
+    assert hook.calls == []
+    assert await service.get(seed.owner_a, target_thread_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_latest_lookup_failure_fails_closed_to_historical_skip(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.thread_repository import ThreadAgentRef
+
+    hook = _BranchCopyHook()
+    service, _raw, scoped = _service(
+        seed,
+        raw=_FailingLatestHeadSaver(),
+        branch_copy_hook=hook,
+    )
+    source = await service.create(
+        seed.owner_a,
+        thread_id="head-lookup-failure-source",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    checkpoint = await scoped.for_context(seed.owner_a).aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        _checkpoint_with_messages(AIMessage(content="done", id="assistant-tail")),
+        {"source": "loop", "step": 0, "parents": {}},
+        {"messages": "messages-v1"},
+    )
+
+    branch = await service.branch(
+        seed.owner_a,
+        source_thread_id=source.thread_id,
+        target_thread_id="head-lookup-failure-target",
+        checkpoint_id=checkpoint["configurable"]["checkpoint_id"],
+        expected_source_version=source.version,
+    )
+
+    assert branch.metadata["workspace_clone_mode"] == "historical_skip"
+    assert branch.metadata["branch_source_head_checkpoint_id"] is None
+    assert hook.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_latest_selection_and_copy_share_source_thread_lock(
+    seed: M4ThreadSeed,
+) -> None:
+    from sqlalchemy.exc import DBAPIError
+
+    from app.private_work.thread_repository import ThreadAgentRef
+
+    class LockCheckingHook(_BranchCopyHook):
+        async def copy_branch_authority(
+            self,
+            scope,
+            source_thread_id: str,
+            target_thread_id: str,
+            *,
+            session=None,
+        ) -> None:
+            assert session is not None
+            assert session.in_transaction()
+            with pytest.raises(DBAPIError):
+                async with seed.engine.begin() as connection:
+                    await connection.execute(
+                        text(
+                            """SELECT thread_id FROM threads_meta
+                            WHERE project_id=:project_id AND owner_user_id=:owner
+                              AND thread_id=:thread_id FOR UPDATE NOWAIT"""
+                        ),
+                        {
+                            "project_id": seed.owner_a.project_id,
+                            "owner": seed.owner_a_scope.owner_user_id,
+                            "thread_id": source_thread_id,
+                        },
+                    )
+            await super().copy_branch_authority(
+                scope,
+                source_thread_id,
+                target_thread_id,
+                session=session,
+            )
+
+    hook = LockCheckingHook()
+    service, _raw, scoped = _service(seed, branch_copy_hook=hook)
+    source = await service.create(
+        seed.owner_a,
+        thread_id="locked-branch-source",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    latest = await scoped.for_context(seed.owner_a).aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        _checkpoint_with_messages(AIMessage(content="done", id="assistant-tail")),
+        {"source": "loop", "step": 0, "parents": {}},
+        {"messages": "messages-v1"},
+    )
+
+    await service.branch(
+        seed.owner_a,
+        source_thread_id=source.thread_id,
+        target_thread_id="locked-branch-target",
+        checkpoint_id=latest["configurable"]["checkpoint_id"],
+        expected_source_version=source.version,
+    )
+
+    assert len(hook.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -361,9 +684,9 @@ async def test_private_thread_service_branch_rolls_back_checkpoint_and_authority
     )
     source_config = await scoped.for_context(seed.owner_a).aput(
         {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
-        empty_checkpoint(),
+        _checkpoint_with_messages(AIMessage(content="done", id="assistant-tail")),
         {"source": "loop", "step": 0, "parents": {}},
-        {},
+        {"messages": "messages-v1"},
     )
 
     with pytest.raises(PrivateWorkUnavailable):
@@ -375,16 +698,83 @@ async def test_private_thread_service_branch_rolls_back_checkpoint_and_authority
             expected_source_version=source.version,
         )
 
-    assert hook.rollback_calls == [(seed.owner_a_scope, source.thread_id, "failed-branch-target")]
+    assert hook.rollback_calls == []
     assert await raw.aget_tuple({"configurable": {"thread_id": "failed-branch-target", "checkpoint_ns": ""}}) is None
     async with seed.engine.connect() as connection:
         assert await connection.scalar(text("SELECT count(*) FROM threads_meta WHERE thread_id='failed-branch-target'")) == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_branch_db_failure_does_not_delete_existing_target_files(
+    seed: M4ThreadSeed,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.exc import DBAPIError
+
+    from app.private_work.file_service import PrivateFileService
+    from app.private_work.thread_repository import ThreadAgentRef
+
+    async def chunks():
+        yield b"existing target authority"
+
+    file_service = PrivateFileService(seed.factory)
+    service, _raw, scoped = _service(seed, branch_copy_hook=file_service)
+    source = await service.create(
+        seed.owner_a,
+        thread_id="db-failure-branch-source",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    await service.create(
+        seed.owner_a,
+        thread_id="db-failure-existing-target",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    existing = await file_service.upload(
+        seed.owner_a,
+        thread_id="db-failure-existing-target",
+        logical_path="workspace/sentinel.txt",
+        media_type="text/plain",
+        chunks=chunks(),
+    )
+    selected = await scoped.for_context(seed.owner_a).aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        _checkpoint_with_messages(AIMessage(content="done", id="assistant-tail")),
+        {"source": "loop", "step": 0, "parents": {}},
+        {"messages": "messages-v1"},
+    )
+
+    async def fail_agent_lookup(*_args, **_kwargs):
+        raise DBAPIError("SELECT agents", {}, RuntimeError("database unavailable"), False)
+
+    monkeypatch.setattr(service, "_require_executable_agent", fail_agent_lookup)
+
+    with pytest.raises(PrivateWorkUnavailable):
+        await service.branch(
+            seed.owner_a,
+            source_thread_id=source.thread_id,
+            target_thread_id="db-failure-existing-target",
+            checkpoint_id=selected["configurable"]["checkpoint_id"],
+            expected_source_version=source.version,
+        )
+
+    ready = await file_service.list_ready(
+        seed.owner_a,
+        thread_id="db-failure-existing-target",
+    )
+    assert [(item.id, item.logical_path, item.sha256) for item in ready] == [(existing.id, existing.logical_path, existing.sha256)]
+
+
 def test_private_thread_service_does_not_read_host_thread_directories() -> None:
-    from app.private_work.thread_service import PrivateThreadService
+    from app.private_work.thread_service import (
+        BranchAuthorityCopyHook,
+        BranchCheckpointSelection,
+        PrivateThreadService,
+    )
 
     source = inspect.getsource(PrivateThreadService)
     assert "get_paths" not in source
     assert "shutil" not in source
     assert "sandbox_user_data_dir" not in source
+    assert inspect.iscoroutinefunction(BranchAuthorityCopyHook.rollback_branch_authority)
+    assert not hasattr(BranchCheckpointSelection, "rollback_branch_authority")

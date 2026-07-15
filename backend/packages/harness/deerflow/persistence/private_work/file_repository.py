@@ -71,6 +71,7 @@ class PrivateArtifactRecord:
     media_type: str
     metadata: dict
     created_at: datetime
+    deleted_at: datetime | None
 
 
 class PrivateFileRepository:
@@ -513,6 +514,7 @@ class PrivateFileRepository:
                     PrivateArtifactRow.project_id == project_id,
                     PrivateArtifactRow.owner_user_id == owner_user_id,
                     PrivateArtifactRow.thread_id == thread_id,
+                    PrivateArtifactRow.deleted_at.is_(None),
                     PrivateFileRow.status == "ready",
                 )
             )
@@ -532,6 +534,7 @@ class PrivateFileRepository:
                 media_type=artifact.media_type,
                 metadata=dict(artifact.artifact_metadata or {}),
                 created_at=artifact.created_at,
+                deleted_at=artifact.deleted_at,
             ),
             self._file_record(file_row),
         )

@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 from langgraph.runtime import Runtime
 
@@ -9,6 +12,44 @@ def _as_posix(path: str) -> str:
 
 
 class TestThreadDataMiddleware:
+    def test_project_mode_uses_only_opaque_authority_paths(self, tmp_path, monkeypatch):
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=False)
+        expected = {
+            "workspace_path": "/mnt/user-data/workspace",
+            "uploads_path": "/mnt/user-data/uploads",
+            "outputs_path": "/mnt/user-data/outputs",
+        }
+        authority = SimpleNamespace(thread_data_paths=Mock(return_value=expected))
+
+        monkeypatch.setattr(
+            middleware,
+            "_create_thread_directories",
+            Mock(side_effect=AssertionError("project mode touched host paths")),
+        )
+        result = middleware.before_agent(
+            state={},
+            runtime=Runtime(
+                context={
+                    "thread_id": "thread-private",
+                    "private_scope": object(),
+                    "__file_authority": authority,
+                }
+            ),
+        )
+
+        assert result is not None
+        assert result["thread_data"] == expected
+        authority.thread_data_paths.assert_called_once_with()
+
+    def test_project_mode_missing_opaque_authority_fails_closed(self, tmp_path):
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+
+        with pytest.raises(RuntimeError, match="Private file authority"):
+            middleware.before_agent(
+                state={},
+                runtime=Runtime(context={"thread_id": "thread-private", "private_scope": object()}),
+            )
+
     def test_before_agent_returns_paths_when_thread_id_present_in_context(self, tmp_path):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
 

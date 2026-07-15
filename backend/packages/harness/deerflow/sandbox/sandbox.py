@@ -1,6 +1,7 @@
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Mapping
+from dataclasses import dataclass
 from typing import Protocol
 
 from langgraph.errors import GraphBubbleUp
@@ -18,6 +19,28 @@ from deerflow.sandbox.search import GrepMatch
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 AUTHORIZATION_REVOKED_REASON = "authorization_revoked"
+PRIVATE_FILE_IO_CHUNK_SIZE = 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxFileInfo:
+    path: str
+    size: int
+    file_type: str
+
+
+class SandboxBinaryReader(Protocol):
+    def read(self, size: int) -> bytes: ...
+
+    def close(self) -> None: ...
+
+
+class SandboxAtomicWriter(Protocol):
+    def write(self, content: bytes) -> None: ...
+
+    def commit(self) -> None: ...
+
+    def abort(self) -> None: ...
 
 
 class AuthorizationRevoked(GraphBubbleUp):
@@ -101,10 +124,82 @@ class Sandbox(ABC):
 
     def __init__(self, id: str):
         self._id = id
+        self._private_atomic_writers: dict[str, SandboxAtomicWriter] = {}
+        self._private_regular_readers: dict[str, SandboxBinaryReader] = {}
 
     @property
     def id(self) -> str:
         return self._id
+
+    def list_secure_files(self, root: str) -> tuple[SandboxFileInfo, ...]:
+        """List regular and rejected objects without following links.
+
+        Providers that do not implement this private-work boundary fail closed.
+        """
+
+        from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+        raise SandboxRuntimeError("Private file authority is unsupported by this sandbox")
+
+    def open_regular_reader(self, path: str) -> SandboxBinaryReader:
+        from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+        raise SandboxRuntimeError("Private file authority is unsupported by this sandbox")
+
+    def open_atomic_writer(self, path: str) -> SandboxAtomicWriter:
+        from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+        raise SandboxRuntimeError("Private file authority is unsupported by this sandbox")
+
+    def remove_path(self, path: str) -> None:
+        from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+        raise SandboxRuntimeError("Private file authority is unsupported by this sandbox")
+
+    # Stateful compatibility facade used by the app authority. Handles are
+    # opaque and never contain physical paths.
+    def begin_atomic_file(self, path: str) -> str:
+        import uuid
+
+        writer = self.open_atomic_writer(path)
+        handle = uuid.uuid4().hex
+        self._private_atomic_writers[handle] = writer
+        return handle
+
+    def append_atomic_file(self, handle: str, content: bytes) -> None:
+        if not isinstance(content, bytes) or not 0 < len(content) <= PRIVATE_FILE_IO_CHUNK_SIZE:
+            raise ValueError("Private sandbox writes must be bounded to 1 MiB")
+        self._private_atomic_writers[handle].write(content)
+
+    def publish_atomic_file(self, handle: str) -> None:
+        writer = self._private_atomic_writers.pop(handle)
+        writer.commit()
+
+    def abort_atomic_file(self, handle: str) -> None:
+        writer = self._private_atomic_writers.pop(handle, None)
+        if writer is not None:
+            writer.abort()
+
+    def remove_file(self, path: str) -> None:
+        self.remove_path(path)
+
+    def open_regular_file(self, path: str) -> str:
+        import uuid
+
+        reader = self.open_regular_reader(path)
+        handle = uuid.uuid4().hex
+        self._private_regular_readers[handle] = reader
+        return handle
+
+    def read_regular_file(self, handle: str, max_bytes: int) -> bytes:
+        if max_bytes != PRIVATE_FILE_IO_CHUNK_SIZE:
+            raise ValueError("Private sandbox reads use the fixed 1 MiB bound")
+        return self._private_regular_readers[handle].read(max_bytes)
+
+    def close_regular_file(self, handle: str) -> None:
+        reader = self._private_regular_readers.pop(handle, None)
+        if reader is not None:
+            reader.close()
 
     @abstractmethod
     def execute_command(

@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
@@ -160,6 +161,91 @@ class TestFilesFromKwargs:
         mw = _middleware(tmp_path)
         msg = _human("hi", files=[{"filename": ".upload-active.part", "size": 5, "path": "/mnt/user-data/uploads/.upload-active.part"}])
         assert mw._files_from_kwargs(msg) is None
+
+
+class TestPrivateAuthorityUploads:
+    def test_project_mode_uses_client_ids_only_and_authoritative_metadata(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        selected_id = "11111111-1111-1111-1111-111111111111"
+        historical_id = "22222222-2222-2222-2222-222222222222"
+        authoritative = (
+            {
+                "file_id": selected_id,
+                "filename": "trusted.pdf",
+                "size": 321,
+                "path": "/mnt/user-data/uploads/trusted.pdf",
+                "extension": ".pdf",
+                "media_type": "application/pdf",
+            },
+            {
+                "file_id": historical_id,
+                "filename": "history.txt",
+                "size": 7,
+                "path": "/mnt/user-data/uploads/history.txt",
+                "extension": ".txt",
+                "media_type": "text/plain",
+            },
+        )
+        authority = MagicMock()
+        authority.visible_uploads.return_value = authoritative
+        runtime = _runtime()
+        runtime.context = {
+            "thread_id": THREAD_ID,
+            "private_scope": object(),
+            "__file_authority": authority,
+        }
+        middleware = _middleware(tmp_path)
+        monkeypatch.setattr(
+            middleware._paths,
+            "sandbox_uploads_dir",
+            MagicMock(side_effect=AssertionError("project mode scanned host uploads")),
+        )
+        state = {
+            "messages": [
+                _human(
+                    "review trusted.pdf",
+                    files=[
+                        {
+                            "file_id": selected_id,
+                            "filename": "forged.exe",
+                            "size": 999999,
+                            "path": "/tmp/forged",
+                        },
+                        {
+                            "file_id": "33333333-3333-3333-3333-333333333333",
+                            "filename": "foreign.txt",
+                        },
+                    ],
+                )
+            ]
+        }
+
+        result = middleware.before_agent(state, runtime)
+
+        assert result is not None
+        authority.visible_uploads.assert_called_once_with()
+        assert result["uploaded_files"] == [authoritative[0]]
+        block = _uploaded_files_block(result["messages"][-1].content)
+        assert "trusted.pdf" in block
+        assert "history.txt" in block
+        assert "forged.exe" not in block
+        assert "foreign.txt" not in block
+
+    def test_project_mode_missing_opaque_authority_fails_closed(self, tmp_path):
+        runtime = _runtime()
+        runtime.context = {
+            "thread_id": THREAD_ID,
+            "private_scope": object(),
+        }
+
+        with pytest.raises(RuntimeError, match="Private file authority"):
+            _middleware(tmp_path).before_agent(
+                {"messages": [_human("hello", files=[])]},
+                runtime,
+            )
 
 
 # ---------------------------------------------------------------------------

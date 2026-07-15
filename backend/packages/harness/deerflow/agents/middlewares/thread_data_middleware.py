@@ -10,6 +10,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config.paths import Paths, get_paths
+from deerflow.file_authority import require_private_file_authority
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,10 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
         context = runtime.context or {}
+        authority = require_private_file_authority(
+            context,
+            method="thread_data_paths",
+        )
         thread_id = context.get("thread_id")
         if thread_id is None:
             config = get_config()
@@ -89,15 +94,24 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         if thread_id is None:
             raise ValueError("Thread ID is required in runtime context or config.configurable")
 
-        user_id = get_effective_user_id()
-
-        if self._lazy_init:
-            # Lazy initialization: only compute paths, don't create directories
-            paths = self._get_thread_paths(thread_id, user_id=user_id)
+        if authority is not None:
+            paths = authority.thread_data_paths()
+            expected_paths = {
+                "workspace_path": "/mnt/user-data/workspace",
+                "uploads_path": "/mnt/user-data/uploads",
+                "outputs_path": "/mnt/user-data/outputs",
+            }
+            if type(paths) is not dict or paths != expected_paths:
+                raise RuntimeError("Private file authority is unavailable")
         else:
-            # Eager initialization: create directories immediately
-            paths = self._create_thread_directories(thread_id, user_id=user_id)
-            logger.debug("Created thread data directories for thread %s", thread_id)
+            user_id = get_effective_user_id()
+            if self._lazy_init:
+                # Lazy initialization: only compute paths, don't create directories
+                paths = self._get_thread_paths(thread_id, user_id=user_id)
+            else:
+                # Eager initialization: create directories immediately
+                paths = self._create_thread_directories(thread_id, user_id=user_id)
+                logger.debug("Created thread data directories for thread %s", thread_id)
 
         messages = list(state.get("messages", []))
         last_message = messages[-1] if messages else None
@@ -107,7 +121,7 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
                 content=last_message.content,
                 id=last_message.id,
                 name=last_message.name or "user-input",
-                additional_kwargs={**last_message.additional_kwargs, "run_id": runtime.context.get("run_id"), "timestamp": datetime.now(UTC).isoformat()},
+                additional_kwargs={**last_message.additional_kwargs, "run_id": context.get("run_id"), "timestamp": datetime.now(UTC).isoformat()},
             )
 
         return {

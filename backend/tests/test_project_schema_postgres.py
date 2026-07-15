@@ -270,7 +270,7 @@ async def test_downgrade_with_project_data_fails_without_mutation(
             assert (await conn.execute(text("SELECT count(*) FROM projects"))).scalar_one() == 1
             assert (await conn.execute(text("SELECT count(*) FROM project_memberships"))).scalar_one() == int(include_membership)
             assert (await conn.execute(text("SELECT system_role FROM users WHERE id=:id"), {"id": user_id})).scalar_one() == "system_admin"
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0010_private_file_source"
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0011_private_artifact_tombstone"
     finally:
         await engine.dispose()
 

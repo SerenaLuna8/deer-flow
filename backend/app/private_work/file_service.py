@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeVar
 
+from sqlalchemy import delete, insert, literal, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -42,6 +43,9 @@ from deerflow.persistence.private_work.file_repository import (
     PrivateFileRecord,
     PrivateFileRepository,
 )
+from deerflow.persistence.private_work.model import PrivateFileChunkRow, PrivateFileRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
@@ -567,6 +571,198 @@ class PrivateFileService:
             raise
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
+
+    async def copy_branch_authority(
+        self,
+        scope: PrivateResourceScope,
+        source_thread_id: str,
+        target_thread_id: str,
+        *,
+        session: AsyncSession | None = None,
+    ) -> None:
+        await self.copy_thread_files(
+            scope,
+            source_thread_id,
+            target_thread_id,
+            session=session,
+        )
+
+    async def copy_thread_files(
+        self,
+        source_scope: PrivateResourceScope,
+        source_thread_id: str,
+        target_thread_id: str,
+        *,
+        session: AsyncSession | None = None,
+    ) -> None:
+        """Copy only ready file/chunk authority; artifacts remain Run-owned."""
+
+        if session is None:
+            async with self._session_factory() as owned_session, owned_session.begin():
+                await self._copy_thread_files_in_session(
+                    owned_session,
+                    source_scope,
+                    source_thread_id,
+                    target_thread_id,
+                )
+            return
+        await self._copy_thread_files_in_session(
+            session,
+            source_scope,
+            source_thread_id,
+            target_thread_id,
+        )
+
+    @staticmethod
+    async def _copy_thread_files_in_session(
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        source_thread_id: str,
+        target_thread_id: str,
+    ) -> None:
+        try:
+            project_id = uuid.UUID(scope.project_id)
+            owner_user_id = str(uuid.UUID(scope.owner_user_id))
+        except (TypeError, ValueError):
+            raise PrivateFileConflict from None
+        if source_thread_id == target_thread_id:
+            raise PrivateFileConflict
+
+        # The caller may already hold source. Re-locking it is safe; target is
+        # always acquired second so finalizer/branch share one global order.
+        locked = (
+            (
+                await session.execute(
+                    select(ThreadMetaRow.thread_id)
+                    .where(
+                        ThreadMetaRow.project_id == project_id,
+                        ThreadMetaRow.owner_user_id == owner_user_id,
+                        ThreadMetaRow.thread_id.in_((source_thread_id, target_thread_id)),
+                        ThreadMetaRow.deleted_at.is_(None),
+                        ThreadMetaRow.frozen_at.is_(None),
+                    )
+                    .order_by(
+                        (ThreadMetaRow.thread_id == source_thread_id).desc(),
+                        ThreadMetaRow.thread_id,
+                    )
+                    .with_for_update(of=ThreadMetaRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if set(locked) != {source_thread_id, target_thread_id}:
+            raise PrivateFileConflict
+
+        source_rows = (
+            (
+                await session.execute(
+                    select(PrivateFileRow)
+                    .where(
+                        PrivateFileRow.project_id == project_id,
+                        PrivateFileRow.owner_user_id == owner_user_id,
+                        PrivateFileRow.thread_id == source_thread_id,
+                        PrivateFileRow.status == "ready",
+                        PrivateFileRow.deleted_at.is_(None),
+                    )
+                    .order_by(PrivateFileRow.logical_path, PrivateFileRow.version, PrivateFileRow.id)
+                    .with_for_update(of=PrivateFileRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        id_map = {row.id: uuid.uuid4() for row in source_rows}
+        copies: list[tuple[PrivateFileRow, PrivateFileRow]] = []
+        for source in source_rows:
+            target = PrivateFileRow(
+                id=id_map[source.id],
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                thread_id=target_thread_id,
+                kind=source.kind,
+                logical_path=source.logical_path,
+                media_type=source.media_type,
+                size=source.size,
+                sha256=source.sha256,
+                status="ready",
+                version=source.version,
+                created_by_run_id=None,
+                source_file_id=None,
+                created_at=source.created_at,
+                updated_at=source.updated_at,
+            )
+            session.add(target)
+            copies.append((source, target))
+        await session.flush()
+        for source, target in copies:
+            target.source_file_id = id_map.get(source.source_file_id)
+            stats = (
+                await session.execute(
+                    text(
+                        """SELECT count(*) AS chunk_count,
+                                  coalesce(sum(size), 0) AS total_size,
+                                  min(chunk_index) AS first_index,
+                                  max(chunk_index) AS last_index,
+                                  coalesce(bool_and(
+                                      size = octet_length(content)
+                                      AND size > 0
+                                      AND size <= :chunk_size
+                                      AND encode(sha256(content), 'hex') = sha256
+                                  ), true) AS chunks_valid,
+                                  encode(sha256(coalesce(
+                                      string_agg(content, ''::bytea ORDER BY chunk_index),
+                                      ''::bytea
+                                  )), 'hex') AS whole_sha256
+                           FROM file_chunks
+                           WHERE file_id = :source_file_id"""
+                    ),
+                    {
+                        "source_file_id": source.id,
+                        "chunk_size": PRIVATE_FILE_CHUNK_SIZE,
+                    },
+                )
+            ).one()
+            chunk_count = stats.chunk_count
+            indices_valid = (chunk_count == 0 and stats.first_index is None and stats.last_index is None) or (chunk_count > 0 and stats.first_index == 0 and stats.last_index == chunk_count - 1)
+            if not indices_valid or not stats.chunks_valid or stats.total_size != source.size or stats.whole_sha256 != source.sha256:
+                raise PrivateFileIntegrityError
+            copied = await session.execute(
+                insert(PrivateFileChunkRow).from_select(
+                    ("file_id", "chunk_index", "content", "size", "sha256"),
+                    select(
+                        literal(target.id),
+                        PrivateFileChunkRow.chunk_index,
+                        PrivateFileChunkRow.content,
+                        PrivateFileChunkRow.size,
+                        PrivateFileChunkRow.sha256,
+                    ).where(PrivateFileChunkRow.file_id == source.id),
+                )
+            )
+            if copied.rowcount != chunk_count:
+                raise PrivateFileIntegrityError
+        await session.flush()
+
+    async def rollback_branch_authority(
+        self,
+        scope: PrivateResourceScope,
+        source_thread_id: str,
+        target_thread_id: str,
+    ) -> None:
+        del source_thread_id
+        try:
+            project_id = uuid.UUID(scope.project_id)
+            owner_user_id = str(uuid.UUID(scope.owner_user_id))
+        except (TypeError, ValueError):
+            return
+        async with self._session_factory() as session, session.begin():
+            await session.execute(
+                delete(PrivateFileRow).where(
+                    PrivateFileRow.project_id == project_id,
+                    PrivateFileRow.owner_user_id == owner_user_id,
+                    PrivateFileRow.thread_id == target_thread_id,
+                )
+            )
 
     async def convert_upload(
         self,

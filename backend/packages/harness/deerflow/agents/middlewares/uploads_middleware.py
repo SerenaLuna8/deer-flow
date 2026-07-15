@@ -13,6 +13,7 @@ from langchain_core.runnables import run_in_executor
 from langgraph.runtime import Runtime
 
 from deerflow.config.paths import Paths, get_paths
+from deerflow.file_authority import require_private_file_authority
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_conversion import extract_outline
@@ -290,6 +291,86 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             )
         return files if files else None
 
+    def _private_before_agent(
+        self,
+        messages: list,
+        last_message_index: int,
+        last_message: HumanMessage,
+        authority: object,
+    ) -> dict | None:
+        visible_uploads = authority.visible_uploads()
+        if type(visible_uploads) is not tuple:
+            raise RuntimeError("Private file authority is unavailable")
+        authorized: list[dict] = []
+        for raw in visible_uploads:
+            if type(raw) is not dict:
+                raise RuntimeError("Private file authority is unavailable")
+            file = dict(raw)
+            file_id = file.get("file_id")
+            filename = file.get("filename")
+            size = file.get("size")
+            path = file.get("path")
+            if type(file_id) is not str or type(filename) is not str or not filename or Path(filename).name != filename or type(size) is not int or size < 0 or path != f"/mnt/user-data/uploads/{filename}":
+                raise RuntimeError("Private file authority is unavailable")
+            file["extension"] = Path(filename).suffix
+            authorized.append(file)
+
+        requested: list[str] = []
+        raw_requested = (last_message.additional_kwargs or {}).get("files")
+        if isinstance(raw_requested, list):
+            for raw in raw_requested:
+                if not isinstance(raw, dict):
+                    continue
+                file_id = raw.get("file_id")
+                if type(file_id) is str and file_id not in requested:
+                    requested.append(file_id)
+        by_id = {file["file_id"]: file for file in authorized}
+        new_files = [dict(by_id[file_id]) for file_id in requested if file_id in by_id]
+        requested_set = set(requested)
+        historical_candidates = [dict(file) for file in authorized if file["file_id"] not in requested_set]
+        query_text = get_original_user_content_text(
+            last_message.content,
+            last_message.additional_kwargs,
+        )
+        context_new_files, omitted_new_files = self._select_files_for_context(
+            new_files,
+            query_text,
+        )
+        historical_files, omitted_historical_files = self._select_files_for_context(
+            historical_candidates,
+            query_text,
+        )
+        if not context_new_files and not historical_files:
+            return None
+        files_message = self._create_files_message(
+            context_new_files,
+            historical_files,
+            omitted_new_files=omitted_new_files,
+            omitted_historical_files=omitted_historical_files,
+        )
+        original_content = last_message.content
+        additional_kwargs = dict(last_message.additional_kwargs or {})
+        additional_kwargs.setdefault(
+            ORIGINAL_USER_CONTENT_KEY,
+            message_content_to_text(original_content),
+        )
+        if isinstance(original_content, str):
+            updated_content = f"{files_message}\n\n{original_content}"
+        elif isinstance(original_content, list):
+            updated_content = [
+                {"type": "text", "text": f"{files_message}\n\n"},
+                *original_content,
+            ]
+        else:
+            updated_content = original_content
+        messages[last_message_index] = HumanMessage(
+            content=updated_content,
+            id=last_message.id,
+            name=last_message.name,
+            additional_kwargs=additional_kwargs,
+        )
+        return {"uploaded_files": new_files, "messages": messages}
+
     @override
     def before_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
         """Inject uploaded files information before agent execution.
@@ -318,6 +399,18 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         if not isinstance(last_message, HumanMessage):
             return None
+
+        authority = require_private_file_authority(
+            runtime.context or {},
+            method="visible_uploads",
+        )
+        if authority is not None:
+            return self._private_before_agent(
+                messages,
+                last_message_index,
+                last_message,
+                authority,
+            )
 
         # Resolve uploads directory for existence checks
         thread_id = (runtime.context or {}).get("thread_id")

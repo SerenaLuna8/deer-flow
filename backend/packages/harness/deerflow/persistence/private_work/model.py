@@ -237,6 +237,7 @@ class PrivateArtifactRow(Base):
     media_type: Mapped[str] = mapped_column(String(255), nullable=False)
     artifact_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         *_scope_constraints("artifacts"),
@@ -253,6 +254,14 @@ class PrivateArtifactRow(Base):
             ondelete="RESTRICT",
         ),
         UniqueConstraint("project_id", "owner_user_id", "thread_id", "run_id", "id", name="uq_artifacts_private_scope"),
+        Index(
+            "ix_artifacts_private_active",
+            "project_id",
+            "owner_user_id",
+            "thread_id",
+            "created_at",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
 

@@ -1,13 +1,30 @@
 import asyncio
+import hashlib
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from deerflow.config import get_app_config
+from deerflow.private_scope import PrivateResourceScope
 from deerflow.reflection import resolve_class
 from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox import Sandbox
+
+
+async def _await_joined_thread(task: asyncio.Task) -> tuple[object, bool]:
+    """Join a blocking provider call even when its async caller is cancelled."""
+
+    cancellation_pending = False
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancellation_pending = True
+    return task.result(), cancellation_pending
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,11 +41,90 @@ class RunScopedReadOnlyMount:
             raise ValueError("Invalid run-scoped read-only mount")
 
 
+@dataclass(frozen=True, slots=True)
+class PrivateSandboxLease:
+    sandbox_id: str
+    run_id: str
+    relative_root: str
+
+
+def private_sandbox_relative_root(
+    scope: PrivateResourceScope,
+    thread_id: str,
+) -> str:
+    if type(scope) is not PrivateResourceScope:
+        raise SandboxRuntimeError("Invalid private sandbox scope")
+    if not thread_id or "/" in thread_id or "\\" in thread_id or thread_id in {".", ".."}:
+        raise SandboxRuntimeError("Invalid private sandbox thread")
+    return f"projects/{scope.project_id}/users/{scope.owner_user_id}/threads/{thread_id}"
+
+
 class SandboxProvider(ABC):
     """Abstract base class for sandbox providers"""
 
     uses_thread_data_mounts: bool = False
     needs_upload_permission_adjustment: bool = True
+
+    @staticmethod
+    def _private_storage_key(scope: PrivateResourceScope) -> str:
+        relative = private_sandbox_relative_root(scope, "scope")
+        return f"private-{hashlib.sha256(relative.encode()).hexdigest()[:24]}"
+
+    def acquire_private(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        user_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+    ) -> PrivateSandboxLease:
+        """Acquire a private lease or fail closed when unsupported.
+
+        A private authority requires bounded, no-link-following secure file
+        primitives in addition to allocation isolation. Providers must opt in
+        by overriding this method; reusing legacy acquire is not sufficient.
+        """
+
+        del thread_id, scope, user_id, run_id, mounts
+        raise SandboxRuntimeError("Private file authority is unsupported by this sandbox provider")
+
+    async def acquire_private_async(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        user_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+    ) -> PrivateSandboxLease:
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self.acquire_private,
+                thread_id,
+                scope=scope,
+                user_id=user_id,
+                run_id=run_id,
+                mounts=mounts,
+            )
+        )
+        result, cancellation_pending = await _await_joined_thread(task)
+        lease = result
+        if type(lease) is not PrivateSandboxLease:
+            raise SandboxRuntimeError("Invalid private sandbox lease")
+        if cancellation_pending:
+            cleanup_task = asyncio.create_task(asyncio.to_thread(self.release, lease.sandbox_id))
+            await _await_joined_thread(cleanup_task)
+            raise asyncio.CancelledError
+        return lease
+
+    async def release_private_async(self, lease: PrivateSandboxLease) -> None:
+        if type(lease) is not PrivateSandboxLease:
+            raise SandboxRuntimeError("Invalid private sandbox lease")
+        task = asyncio.create_task(asyncio.to_thread(self.release, lease.sandbox_id))
+        _, cancellation_pending = await _await_joined_thread(task)
+        if cancellation_pending:
+            raise asyncio.CancelledError
 
     @abstractmethod
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:

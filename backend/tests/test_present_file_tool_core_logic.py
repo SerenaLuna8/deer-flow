@@ -2,6 +2,7 @@
 
 import importlib
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 present_file_tool_module = importlib.import_module("deerflow.tools.builtins.present_file_tool")
 
@@ -95,3 +96,62 @@ def test_present_files_rejects_paths_outside_outputs(tmp_path):
 
     assert "artifacts" not in result.update
     assert result.update["messages"][0].content == f"Error: Only files in /mnt/user-data/outputs can be presented: {leaked_path}"
+
+
+def test_private_present_files_registers_opaque_authority_without_host_resolution(
+    monkeypatch,
+):
+    authority = SimpleNamespace(record_presented_paths=Mock())
+    runtime = SimpleNamespace(
+        state={
+            "thread_data": {
+                "outputs_path": "/mnt/user-data/outputs",
+            }
+        },
+        context={
+            "thread_id": "thread-private",
+            "__file_authority": authority,
+        },
+        config={},
+    )
+
+    def reject_host_resolution():
+        raise AssertionError("private present_files used legacy host paths")
+
+    monkeypatch.setattr(present_file_tool_module, "get_paths", reject_host_resolution)
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=runtime,
+        filepaths=["/mnt/user-data/outputs/report.md"],
+        tool_call_id="tc-private",
+    )
+
+    assert result.update["artifacts"] == ["/mnt/user-data/outputs/report.md"]
+    authority.record_presented_paths.assert_called_once_with(("/mnt/user-data/outputs/report.md",))
+
+
+def test_private_present_files_invalid_batch_registers_nothing(monkeypatch):
+    authority = SimpleNamespace(record_presented_paths=Mock())
+    runtime = SimpleNamespace(
+        state={"thread_data": {"outputs_path": "/mnt/user-data/outputs"}},
+        context={
+            "thread_id": "thread-private",
+            "__file_authority": authority,
+        },
+        config={},
+    )
+
+    def reject_host_resolution():
+        raise AssertionError("private present_files used legacy host paths")
+
+    monkeypatch.setattr(present_file_tool_module, "get_paths", reject_host_resolution)
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=runtime,
+        filepaths=[
+            "/mnt/user-data/outputs/report.md",
+            "/mnt/user-data/workspace/private.txt",
+        ],
+        tool_call_id="tc-private-invalid",
+    )
+
+    assert "artifacts" not in result.update
+    authority.record_presented_paths.assert_not_called()

@@ -1267,6 +1267,86 @@ async def test_service_lists_and_soft_deletes_ready_file_without_removing_chunks
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_branch_authority_copies_chunk_payload_server_side_without_returning_content(
+    file_service_seed,
+) -> None:
+    from sqlalchemy import event
+
+    from app.private_work.file_service import PrivateFileService
+
+    seed, source_thread_id = file_service_seed
+    target_thread_id = f"branch-copy-{uuid.uuid4()}"
+    async with seed.factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=seed.owner_a_scope,
+            thread_id=target_thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+    source = await PrivateFileService(seed.factory).upload(
+        seed.owner_a,
+        thread_id=source_thread_id,
+        logical_path="workspace/large.bin",
+        media_type="application/octet-stream",
+        chunks=_chunks(b"a" * MIB + b"tail"),
+    )
+    statements: list[str] = []
+
+    def capture_statement(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(seed.engine.sync_engine, "before_cursor_execute", capture_statement)
+    try:
+        await PrivateFileService(seed.factory).copy_thread_files(
+            seed.owner_a_scope,
+            source_thread_id,
+            target_thread_id,
+        )
+    finally:
+        event.remove(seed.engine.sync_engine, "before_cursor_execute", capture_statement)
+
+    normalized = [" ".join(statement.lower().split()) for statement in statements]
+    assert not any(statement.startswith("select") and "file_chunks.content" in statement for statement in normalized)
+    assert any(statement.startswith("insert into file_chunks") and "select" in statement and "file_chunks.content" in statement for statement in normalized)
+    async with seed.engine.connect() as connection:
+        copied = (
+            await connection.execute(
+                text("SELECT id,size,sha256,status,created_by_run_id FROM files WHERE project_id=:project_id AND owner_user_id=:owner AND thread_id=:thread_id AND logical_path='workspace/large.bin'"),
+                {
+                    "project_id": seed.owner_a.project_id,
+                    "owner": seed.owner_a_scope.owner_user_id,
+                    "thread_id": target_thread_id,
+                },
+            )
+        ).one()
+        chunk_summary = (
+            await connection.execute(
+                text("SELECT count(*),sum(size),min(chunk_index),max(chunk_index) FROM file_chunks WHERE file_id=:file_id"),
+                {"file_id": copied.id},
+            )
+        ).one()
+        artifact_count = await connection.scalar(
+            text("SELECT count(*) FROM artifacts WHERE thread_id=:thread_id"),
+            {"thread_id": target_thread_id},
+        )
+        run_count = await connection.scalar(
+            text("SELECT count(*) FROM runs WHERE thread_id=:thread_id"),
+            {"thread_id": target_thread_id},
+        )
+    assert copied[1:] == (source.size, source.sha256, "ready", None)
+    assert chunk_summary == (2, source.size, 0, 1)
+    assert artifact_count == 0
+    assert run_count == 0
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_service_viewer_can_list_and_delete_own_ready_files_but_cannot_create(
     file_service_seed,
     tmp_path,
