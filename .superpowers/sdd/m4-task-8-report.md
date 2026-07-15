@@ -6,17 +6,17 @@
 - Baseline: `abe99ce73e8069d68993565d1149434cbb97e9d2`
 - Branch: `codex/m4-private-work`
 - Scope: Task 8 only
-- Implementation: repaired GREEN candidate
+- Implementation: APPROVED
 - Initial fixed-commit review: changes requested (2 Critical / 11 unique Important)
-- Frozen repair checklist: closed; final fixed-commit check pending
+- Repair commits: `bad07dd6`, `7410d583`
+- Final fixed-commit check: APPROVED (0 Critical / 0 Important / 0 Minor)
 - Task 9 / Task 11 / Task 12: not started
 
 Task 8 implements the project-private sandbox restore, finalization, Thread
 lifecycle, latest-visible-turn branch authority boundary, and provider-specific
 private leases. The initial fixed-commit review did not approve `f017dde8`; the
-resulting frozen repair list is now closed and merged verification is green. The
-task remains unapproved until one final fixed-commit check confirms the frozen
-Critical/Important list is closed.
+resulting frozen repair list is closed, merged verification is green, and the
+final fixed-commit check approved Task 8 with no remaining findings.
 
 ## Delivered boundary
 
@@ -148,13 +148,14 @@ database was used.
 | Merged Task 8 core + worker + middleware + Gateway | 477 passed, 0 skipped |
 | Cumulative M1-M4 schema + bootstrap + `tests/integration` | 165 passed, 0 skipped |
 | AIO/E2B/Boxlite/remote-contract + provider lifecycle | 210 passed, 0 skipped |
+| Final strict-destroy provider contract | 39 passed, 0 skipped |
 | `ruff format --check app packages tests` | 960 files formatted |
 | `ruff check app packages tests` | passed |
 | `python -m compileall -q app packages tests` | passed |
 | `git diff --check` | passed |
 
-## Remaining release condition
+## Approval
 
-Create one repair commit and run one final fixed-checklist review against the
-frozen Critical/Important findings. Task 8 remains review-pending until that
-check reaches 0 Critical / 0 Important. Task 9 has not started.
+Task 8 is approved at `7410d583`. The final frozen-checklist review reported
+0 Critical, 0 Important, and 0 Minor findings. Task 9 had not changed code at
+the time of this approval.
