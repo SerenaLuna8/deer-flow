@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { projectNavigationItems } from "@/components/projects/project-nav";
 import { ProjectShell } from "@/components/projects/project-shell";
 import { CAPABILITIES, type Project } from "@/core/projects/types";
 
@@ -40,6 +41,26 @@ function renderShell(project: Project) {
 }
 
 describe("project shell navigation", () => {
+  test("gates project Memory and Connections with private-work readiness", () => {
+    const readyItems = projectNavigationItems(adminProject, true, true);
+
+    expect(readyItems.map((item) => item.label)).toEqual(
+      expect.arrayContaining(["Chats", "Memory", "Connections"]),
+    );
+    expect(projectNavigationItems(adminProject, false, true)).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "Memory" }),
+        expect.objectContaining({ label: "Connections" }),
+      ]),
+    );
+    expect(projectNavigationItems(adminProject, true, false)).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "Memory" }),
+        expect.objectContaining({ label: "Connections" }),
+      ]),
+    );
+  });
+
   test("renders implemented M3 asset destinations from shared_assets.read", () => {
     const html = renderShell(adminProject);
 

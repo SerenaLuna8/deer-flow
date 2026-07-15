@@ -80,6 +80,7 @@ export function useUploadFiles(
 export function useUploadedFiles(
   threadId: string,
   explicitPrivateWork?: PrivateWorkAccess,
+  enabled = true,
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery({
@@ -90,7 +91,7 @@ export function useUploadedFiles(
       threadId,
     ),
     queryFn: () => listUploadedFiles(threadId, privateWork),
-    enabled: !!threadId,
+    enabled: !!threadId && enabled,
   });
 }
 

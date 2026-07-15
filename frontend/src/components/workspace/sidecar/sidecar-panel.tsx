@@ -58,11 +58,14 @@ import {
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import type { Model } from "@/core/models/types";
+import { createProjectThread } from "@/core/private-work/api-client";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { useLocalSettings } from "@/core/settings";
 import {
   buildParentConversationContext,
   buildReferenceMessageMetadata,
   buildSidecarContextPrompt,
+  buildSidecarThreadMetadata,
 } from "@/core/sidecar";
 import { createSidecarThread } from "@/core/sidecar/api";
 import {
@@ -77,6 +80,7 @@ import {
   type UploadLimits,
   type UploadLimitViolation,
 } from "@/core/uploads";
+import { uuid } from "@/core/utils/uuid";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -148,6 +152,7 @@ function promptMessageFiles(message: PromptInputMessage) {
 
 export function SidecarPanel({ className }: { className?: string }) {
   const { t } = useI18n();
+  const privateWork = usePrivateWorkAccess();
   const sidecar = useSidecar();
   const { thread: parentThread } = useParentThread();
   const [localSettings] = useLocalSettings();
@@ -338,17 +343,44 @@ export function SidecarPanel({ className }: { className?: string }) {
       }
       setCreatingThread(true);
       try {
-        const created = await createSidecarThread({
-          parentThreadId: sidecar.parentThreadId,
-          context: references.map((reference) => reference.context),
-        });
+        const contexts = references.map((reference) => reference.context);
+        const projectScope = privateWork.scope;
+        const created = projectScope
+          ? await (async () => {
+              const parent = await privateWork.client.threads.get(
+                sidecar.parentThreadId,
+              );
+              const agentAssetId = parent.metadata?.agent_asset_id;
+              const agentScope = parent.metadata?.agent_scope;
+              if (
+                typeof agentAssetId !== "string" ||
+                (agentScope !== "project" && agentScope !== "system")
+              ) {
+                throw new Error(
+                  "Project side conversation Agent is unavailable.",
+                );
+              }
+              return createProjectThread(projectScope, {
+                threadId: uuid(),
+                agentAssetId,
+                agentScope,
+                metadata: buildSidecarThreadMetadata(
+                  sidecar.parentThreadId,
+                  contexts,
+                ),
+              });
+            })()
+          : await createSidecarThread({
+              parentThreadId: sidecar.parentThreadId,
+              context: contexts,
+            });
         sidecar.setSidecarThreadId(created.thread_id);
         return created.thread_id;
       } finally {
         setCreatingThread(false);
       }
     },
-    [sidecar, t.sidecar.noContext],
+    [privateWork, sidecar, t.sidecar.noContext],
   );
 
   const submitToSidecarThread = useCallback(

@@ -11,7 +11,7 @@ export function ProjectChatProviders({
 }) {
   return (
     <SubtasksProvider>
-      <StandaloneArtifactsProvider enabled={false}>
+      <StandaloneArtifactsProvider enabled={true}>
         <PromptInputProvider>{children}</PromptInputProvider>
       </StandaloneArtifactsProvider>
     </SubtasksProvider>

@@ -11,6 +11,7 @@ export interface UploadedFileInfo {
   filename: string;
   size: number;
   path: string;
+  logical_path?: string;
   virtual_path: string;
   artifact_url: string;
   extension?: string;
@@ -81,6 +82,7 @@ function mapPrivateUploadedFile(
     filename: file.display_name,
     size: file.size,
     path: virtualPath,
+    logical_path: file.logical_path,
     virtual_path: virtualPath,
     artifact_url: `${apiBaseURL}/threads/${encodeURIComponent(threadId)}/files/${encodeURIComponent(file.id)}`,
     extension,

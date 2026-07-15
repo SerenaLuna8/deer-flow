@@ -9,6 +9,7 @@ const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const THREAD_ID = "20000000-0000-4000-8000-000000000001";
 const MISSING_THREAD_ID = "20000000-0000-4000-8000-000000000099";
 const AGENT_ID = "30000000-0000-4000-8000-000000000001";
+const PROJECT_FILE_ID = "40000000-0000-4000-8000-000000000001";
 const WRITE_ARTIFACT_PATH = "/mnt/user-data/outputs/project-report.md";
 const PRESENTED_ARTIFACT_PATH = "/mnt/user-data/outputs/presented-report.md";
 
@@ -194,6 +195,32 @@ async function mockPrivateWork(
         total_tokens: 0,
       });
     }
+    if (
+      request.method() === "GET" &&
+      path.endsWith(`/threads/${THREAD_ID}/uploads`)
+    ) {
+      return json(route, [
+        {
+          id: PROJECT_FILE_ID,
+          logical_path: "outputs/presented-report.md",
+          display_name: "presented-report.md",
+          kind: "artifact",
+          media_type: "text/markdown",
+          size: 26,
+          sha256: "project-file-sha",
+          status: "ready",
+          created_at: "2026-07-15T00:00:00Z",
+          updated_at: "2026-07-15T00:00:00Z",
+        },
+      ]);
+    }
+    if (path.endsWith(`/threads/${THREAD_ID}/files/${PROJECT_FILE_ID}`)) {
+      return route.fulfill({
+        status: 200,
+        contentType: "text/markdown",
+        body: "# Presented project report",
+      });
+    }
     if (path.endsWith(`/threads/${THREAD_ID}`)) {
       if (request.method() === "DELETE") {
         threadExists = false;
@@ -290,7 +317,7 @@ test("project list is owner-scoped and direct metadata misses show one public no
   await expect(page.getByText(/owner|跨项目|其他用户/iu)).toHaveCount(0);
 });
 
-test("project artifact tool calls never open or request the legacy artifact surface", async ({
+test("project artifacts load only through the scoped project file surface", async ({
   page,
 }) => {
   const legacyArtifactRequests: string[] = [];
@@ -300,7 +327,7 @@ test("project artifact tool calls never open or request the legacy artifact surf
       legacyArtifactRequests.push(`${request.method()} ${path}`);
     }
   });
-  await mockPrivateWork(page, true, {
+  const projectRequests = await mockPrivateWork(page, true, {
     stateMessages: projectArtifactMessages,
     stateArtifacts: [WRITE_ARTIFACT_PATH, PRESENTED_ARTIFACT_PATH],
   });
@@ -309,12 +336,15 @@ test("project artifact tool calls never open or request the legacy artifact surf
   await expect(
     page.getByText(WRITE_ARTIFACT_PATH, { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("presented-report.md")).toHaveCount(0);
-  await page.getByText(WRITE_ARTIFACT_PATH, { exact: true }).click();
-  await page.waitForTimeout(200);
+  await expect(page.getByText("presented-report.md")).toBeVisible();
+  await page.getByText("presented-report.md").click();
+  await expect(page.locator("#artifacts")).toHaveCount(1);
+  await expect
+    .poll(() => projectRequests)
+    .toContain(
+      `GET /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/files/${PROJECT_FILE_ID}`,
+    );
 
-  await expect(page.locator("#artifacts")).toHaveCount(0);
-  await expect(page.locator('iframe[title="Artifact preview"]')).toHaveCount(0);
   expect(legacyArtifactRequests).toEqual([]);
 });
 

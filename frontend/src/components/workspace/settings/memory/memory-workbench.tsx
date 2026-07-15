@@ -14,6 +14,7 @@ import {
   NotebookTextIcon,
   PenLineIcon,
   PlusIcon,
+  RefreshCwIcon,
   SearchIcon,
   Settings2Icon,
   SparklesIcon,
@@ -61,55 +62,89 @@ export function MemoryHeaderActions(props: {
   isImporting: boolean;
   isExporting: boolean;
   isClearing: boolean;
+  isReloading?: boolean;
+  canAddFact?: boolean;
+  canImport?: boolean;
+  canExport?: boolean;
+  canClear?: boolean;
+  canReload?: boolean;
   onAddFact: () => void;
   onImport: () => void;
   onExport: () => void;
   onClear: () => void;
+  onReload?: () => void;
 }): React.ReactNode {
   const {
     t,
     isImporting,
     isExporting,
     isClearing,
+    isReloading = false,
+    canAddFact = true,
+    canImport = true,
+    canExport = true,
+    canClear = true,
+    canReload = false,
     onAddFact,
     onImport,
     onExport,
     onClear,
+    onReload,
   } = props;
+
+  const hasManageActions = canImport || canExport || canClear || canReload;
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="outline">
-            <Settings2Icon aria-hidden="true" />
-            {t.settings.memory.manageMemory}
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-52">
-          <DropdownMenuItem disabled={isImporting} onSelect={onImport}>
-            <UploadIcon aria-hidden="true" />
-            {t.settings.memory.importButton}
-          </DropdownMenuItem>
-          <DropdownMenuItem disabled={isExporting} onSelect={onExport}>
-            <DownloadIcon aria-hidden="true" />
-            {isExporting ? t.common.loading : t.settings.memory.exportButton}
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            variant="destructive"
-            disabled={isClearing}
-            onSelect={onClear}
-          >
-            <Trash2Icon aria-hidden="true" />
-            {isClearing ? t.common.loading : t.settings.memory.clearAll}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-      <Button onClick={onAddFact}>
-        <PlusIcon aria-hidden="true" />
-        {t.settings.memory.addFact}
-      </Button>
+      {hasManageActions ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline">
+              <Settings2Icon aria-hidden="true" />
+              {t.settings.memory.manageMemory}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-52">
+            {canReload ? (
+              <DropdownMenuItem disabled={isReloading} onSelect={onReload}>
+                <RefreshCwIcon aria-hidden="true" />
+                {isReloading ? t.common.loading : "Reload"}
+              </DropdownMenuItem>
+            ) : null}
+            {canImport ? (
+              <DropdownMenuItem disabled={isImporting} onSelect={onImport}>
+                <UploadIcon aria-hidden="true" />
+                {t.settings.memory.importButton}
+              </DropdownMenuItem>
+            ) : null}
+            {canExport ? (
+              <DropdownMenuItem disabled={isExporting} onSelect={onExport}>
+                <DownloadIcon aria-hidden="true" />
+                {isExporting
+                  ? t.common.loading
+                  : t.settings.memory.exportButton}
+              </DropdownMenuItem>
+            ) : null}
+            {canClear ? <DropdownMenuSeparator /> : null}
+            {canClear ? (
+              <DropdownMenuItem
+                variant="destructive"
+                disabled={isClearing}
+                onSelect={onClear}
+              >
+                <Trash2Icon aria-hidden="true" />
+                {isClearing ? t.common.loading : t.settings.memory.clearAll}
+              </DropdownMenuItem>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
+      {canAddFact ? (
+        <Button onClick={onAddFact}>
+          <PlusIcon aria-hidden="true" />
+          {t.settings.memory.addFact}
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -259,8 +294,8 @@ export function MemoryToolbar(props: {
 function MemoryFactRow(props: {
   fact: MemoryFact;
   t: Translations;
-  onEdit: () => void;
-  onDelete: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
   disabled: boolean;
 }): React.ReactNode {
   const { fact, t, onEdit, onDelete, disabled } = props;
@@ -305,32 +340,38 @@ function MemoryFactRow(props: {
           </span>
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-1">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="shrink-0"
-          onClick={onEdit}
-          disabled={disabled}
-          title={t.common.edit}
-          aria-label={t.common.edit}
-        >
-          <PenLineIcon aria-hidden="true" className="size-4" />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="text-destructive hover:text-destructive shrink-0"
-          onClick={onDelete}
-          disabled={disabled}
-          title={t.common.delete}
-          aria-label={t.common.delete}
-        >
-          <Trash2Icon aria-hidden="true" className="size-4" />
-        </Button>
-      </div>
+      {onEdit || onDelete ? (
+        <div className="flex shrink-0 items-center gap-1">
+          {onEdit ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="shrink-0"
+              onClick={onEdit}
+              disabled={disabled}
+              title={t.common.edit}
+              aria-label={t.common.edit}
+            >
+              <PenLineIcon aria-hidden="true" className="size-4" />
+            </Button>
+          ) : null}
+          {onDelete ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="text-destructive hover:text-destructive shrink-0"
+              onClick={onDelete}
+              disabled={disabled}
+              title={t.common.delete}
+              aria-label={t.common.delete}
+            >
+              <Trash2Icon aria-hidden="true" className="size-4" />
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
     </article>
   );
 }
@@ -339,8 +380,8 @@ export function MemoryFactList(props: {
   facts: MemoryFact[];
   t: Translations;
   isDeleting: boolean;
-  onEdit: (fact: MemoryFact) => void;
-  onDelete: (fact: MemoryFact) => void;
+  onEdit?: (fact: MemoryFact) => void;
+  onDelete?: (fact: MemoryFact) => void;
 }): React.ReactNode {
   const { facts, t, isDeleting, onEdit, onDelete } = props;
 
@@ -365,8 +406,8 @@ export function MemoryFactList(props: {
               key={fact.id}
               fact={fact}
               t={t}
-              onEdit={() => onEdit(fact)}
-              onDelete={() => onDelete(fact)}
+              onEdit={onEdit ? () => onEdit(fact) : undefined}
+              onDelete={onDelete ? () => onDelete(fact) : undefined}
               disabled={isDeleting}
             />
           ))
@@ -463,7 +504,7 @@ export function MemorySummaryDisclosure(props: {
 
 export function MemoryEmptyState(props: {
   t: Translations;
-  onAddFact: () => void;
+  onAddFact?: () => void;
 }): React.ReactNode {
   const { t, onAddFact } = props;
 
@@ -481,10 +522,12 @@ export function MemoryEmptyState(props: {
       <p className="text-muted-foreground mt-1 max-w-md text-sm">
         {t.settings.memory.emptyDescription}
       </p>
-      <Button type="button" className="mt-4" onClick={onAddFact}>
-        <PlusIcon aria-hidden="true" />
-        {t.settings.memory.addFact}
-      </Button>
+      {onAddFact ? (
+        <Button type="button" className="mt-4" onClick={onAddFact}>
+          <PlusIcon aria-hidden="true" />
+          {t.settings.memory.addFact}
+        </Button>
+      ) : null}
     </section>
   );
 }

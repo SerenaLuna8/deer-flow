@@ -124,16 +124,21 @@ M3 不提供运行或开始对话入口。旧 `/workspace/{agents,skills,tools}`
 cache、响应或错误；用户在 password control 中输入的值提交后必须立即清空，不得继续在 DOM 中
 残留或被 UI 回显。
 M3 的前端资产交付到此为止：`/admin/assets`、四类项目资产页和旧入口只读 catalog 已接入。
-M4 Task 14 只补齐 account/project-scoped LangGraph client、cache ownership 与 Thread/upload 底层
-注入。M4 Task 15 的项目 chats 列表和详情复用 `ScopedChatPage`，但通过项目 route scope 关闭
-goal、compact、branch、regenerate、sidecar、artifact、follow-up suggestions 和 scheduled-task；
-artifact provider 在项目 route 中必须整体禁用，tool call 不得自动打开或请求 legacy artifact API。
-项目 route 只使用 `ProjectPrivateWorkProvider` client，不能回退到 legacy `/api/threads/*`；
-`private_work.read_own` 允许删除自己的对话，但不隐含 create/run/upload/branch 权限。Thread metadata
-只有规范化 404/403 且 history/messages 为空时才显示公共 not-found，5xx 必须保留可用历史或显示可重试错误。
-新建入口必须同时满足
-编译期 feature flag、服务端 readiness=ready、`private_work.create` 和 `shared_assets.execute`；
-Memory、connections 与 automation 页面仍未接入，不能把当前界面描述为完整多用户 SaaS。
+M4 Task 14-16 提供 account/project-scoped LangGraph client、cache ownership、Thread/upload 注入，
+并让项目 chats 列表和详情复用 `ScopedChatPage`。项目 route 继续关闭 goal、compact、branch、
+regenerate、follow-up suggestions 和 scheduled-task；sidecar 与 artifact 只在 project-scoped
+Thread/file/artifact loaders 注入后启用，禁止回退到 legacy `/api/threads/*`、legacy artifact URL 或宿主
+文件路径。`private_work.read_own` 允许读取、下载并删除自己的 Thread/file，但不隐含
+create/run/upload/branch 权限。Thread metadata 只有规范化 404/403 且 history/messages 为空时才显示
+公共 not-found，5xx 必须保留可用历史或显示可重试错误。项目 Memory 页面复用可注入的 workspace
+Memory view；query key 包含 account/project，Viewer 仅 list/export，不渲染 reload/import/update/delete。
+项目 Connections 复用 canonical channel provider metadata 和项目 Agent catalog；connect/disconnect 使用
+imperative API，连接临时状态在 `finally` 清除，不进入 TanStack mutation cache。当前 backend 未提供
+项目级 provider discovery、secret replace 或 rebind，前端不得借用 global channel endpoints 模拟这些能力。
+Chats、Memory 与 Connections 导航入口必须同时满足编译期 feature flag、服务端 readiness=ready 和
+`private_work.read_own`；新建或运行仍额外要求 `private_work.create` 和 `shared_assets.execute`。
+automation 页面仍未接入，且 `PROJECT_PRIVATE_WORKSPACE` 在 Task 17 前保持关闭，不能把当前界面描述为
+完整多用户 SaaS。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie

@@ -3,6 +3,8 @@
 import {
   ArrowLeftIcon,
   BotIcon,
+  BrainCircuitIcon,
+  CableIcon,
   FolderKanbanIcon,
   KeyRoundIcon,
   MessagesSquareIcon,
@@ -51,6 +53,7 @@ function canViewSettings(project: Project): boolean {
 export function projectNavigationItems(
   project: Project,
   privateWorkReady = false,
+  privateWorkFeatureEnabled: boolean = PROJECT_PRIVATE_WORKSPACE,
 ): ProjectNavigationItem[] {
   const base = `/projects/${encodeURIComponent(project.slug)}`;
   const items: ProjectNavigationItem[] = [
@@ -59,16 +62,28 @@ export function projectNavigationItems(
   ];
   if (
     projectPrivateWorkEntryEnabled(
-      PROJECT_PRIVATE_WORKSPACE,
+      privateWorkFeatureEnabled,
       project.capabilities.includes("private_work.read_own"),
       privateWorkReady ? "ready" : undefined,
     )
   ) {
-    items.push({
-      href: `${base}/chats`,
-      icon: MessagesSquareIcon,
-      label: "Chats",
-    });
+    items.push(
+      {
+        href: `${base}/chats`,
+        icon: MessagesSquareIcon,
+        label: "Chats",
+      },
+      {
+        href: `${base}/memory`,
+        icon: BrainCircuitIcon,
+        label: "Memory",
+      },
+      {
+        href: `${base}/connections`,
+        icon: CableIcon,
+        label: "Connections",
+      },
+    );
   }
   if (project.capabilities.includes("shared_assets.read")) {
     items.push(

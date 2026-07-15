@@ -12,6 +12,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
   appendSidecarReference,
   buildMessageSidecarContext,
@@ -63,6 +64,7 @@ export function SidecarProvider({
   context: ThreadStreamOptions["context"];
   isMock?: boolean;
 }) {
+  const privateWork = usePrivateWorkAccess();
   const [open, setOpen] = useState(false);
   const [activeReferences, setActiveReferences] = useState<SidecarReference[]>(
     [],
@@ -123,6 +125,7 @@ export function SidecarProvider({
       const promise = findLatestSidecarThread({
         parentThreadId,
         isMock,
+        apiClient: privateWork.client,
       })
         .then((thread) => {
           const threadId = thread?.thread_id ?? null;
@@ -155,7 +158,7 @@ export function SidecarProvider({
 
       return promise;
     },
-    [isMock, parentThreadId, updateSidecarThreadId],
+    [isMock, parentThreadId, privateWork.client, updateSidecarThreadId],
   );
 
   useEffect(() => {

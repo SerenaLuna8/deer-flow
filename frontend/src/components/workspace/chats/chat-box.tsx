@@ -11,6 +11,8 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import { useUploadedFiles } from "@/core/uploads";
 import { env } from "@/env";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
@@ -35,6 +37,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   const isMobile = useIsMobile();
   const pathname = usePathname();
   const threadIdRef = useRef(threadId);
+  const privateWork = usePrivateWorkAccess();
 
   const {
     enabled: artifactsEnabled,
@@ -46,15 +49,33 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     deselect,
     selectedArtifact,
   } = useArtifacts();
+  const projectFiles = useUploadedFiles(
+    threadId,
+    privateWork,
+    artifactsEnabled && privateWork.scope !== null,
+  );
   const sidecar = useMaybeSidecar();
   const sidecarOpen = sidecar?.open ?? false;
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
-  useEffect(() => {
-    const threadArtifacts = Array.isArray(thread.values.artifacts)
+  const threadArtifacts = useMemo(() => {
+    const stateArtifacts = Array.isArray(thread.values.artifacts)
       ? thread.values.artifacts
-      : undefined;
+      : [];
+    if (!privateWork.scope) {
+      return stateArtifacts;
+    }
+    return Array.from(
+      new Set([
+        ...stateArtifacts,
+        ...(projectFiles.data?.files.flatMap((file) =>
+          file.logical_path ? [file.logical_path] : [],
+        ) ?? []),
+      ]),
+    );
+  }, [privateWork.scope, projectFiles.data?.files, thread.values.artifacts]);
 
+  useEffect(() => {
     if (threadIdRef.current !== threadId) {
       threadIdRef.current = threadId;
       deselect();
@@ -62,9 +83,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     }
 
     // Update artifacts from the current thread
-    if (threadArtifacts) {
-      setArtifacts(threadArtifacts);
-    }
+    setArtifacts(threadArtifacts);
 
     // DO NOT automatically deselect the artifact when switching threads, because the artifacts auto discovering is not work now.
     // if (
@@ -78,7 +97,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
       autoSelectFirstArtifact
     ) {
-      if (threadArtifacts && threadArtifacts.length > 0) {
+      if (threadArtifacts.length > 0) {
         setAutoSelectFirstArtifact(false);
         selectArtifact(threadArtifacts[0]!);
       }
@@ -90,7 +109,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     selectArtifact,
     selectedArtifact,
     setArtifacts,
-    thread.values.artifacts,
+    threadArtifacts,
   ]);
 
   const artifactPanelOpen = useMemo(() => {

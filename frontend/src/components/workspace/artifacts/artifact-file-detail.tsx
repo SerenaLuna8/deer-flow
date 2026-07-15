@@ -43,8 +43,14 @@ import { extractCitationSources } from "@/core/citations/sources";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
+import {
+  projectArtifactDownloadURL,
+  projectFileDownloadURL,
+} from "@/core/private-work/files";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
 import { SafeStreamdown } from "@/core/streamdown/components";
+import { useUploadedFiles } from "@/core/uploads";
 import {
   canBrowserPreviewFile,
   checkCodeFile,
@@ -76,6 +82,7 @@ export function ArtifactFileDetail({
 }) {
   const { t } = useI18n();
   const { user } = useAuth();
+  const privateWork = usePrivateWorkAccess();
   const isAdmin = user?.system_role === "system_admin";
   const { artifacts, setOpen, select } = useArtifacts();
   const { thread, isMock } = useThread();
@@ -89,6 +96,37 @@ export function ArtifactFileDetail({
     }
     return filepathFromProps;
   }, [filepathFromProps, isWriteFile]);
+  const projectFiles = useUploadedFiles(
+    threadId,
+    privateWork,
+    privateWork.scope !== null && !isWriteFile,
+  );
+  const projectURL = useMemo(() => {
+    if (!privateWork.scope || isWriteFile) return null;
+    const normalizedPath = filepath
+      .replace(/^\/mnt\/(?:data|user-data)\//u, "")
+      .replace(/^\/+/, "");
+    const file = projectFiles.data?.files.find(
+      (candidate) => candidate.logical_path === normalizedPath,
+    );
+    if (file?.id) {
+      return projectFileDownloadURL(privateWork, threadId, file.id);
+    }
+    if (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        filepath,
+      )
+    ) {
+      return projectArtifactDownloadURL(privateWork, threadId, filepath);
+    }
+    return null;
+  }, [filepath, isWriteFile, privateWork, projectFiles.data?.files, threadId]);
+  const openURL = privateWork.scope
+    ? projectURL
+    : urlOfArtifact({ filepath, threadId, isMock });
+  const downloadURL = privateWork.scope
+    ? projectURL
+    : urlOfArtifact({ filepath, threadId, download: true, isMock });
   // Keep these local because ChatBox replaces context artifacts with thread state.
   const [openedPresentedFilepaths, setOpenedPresentedFilepaths] = useState<
     string[]
@@ -164,7 +202,11 @@ export function ArtifactFileDetail({
   const { content, url } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
-    enabled: isCodeFile && !isWriteFile,
+    enabled:
+      isCodeFile &&
+      !isWriteFile &&
+      (privateWork.scope === null || projectURL !== null),
+    url: openURL ?? undefined,
   });
 
   const displayContent = content ?? "";
@@ -258,28 +300,31 @@ export function ArtifactFileDetail({
         </div>
         <div className="flex items-center gap-2">
           <ArtifactActions>
-            {!isWriteFile && filepath.endsWith(".skill") && isAdmin && (
-              <Tooltip content={t.toolCalls.skillInstallTooltip}>
-                <ArtifactAction
-                  icon={isInstalling ? LoaderIcon : PackageIcon}
-                  label={t.common.install}
-                  tooltip={t.common.install}
-                  disabled={
-                    isInstalling ||
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
-                  }
-                  onClick={handleInstallSkill}
-                />
-              </Tooltip>
-            )}
-            {!isWriteFile && (
+            {!privateWork.scope &&
+              !isWriteFile &&
+              filepath.endsWith(".skill") &&
+              isAdmin && (
+                <Tooltip content={t.toolCalls.skillInstallTooltip}>
+                  <ArtifactAction
+                    icon={isInstalling ? LoaderIcon : PackageIcon}
+                    label={t.common.install}
+                    tooltip={t.common.install}
+                    disabled={
+                      isInstalling ||
+                      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+                    }
+                    onClick={handleInstallSkill}
+                  />
+                </Tooltip>
+              )}
+            {!isWriteFile && openURL && (
               <ArtifactAction
                 icon={SquareArrowOutUpRightIcon}
                 label={t.common.openInNewWindow}
                 tooltip={t.common.openInNewWindow}
                 onClick={() => {
                   const w = window.open(
-                    urlOfArtifact({ filepath, threadId, isMock }),
+                    openURL,
                     "_blank",
                     "noopener,noreferrer",
                   );
@@ -310,19 +355,14 @@ export function ArtifactFileDetail({
                 tooltip={t.clipboard.copyToClipboard}
               />
             )}
-            {!isWriteFile && (
+            {!isWriteFile && downloadURL && (
               <ArtifactAction
                 icon={DownloadIcon}
                 label={t.common.download}
                 tooltip={t.common.download}
                 onClick={() => {
                   const w = window.open(
-                    urlOfArtifact({
-                      filepath,
-                      threadId,
-                      download: true,
-                      isMock,
-                    }),
+                    downloadURL,
                     "_blank",
                     "noopener,noreferrer",
                   );
@@ -357,17 +397,13 @@ export function ArtifactFileDetail({
             readonly
           />
         )}
-        {!isCodeFile && canPreviewInBrowser && (
-          <iframe
-            className="size-full"
-            src={urlOfArtifact({ filepath, threadId, isMock })}
-          />
+        {!isCodeFile && canPreviewInBrowser && openURL && (
+          <iframe className="size-full" src={openURL} />
         )}
         {!isCodeFile && !canPreviewInBrowser && (
           <ArtifactDownloadFallback
             filepath={filepath}
-            threadId={threadId}
-            isMock={isMock}
+            downloadURL={downloadURL}
           />
         )}
       </ArtifactContent>
@@ -377,12 +413,10 @@ export function ArtifactFileDetail({
 
 function ArtifactDownloadFallback({
   filepath,
-  threadId,
-  isMock,
+  downloadURL,
 }: {
   filepath: string;
-  threadId: string;
-  isMock?: boolean;
+  downloadURL: string | null;
 }) {
   const filename = getFileName(filepath);
   const fileType = getFileExtensionDisplayName(filepath);
@@ -400,21 +434,18 @@ function ArtifactDownloadFallback({
         <p className="text-muted-foreground text-sm">
           This file type cannot be previewed in the browser.
         </p>
-        <Button asChild>
-          <a
-            href={urlOfArtifact({
-              filepath,
-              threadId,
-              download: true,
-              isMock,
-            })}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <DownloadIcon className="size-4" />
-            Download
-          </a>
-        </Button>
+        {downloadURL ? (
+          <Button asChild>
+            <a href={downloadURL} target="_blank" rel="noopener noreferrer">
+              <DownloadIcon className="size-4" />
+              Download
+            </a>
+          </Button>
+        ) : (
+          <p role="alert" className="text-muted-foreground text-sm">
+            File download is unavailable.
+          </p>
+        )}
       </div>
     </div>
   );

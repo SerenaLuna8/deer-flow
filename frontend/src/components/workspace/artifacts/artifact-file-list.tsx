@@ -1,4 +1,9 @@
-import { DownloadIcon, LoaderIcon, PackageIcon } from "lucide-react";
+import {
+  DownloadIcon,
+  LoaderIcon,
+  PackageIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
@@ -13,7 +18,13 @@ import {
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  projectArtifactDownloadURL,
+  projectFileDownloadURL,
+} from "@/core/private-work/files";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
+import { useDeleteUploadedFile, useUploadedFiles } from "@/core/uploads";
 import {
   getFileExtensionDisplayName,
   getFileIcon,
@@ -34,9 +45,39 @@ export function ArtifactFileList({
 }) {
   const { t } = useI18n();
   const { user } = useAuth();
+  const privateWork = usePrivateWorkAccess();
+  const projectFiles = useUploadedFiles(
+    threadId,
+    privateWork,
+    privateWork.scope !== null,
+  );
+  const deleteProjectFile = useDeleteUploadedFile(threadId, privateWork);
   const isAdmin = user?.system_role === "system_admin";
   const { select: selectArtifact, setOpen } = useArtifacts();
   const [installingFile, setInstallingFile] = useState<string | null>(null);
+
+  const downloadURL = useCallback(
+    (filepath: string) => {
+      if (!privateWork.scope) {
+        return urlOfArtifact({ filepath, threadId, download: true });
+      }
+      const normalizedPath = filepath
+        .replace(/^\/mnt\/(?:data|user-data)\//u, "")
+        .replace(/^\/+/, "");
+      const file = projectFiles.data?.files.find(
+        (candidate) => candidate.logical_path === normalizedPath,
+      );
+      if (file?.id) {
+        return projectFileDownloadURL(privateWork, threadId, file.id);
+      }
+      return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        filepath,
+      )
+        ? projectArtifactDownloadURL(privateWork, threadId, filepath)
+        : null;
+    },
+    [privateWork, projectFiles.data?.files, threadId],
+  );
 
   const handleClick = useCallback(
     (filepath: string) => {
@@ -78,6 +119,28 @@ export function ArtifactFileList({
     [threadId, installingFile, t],
   );
 
+  const handleDeleteProjectFile = useCallback(
+    async (event: React.MouseEvent, filepath: string) => {
+      event.stopPropagation();
+      event.preventDefault();
+      const normalizedPath = filepath
+        .replace(/^\/mnt\/(?:data|user-data)\//u, "")
+        .replace(/^\/+/, "");
+      const file = projectFiles.data?.files.find(
+        (candidate) => candidate.logical_path === normalizedPath,
+      );
+      if (!file?.id) return;
+      try {
+        await deleteProjectFile.mutateAsync(file.id);
+        toast.success("File deleted");
+      } catch (error) {
+        console.error("Failed to delete project file:", error);
+        toast.error("Failed to delete file");
+      }
+    },
+    [deleteProjectFile, projectFiles.data?.files],
+  );
+
   return (
     <ul className={cn("flex w-full flex-col gap-4", className)}>
       {files.map((file) => (
@@ -97,7 +160,7 @@ export function ArtifactFileList({
               {getFileExtensionDisplayName(file)} file
             </CardDescription>
             <CardAction className="row-span-1 self-center">
-              {file.endsWith(".skill") && isAdmin && (
+              {!privateWork.scope && file.endsWith(".skill") && isAdmin && (
                 <Button
                   variant="ghost"
                   disabled={installingFile === file}
@@ -111,21 +174,46 @@ export function ArtifactFileList({
                   {t.common.install}
                 </Button>
               )}
-              <Button variant="ghost" asChild>
-                <a
-                  href={urlOfArtifact({
-                    filepath: file,
-                    threadId: threadId,
-                    download: true,
-                  })}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                >
+              {privateWork.scope &&
+                projectFiles.data?.files.some(
+                  (candidate) =>
+                    candidate.id &&
+                    candidate.logical_path ===
+                      file
+                        .replace(/^\/mnt\/(?:data|user-data)\//u, "")
+                        .replace(/^\/+/, ""),
+                ) && (
+                  <Button
+                    variant="ghost"
+                    disabled={deleteProjectFile.isPending}
+                    onClick={(event) => handleDeleteProjectFile(event, file)}
+                  >
+                    {deleteProjectFile.isPending ? (
+                      <LoaderIcon className="size-4 animate-spin" />
+                    ) : (
+                      <Trash2Icon className="size-4" />
+                    )}
+                    {t.common.delete}
+                  </Button>
+                )}
+              {downloadURL(file) ? (
+                <Button variant="ghost" asChild>
+                  <a
+                    href={downloadURL(file)!}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <DownloadIcon className="size-4" />
+                    {t.common.download}
+                  </a>
+                </Button>
+              ) : (
+                <Button variant="ghost" disabled>
                   <DownloadIcon className="size-4" />
                   {t.common.download}
-                </a>
-              </Button>
+                </Button>
+              )}
             </CardAction>
           </CardHeader>
         </Card>

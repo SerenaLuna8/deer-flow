@@ -54,6 +54,37 @@ type PendingImport = {
   memory: UserMemory;
 };
 
+type MemoryMutation<TInput = void> = {
+  isPending: boolean;
+  mutateAsync: (input: TInput) => Promise<unknown>;
+};
+
+export type MemorySettingsPermissions = {
+  canAdd: boolean;
+  canClear: boolean;
+  canDelete: boolean;
+  canExport: boolean;
+  canImport: boolean;
+  canModify: boolean;
+  canReload: boolean;
+};
+
+export type MemorySettingsController = {
+  memory: UserMemory | null;
+  isLoading: boolean;
+  error: Error | null;
+  clearMemory?: MemoryMutation;
+  createMemoryFact?: MemoryMutation<MemoryFactInput>;
+  deleteMemoryFact?: MemoryMutation<string>;
+  importMemory?: MemoryMutation<UserMemory>;
+  updateMemoryFact?: MemoryMutation<{
+    factId: string;
+    input: MemoryFactPatchInput;
+  }>;
+  reloadMemory?: MemoryMutation;
+  exportMemory: () => Promise<UserMemory>;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -121,14 +152,58 @@ const DEFAULT_FACT_FORM_STATE: FactFormState = {
 };
 
 export function MemorySettingsPage() {
-  const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
   const clearMemory = useClearMemory();
   const createMemoryFact = useCreateMemoryFact();
   const deleteMemoryFact = useDeleteMemoryFact();
   const importMemoryMutation = useImportMemory();
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const updateMemoryFact = useUpdateMemoryFact();
+  return (
+    <MemorySettingsView
+      controller={{
+        memory,
+        isLoading,
+        error,
+        clearMemory,
+        createMemoryFact,
+        deleteMemoryFact,
+        importMemory: importMemoryMutation,
+        updateMemoryFact,
+        exportMemory,
+      }}
+      permissions={{
+        canAdd: true,
+        canClear: true,
+        canDelete: true,
+        canExport: true,
+        canImport: true,
+        canModify: true,
+        canReload: false,
+      }}
+    />
+  );
+}
+
+export function MemorySettingsView({
+  controller,
+  permissions,
+}: {
+  controller: MemorySettingsController;
+  permissions: MemorySettingsPermissions;
+}) {
+  const { t } = useI18n();
+  const {
+    memory,
+    isLoading,
+    error,
+    clearMemory,
+    createMemoryFact,
+    deleteMemoryFact,
+    importMemory: importMemoryMutation,
+    updateMemoryFact,
+    reloadMemory,
+  } = controller;
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
   const [factToDelete, setFactToDelete] = useState<MemoryFact | null>(null);
   const [factToEdit, setFactToEdit] = useState<MemoryFact | null>(null);
@@ -265,7 +340,7 @@ export function MemorySettingsPage() {
   async function handleExportMemory() {
     try {
       setIsExporting(true);
-      const exportedMemory = await exportMemory();
+      const exportedMemory = await controller.exportMemory();
       const fileName = `deerflow-memory-${(exportedMemory.lastUpdated || new Date().toISOString()).replace(/[:.]/g, "-")}.json`;
       const blob = new Blob([JSON.stringify(exportedMemory, null, 2)], {
         type: "application/json",
@@ -316,6 +391,7 @@ export function MemorySettingsPage() {
     }
 
     try {
+      if (!importMemoryMutation) return;
       await importMemoryMutation.mutateAsync(pendingImport.memory);
       toast.success(importSuccess);
       setPendingImport(null);
@@ -326,6 +402,7 @@ export function MemorySettingsPage() {
 
   async function handleClearMemory() {
     try {
+      if (!clearMemory) return;
       await clearMemory.mutateAsync();
       toast.success(clearAllSuccess);
       setClearDialogOpen(false);
@@ -338,6 +415,7 @@ export function MemorySettingsPage() {
     if (!factToDelete) return;
 
     try {
+      if (!deleteMemoryFact) return;
       await deleteMemoryFact.mutateAsync(factToDelete.id);
       toast.success(factDeleteSuccess);
       setFactToDelete(null);
@@ -388,12 +466,14 @@ export function MemorySettingsPage() {
           category: input.category,
           confidence: input.confidence,
         };
+        if (!updateMemoryFact) return;
         await updateMemoryFact.mutateAsync({
           factId: factToEdit.id,
           input: patchInput,
         });
         toast.success(editFactSuccess);
       } else {
+        if (!createMemoryFact) return;
         await createMemoryFact.mutateAsync(input);
         toast.success(addFactSuccess);
       }
@@ -406,7 +486,17 @@ export function MemorySettingsPage() {
   }
 
   const isFactFormPending =
-    createMemoryFact.isPending || updateMemoryFact.isPending;
+    Boolean(createMemoryFact?.isPending) ||
+    Boolean(updateMemoryFact?.isPending);
+
+  async function handleReloadMemory() {
+    if (!reloadMemory) return;
+    try {
+      await reloadMemory.mutateAsync();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   return (
     <>
@@ -432,13 +522,20 @@ export function MemorySettingsPage() {
               />
               <MemoryHeaderActions
                 t={t}
-                isImporting={importMemoryMutation.isPending}
+                isImporting={importMemoryMutation?.isPending ?? false}
                 isExporting={isExporting}
-                isClearing={clearMemory.isPending}
+                isClearing={clearMemory?.isPending ?? false}
+                isReloading={reloadMemory?.isPending ?? false}
+                canAddFact={permissions.canAdd}
+                canImport={permissions.canImport}
+                canExport={permissions.canExport}
+                canClear={permissions.canClear}
+                canReload={permissions.canReload}
                 onAddFact={openCreateFactDialog}
                 onImport={() => fileInputRef.current?.click()}
                 onExport={() => void handleExportMemory()}
                 onClear={() => setClearDialogOpen(true)}
+                onReload={() => void handleReloadMemory()}
               />
             </>
           ) : null}
@@ -471,7 +568,12 @@ export function MemorySettingsPage() {
             />
 
             {memoryFullyEmpty ? (
-              <MemoryEmptyState t={t} onAddFact={openCreateFactDialog} />
+              <MemoryEmptyState
+                t={t}
+                onAddFact={
+                  permissions.canAdd ? openCreateFactDialog : undefined
+                }
+              />
             ) : hasNoMatches ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {noMatches}
@@ -482,9 +584,13 @@ export function MemorySettingsPage() {
                   <MemoryFactList
                     t={t}
                     facts={filteredFacts}
-                    isDeleting={deleteMemoryFact.isPending}
-                    onEdit={openEditFactDialog}
-                    onDelete={setFactToDelete}
+                    isDeleting={deleteMemoryFact?.isPending ?? false}
+                    onEdit={
+                      permissions.canModify ? openEditFactDialog : undefined
+                    }
+                    onDelete={
+                      permissions.canDelete ? setFactToDelete : undefined
+                    }
                   />
                 ) : null}
 
@@ -510,245 +616,257 @@ export function MemorySettingsPage() {
         )}
       </section>
 
-      <Dialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{clearAllConfirmTitle}</DialogTitle>
-            <DialogDescription>{clearAllConfirmDescription}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setClearDialogOpen(false)}
-              disabled={clearMemory.isPending}
-            >
-              {t.common.cancel}
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => void handleClearMemory()}
-              disabled={clearMemory.isPending}
-            >
-              {clearMemory.isPending ? t.common.loading : clearAllLabel}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={factEditorOpen}
-        onOpenChange={(open) => {
-          setFactEditorOpen(open);
-          if (!open) {
-            setFactToEdit(null);
-            setFactForm(DEFAULT_FACT_FORM_STATE);
-          }
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {factToEdit ? editFactTitle : addFactTitle}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <label
-                className="text-sm font-medium"
-                htmlFor={factContentInputId}
+      {permissions.canClear ? (
+        <Dialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{clearAllConfirmTitle}</DialogTitle>
+              <DialogDescription>
+                {clearAllConfirmDescription}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setClearDialogOpen(false)}
+                disabled={clearMemory?.isPending}
               >
-                {factContentLabel}
-              </label>
-              <Textarea
-                id={factContentInputId}
-                value={factForm.content}
-                onChange={(event) =>
-                  setFactForm((current) => ({
-                    ...current,
-                    content: event.target.value,
-                  }))
-                }
-                placeholder={factContentPlaceholder}
-                rows={4}
-              />
-            </div>
+                {t.common.cancel}
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={() => void handleClearMemory()}
+                disabled={clearMemory?.isPending}
+              >
+                {clearMemory?.isPending ? t.common.loading : clearAllLabel}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
-            <div className="grid gap-4 sm:grid-cols-2">
+      {permissions.canModify || permissions.canAdd ? (
+        <Dialog
+          open={factEditorOpen}
+          onOpenChange={(open) => {
+            setFactEditorOpen(open);
+            if (!open) {
+              setFactToEdit(null);
+              setFactForm(DEFAULT_FACT_FORM_STATE);
+            }
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                {factToEdit ? editFactTitle : addFactTitle}
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4">
               <div className="space-y-2">
                 <label
                   className="text-sm font-medium"
-                  htmlFor={factCategoryInputId}
+                  htmlFor={factContentInputId}
                 >
-                  {factCategoryLabel}
+                  {factContentLabel}
                 </label>
-                <Input
-                  id={factCategoryInputId}
-                  value={factForm.category}
+                <Textarea
+                  id={factContentInputId}
+                  value={factForm.content}
                   onChange={(event) =>
                     setFactForm((current) => ({
                       ...current,
-                      category: event.target.value,
+                      content: event.target.value,
                     }))
                   }
-                  placeholder={factCategoryPlaceholder}
+                  placeholder={factContentPlaceholder}
+                  rows={4}
                 />
               </div>
 
-              <div className="space-y-2">
-                <label
-                  className="text-sm font-medium"
-                  htmlFor={factConfidenceInputId}
-                >
-                  {factConfidenceLabel}
-                </label>
-                <Input
-                  id={factConfidenceInputId}
-                  aria-describedby={factConfidenceHintId}
-                  type="number"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  value={factForm.confidence}
-                  onChange={(event) =>
-                    setFactForm((current) => ({
-                      ...current,
-                      confidence: event.target.value,
-                    }))
-                  }
-                />
-                <div
-                  className="text-muted-foreground text-xs"
-                  id={factConfidenceHintId}
-                >
-                  {factConfidenceHint}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <label
+                    className="text-sm font-medium"
+                    htmlFor={factCategoryInputId}
+                  >
+                    {factCategoryLabel}
+                  </label>
+                  <Input
+                    id={factCategoryInputId}
+                    value={factForm.category}
+                    onChange={(event) =>
+                      setFactForm((current) => ({
+                        ...current,
+                        category: event.target.value,
+                      }))
+                    }
+                    placeholder={factCategoryPlaceholder}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label
+                    className="text-sm font-medium"
+                    htmlFor={factConfidenceInputId}
+                  >
+                    {factConfidenceLabel}
+                  </label>
+                  <Input
+                    id={factConfidenceInputId}
+                    aria-describedby={factConfidenceHintId}
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={factForm.confidence}
+                    onChange={(event) =>
+                      setFactForm((current) => ({
+                        ...current,
+                        confidence: event.target.value,
+                      }))
+                    }
+                  />
+                  <div
+                    className="text-muted-foreground text-xs"
+                    id={factConfidenceHintId}
+                  >
+                    {factConfidenceHint}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setFactEditorOpen(false);
-                setFactToEdit(null);
-                setFactForm(DEFAULT_FACT_FORM_STATE);
-              }}
-              disabled={isFactFormPending}
-            >
-              {t.common.cancel}
-            </Button>
-            <Button
-              onClick={() => void handleSaveFact()}
-              disabled={isFactFormPending}
-            >
-              {isFactFormPending ? t.common.loading : factSave}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setFactEditorOpen(false);
+                  setFactToEdit(null);
+                  setFactForm(DEFAULT_FACT_FORM_STATE);
+                }}
+                disabled={isFactFormPending}
+              >
+                {t.common.cancel}
+              </Button>
+              <Button
+                onClick={() => void handleSaveFact()}
+                disabled={isFactFormPending}
+              >
+                {isFactFormPending ? t.common.loading : factSave}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
-      <Dialog
-        open={factToDelete !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setFactToDelete(null);
-          }
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{factDeleteConfirmTitle}</DialogTitle>
-            <DialogDescription>
-              {factDeleteConfirmDescription}
-            </DialogDescription>
-          </DialogHeader>
-          {factToDelete ? (
-            <div className="bg-muted rounded-md border p-3 text-sm">
-              <div className="text-muted-foreground mb-1 font-medium">
-                {factPreviewLabel}
+      {permissions.canDelete ? (
+        <Dialog
+          open={factToDelete !== null}
+          onOpenChange={(open) => {
+            if (!open) {
+              setFactToDelete(null);
+            }
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{factDeleteConfirmTitle}</DialogTitle>
+              <DialogDescription>
+                {factDeleteConfirmDescription}
+              </DialogDescription>
+            </DialogHeader>
+            {factToDelete ? (
+              <div className="bg-muted rounded-md border p-3 text-sm">
+                <div className="text-muted-foreground mb-1 font-medium">
+                  {factPreviewLabel}
+                </div>
+                <p className="break-words">
+                  {truncateFactPreview(factToDelete.content)}
+                </p>
               </div>
-              <p className="break-words">
-                {truncateFactPreview(factToDelete.content)}
-              </p>
-            </div>
-          ) : null}
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setFactToDelete(null)}
-              disabled={deleteMemoryFact.isPending}
-            >
-              {t.common.cancel}
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => void handleDeleteFact()}
-              disabled={deleteMemoryFact.isPending}
-            >
-              {deleteMemoryFact.isPending ? t.common.loading : t.common.delete}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            ) : null}
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setFactToDelete(null)}
+                disabled={deleteMemoryFact?.isPending}
+              >
+                {t.common.cancel}
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={() => void handleDeleteFact()}
+                disabled={deleteMemoryFact?.isPending}
+              >
+                {deleteMemoryFact?.isPending
+                  ? t.common.loading
+                  : t.common.delete}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
-      <Dialog
-        open={pendingImport !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setPendingImport(null);
-          }
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t.settings.memory.importConfirmTitle}</DialogTitle>
-            <DialogDescription>
-              {t.settings.memory.importConfirmDescription}
-            </DialogDescription>
-          </DialogHeader>
-          {pendingImport ? (
-            <div className="bg-muted rounded-md border p-3 text-sm">
-              <div>
-                <span className="text-muted-foreground">
-                  {t.settings.memory.importFileLabel}:
-                </span>{" "}
-                {pendingImport.fileName}
+      {permissions.canImport ? (
+        <Dialog
+          open={pendingImport !== null}
+          onOpenChange={(open) => {
+            if (!open) {
+              setPendingImport(null);
+            }
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{t.settings.memory.importConfirmTitle}</DialogTitle>
+              <DialogDescription>
+                {t.settings.memory.importConfirmDescription}
+              </DialogDescription>
+            </DialogHeader>
+            {pendingImport ? (
+              <div className="bg-muted rounded-md border p-3 text-sm">
+                <div>
+                  <span className="text-muted-foreground">
+                    {t.settings.memory.importFileLabel}:
+                  </span>{" "}
+                  {pendingImport.fileName}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">
+                    {t.settings.memory.markdown.facts}:
+                  </span>{" "}
+                  {pendingImport.memory.facts.length}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">
+                    {t.common.lastUpdated}:
+                  </span>{" "}
+                  {pendingImport.memory.lastUpdated
+                    ? formatTimeAgo(pendingImport.memory.lastUpdated)
+                    : "-"}
+                </div>
               </div>
-              <div>
-                <span className="text-muted-foreground">
-                  {t.settings.memory.markdown.facts}:
-                </span>{" "}
-                {pendingImport.memory.facts.length}
-              </div>
-              <div>
-                <span className="text-muted-foreground">
-                  {t.common.lastUpdated}:
-                </span>{" "}
-                {pendingImport.memory.lastUpdated
-                  ? formatTimeAgo(pendingImport.memory.lastUpdated)
-                  : "-"}
-              </div>
-            </div>
-          ) : null}
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setPendingImport(null)}
-              disabled={importMemoryMutation.isPending}
-            >
-              {t.common.cancel}
-            </Button>
-            <Button
-              onClick={() => void handleConfirmImport()}
-              disabled={importMemoryMutation.isPending}
-            >
-              {importMemoryMutation.isPending
-                ? t.common.loading
-                : t.common.import}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            ) : null}
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setPendingImport(null)}
+                disabled={importMemoryMutation?.isPending}
+              >
+                {t.common.cancel}
+              </Button>
+              <Button
+                onClick={() => void handleConfirmImport()}
+                disabled={importMemoryMutation?.isPending}
+              >
+                {importMemoryMutation?.isPending
+                  ? t.common.loading
+                  : t.common.import}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </>
   );
 }

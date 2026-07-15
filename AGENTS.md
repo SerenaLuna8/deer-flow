@@ -77,8 +77,11 @@ project private-work、Memory 和 connection backend API，覆盖 Thread、run/s
 run/feed 的消息与事件固定写入 PostgreSQL，不受 legacy `run_events.backend=memory` 配置影响。M4 Task 13
 提供 runnable-first 的显式 private-work migration：可 dry-run，并把 PostgreSQL legacy
 Thread/run/event/feedback 与 checkpoint metadata marker 迁入显式 owner→active project scope；非空 legacy
-filesystem、Memory 或 connection source 当前会安全拒绝，留待后续迁移。frontend 接入和 automation
-项目化尚未完成。M4 Task 12 已接入 singleton
+filesystem、Memory 或 connection source 当前会安全拒绝，留待后续迁移。M4 Task 14-16 已接入
+account/project-scoped frontend client、项目 Chats、Memory、Connections 以及 chat 内
+file/artifact/sidecar；所有项目私有数据 URL 均从当前 `ProjectPrivateWorkProvider` 派生，Viewer 只获得
+服务端 capability 允许的只读与 own-delete 操作。`PROJECT_PRIVATE_WORKSPACE` 仍保持关闭，Task 17
+完成真实 PostgreSQL/frontend release gate 前不开放入口；automation 项目化尚未完成。M4 Task 12 已接入 singleton
 `private_work_cutover_state` guard：final schema 且 marker 完成后开放 project private API，同时关闭
 legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run`；因此当前仍不能
 作为完整多用户 SaaS 发布。

@@ -18,20 +18,21 @@ export function projectChatRouteScope(project: Project): ProjectChatRouteScope {
   const canCreate = project.capabilities.includes("private_work.create");
   const canRun =
     canCreate && project.capabilities.includes("shared_assets.execute");
+  const canRead = project.capabilities.includes("private_work.read_own");
   return {
     threadBasePath: base,
     newThreadPath: base,
     canCreate,
     canRun,
     canUpload: canRun,
-    canDelete: project.capabilities.includes("private_work.read_own"),
+    canDelete: canRead,
     scheduledTasksVisible: false,
     goalVisible: false,
     compactVisible: false,
     branchVisible: false,
     regenerateVisible: false,
-    sidecarVisible: false,
-    artifactsVisible: false,
+    sidecarVisible: canRun,
+    artifactsVisible: canRead,
     sidebarTriggerVisible: false,
     followupSuggestionsEnabled: false,
   };

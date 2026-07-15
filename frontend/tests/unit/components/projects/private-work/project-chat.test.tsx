@@ -47,8 +47,8 @@ describe("project chat route", () => {
     expect(scope.compactVisible).toBe(false);
     expect(scope.branchVisible).toBe(false);
     expect(scope.regenerateVisible).toBe(false);
-    expect(scope.sidecarVisible).toBe(false);
-    expect(scope.artifactsVisible).toBe(false);
+    expect(scope.sidecarVisible).toBe(true);
+    expect(scope.artifactsVisible).toBe(true);
     expect(scope.followupSuggestionsEnabled).toBe(false);
   });
 
@@ -148,7 +148,7 @@ describe("project chat route", () => {
       "utf8",
     );
     expect(projectProviders).toContain("StandaloneArtifactsProvider");
-    expect(projectProviders).toContain("enabled={false}");
+    expect(projectProviders).toContain("enabled={true}");
     expect(projectProviders).not.toMatch(/<ArtifactsProvider>/u);
     expect(shared).toContain("useThreadStream");
     expect(shared).toContain("handleStop");
@@ -163,7 +163,20 @@ describe("project chat route", () => {
     expect(shared).toContain("scope.followupSuggestionsEnabled");
     expect(shared).toContain("enabled={scope.sidecarVisible !== false}");
     expect(projectPage).toContain("sidebarTriggerVisible: false");
-    expect(projectPage).toContain("sidecarVisible: false");
+    expect(projectPage).toContain("sidecarVisible: canRun");
+    expect(projectPage).toContain("artifactsVisible: canRead");
+  });
+
+  test("viewer can open scoped files without gaining sidecar runs or uploads", () => {
+    const viewer: Project = {
+      ...project,
+      role: "viewer",
+      capabilities: ["project.read", "private_work.read_own"],
+    };
+    const scope = projectChatRouteScope(viewer);
+    expect(scope.canUpload).toBe(false);
+    expect(scope.sidecarVisible).toBe(false);
+    expect(scope.artifactsVisible).toBe(true);
   });
 
   test("project list uses the scoped delete hook without nesting actions in links", () => {

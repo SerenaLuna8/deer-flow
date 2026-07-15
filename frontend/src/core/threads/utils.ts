@@ -1,5 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
+import { labelOfChannelProvider } from "@/core/channels/types";
+
 import type { AgentThread, AgentThreadContext } from "./types";
 
 export type ChannelThreadSource = {
@@ -57,20 +59,6 @@ export function textOfMessage(message: Message) {
 
 export function titleOfThread(thread: AgentThread) {
   return thread.values?.title ?? "Untitled";
-}
-
-const CHANNEL_PROVIDER_LABELS: Record<string, string> = {
-  dingtalk: "DingTalk",
-  discord: "Discord",
-  feishu: "Feishu",
-  slack: "Slack",
-  telegram: "Telegram",
-  wechat: "WeChat",
-  wecom: "WeCom",
-};
-
-function labelOfChannelProvider(provider: string) {
-  return CHANNEL_PROVIDER_LABELS[provider] ?? provider;
 }
 
 export function channelSourceOfThread(

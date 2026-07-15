@@ -9,10 +9,12 @@ export function useArtifactContent({
   filepath,
   threadId,
   enabled,
+  url,
 }: {
   filepath: string;
   threadId: string;
   enabled?: boolean;
+  url?: string;
 }) {
   const isWriteFile = useMemo(() => {
     return filepath.startsWith("write-file:");
@@ -26,9 +28,9 @@ export function useArtifactContent({
   }, [filepath, isWriteFile, thread]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["artifact", filepath, threadId, isMock],
+    queryKey: ["artifact", filepath, threadId, isMock, url],
     queryFn: () => {
-      return loadArtifactContent({ filepath, threadId, isMock });
+      return loadArtifactContent({ filepath, threadId, isMock, url });
     },
     enabled,
     // Cache artifact content for 5 minutes to avoid repeated fetches (especially for .skill ZIP extraction)
