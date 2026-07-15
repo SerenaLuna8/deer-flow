@@ -27,11 +27,13 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    private_work,
     project_assets,
     project_connections,
     project_invitations,
     project_lifecycle,
     project_members,
+    project_memory,
     projects,
     runs,
     scheduled_tasks,
@@ -465,6 +467,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(project_lifecycle.router)
     app.include_router(project_assets.catalog_router)
     app.include_router(project_assets.project_router)
+    app.include_router(private_work.router)
+    app.include_router(project_memory.router)
     app.include_router(project_connections.router)
     app.include_router(admin_assets.admin_router)
     app.include_router(admin_assets.admin_project_router)

@@ -20,15 +20,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.context import PrivateWorkContext
+from app.private_work.error_mapping import private_work_http_exception
+from app.private_work.errors import (
+    PrivateWorkError,
+    PrivateWorkNotFound,
+    PrivateWorkUnavailable,
+)
+from app.projects.context import resolve_project_context
+from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import RunContext, RunManager, StreamBridge
@@ -264,6 +273,27 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.project_scoped_checkpointer = ProjectScopedCheckpointer(
             app.state._raw_checkpointer,
             sf,
+        )
+        from app.private_work.connection_service import ProjectConnectionService
+        from app.private_work.file_service import PrivateFileService
+        from app.private_work.file_streaming import PrivateFileStreamer
+        from app.private_work.memory_service import PrivateMemoryService
+        from app.private_work.run_service import PrivateRunService
+        from app.private_work.thread_service import PrivateThreadService
+        from deerflow.persistence.channel_connections import ChannelConnectionRepository
+
+        app.state.private_thread_service = PrivateThreadService(
+            sf,
+            app.state.project_scoped_checkpointer,
+        )
+        app.state.private_run_service = PrivateRunService(sf)
+        app.state.private_file_service = PrivateFileService(sf)
+        app.state.private_file_streamer = PrivateFileStreamer(sf)
+        app.state.project_memory_service = PrivateMemoryService(sf)
+        app.state.channel_connection_repo = ChannelConnectionRepository(sf)
+        app.state.project_connection_service = ProjectConnectionService(
+            sf,
+            repository=app.state.channel_connection_repo,
         )
         from deerflow.persistence.feedback import FeedbackRepository
         from deerflow.persistence.run import RunRepository
@@ -505,6 +535,34 @@ async def get_current_user_from_request(request: Request):
         )
 
     return user
+
+
+async def private_work_context(
+    project_id: uuid.UUID,
+    user=Depends(get_current_user_from_request),
+    session: AsyncSession = Depends(project_session),
+) -> PrivateWorkContext:
+    """Resolve the only HTTP-issued project-private authority context."""
+
+    request_id = get_current_trace_id() or generate_trace_id()
+    try:
+        user_id = uuid.UUID(str(user.id))
+    except (AttributeError, TypeError, ValueError):
+        raise private_work_http_exception(PrivateWorkNotFound(request_id)) from None
+    try:
+        project = await resolve_project_context(
+            session,
+            user_id,
+            project_id,
+            request_id,
+        )
+        return PrivateWorkContext.from_project(project)
+    except ProjectNotFound:
+        raise private_work_http_exception(PrivateWorkNotFound(request_id)) from None
+    except ProjectDatabaseUnavailable:
+        raise private_work_http_exception(PrivateWorkUnavailable(request_id)) from None
+    except PrivateWorkError as exc:
+        raise private_work_http_exception(exc) from None
 
 
 async def require_admin_user(request: Request, *, detail: str) -> None:

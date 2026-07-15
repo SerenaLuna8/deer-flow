@@ -5,12 +5,9 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Request, Response
-from fastapi.exceptions import RequestValidationError
-from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gateway.deps import project_session
+from app.gateway.deps import private_work_context
+from app.gateway.private_work_schemas import PrivateWorkRoute, StrictPrivateWorkRequest
 from app.gateway.routers.channel_connections import (
     _PROVIDER_META,
     ChannelConnectionResponse,
@@ -24,47 +21,21 @@ from app.gateway.routers.channel_connections import (
     _provider_config,
     _provider_status,
 )
-from app.gateway.routers.projects import authenticated_project_identity
 from app.private_work.connection_service import ProjectConnectionService
 from app.private_work.context import PrivateWorkContext
 from app.private_work.error_mapping import private_work_http_exception
-from app.private_work.errors import (
-    PrivateWorkError,
-    PrivateWorkInvalid,
-    PrivateWorkNotFound,
-    PrivateWorkUnavailable,
-)
-from app.projects.context import resolve_project_context
-from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
+from app.private_work.errors import PrivateWorkError, PrivateWorkNotFound, PrivateWorkUnavailable
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
 from deerflow.persistence.engine import get_session_factory
-from deerflow.trace_context import generate_trace_id, get_current_trace_id
-
-
-class ProjectConnectionRoute(APIRoute):
-    def get_route_handler(self):
-        original = super().get_route_handler()
-
-        async def handler(request: Request):
-            try:
-                return await original(request)
-            except RequestValidationError:
-                request_id = get_current_trace_id() or generate_trace_id()
-                raise private_work_http_exception(PrivateWorkInvalid(request_id)) from None
-
-        return handler
-
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/connections",
     tags=["project-connections"],
-    route_class=ProjectConnectionRoute,
+    route_class=PrivateWorkRoute,
 )
 
 
-class ProjectConnectRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ProjectConnectRequest(StrictPrivateWorkRequest):
     agent_asset_id: uuid.UUID
     agent_scope: Literal["project", "system"]
     redirect_after: str | None = None
@@ -82,20 +53,6 @@ def _service(request: Request) -> ProjectConnectionService:
     service = ProjectConnectionService(session_factory, repository=repository)
     request.app.state.project_connection_service = service
     return service
-
-
-async def _context(
-    project_id: uuid.UUID,
-    identity: tuple[uuid.UUID, str],
-    session: AsyncSession,
-) -> PrivateWorkContext:
-    user_id, request_id = identity
-    try:
-        return PrivateWorkContext.from_project(await resolve_project_context(session, user_id, project_id, request_id))
-    except ProjectNotFound:
-        raise private_work_http_exception(PrivateWorkNotFound(request_id)) from None
-    except ProjectDatabaseUnavailable:
-        raise private_work_http_exception(PrivateWorkUnavailable(request_id)) from None
 
 
 async def _ready_provider(request: Request, provider: str, request_id: str):
@@ -118,11 +75,8 @@ async def _ready_provider(request: Request, provider: str, request_id: str):
 @router.get("", response_model=ChannelConnectionsResponse)
 async def list_project_connections(
     request: Request,
-    project_id: uuid.UUID,
-    identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
-    session: AsyncSession = Depends(project_session),
+    context: PrivateWorkContext = Depends(private_work_context),
 ) -> ChannelConnectionsResponse:
-    context = await _context(project_id, identity, session)
     try:
         rows = await _service(request).list(context)
     except PrivateWorkError as exc:
@@ -133,13 +87,10 @@ async def list_project_connections(
 @router.post("/{provider}/connect", response_model=ChannelConnectResponse)
 async def begin_project_connection(
     request: Request,
-    project_id: uuid.UUID,
     provider: str,
     body: ProjectConnectRequest,
-    identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
-    session: AsyncSession = Depends(project_session),
+    context: PrivateWorkContext = Depends(private_work_context),
 ) -> ChannelConnectResponse:
-    context = await _context(project_id, identity, session)
     config = await _ready_provider(request, provider, context.request_id)
     try:
         challenge = await _service(request).begin_connect(
@@ -166,12 +117,9 @@ async def begin_project_connection(
 @router.delete("/{connection_id}", status_code=204)
 async def disconnect_project_connection(
     request: Request,
-    project_id: uuid.UUID,
     connection_id: str,
-    identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
-    session: AsyncSession = Depends(project_session),
+    context: PrivateWorkContext = Depends(private_work_context),
 ) -> Response:
-    context = await _context(project_id, identity, session)
     try:
         await _service(request).disconnect(context, connection_id)
     except PrivateWorkError as exc:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -9,7 +10,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
-from app.gateway.deps import project_session
+from app.gateway.deps import get_current_user_from_request, project_session
 from app.gateway.routers import project_connections
 from app.private_work.connection_service import ProjectConnectionService
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
@@ -46,12 +47,11 @@ def _app(seed: M4ThreadSeed, identity: dict[str, uuid.UUID]) -> FastAPI:
         async with seed.factory() as session:
             yield session
 
-    async def request_identity():
-        user_id = identity["user_id"]
-        return user_id, f"request-{user_id}"
+    async def current_user():
+        return SimpleNamespace(id=identity["user_id"])
 
     app.dependency_overrides[project_session] = request_session
-    app.dependency_overrides[project_connections.authenticated_project_identity] = request_identity
+    app.dependency_overrides[get_current_user_from_request] = current_user
     return app
 
 

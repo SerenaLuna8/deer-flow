@@ -338,8 +338,12 @@ submit/approve 流程发布；Credential 页面不提供明文查看或复制，
 已发布版本；旧文件即使仍存在也不会回退使用。旧版文件写接口统一返回
 `409 ASSET_CATALOG_CUTOVER`，请改用 `/admin/assets` 管理系统资产。
 M3 的兼容运行不会构造项目运行身份：credential materialization 只接受应用内部解析出的真实、
-不可变 `ProjectContext`。嵌入式 client 在 cutover 后必须显式接收该 opaque context；缺少 context
-或客户端传入的字典都会 fail closed。把项目 context 接入项目私有 run 生命周期属于 M4。
+不可变 `ProjectContext`。M4 Task 11 已挂载 project-private backend API：基路径
+`/api/projects/{project_id}/private-work` 提供 readiness、Thread、run/stream/wait、feed
+（messages/events/token usage/feedback）、file 和 artifact 接口；项目 Memory 管理位于
+`/api/projects/{project_id}/memory`。这些接口复用 Gateway 的 run lifecycle，并按项目与 owner
+双重隔离。legacy cutover/migration、frontend 接入和 automation 项目化仍未完成，因此这还不是
+完整的多用户 SaaS 发布。
 
 #### M3 共享资产迁移与 credential 轮换
 
@@ -478,7 +482,7 @@ See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
-DeerFlow supports user-owned IM channel connections and reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. The project-scoped backend API is `/api/projects/{project_id}/connections`; bound text runs in that exact project and owner scope. The workspace UI is being migrated to this project route in a later M4 task. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and operational notes.
+DeerFlow supports user-owned IM channel connections and reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. The existing project-scoped backend API is `/api/projects/{project_id}/connections`; bound text runs in that exact project and owner scope. Frontend integration remains pending. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and operational notes.
 
 | Channel | Transport | Difficulty |
 |---------|-----------|------------|
