@@ -8,7 +8,8 @@
 
 ## M5 reviewed tasks
 
-No M5 implementation task has completed review yet.
+- Task 1: complete (atomic with Task 2; commits `d4899e82..d33c45b6`, review clean: 0 Critical/Important/Minor).
+- Task 2: complete (atomic with Task 1; commits `d4899e82..d33c45b6`, review clean: 0 Critical/Important/Minor).
 
 ---
 
