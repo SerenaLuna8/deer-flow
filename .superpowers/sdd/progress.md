@@ -13,6 +13,7 @@
 - Task 3: complete (commits `7b89b56b..1ddddb7f`, review clean after one repair wave: 0 Critical/Important/Minor).
 - Task 4: complete (commits `78feae87..5b5a2bfb`, review clean after two repair waves: 0 Critical/Important/Minor; Task 5 handoff records real claim-vs-mutation interleavings).
 - Task 5: complete (commits `0f09cdc4..83141d1f`, review clean after one repair wave: 0 Critical/Important/Minor; immediate runtime-pointer FKs preserved with Task 6 atomic-backfill handoff).
+- Task 6: complete (commits `2f73202a..4da08702`, review clean after two repair waves: 0 Critical/Important/Minor; private M4 Thread/run launch and atomic runtime-pointer backfill complete).
 
 ---
 
