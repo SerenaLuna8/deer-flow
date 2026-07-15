@@ -401,6 +401,8 @@ class AutomationDispatcher:
                 if locked_run is None:
                     raise AutomationUnavailable(prepared.context.request_id)
                 self._require_matching_run(coordinates, locked_run)
+                if locked_run.status not in _RUN_ADOPTABLE_STATUSES:
+                    raise AutomationConflict(prepared.context.request_id)
                 marked = await occurrence_repository.mark_running(
                     prepared.context.resource_scope,
                     occurrence.id,

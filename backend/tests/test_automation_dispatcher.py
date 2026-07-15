@@ -439,6 +439,111 @@ async def test_dispatcher_rejects_matching_terminal_run_as_conflict(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+@pytest.mark.parametrize("dispatch_path", ["normal_launch", "adoption"])
+async def test_locked_run_status_gate_rejects_pending_to_error_race(
+    dispatch_seed: DispatchSeed,
+    monkeypatch: pytest.MonkeyPatch,
+    dispatch_path: str,
+) -> None:
+    seed = dispatch_seed
+    task, occurrence = await seed.claimed_occurrence()
+    thread_id = deterministic_thread_id(occurrence.id)
+    run_id = deterministic_run_id(occurrence.id)
+    metadata = {
+        "scheduled_task_id": task.id,
+        "scheduled_task_run_id": occurrence.id,
+        "scheduled_trigger": occurrence.trigger,
+    }
+    launch_calls: list[dict[str, object]] = []
+    if dispatch_path == "adoption":
+        await seed.thread_service.create(
+            seed.context,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(task.agent_asset_id, task.agent_scope),
+            metadata=metadata,
+        )
+        await PrivateRunAdmissionService(seed.factory).admit(
+            seed.context,
+            thread_id,
+            PrivateRunCreate(run_id=run_id, metadata=metadata),
+        )
+        launcher = AsyncMock()
+    else:
+        launcher = _real_admission_launcher(seed, launch_calls)
+
+    barrier = asyncio.Barrier(2)
+    status_committed = asyncio.Event()
+    locked_read_consumed = False
+
+    class BarrierPrivateRunRepository(PrivateRunRepository):
+        async def get(self, *, scope, run_id, lock=False):
+            nonlocal locked_read_consumed
+            if lock and not locked_read_consumed:
+                locked_read_consumed = True
+                await asyncio.wait_for(barrier.wait(), timeout=5)
+                await asyncio.wait_for(status_committed.wait(), timeout=5)
+            return await super().get(scope=scope, run_id=run_id, lock=lock)
+
+    monkeypatch.setattr(
+        "app.automations.dispatcher.PrivateRunRepository",
+        BarrierPrivateRunRepository,
+    )
+
+    async def terminalize_before_locked_read() -> None:
+        await asyncio.wait_for(barrier.wait(), timeout=5)
+        try:
+            async with seed.factory() as session, session.begin():
+                updated = await PrivateRunRepository(session).update_status(
+                    scope=seed.context.resource_scope,
+                    run_id=run_id,
+                    status="error",
+                    error="failed before locked status gate",
+                )
+            assert updated is True
+        finally:
+            status_committed.set()
+
+    updater = asyncio.create_task(terminalize_before_locked_read())
+    dispatcher = AutomationDispatcher(
+        seed.factory,
+        thread_service=seed.thread_service,
+        launch_private_run=launcher,
+        clock=lambda: NOW,
+    )
+    try:
+        with pytest.raises(AutomationConflict):
+            await asyncio.wait_for(
+                dispatcher.dispatch(occurrence.id, app=SimpleNamespace()),
+                timeout=10,
+            )
+        await asyncio.wait_for(updater, timeout=5)
+    finally:
+        if not updater.done():
+            updater.cancel()
+            await asyncio.gather(updater, return_exceptions=True)
+
+    if dispatch_path == "adoption":
+        launcher.assert_not_awaited()
+    else:
+        assert len(launch_calls) == 1
+    persisted = await seed.persisted_occurrence(occurrence.id)
+    assert persisted.status == "rejected"
+    assert persisted.error_code == "AUTOMATION_CONFLICT"
+    assert persisted.thread_id == thread_id
+    assert persisted.run_id == run_id
+    async with seed.factory() as session:
+        run = await PrivateRunRepository(session).get(
+            scope=seed.context.resource_scope,
+            run_id=run_id,
+        )
+    assert run is not None
+    assert run.status == "error"
+    assert run.thread_id == thread_id
+    assert run.metadata == metadata
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_fresh_thread_adoption_rejects_mismatched_automation_metadata(
     dispatch_seed: DispatchSeed,
 ) -> None:
