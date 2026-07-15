@@ -2,7 +2,7 @@
 
 - 日期：2026-07-12
 - 状态：实施中
-- 当前完成度：M1、M2、M3 已正式完成；M4 实现与全量门禁候选完成，待独立审查
+- 当前完成度：M1、M2、M3、M4 已正式完成（4/8，50%）
 - 代码仓库：DeerFlow 单体仓库
 - 数据库：PostgreSQL
 - 权限边界：业务层、仓储层和数据库模型约束
@@ -11,9 +11,9 @@
 
 本文档定义 DeerFlow 从个人 Agent 工作区演进为项目优先、多用户 SaaS 的 V1 产品边界、架构原则和交付顺序。本文档是总体方向，不代替各里程碑的专项规格和实施计划。
 
-M1、M2、M3 已正式完成。M4 已交付项目 Chats、run、file/artifact、Memory、Connections、
-project/owner scoped runtime 与 staged cutover 的实现和全量门禁候选，但尚未通过最终独立审查，
-因此本轮不把 M4 标记为已完成。M5 至 M8 尚未完成；整体 SaaS 交付仍不得标记为已完成。
+M1、M2、M3、M4 已正式完成。M4 已交付项目 Chats、run、file/artifact、Memory、Connections、
+project/owner scoped runtime、staged cutover、legacy SQLite→0007→M4 final 迁移链与全量门禁。
+M5 至 M8 尚未完成；整体 SaaS 交付仍不得标记为已完成。
 
 ## 2. 已冻结决策
 
@@ -433,7 +433,7 @@ V1 不采用长期双写。最终切换前执行维护窗口、最终增量回�
 | M1 | 决策冻结、威胁模型、数据清单、SQLite 原样迁移、PostgreSQL 切换、项目基础和项目工作台 | 已完成 |
 | M2 | 工作空间与项目壳层、成员、邀请、角色变更、退出、删除恢复 | 已完成 |
 | M3 | 系统与项目 Agent、Skill、MCP 版本、绑定、凭据审批和资产迁移 | 已完成 |
-| M4 | 私有对话、运行、文件、记忆和连接 | 实现与门禁候选完成，待独立审查 |
+| M4 | 私有对话、运行、文件、记忆和连接 | 已完成 |
 | M5 | 自动化项目化与持久化任务 | 未完成 |
 | M6 | Worker/持久化 SSE、配额、审计、平台管理和通用备份恢复 | 未完成 |
 | M7 | 最终 legacy source/API 清理与回滚窗口收口 | 未完成 |

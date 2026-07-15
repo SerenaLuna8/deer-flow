@@ -212,7 +212,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    fail closed。完整操作与故障决策见
    [M4 private-work migration runbook](docs/operations/m4-private-work-migration.md)。
 
-   M4 当前是实现与门禁候选，待独立审查。M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、
+   M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、
    M7 legacy 清理和 M8 完整发布验收尚未完成，因此仍不能作为完整多用户 SaaS 发布。
 
    共享资产迁移和 credential 轮换只通过显式命令执行，不会在应用启动时自动运行。

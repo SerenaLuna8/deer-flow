@@ -140,7 +140,7 @@ Chats、Memory 与 Connections 导航入口必须同时满足编译期 feature f
 `private_work.read_own`；新建或运行仍额外要求 `private_work.create` 和 `shared_assets.execute`。
 Viewer 仅 list/export/read/own-delete，不渲染 create/run/upload/connect 或 Memory mutation。项目或账号
 切换必须先 cancel，再删除 scoped queries/mutations、reconnect metadata 与 client；隔离 E2E 必须覆盖
-迟到响应不能污染新 scope。automation 页面仍未接入，M4 当前是实现与门禁候选、待独立审查，不能把
+迟到响应不能污染新 scope。automation 页面仍未接入；M4 已于 2026-07-16 完成，仍不能把
 当前界面描述为完整多用户 SaaS。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。

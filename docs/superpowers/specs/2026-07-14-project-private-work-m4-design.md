@@ -1,7 +1,7 @@
 # M4 项目私有工作专项设计
 
 - 日期：2026-07-14
-- 状态：实现与全量门禁候选完成，待独立审查
+- 状态：已完成（2026-07-16）
 - 对应总体设计：`2026-07-12-project-first-saas-design.md`
 - 前置里程碑：M1、M2、M3 已完成
 - 里程碑：M4 — 私有对话、运行、文件、记忆和连接
@@ -24,7 +24,11 @@ final schema + `cutover_complete` marker + readiness + capability 共同控制�
 staged migrator 首版只迁 PostgreSQL legacy Thread/run/event/feedback 与 checkpoint metadata marker；
 非空 legacy filesystem、Memory、file/artifact 或 connection source 在 DDL 前拒绝。当前
 `--backup-dir` 为保留参数且 CLI 不消费 `DEER_FLOW_M4_BACKUP_KEY`，operator backup proof 是外部运维
-前置条件，不把它描述为脚本内置的通用备份恢复。以上限制与独立审查结果决定 M4 是否最终完成。
+前置条件，不把它描述为脚本内置的通用备份恢复。Task 18 的单次正式审查发现 0 Critical、
+2 Important、1 Minor；集中修复补齐了可执行的
+legacy SQLite→0007→M4 final 正向迁移链、marker 前 legacy channel adapter 与跨平台 doctor。
+最终 fresh 门禁为 backend 8221 passed（18 个声明的环境 skip）、M1–M4 PostgreSQL 17/17、
+frontend unit 836、Playwright 156，以及 doctor/check-db、Ruff/format 全绿。
 
 ## 2. 已冻结决策
 

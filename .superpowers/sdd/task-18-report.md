@@ -4,11 +4,12 @@ Date: 2026-07-16
 
 Formal-review repair baseline: `c5167f5239769983b9335943459df5a53d85b3a8`
 
-Status: **AWAITING PARENT COMPLETION VERIFICATION**. The single formal review reported
+Status: **COMPLETE — PARENT COMPLETION VERIFICATION PASSED**. The single formal review reported
 0 Critical, 2 Important, and 1 Minor finding. One concentrated repair wave closed all three and
 all required executable gates are green. Per the runnable-first rule, no second formal review was
-started. This report does not mark Task 18 complete, does not change overall progress to 4/8, and
-does not check the final acceptance checklist.
+started. Parent verification on fixed commit `7bda63660ce5d177ebef8519f12dd5effcfdd09c`
+confirmed the review repairs, clean worktree, fresh gates, and documentation consistency. Task 18
+and M4 are complete; overall progress is 4/8 (50%).
 
 ## Repair scope
 
@@ -173,8 +174,10 @@ path aborts the scoped in-flight stream, and server-side SSE consumer disconnect
 remains covered. Adding persistent cross-request join/cancel/rollback is later lifecycle work, not
 part of this bounded release-blocker repair.
 
-## Next step
+## Completion verification
 
-Create the single formal-review repair commit and hand it to the parent for completion verification.
-No additional review loop is required; only the parent may mark Task 18 complete and update M4 to
-4/8 after confirming the commit and recorded gates.
+The parent verified the immutable repair commit, the executable SQLite staging command and real
+PostgreSQL pipeline, marker-before and marker-after channel contracts, cross-platform doctor path,
+fresh gate counts, clean temporary-resource teardown, and documentation status. No second review
+loop was opened. Branch integration remains a user choice; no merge, push, or worktree cleanup was
+performed automatically.

@@ -8,9 +8,10 @@
 
 **Tech Stack:** Python 3.12、FastAPI、Pydantic、SQLAlchemy 2 async、Alembic、asyncpg、PostgreSQL 17、LangGraph PostgreSQL checkpointer、pytest、Next.js 16 App Router、React 19、TypeScript、Zod、TanStack Query、LangGraph SDK、Playwright。
 
-**当前状态（2026-07-15）：** Tasks 1–17 已实现并完成各自审查；Task 18 的文档同步与 fresh
-verification 正在执行。M4 仍是待独立审查的候选，不得在 Step 8–9 通过前改成已完成、4/8 或勾选
-Task 18/Final acceptance checklist。
+**完成状态（2026-07-16）：** Tasks 1–18 已完成。Task 18 的单次正式审查报告 0 Critical、
+2 Important、1 Minor；集中修复后，parent completion verification 已确认两个 Important 的真实
+PostgreSQL 正向路径、Minor、全量 backend/frontend、M1–M4 PostgreSQL gate 与运维检查全部通过。
+M4 已完成，总体进度更新为 4/8（50%）；M5–M8 仍未完成。
 
 ## Global Constraints
 
@@ -69,7 +70,7 @@ Task 18/Final acceptance checklist。
 - `0008` 只增加 nullable scope/backfill columns、新表、索引、ledger/marker；`0009` 在任何 DDL 前验证 prerequisite，然后 rename `user_id -> owner_user_id` 并安装 final constraints。
 - LangGraph-owned `checkpoints`、`checkpoint_blobs`、`checkpoint_writes` 继续被 migration env 排除。
 
-- [ ] **Step 1: 写 final schema 与 staged revision 失败测试**
+- [x] **Step 1: 写 final schema 与 staged revision 失败测试**
 
 ```python
 M4_TABLES = {
@@ -115,13 +116,13 @@ async def test_m4_finalize_schema_has_private_scope_and_composite_fks(
 - empty install 只有在确认没有 legacy private source并完成空域 probe后才写 `empty_install/cutover_complete` marker；
 - migration env 仍不接管 LangGraph checkpoint 表。
 
-- [ ] **Step 2: 运行测试确认缺少 M4 revision**
+- [x] **Step 2: 运行测试确认缺少 M4 revision**
 
 Run: `cd backend && uv run pytest tests/test_m4_private_work_schema_postgres.py tests/test_persistence_migrations_env.py tests/test_default_project_bootstrap.py -q`
 
 Expected: FAIL，提示 revision 仍为 `0007_project_shared_assets` 或缺少 `files`/`project_id`；若真实 PostgreSQL fixture skip，先配置本地 test admin URL，不能把 skip 当作红灯证据。
 
-- [ ] **Step 3: 建立 final-state ORM**
+- [x] **Step 3: 建立 final-state ORM**
 
 核心列按以下 final contract 定义；时间列统一 timezone-aware，UUID 用 `sa.Uuid()`，owner FK 长度与 `users.id` 一致为 36：
 
@@ -153,7 +154,7 @@ class PrivateFileChunkRow(Base):
 
 `threads_meta` final columns为 `project_id`、`owner_user_id`、`agent_asset_id`、`agent_scope`、`frozen_at`、`deleted_at`、`checkpoint_delete_status`、`version`；`runs` final columns增加 project/owner、authorization cancel marker/reason、`finalization_status`。所有 snapshot/file/memory/channel 行安装规格中的 CHECK、unique 和 composite FK。
 
-- [ ] **Step 4: 编写 expand revision**
+- [x] **Step 4: 编写 expand revision**
 
 `0008_project_private_work_expand` 必须：
 
@@ -175,7 +176,7 @@ def upgrade() -> None:
 
 当 versioned数据库位于 `0007` 或更早且检测到 legacy private source时，普通 Gateway bootstrap必须在执行 `upgrade head` 前失败并提示运行 `make migrate-private-work`；不能由启动过程偷偷应用 `0008/0009`。显式迁移脚本是跨越M4 staged boundary的唯一入口。
 
-- [ ] **Step 5: 编写 fail-before-DDL finalize revision**
+- [x] **Step 5: 编写 fail-before-DDL finalize revision**
 
 `0009` 的第一条动作调用纯验证 SQL；任何失败都在 `op.alter_column` 前抛出：
 
@@ -190,13 +191,13 @@ def upgrade() -> None:
 
 prerequisite 要求一个 completed migration run、全部 domain ledger/probe 为 complete、所有待收紧列无 NULL、checkpoint marker coverage 完整。cutover marker 不作为前置；由 Task 13 在 `0009` 成功后写入。
 
-- [ ] **Step 6: 跑 schema、upgrade/downgrade 安全测试**
+- [x] **Step 6: 跑 schema、upgrade/downgrade 安全测试**
 
 Run: `cd backend && uv run pytest tests/test_m4_private_work_schema_postgres.py tests/test_project_schema_postgres.py tests/test_project_governance_schema_postgres.py tests/test_m3_shared_assets_schema_postgres.py tests/test_persistence_migrations_env.py tests/test_default_project_bootstrap.py -q`
 
 Expected: PASS；`0009` downgrade 在 M4 表有数据时 fail closed，空库 downgrade 可回到 `0008`，再回到 `0007`。
 
-- [ ] **Step 7: 提交 Gate 1 schema**
+- [x] **Step 7: 提交 Gate 1 schema**
 
 ```bash
 git add backend/packages/harness/deerflow/persistence backend/tests/test_m4_private_work_schema_postgres.py backend/tests/test_persistence_migrations_env.py backend/tests/test_default_project_bootstrap.py
@@ -227,7 +228,7 @@ git commit -m "feat: add M4 private work schema"
 - harness 只认识不含 role/capability 的 `PrivateResourceScope` protocol/value；不得 import `app.projects` 或 `app.private_work`。
 - `PrivateWorkRevalidator.require(context, *capabilities)` 在每个 mutation/side-effect boundary 重新读取 project + membership/version。
 
-- [ ] **Step 1: 写 context/client stripping/revalidation 失败测试**
+- [x] **Step 1: 写 context/client stripping/revalidation 失败测试**
 
 ```python
 def test_private_work_context_can_only_derive_from_project_context(project_context):
@@ -256,13 +257,13 @@ def test_strip_private_client_fields_drops_all_authority_fields():
 
 再测试 stale membership、suspended project、left membership 返回 not-found；同 scope 但缺 capability 返回 forbidden；client-shaped dict 不能传入 M3 resolver/materializer。
 
-- [ ] **Step 2: 运行测试确认模块缺失**
+- [x] **Step 2: 运行测试确认模块缺失**
 
 Run: `cd backend && uv run pytest tests/test_private_work_context.py tests/test_private_work_error_mapping.py tests/test_private_work_import_firewall.py -q`
 
 Expected: FAIL，提示 `app.private_work` 或 `PrivateResourceScope` 不存在。
 
-- [ ] **Step 3: 定义 harness-safe scope 与 app context**
+- [x] **Step 3: 定义 harness-safe scope 与 app context**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -296,7 +297,7 @@ class PrivateWorkContext:
 
 禁止公开接收 `(project_id, owner_user_id)` 的便捷构造器；测试扫描 harness import graph，确保 `backend/packages/harness` 不依赖 `app.*`。
 
-- [ ] **Step 4: 定义稳定 domain errors 与 HTTP mapper**
+- [x] **Step 4: 定义稳定 domain errors 与 HTTP mapper**
 
 使用以下公共 code/status：
 
@@ -315,7 +316,7 @@ PRIVATE_WORK_ERROR_STATUS = {
 
 response detail 只包含 `code`、固定 public message、`request_id`。mapper 不拼接 exception、SQL、资源 ID、文件名、provider error 或 credential metadata。
 
-- [ ] **Step 5: 实现事务内 revalidator**
+- [x] **Step 5: 实现事务内 revalidator**
 
 ```python
 class PrivateWorkRevalidator:
@@ -345,7 +346,7 @@ class PrivateWorkRevalidator:
 
 `resolve_project_context_in_transaction` 不自行 `session.begin()`，供已有 transaction 的 mutation/side-effect boundary 使用；现有 HTTP wrapper `resolve_project_context` 保留自身 transaction wrapper。`lock=True` 使用同一 joined query 的 `FOR UPDATE` 版本，遵守 project → membership 锁序，禁止在已有 transaction 内嵌套调用当前会自行 begin 的 resolver。
 
-- [ ] **Step 6: 跑 context/error/import firewall 测试并提交**
+- [x] **Step 6: 跑 context/error/import firewall 测试并提交**
 
 Run: `cd backend && uv run pytest tests/test_private_work_context.py tests/test_private_work_error_mapping.py tests/test_private_work_import_firewall.py tests/test_project_context.py tests/test_project_capabilities.py -q`
 
@@ -378,7 +379,7 @@ git commit -m "feat: add trusted private work context"
 - `ProjectScopedCheckpointer` 覆盖 sync/async get/list/put/put_writes/delete_thread，并在每次调用前验证 scoped Thread。
 - `PrivateThreadService` 负责 create/search/get/patch/delete/branch 的 authority transaction；route 不直接碰 repository/checkpointer。
 
-- [ ] **Step 1: 写 Thread 跨 scope 与 raw saver 拒绝测试**
+- [x] **Step 1: 写 Thread 跨 scope 与 raw saver 拒绝测试**
 
 ```python
 async def test_private_thread_repository_never_returns_same_project_other_owner(repo):
@@ -398,13 +399,13 @@ async def test_scoped_checkpointer_rejects_marker_mismatch(wrapper, raw_saver):
 
 覆盖：缺 marker、伪造 marker、跨 owner/project、global thread UUID collision、deleted/frozen Thread、client configurable 伪造 scope、goal/compact/branch/state update/delete 的 raw-saver bypass。
 
-- [ ] **Step 2: 运行测试确认现有 repo 只有 user scope**
+- [x] **Step 2: 运行测试确认现有 repo 只有 user scope**
 
 Run: `cd backend && uv run pytest tests/test_private_thread_repository.py tests/test_project_scoped_checkpointer.py tests/test_private_thread_service.py -q`
 
 Expected: FAIL，现有 `ThreadMetaStore` 不接受 `scope` 且 checkpointer 未包装。
 
-- [ ] **Step 3: 让所有 Thread SQL 在数据库条件中包含完整 scope**
+- [x] **Step 3: 让所有 Thread SQL 在数据库条件中包含完整 scope**
 
 ```python
 stmt = select(ThreadMetaRow).where(
@@ -417,7 +418,7 @@ stmt = select(ThreadMetaRow).where(
 
 create/search/update/delete/check_access 都使用相同 predicate，禁止 `session.get(ThreadMetaRow, thread_id)` 后 Python 判断。create 同时写 logical `agent_asset_id/agent_scope` 和 `version=1`；mutation 使用 version 条件更新，stale 变成 stable 409。
 
-- [ ] **Step 4: 实现 scoped checkpointer view**
+- [x] **Step 4: 实现 scoped checkpointer view**
 
 ```python
 class ProjectScopedCheckpointer:
@@ -441,11 +442,11 @@ class _ScopedSaver:
 
 `aput` 覆盖 client marker，写 `deerflow_private_scope={project_id, owner_user_id}`；`alist` 每项校验 marker；`adelete_thread` 先将 Thread 标记不可见，再删除 checkpoint，失败时保留 `checkpoint_delete_status='retry_required'`。
 
-- [ ] **Step 5: 实现原子 Thread create/delete/branch**
+- [x] **Step 5: 实现原子 Thread create/delete/branch**
 
 create 顺序固定为 project/membership lock → capability → Agent 可执行性 → Thread row → root checkpoint；root checkpoint 失败补偿删除 row。branch 只复制同 scope PostgreSQL authority files（Task 8 接入后完成 copy hook），不读取宿主目录。
 
-- [ ] **Step 6: Gateway 只暴露 scoped saver factory**
+- [x] **Step 6: Gateway 只暴露 scoped saver factory**
 
 `langgraph_runtime` 保留 raw saver 在私有 app-state 名称 `_raw_checkpointer`，`get_checkpointer` 继续仅供 legacy path；新增：
 
@@ -456,7 +457,7 @@ def get_project_checkpointer(request: Request, context: PrivateWorkContext):
 
 Task 11 的项目 router、run service、goal/compact/branch/state mutation 只能依赖该 factory。测试通过 AST/import patch 证明项目模块从未调用 `get_checkpointer`。
 
-- [ ] **Step 7: 跑 Thread/checkpoint 回归并提交**
+- [x] **Step 7: 跑 Thread/checkpoint 回归并提交**
 
 Run: `cd backend && uv run pytest tests/test_private_thread_repository.py tests/test_project_scoped_checkpointer.py tests/test_private_thread_service.py tests/test_thread_meta_repo.py tests/test_threads_router.py tests/test_goal_runtime.py tests/test_thread_state_promoted.py -q`
 
@@ -494,7 +495,7 @@ git commit -m "feat: scope project threads and checkpoints"
 - RunStore/EventStore/Feedback project entrypoint 必须使用完整 scope；background update 通过 run row 自身 scope 条件更新，不接受客户端 owner。
 - `RunSnapshotRepository.create_run_with_snapshot(context, thread, request, resolved_agent)` 在一个 transaction 写 run + asset closure + grant snapshot。
 
-- [ ] **Step 1: 写 scope、FK、snapshot secret-zero 失败测试**
+- [x] **Step 1: 写 scope、FK、snapshot secret-zero 失败测试**
 
 ```python
 async def test_run_snapshot_is_exact_and_secret_free(snapshot_repo, resolved_agent):
@@ -512,13 +513,13 @@ async def test_run_snapshot_is_exact_and_secret_free(snapshot_repo, resolved_age
 
 再覆盖同 project 另一 owner、另一 project、UUID 猜测、分页、update/delete、event seq、feedback、消息 history；数据库复合 FK 必须拒绝把 event/file snapshot 挂到错误 run。
 
-- [ ] **Step 2: 运行测试确认当前 stores 只有 `user_id`**
+- [x] **Step 2: 运行测试确认当前 stores 只有 `user_id`**
 
 Run: `cd backend && uv run pytest tests/test_private_run_repository.py tests/test_private_run_snapshot.py -q`
 
 Expected: FAIL，`RunRecord` 缺 scope，snapshot repository/table 尚未接入。
 
-- [ ] **Step 3: 演进 RunManager/RunStore，不复制 manager**
+- [x] **Step 3: 演进 RunManager/RunStore，不复制 manager**
 
 ```python
 record = RunRecord(
@@ -537,7 +538,7 @@ record = RunRecord(
 
 `create/create_or_reject/get/list_by_thread/cancel/update_*` 对项目 run 透传 `scope`。RunManager 的 in-memory lookup 在命中后也必须比较 scope，不能因为 memory hit 绕开 store 过滤；startup reconciliation 使用显式 trusted-unscoped store 方法，不复用产品方法。
 
-- [ ] **Step 4: 收紧 SQL repository、event store 与 feedback**
+- [x] **Step 4: 收紧 SQL repository、event store 与 feedback**
 
 项目 SQL 统一形态：
 
@@ -551,11 +552,11 @@ stmt = select(RunRow).where(RunRow.run_id == run_id, *where_scope)
 
 event `put/put_batch/list` 从对应 scoped run/thread 获取 project-owner，禁止 event payload 提供 scope；feedback create/get/delete 同样通过完整 parent scope。保留 `user_id` 仅作为 cutover 前 adapter 参数，不让项目 router 调用。
 
-- [ ] **Step 5: 实现 snapshot transaction**
+- [x] **Step 5: 实现 snapshot transaction**
 
 `ResolvedAgentSnapshot` 的 root Agent 为 dependency order 0，随后按 resolver 返回的稳定 Skill/MCP dependency order 写 `run_asset_versions`。每个 MCP grant 写 `run_mcp_grant_snapshots(mcp_version_id, credential_slot_id, credential_grant_id, credential_version_id)`；repository API 不接受 secret-bearing对象，只接受 M3 安全 snapshot 与 closure IDs。
 
-- [ ] **Step 6: 跑 run/event/feedback 回归并提交**
+- [x] **Step 6: 跑 run/event/feedback 回归并提交**
 
 Run: `cd backend && uv run pytest tests/test_private_run_repository.py tests/test_private_run_snapshot.py tests/test_run_manager.py tests/test_run_repository.py tests/test_run_event_store.py tests/test_run_events_endpoint.py tests/test_thread_messages_feedback.py -q`
 
@@ -587,7 +588,7 @@ git commit -m "feat: scope runs and persist asset snapshots"
 - `PrivateAssetRuntime.materialize(context, admitted) -> PrivateAgentRuntime` 只从 persisted exact snapshot 构建 Agent/Skill/MCP。
 - harness `RunContext` 接收 opaque `private_scope`、authorization checker、file authority hooks，不 import app domain。
 
-- [ ] **Step 1: 写 admission 锁序、generation stale 和 client field stripping 测试**
+- [x] **Step 1: 写 admission 锁序、generation stale 和 client field stripping 测试**
 
 ```python
 async def test_admission_persists_snapshot_before_starting_graph(service):
@@ -606,13 +607,13 @@ async def test_catalog_change_between_snapshot_and_materialize_fails_closed(serv
 
 覆盖 capability 双要求、Thread busy、Agent 不可执行、MCP grant revoke、project Skill 临时物化、legacy path 拒绝 project asset、client context/configurable 伪造字段被覆盖。
 
-- [ ] **Step 2: 运行测试确认现有 `start_run` 直接 resolve global agent factory**
+- [x] **Step 2: 运行测试确认现有 `start_run` 直接 resolve global agent factory**
 
 Run: `cd backend && uv run pytest tests/test_private_run_admission.py tests/test_private_asset_runtime.py tests/test_private_runtime_context.py -q`
 
 Expected: FAIL，项目 admission service 不存在；现有 `start_run` 仍从 `assistant_id` 选择 legacy factory。
 
-- [ ] **Step 3: 实现固定 admission transaction 与锁序**
+- [x] **Step 3: 实现固定 admission transaction 与锁序**
 
 ```python
 async def admit(self, context, thread_id, request):
@@ -635,11 +636,11 @@ async def admit(self, context, thread_id, request):
 
 M3 resolver 当前自管 session；实现时增加可在 caller transaction 使用的 session-bound variant，或让 snapshot transaction 在 resolver 返回后重新锁 project/membership/thread 并重验 generation。不得持有跨 await 的未知 lock 顺序。
 
-- [ ] **Step 4: 构建 exact runtime，禁止全局 cache 污染**
+- [x] **Step 4: 构建 exact runtime，禁止全局 cache 污染**
 
 `PrivateAssetRuntime` 从已持久化 snapshot 重新加载 exact M3 versions；Skill 解包到 run-scoped temp dir；MCP definition 为每次 run 独立 mapping。调用 `materialize_mcp_secrets` 前比较 persisted/current generation 和 grant closure，返回的 `MaterializedMcpSecrets` 只保存在局部变量，MCP 调用结束立即释放引用。
 
-- [ ] **Step 5: 扩展 runtime context 与 server overwrite**
+- [x] **Step 5: 扩展 runtime context 与 server overwrite**
 
 ```python
 config["context"]["private_scope"] = admitted.opaque_runtime_scope
@@ -651,11 +652,11 @@ for key in PRIVATE_CLIENT_KEYS:
 
 不把 project/owner/capability object写入 checkpointed configurable；checkpoint 只由 scoped saver 写安全 marker。worker 通过 `RunContext` 中的 opaque hooks 获取 revalidation/file authority。
 
-- [ ] **Step 6: 将项目 path 接入现有 RunManager/run_agent**
+- [x] **Step 6: 将项目 path 接入现有 RunManager/run_agent**
 
 新增 `start_private_run`，复用现有 normalize input、stream modes、RunManager record、stream bridge、`run_agent` 和 completion path；legacy `start_run` 保留到 Task 12 cutover guard。不得复制 `run_agent` 主循环。
 
-- [ ] **Step 7: 跑 asset/runtime/legacy 回归并提交**
+- [x] **Step 7: 跑 asset/runtime/legacy 回归并提交**
 
 Run: `cd backend && uv run pytest tests/test_private_run_admission.py tests/test_private_asset_runtime.py tests/test_private_runtime_context.py tests/test_legacy_system_asset_runtime.py tests/test_runtime_lifecycle_e2e.py tests/test_runtime_channel_config_merge.py -q`
 
@@ -690,7 +691,7 @@ git commit -m "feat: admit project runs with exact M3 assets"
 - `notify_local_cancellation(run_ids)` 只在 commit 后调用 RunManager.cancel。
 - harness 接收 `AuthorizationBoundary` protocol，在 model、tool、MCP、sandbox side effect、file finalization 前调用。
 
-- [ ] **Step 1: 写 downgrade/remove/suspend 与跨 worker 测试**
+- [x] **Step 1: 写 downgrade/remove/suspend 与跨 worker 测试**
 
 ```python
 async def test_remove_member_commits_cancel_marker_before_local_notify(service):
@@ -708,13 +709,13 @@ async def test_remote_worker_stops_at_next_tool_boundary(boundary):
 
 覆盖 Admin→Editor/Runner 不取消，Admin/Editor/Runner→Viewer 取消，left/removed、project suspend/pending deletion 取消；left/remove冻结 private rows，原 membership row重新 active后恢复访问；已成功 run 不改终态；未知本地 task 不影响 DB marker；M4 永不执行 retention 到期物理清理。
 
-- [ ] **Step 2: 运行测试确认治理 service 尚未联动 runs**
+- [x] **Step 2: 运行测试确认治理 service 尚未联动 runs**
 
 Run: `cd backend && uv run pytest tests/test_private_run_authorization.py tests/test_project_membership_service.py tests/test_project_lifecycle_service.py -q`
 
 Expected: FAIL，run marker 未写入或 worker 不检查。
 
-- [ ] **Step 3: 在同一治理 transaction 写 marker**
+- [x] **Step 3: 在同一治理 transaction 写 marker**
 
 membership/lifecycle repository 按 project → membership → active runs 锁序调用：
 
@@ -731,11 +732,11 @@ service commit 后调用 notifier；不能让 notifier 失败回滚治理变更�
 
 同一 transaction 调用 retention service：left/removed/suspend为 owner Thread写 `frozen_at`并冻结connection；rejoin/restore只清除属于同一 membership/project的 Thread freeze。file/Memory内容保持不变并始终由membership gate保护。
 
-- [ ] **Step 4: 安装 runtime boundaries**
+- [x] **Step 4: 安装 runtime boundaries**
 
 在每次 model invocation、tool/MCP dispatch、sandbox write/exec 和 Task 8 file finalization 前查询 run marker与当前 membership。发现失权：设置 abort event、抛出安全内部异常、run 终态 `interrupted`，public reason 仅 `authorization_revoked`。
 
-- [ ] **Step 5: 跑治理/runtime 回归并提交 Gate 2**
+- [x] **Step 5: 跑治理/runtime 回归并提交 Gate 2**
 
 Run: `cd backend && uv run pytest tests/test_private_run_authorization.py tests/test_project_membership_service.py tests/test_project_lifecycle_service.py tests/test_run_manager.py tests/test_runtime_lifecycle_e2e.py -q`
 
@@ -770,7 +771,7 @@ git commit -m "feat: stop runs when project authorization is revoked"
 - `append_chunk/finalize_upload/abort_upload` 形成明确 staging lifecycle；默认 `PRIVATE_FILE_CHUNK_SIZE = 1 MiB`。
 - `stream_file/stream_artifact` 返回 async chunk iterator；不得 `read_bytes()` 整文件。
 
-- [ ] **Step 1: 写 path、chunk/hash、cleanup 和内存边界失败测试**
+- [x] **Step 1: 写 path、chunk/hash、cleanup 和内存边界失败测试**
 
 ```python
 @pytest.mark.parametrize("path", [
@@ -791,13 +792,13 @@ async def test_upload_streams_chunks_and_commits_ready_only_after_hash(service):
 
 覆盖多文件 total limit、request cancel、conversion failure、DB failure、chunk tamper、whole-file tamper、staging row cleanup、same path version/partial unique、same owner cross-project、same project cross-owner、下载 backpressure、active content attachment header。
 
-- [ ] **Step 2: 运行测试确认当前 authority 是宿主目录**
+- [x] **Step 2: 运行测试确认当前 authority 是宿主目录**
 
 Run: `cd backend && uv run pytest tests/test_private_file_repository.py tests/test_private_file_service.py tests/test_private_file_streaming.py -q`
 
 Expected: FAIL，private file service 不存在；现有 upload router 直接写 `get_uploads_dir()`。
 
-- [ ] **Step 3: 实现严格 logical path 与 scoped repository**
+- [x] **Step 3: 实现严格 logical path 与 scoped repository**
 
 ```python
 def normalize_private_logical_path(raw: str) -> str:
@@ -811,11 +812,11 @@ def normalize_private_logical_path(raw: str) -> str:
 
 repository 所有查询均带 project/owner/thread；`file_chunks` 按 `(file_id, chunk_index)` 递增写入，每次校验 `size == len(content)` 和 chunk SHA-256。文件 whole hash、size、status 与 chunks 在 finalize transaction 内一致。
 
-- [ ] **Step 4: 实现 staging upload 与转换产物**
+- [x] **Step 4: 实现 staging upload 与转换产物**
 
 HTTP body 逐块读；每个输入文件先建 staging row，再写 chunks，达到 single/total/count limit 立即 abort。文档转换通过受控临时文件消费 chunk stream，转换结果写独立 `kind='workspace'` file row，并以 `source_file_id` 安全关联，不覆盖原文件。
 
-- [ ] **Step 5: 实现 chunked download/artifact response**
+- [x] **Step 5: 实现 chunked download/artifact response**
 
 ```python
 return StreamingResponse(
@@ -827,11 +828,11 @@ return StreamingResponse(
 
 先 scoped lookup 再 streaming；iterator 每次从数据库读取有界 chunk page。active MIME 强制 attachment；404/503 使用 Task 2 mapper，不回显 logical path。
 
-- [ ] **Step 6: 保留 legacy router，项目 service 通过 Task 11 挂载**
+- [x] **Step 6: 保留 legacy router，项目 service 通过 Task 11 挂载**
 
 现有 `/api/threads/{thread_id}/uploads` 与 `/api/artifacts` 在 cutover 前仍处理 legacy source；抽取 shared Pydantic response 和 limit helper，但不要让项目 path 调用宿主目录 helper。Task 12 再加 marker guard。
 
-- [ ] **Step 7: 跑 file/blocking-I/O 回归并提交**
+- [x] **Step 7: 跑 file/blocking-I/O 回归并提交**
 
 Run: `cd backend && uv run pytest tests/test_private_file_repository.py tests/test_private_file_service.py tests/test_private_file_streaming.py tests/test_uploads_router.py tests/test_artifacts_router.py tests/blocking_io/test_uploads_router.py tests/blocking_io/test_artifacts_router.py -q`
 
@@ -865,7 +866,7 @@ git commit -m "feat: make PostgreSQL authoritative for private files"
 - `PrivateFileFinalizer.finalize(run_scope, before_manifest, sandbox) -> FinalizationResult`。
 - Thread branch 使用 `PrivateFileService.copy_thread_files(source_scope, target_thread_id)`，不读取当前 sandbox。
 
-- [ ] **Step 1: 写 restore hash、symlink、finalization-success ordering 失败测试**
+- [x] **Step 1: 写 restore hash、symlink、finalization-success ordering 失败测试**
 
 ```python
 async def test_run_cannot_be_success_before_artifact_commit(worker):
@@ -884,13 +885,13 @@ async def test_restore_removes_tampered_projection(projection, sandbox):
 
 覆盖物理路径含 project/user/thread、只恢复 ready files、拒绝 symlink/越界/保留目录、cancel/interrupted 也执行合法 finalization、清理失败不改已提交终态、branch 同 scope copy 和跨 scope 404。
 
-- [ ] **Step 2: 运行测试确认 middleware 仍扫描宿主目录**
+- [x] **Step 2: 运行测试确认 middleware 仍扫描宿主目录**
 
 Run: `cd backend && uv run pytest tests/test_private_sandbox_files.py tests/test_private_file_finalizer.py -q`
 
 Expected: FAIL，projection/finalizer 不存在；UploadsMiddleware 仍通过 `sandbox_uploads_dir` 枚举。
 
-- [ ] **Step 3: 实现 scope-aware sandbox acquisition 与 streaming restore**
+- [x] **Step 3: 实现 scope-aware sandbox acquisition 与 streaming restore**
 
 临时根固定为：
 
@@ -902,19 +903,19 @@ relative_root = PurePosixPath(
 
 provider acquisition 接收 `PrivateResourceScope` opaque value；projection 按 logical path 排序、逐 chunk 写临时目标、fsync/close 后校验 whole hash，再原子 publish 给工具。任何失败删除本轮 partial projection。
 
-- [ ] **Step 4: 改造 ThreadData/Uploads middleware 的 authority source**
+- [x] **Step 4: 改造 ThreadData/Uploads middleware 的 authority source**
 
 项目 runtime 从 `RunContext.file_authority` 获取 manifest 与 visible uploaded files；legacy runtime 继续走现有 path helpers直到 cutover。middleware 不能从 runtime context 的 client dict构造 scope。
 
-- [ ] **Step 5: 实现 workspace/output finalizer**
+- [x] **Step 5: 实现 workspace/output finalizer**
 
 finalizer 在 authorization boundary 后：扫描 regular files → 规范化 path → 拒绝 symlink/越界/保留目录/limit → 对照 manifest → 按 path 稳定排序 streaming 写新 version → 为 presented output 写 artifact。所有交付文件提交后才把 `finalization_status='complete'` 并允许 RunManager 写 success/interrupted。
 
-- [ ] **Step 6: 把 branch 改为数据库 authority copy**
+- [x] **Step 6: 把 branch 改为数据库 authority copy**
 
 同 project/owner branch 使用 `INSERT ... SELECT` 创建新 file metadata，再 streaming/SQL copy chunks；source 与 target Thread 都先 scoped lock。新 file/artifact 不复用旧 ID，不复制 deleted/staging 行。
 
-- [ ] **Step 7: 跑 sandbox/worker/branch 回归并提交**
+- [x] **Step 7: 跑 sandbox/worker/branch 回归并提交**
 
 Run: `cd backend && uv run pytest tests/test_private_sandbox_files.py tests/test_private_file_finalizer.py tests/test_uploads_middleware_core_logic.py tests/test_thread_data_middleware.py tests/test_run_worker_rollback.py tests/test_threads_router.py -q`
 
@@ -948,7 +949,7 @@ git commit -m "feat: project private files into run sandboxes"
 - `MemoryQueueItem` 入队时冻结 project、owner、thread、run、namespace、membership version；timer 不从 ContextVar 回推。
 - `PrivateMemoryService` 支持 status/list/reload/import/export/update/delete；Viewer 只能 read/export。
 
-- [ ] **Step 1: 写 queue scope capture、cross-owner 和 secret filtering 失败测试**
+- [x] **Step 1: 写 queue scope capture、cross-owner 和 secret filtering 失败测试**
 
 ```python
 async def test_memory_queue_uses_enqueued_scope_after_context_changes(queue):
@@ -964,13 +965,13 @@ async def test_memory_queue_uses_enqueued_scope_after_context_changes(queue):
 
 覆盖 hidden system context、tool secret、credential、其他 owner message 不进入 extractor；membership left 后不写不注入；rejoin 同 membership row 恢复；namespace 唯一；可选 pgvector 开/关行为。
 
-- [ ] **Step 2: 运行测试确认 MemoryStorage 仍是 user file**
+- [x] **Step 2: 运行测试确认 MemoryStorage 仍是 user file**
 
 Run: `cd backend && uv run pytest tests/test_private_memory_repository.py tests/test_private_memory_queue.py tests/test_private_memory_prompt.py -q`
 
 Expected: FAIL，PG memory repository 不存在；现有 storage key 只有 user/agent。
 
-- [ ] **Step 3: 实现结构化 PostgreSQL Memory repository**
+- [x] **Step 3: 实现结构化 PostgreSQL Memory repository**
 
 ```python
 stmt = select(UserProjectMemoryRow).where(
@@ -982,7 +983,7 @@ stmt = select(UserProjectMemoryRow).where(
 
 fact parent/Thread/run 引用使用完整 scope；upsert 使用 expected version；默认 namespace 为 `default`，legacy per-agent namespace 为 `agent:{stable_agent_key}`，迁移时不猜合并。
 
-- [ ] **Step 4: 改造 queue item 与 updater**
+- [x] **Step 4: 改造 queue item 与 updater**
 
 ```python
 @dataclass(frozen=True)
@@ -997,11 +998,11 @@ class MemoryQueueItem:
 
 enqueue 前过滤 message visibility；flush 前 revalidate；storage/updater 不再读取 timer 执行时 ContextVar。legacy file storage 只供 migration 和 cutover 前 legacy API。
 
-- [ ] **Step 5: 将 MemoryMiddleware/prompt injection 接到 project storage**
+- [x] **Step 5: 将 MemoryMiddleware/prompt injection 接到 project storage**
 
 runtime 有 private scope 时只读取该 scope/namespace 并继续现有 token budget；无 private scope 且 marker 已 cutover 时 fail closed，不回退 global file。Memory API 的项目路由由 Task 11 挂载，legacy guard由 Task 12 完成。
 
-- [ ] **Step 6: 跑 Memory 回归并提交**
+- [x] **Step 6: 跑 Memory 回归并提交**
 
 Run: `cd backend && uv run pytest tests/test_private_memory_repository.py tests/test_private_memory_queue.py tests/test_private_memory_prompt.py tests/test_memory_router.py tests/test_memory_storage.py tests/test_memory_storage_user_isolation.py tests/test_memory_queue.py tests/test_memory_queue_user_isolation.py tests/test_memory_prompt_injection.py -q`
 
@@ -1042,7 +1043,7 @@ git commit -m "feat: scope memory by project and owner"
 - `ProjectConnectionService.begin_connect/complete_callback/list/disconnect` 每次 revalidate。
 - `ConnectionInboundResolver.resolve(provider_identity) -> ResolvedInboundPrivateWork` 是内部 run 的唯一 project/owner来源。
 
-- [ ] **Step 1: 写 connection identity、freeze/rejoin 与 inbound scope 失败测试**
+- [x] **Step 1: 写 connection identity、freeze/rejoin 与 inbound scope 失败测试**
 
 ```python
 async def test_inbound_can_only_route_to_bound_project(resolver):
@@ -1060,25 +1061,25 @@ async def test_left_member_connection_is_frozen_and_secret_is_not_decrypted(serv
 
 覆盖 project-owner unique、active external identity partial unique、OAuth callback membership change、owner header 不足以授权、conversation 完整 FK、同 identity 绑定新项目、rejoin collision 保持 frozen、不同 provider adapters统一路径。
 
-- [ ] **Step 2: 运行测试确认 repository 只按 owner**
+- [x] **Step 2: 运行测试确认 repository 只按 owner**
 
 Run: `cd backend && uv run pytest tests/test_private_connection_repository.py tests/test_private_connection_service.py tests/test_private_connection_inbound.py -q`
 
 Expected: FAIL，`upsert_connection` 不接受 project scope，inbound 仍依赖 owner header/context。
 
-- [ ] **Step 3: 收紧 repository 与 OAuth state**
+- [x] **Step 3: 收紧 repository 与 OAuth state**
 
 owner unique 改为 `(project_id, owner_user_id, provider, external_account_id, workspace_id)`；connected external identity partial unique排除 frozen/revoked。OAuth state 保存 project/owner/provider/expiry/safe redirect，consume 用 state hash lock 后重新解析 membership/capability。
 
-- [ ] **Step 4: 实现连接 service 与冻结状态机**
+- [x] **Step 4: 实现连接 service 与冻结状态机**
 
 create/rebind 要求 `private_work.create`；list/read 要求 read-own；disconnect 是 owner 删除权。leave/remove/suspend transaction 将 connection 置 `frozen`，保留 encrypted credential但禁止读取。rejoin 只有 external identity 未被其他 connected row占用才恢复，否则保持 frozen。
 
-- [ ] **Step 5: 统一 inbound resolver 与项目 run path**
+- [x] **Step 5: 统一 inbound resolver 与项目 run path**
 
 按 external identity → connection → project → membership → conversation → Thread 锁序解析；conversation 缺失时通过 `PrivateThreadService` 创建，随后只调用 Task 5 `start_private_run`。删掉/拒绝从 `X-DeerFlow-Owner-User-Id` 或 message payload直接构造 project context 的路径。
 
-- [ ] **Step 6: 跑 channel/provider 回归并提交 Gate 3**
+- [x] **Step 6: 跑 channel/provider 回归并提交 Gate 3**
 
 Run: `cd backend && uv run pytest tests/test_private_connection_repository.py tests/test_private_connection_service.py tests/test_private_connection_inbound.py tests/test_channel_connections_repository.py tests/test_channel_connections_router.py tests/test_channels.py tests/test_feishu_parser.py tests/test_slack_channel_connections.py tests/test_telegram_channel_connections.py tests/test_discord_channel_connections.py tests/test_dingtalk_channel.py -q`
 
@@ -1117,7 +1118,7 @@ git commit -m "feat: scope IM connections to private projects"
 - `GET /api/projects/{project_id}/private-work/readiness` 只返回 `ready|migration_required|unavailable`、公共错误code和request ID，不返回inventory或私有counts。
 - 项目 router 只解析 UUID、strict Pydantic schema、`PrivateWorkContext` 和 error mapping；复用 service/serialization helpers，不复制业务逻辑。
 
-- [ ] **Step 1: 写 route matrix、field stripping 和 anti-enumeration 失败测试**
+- [x] **Step 1: 写 route matrix、field stripping 和 anti-enumeration 失败测试**
 
 至少覆盖：
 
@@ -1142,13 +1143,13 @@ PROJECT_PRIVATE_ROUTES = (
 
 readiness测试证明complete marker前返回 `migration_required`、marker后返回 `ready`，数据库不可用返回 `unavailable`；响应不得包含owner、Thread、file、Memory或connection count。
 
-- [ ] **Step 2: 运行测试确认路由未挂载**
+- [x] **Step 2: 运行测试确认路由未挂载**
 
 Run: `cd backend && uv run pytest tests/test_private_work_router.py tests/test_project_memory_router.py tests/test_project_connections_router.py tests/test_private_work_route_dependencies.py -q`
 
 Expected: FAIL，project private routes 返回 404。
 
-- [ ] **Step 3: 定义唯一 context dependency 和 strict route class**
+- [x] **Step 3: 定义唯一 context dependency 和 strict route class**
 
 ```python
 async def private_work_context(
@@ -1164,19 +1165,19 @@ async def private_work_context(
 
 `PrivateWorkRoute` 将 FastAPI validation error 映射为 `PRIVATE_WORK_INVALID`。Pydantic `extra='forbid'`；自由格式 LangGraph config/context 在进入 service 前调用 authoritative field stripper。
 
-- [ ] **Step 4: 抽取 legacy serializer/helpers，项目 router 调 service**
+- [x] **Step 4: 抽取 legacy serializer/helpers，项目 router 调 service**
 
 从现有 routers 抽取 response serialization、SSE/wait consumer、input normalization等无授权逻辑 helper；项目 router 不调用 legacy `@require_permission`、不调用 raw `get_checkpointer`、不读取 `get_effective_user_id()`。
 
-- [ ] **Step 5: 挂载 Memory/connection 项目 API**
+- [x] **Step 5: 挂载 Memory/connection 项目 API**
 
 Memory list/status/reload/import/export/update/delete 全部使用 Task 9 service；secret-bearing connection create/replace 使用 imperative request schema和 `Cache-Control: no-store`，response 永不回显 token/credential。
 
-- [ ] **Step 6: app/deps 安装 scoped repositories/services**
+- [x] **Step 6: app/deps 安装 scoped repositories/services**
 
 `langgraph_runtime` 从同一个 session factory初始化 private repositories、M3 resolver、scoped checkpointer、file/memory/connection services；FastAPI lifespan teardown顺序仍先 drain runs，再关闭 checkpointer/engine。
 
-- [ ] **Step 7: 跑 API 与现有兼容路由回归并提交**
+- [x] **Step 7: 跑 API 与现有兼容路由回归并提交**
 
 Run: `cd backend && uv run pytest tests/test_private_work_router.py tests/test_project_memory_router.py tests/test_project_connections_router.py tests/test_private_work_route_dependencies.py tests/test_threads_router.py tests/test_runs_api_endpoints.py tests/test_memory_router.py tests/test_channel_connections_router.py tests/test_uploads_router.py tests/test_artifacts_router.py -q`
 
@@ -1211,7 +1212,7 @@ git commit -m "feat: expose project private work APIs"
 - `require_project_open()` 仅在 final schema + `cutover_complete` marker 后允许项目 API；未完成为 409。
 - embedded/TUI client cutover 后必须显式注入可信 private scope adapter，client dict 不被接受。
 
-- [ ] **Step 1: 写 marker 前后 route/runtime matrix 失败测试**
+- [x] **Step 1: 写 marker 前后 route/runtime matrix 失败测试**
 
 ```python
 @pytest.mark.parametrize("path", [
@@ -1225,23 +1226,23 @@ async def test_legacy_private_api_returns_cutover_conflict(client, cutover_compl
 
 同时证明 legacy API 在 marker 后不能 search/get 猜到任何 project row；项目 API 在 marker 前也不能创建；stateless run、TUI、embedded client、IM owner-header bypass 全部 fail closed。
 
-- [ ] **Step 2: 运行测试确认 marker 尚未影响 legacy routes**
+- [x] **Step 2: 运行测试确认 marker 尚未影响 legacy routes**
 
 Run: `cd backend && uv run pytest tests/test_private_work_cutover_guard.py tests/test_stateless_runs_owner_isolation.py tests/test_tui_runtime.py -q`
 
 Expected: FAIL，legacy routes 仍返回数据或项目 route 在 marker 前可进入。
 
-- [ ] **Step 3: 实现 request/runtime 两层 guard**
+- [x] **Step 3: 实现 request/runtime 两层 guard**
 
 所有 legacy private routers 在 auth 后、任何 repository/checkpointer/file访问前调用 guard；`start_run`、embedded client的 checkpoint/tool loading也调用 runtime guard，防止绕过 HTTP。项目 router 先要求 final schema与 complete marker。
 
 Gateway startup 的 `_migrate_orphaned_threads` 在 complete marker 后禁用；scope backfill只允许Task 13显式migration执行，普通启动不得再做unscoped owner修复。
 
-- [ ] **Step 4: 禁止 default-project 推断和 legacy/project 双写**
+- [x] **Step 4: 禁止 default-project 推断和 legacy/project 双写**
 
 删除任何“唯一项目”“最近项目”“default slug”私有 scope fallback。marker 后 project service 是唯一写路径，legacy filesystem/memory sources只读保留到 M7；不得同时写 PG authority 与 legacy private source。
 
-- [ ] **Step 5: 跑 cutover/legacy 回归并提交**
+- [x] **Step 5: 跑 cutover/legacy 回归并提交**
 
 Run: `cd backend && uv run pytest tests/test_private_work_cutover_guard.py tests/test_stateless_runs_owner_isolation.py tests/test_tui_runtime.py tests/test_threads_router.py tests/test_runs_api_endpoints.py tests/test_memory_router.py tests/test_channel_connections_router.py -q`
 
@@ -1270,7 +1271,7 @@ git commit -m "feat: close legacy private APIs after M4 cutover"
 - owner map 精确映射 legacy owner user ID → active project UUID；禁止 email/role/recent/default/unique-project 推断。
 - domain 顺序固定：thread/run/event/feedback → checkpoint marker → files/artifacts → Memory → connections → probes → finalize → cutover marker。
 
-- [ ] **Step 1: 写 parser、inventory、dry-run 零写入和 redaction 失败测试**
+- [x] **Step 1: 写 parser、inventory、dry-run 零写入和 redaction 失败测试**
 
 ```python
 def test_owner_map_requires_explicit_active_project_for_every_legacy_owner(tmp_path):
@@ -1288,7 +1289,7 @@ async def test_dry_run_does_not_mutate_target_or_write_backup(migration):
 
 输出测试扫描不得出现 user ID/email、prompt、message、Memory、文件名/path/content、credential、数据库 URL；只允许 counts、stable key hash、size、target scope hash 和公共 conflict code。
 
-- [ ] **Step 2: 写真实 PostgreSQL staged/finalize/幂等/tamper 失败测试**
+- [x] **Step 2: 写真实 PostgreSQL staged/finalize/幂等/tamper 失败测试**
 
 覆盖：
 
@@ -1303,13 +1304,13 @@ async def test_dry_run_does_not_mutate_target_or_write_backup(migration):
 - cross-project/cross-owner probe 通过后才能写 finalize prerequisite；
 - `0009` 后才写 complete marker；legacy source bytes 保持不变。
 
-- [ ] **Step 3: 运行测试确认脚本/target 缺失**
+- [x] **Step 3: 运行测试确认脚本/target 缺失**
 
 Run: `cd backend && uv run pytest tests/test_private_work_migration.py tests/test_private_work_migration_cli.py tests/integration/test_m4_private_work_migration_postgres.py -q`
 
 Expected: FAIL，CLI 模块或 migration tables/control flow 不存在；真实 PG fixture 不能以 skip 代替红灯。
 
-- [ ] **Step 4: 定义 immutable inventory 与 plan types**
+- [x] **Step 4: 定义 immutable inventory 与 plan types**
 
 ```python
 @dataclass(frozen=True)
@@ -1331,21 +1332,21 @@ class OwnerTarget:
 
 inventory 使用 pinned no-follow file descriptors 和 canonical database ordering；所有 raw private payload `repr=False`。plan 在任何 target write前完整验证 scope graph、重复 logical paths、checkpoint coverage 和 connection routing。
 
-- [ ] **Step 5: 实现 backup proof 与认证加密 filesystem backup**
+- [x] **Step 5: 实现 backup proof 与认证加密 filesystem backup**
 
 execute 要求 operator 放入 database backup proof manifest，包含受控 backup locator 的安全相对值、DB fingerprint、timestamp 和 SHA-256；脚本只验证，不生成通用 DB backup。filesystem archive 使用 AES-GCM、随机 nonce、AAD 绑定 migration run/source fingerprint；key 只从环境读，backup manifest 不保存 key/nonce以外的解密材料。
 
-- [ ] **Step 6: 实现幂等 domain executor 与 checkpoint marker migration**
+- [x] **Step 6: 实现幂等 domain executor 与 checkpoint marker migration**
 
 每个 domain transaction：lock migration run → recheck source/target digest → write rows/chunks/markers → probes/count/hash → ledger commit。checkpoint 使用上游 saver/SQL metadata encoding兼容路径，只覆盖 server scope marker，checkpoint/blob/write payload hash 在前后相同。
 
 若 inventory 证明数据库与 filesystem 均无 legacy private source，则执行 empty-install路径：验证final schema、运行空域cross-scope probe并写 `empty_install` complete marker，不创建伪owner/Thread/Memory数据。
 
-- [ ] **Step 7: 实现 finalize 与 marker 顺序**
+- [x] **Step 7: 实现 finalize 与 marker 顺序**
 
 全部 domain/semantic/probe ledger complete 后写 `migration_ready` prerequisite，运行 Alembic `upgrade 0009_project_private_work_finalize`，验证 revision/constraints，再以独立短事务写 `cutover_complete`。任意失败不写 marker，项目 API保持 409。
 
-- [ ] **Step 8: 增加 Make targets**
+- [x] **Step 8: 增加 Make targets**
 
 ```make
 migrate-private-work:
@@ -1354,7 +1355,7 @@ migrate-private-work:
 
 Root `Makefile` 转发同名 target，并在 `help` 显示 dry-run/execute 说明；`.PHONY` 同步。
 
-- [ ] **Step 9: 跑 migration 全套并提交**
+- [x] **Step 9: 跑 migration 全套并提交**
 
 Run: `cd backend && uv run pytest tests/test_private_work_migration.py tests/test_private_work_migration_cli.py tests/integration/test_m4_private_work_migration_postgres.py tests/test_migrate_assets.py -q`
 
@@ -1394,7 +1395,7 @@ git commit -m "feat: migrate legacy private work into projects"
 - `ProjectPrivateWorkProvider` 是 nested project pages 的 client/query scope owner；只消费 `useCurrentProject()` 与 authenticated account ID。
 - 所有 private keys 以 `['account', accountId, 'project', projectId, 'private-work', ...]` 开始。
 
-- [ ] **Step 1: 写 base URL、client identity 和 cancel-before-clear 失败测试**
+- [x] **Step 1: 写 base URL、client identity 和 cancel-before-clear 失败测试**
 
 ```ts
 it("does not share a LangGraph client across accounts or projects", () => {
@@ -1416,13 +1417,13 @@ it("cancels in-flight work before removing scope state", async () => {
 
 覆盖 logout、account switch、project switch、provider unmount、late query/mutation response、static mode、CSRF injection、client secret不进入cache。
 
-- [ ] **Step 2: 运行单测确认只有 module-level default client**
+- [x] **Step 2: 运行单测确认只有 module-level default client**
 
 Run: `cd frontend && pnpm test -- --run tests/unit/core/private-work/api-client.test.ts tests/unit/core/private-work/query-keys.test.ts tests/unit/core/private-work/scope-registry.test.ts tests/unit/core/private-work/provider.test.tsx`
 
 Expected: FAIL，新模块不存在；现有 `getAPIClient()` 只以 `default|mock` cache。
 
-- [ ] **Step 3: 定义 project base URL 和独立 client registry**
+- [x] **Step 3: 定义 project base URL 和独立 client registry**
 
 ```ts
 export function projectPrivateWorkBaseURL(projectId: string): string {
@@ -1441,15 +1442,15 @@ export function getProjectAPIClient(scope: ProjectClientScope) {
 
 复用现有 CSRF、run stream sanitize、terminal reconnect/cancel wrappers，但 registry 与 default client完全分开。
 
-- [ ] **Step 4: 让 threads/uploads hooks 从 provider 获取 client/scope**
+- [x] **Step 4: 让 threads/uploads hooks 从 provider 获取 client/scope**
 
 将 hooks 的低层 query functions改为显式 `client`/`scope` 参数；workspace provider传 default client，project provider传 project client。禁止在 hook body重新调用 module global `getAPIClient()`。query keys 和 sessionStorage reconnect key加入 account/project，避免相同 thread UUID 状态串线。
 
-- [ ] **Step 5: 实现 provider transition lifecycle**
+- [x] **Step 5: 实现 provider transition lifecycle**
 
 scope变化时先 abort controllers、`queryClient.cancelQueries({queryKey: privateRoot(old)})`，再 remove old queries/mutations/reconnect state/client。late response使用 generation token丢弃；注销仍由 account transition清全局 QueryClient，但 project registry也必须 dispose。
 
-- [ ] **Step 6: 跑 frontend core 回归并提交**
+- [x] **Step 6: 跑 frontend core 回归并提交**
 
 Run: `cd frontend && pnpm test -- --run tests/unit/core/private-work tests/unit/core/api/api-client.test.ts tests/unit/core/projects/account-query-client.test.ts tests/unit/core/threads tests/unit/core/uploads`
 
@@ -1490,7 +1491,7 @@ git commit -m "feat: isolate project private work clients"
 - Project chat route只调用 `useCurrentProject()`，不重复 slug resolution/enter mutation。
 - new Thread 必须先选择 visible executable Agent；Thread 保存 logical Agent，run admission重新解析 exact version。
 
-- [ ] **Step 1: 写 route、Agent selector、Viewer 和 404 失败测试**
+- [x] **Step 1: 写 route、Agent selector、Viewer 和 404 失败测试**
 
 ```tsx
 it("viewer never dispatches create or run requests", async () => {
@@ -1503,13 +1504,13 @@ it("viewer never dispatches create or run requests", async () => {
 
 覆盖有能力+有 Agent打开 selector；无 Agent跳 `/agents`；recent只显示当前 owner；static demo无入口；same-project other owner和cross-project direct URL都渲染统一 not-found；项目 page不调用 project list API。
 
-- [ ] **Step 2: 运行单测确认 project chat routes/组件缺失**
+- [x] **Step 2: 运行单测确认 project chat routes/组件缺失**
 
 Run: `cd frontend && pnpm test -- --run tests/unit/components/projects/private-work tests/unit/components/projects/project-components.test.ts`
 
 Expected: FAIL，routes/components 不存在，CTA仍 disabled。
 
-- [ ] **Step 3: 抽取 scope-aware chat page**
+- [x] **Step 3: 抽取 scope-aware chat page**
 
 从 workspace ChatPage 提取共享 `ScopedChatPage`，输入：
 
@@ -1528,19 +1529,19 @@ export interface ChatRouteScope {
 
 workspace adapter保持现有行为；project adapter使用 project client/base path，隐藏 scheduled-task link。stream、stop、goal、compact、branch、human-input、sidecar、artifact、token usage都继续走共享组件。
 
-- [ ] **Step 4: 实现项目 chats list/detail/providers**
+- [x] **Step 4: 实现项目 chats list/detail/providers**
 
 list使用 project-scoped infinite query；links固定 `/projects/${slug}/chats/${thread_id}`。detail providers从 `useCurrentProject()` 和 auth account构造 Task 14 provider；404只显示公共 not-found，不显示 owner/project差异。
 
-- [ ] **Step 5: 实现 Agent selector、CTA 与 recent work**
+- [x] **Step 5: 实现 Agent selector、CTA 与 recent work**
 
 selector消费 M3 project asset catalog的可执行 Agent视图；创建 Thread request只发送 `agent_asset_id/agent_scope`，不发送 version/owner/capability。项目首页 recent query limit固定，创建成功导航 chats/thread。无 executable Agent跳项目 Agents；Viewer只读提示。
 
-- [ ] **Step 6: 项目导航加入 chats，保持 feature flag关闭**
+- [x] **Step 6: 项目导航加入 chats，保持 feature flag关闭**
 
 在 Task 17 前仍由 cutover/readiness状态决定 CTA disabled；`PROJECT_PRIVATE_WORKSPACE` 暂不改 true。project nav可以在 readiness为complete时显示 Chats，Memory/connections在 Task 16接入。
 
-- [ ] **Step 7: 跑 unit/E2E 项目聊天回归并提交**
+- [x] **Step 7: 跑 unit/E2E 项目聊天回归并提交**
 
 Run: `cd frontend && pnpm test -- --run tests/unit/components/projects/private-work tests/unit/core/private-work tests/unit/core/threads`
 
@@ -1582,7 +1583,7 @@ git commit -m "feat: add project private chat experience"
 - connection secret-bearing create/replace使用 local component state + imperative API，不进入 TanStack mutation variables/cache/devtools。
 - files仍只在 chat sidecar展示，不新增独立文件管理页。
 
-- [ ] **Step 1: 写 project paths、Viewer mutation deny 和 secret-cache 失败测试**
+- [x] **Step 1: 写 project paths、Viewer mutation deny 和 secret-cache 失败测试**
 
 ```ts
 it("never stores a connection secret in query or mutation cache", async () => {
@@ -1594,29 +1595,29 @@ it("never stores a connection secret in query or mutation cache", async () => {
 
 覆盖 Memory list/export/delete/update、Viewer read/export/delete-own与modify deny、connection list/connect/disconnect/rebind、upload/list/delete/artifact project URLs、cross scope 404、download streaming UI、logout/project switch late response。
 
-- [ ] **Step 2: 运行单测确认现有 API 都是 global path**
+- [x] **Step 2: 运行单测确认现有 API 都是 global path**
 
 Run: `cd frontend && pnpm test -- --run tests/unit/core/private-work/memory.test.ts tests/unit/core/private-work/connections.test.ts tests/unit/core/private-work/files.test.ts tests/unit/components/projects/private-work/project-memory.test.tsx tests/unit/components/projects/private-work/project-connections.test.tsx`
 
 Expected: FAIL，新 API/components不存在；现有 memory/channel/upload modules使用 global路径。
 
-- [ ] **Step 3: 抽取可注入 base URL 的共享 view models**
+- [x] **Step 3: 抽取可注入 base URL 的共享 view models**
 
 workspace legacy adapters保留到 M7；project adapters传 `/api/projects/{id}/memory|connections` 和 private-work file URLs。UI共享纯 view component，authorization decisions只使用服务端 capabilities。
 
-- [ ] **Step 4: 实现 Memory 页面**
+- [x] **Step 4: 实现 Memory 页面**
 
 Runner/Admin/Editor可 reload/import/update/delete/export；Viewer只有 list/export/delete-own，修改控件不渲染。import input做 strict validation；响应 schema用 Zod strict parse；错误使用 Task 2 public code文案。
 
-- [ ] **Step 5: 实现 connections 页面和 imperative secret submit**
+- [x] **Step 5: 实现 connections 页面和 imperative secret submit**
 
 provider discovery/list可 query；connect/secret submit由 `fetchWithAuth` 直接发出，body只存在调用栈和受控 local state，finally清空 state。OAuth redirect只接受服务端 safe redirect metadata。
 
-- [ ] **Step 6: 接入 project file/artifact sidecar**
+- [x] **Step 6: 接入 project file/artifact sidecar**
 
 sidecar从 ChatRouteScope获得 file/artifact API；project scope下禁止 fallback到 `/api/threads` 或宿主 path。Viewer可以下载/删除 own file，但 upload按钮隐藏；run者可上传。
 
-- [ ] **Step 7: 跑 unit/E2E 并提交**
+- [x] **Step 7: 跑 unit/E2E 并提交**
 
 Run: `cd frontend && pnpm test -- --run tests/unit/core/private-work tests/unit/components/projects/private-work tests/unit/core/channels tests/unit/core/uploads`
 
@@ -1647,7 +1648,7 @@ git commit -m "feat: add project memory connections and files"
 - CI固定运行 M1 cutover、M1 isolation、M2 governance、M3 shared assets、M4 private work和M4 migration。
 - feature入口只有后端 readiness/cutover complete且前端编译期开关开启时可用。
 
-- [ ] **Step 1: 写完整真实 PostgreSQL integration gate**
+- [x] **Step 1: 写完整真实 PostgreSQL integration gate**
 
 在单一随机测试库覆盖规格 17.1 全部矩阵：Thread/run/event/feedback/file/artifact/Memory/connection CRUD/search/page/export/guesstimate UUID；同项目跨 owner 404；跨项目 404；Viewer read-own/create deny；复合 FK；checkpoint marker缺失/伪造/cross scope；exact snapshot/generation stale；secret零持久化；authorization revocation；connection inbound/freeze/rejoin；file chunk/hash/tamper/finalization。
 
@@ -1659,13 +1660,13 @@ for table in PRIVATE_PERSISTENCE_TABLES + LANGGRAPH_CHECKPOINT_TABLES:
 assert SECRET_TEXT not in caplog.text
 ```
 
-- [ ] **Step 2: 运行 M4 gate确认任何漏项失败**
+- [x] **Step 2: 运行 M4 gate确认任何漏项失败**
 
 Run: `cd backend && uv run pytest tests/integration/test_m4_private_work_postgres.py tests/integration/test_m4_private_work_migration_postgres.py -q`
 
 Expected: 首次运行若有任一未实现隔离/secret/file/cutover行为则 FAIL；缺 `POSTGRES_TEST_URL` 时必须先配置并重跑。
 
-- [ ] **Step 3: 扩展 CI PostgreSQL workflow**
+- [x] **Step 3: 扩展 CI PostgreSQL workflow**
 
 workflow name/job/step改为 `M1, M2, M3 and M4 PostgreSQL Gates`，pytest列表固定包含：
 
@@ -1680,15 +1681,15 @@ tests/integration/test_m4_private_work_migration_postgres.py
 
 保留 least-privilege application role与 `POSTGRES_TEST_URL` hard fail；timeout按实测只做必要上调。
 
-- [ ] **Step 4: 写 Frontend isolation E2E**
+- [x] **Step 4: 写 Frontend isolation E2E**
 
 Playwright覆盖 account/project switch cancel-before-clear、recent owner isolation、Viewer、direct URL 404、Agent selector/run stream/stop/goal/compact/branch/human-input、upload/artifact、Memory、connection和static demo无入口。
 
-- [ ] **Step 5: fresh install/cutover readiness 通过后开放入口**
+- [x] **Step 5: fresh install/cutover readiness 通过后开放入口**
 
 把 `PROJECT_PRIVATE_WORKSPACE` 改为 `true as const`，但 CTA仍读取后端 readiness；marker不完整时 disabled且不导航。删除“后续里程碑”文案，改为准确的 capability/readiness状态。
 
-- [ ] **Step 6: 跑 M1–M4 PG gate 与 frontend E2E并提交**
+- [x] **Step 6: 跑 M1–M4 PG gate 与 frontend E2E并提交**
 
 Run: `cd backend && uv run pytest tests/integration/test_m1_postgres_cutover.py tests/integration/test_project_isolation_postgres.py tests/integration/test_m2_project_governance_postgres.py tests/integration/test_m3_shared_assets_postgres.py tests/integration/test_m4_private_work_postgres.py tests/integration/test_m4_private_work_migration_postgres.py -q`
 
@@ -1717,18 +1718,18 @@ git commit -m "test: enforce M4 private work release gates"
 
 **Interfaces:**
 
-- 只有所有 fresh verification 有成功输出且独立 review无 Critical/Important finding，才将 M4 状态改为已完成、计划 checkbox全部勾选、总进度改为 4/8（50%）。
+- 只有所有 fresh verification 有成功输出，且单次独立 review 的 Critical/Important finding 已由集中修复和 parent completion verification 关闭，才将 M4 状态改为已完成、计划 checkbox全部勾选、总进度改为 4/8（50%）。
 - 文档继续声明 M5 automation、M6 Worker/SSE/配额审计备份恢复、M7 legacy cleanup和M8完整发布验收未完成，系统仍不可作为完整多用户 SaaS发布。
 
-- [ ] **Step 1: 先写文档一致性失败测试/检查**
+- [x] **Step 1: 先写文档一致性失败测试/检查**
 
 使用 `rg` 证明当前文档仍含 `3/8`、`M4 未开始`、`私有工作后续里程碑`、`M1/M2/M3 gate`，记录需要替换的精确位置；不要在实现门禁未通过前改状态。
 
-- [ ] **Step 2: 更新用户与架构文档**
+- [x] **Step 2: 更新用户与架构文档**
 
 README 中写项目 chats/files/Memory/connections、Viewer行为、legacy cutover、migration命令。Root/backend/frontend AGENTS分别记录 M4 authority、scope/checkpointer/file/memory/connection、project client/cache ownership和 M1–M4 release gate。
 
-- [ ] **Step 3: 写运维 runbook**
+- [x] **Step 3: 写运维 runbook**
 
 runbook 必须包含：
 
@@ -1743,7 +1744,7 @@ runbook 必须包含：
 9. cutover 后不得启动 legacy writer；
 10. M4 不承诺通用 backup/restore或物理 retention purge。
 
-- [ ] **Step 4: 运行 backend focused + lint/format/blocking-I/O**
+- [x] **Step 4: 运行 backend focused + lint/format/blocking-I/O**
 
 Run:
 
@@ -1758,7 +1759,7 @@ git diff --check
 
 Expected: 全部 PASS；format 后若文件变化，重新运行对应 focused tests 与 lint。
 
-- [ ] **Step 5: 运行完整 backend 与 M1–M4 PostgreSQL gate**
+- [x] **Step 5: 运行完整 backend 与 M1–M4 PostgreSQL gate**
 
 Run:
 
@@ -1770,7 +1771,7 @@ uv run pytest tests/integration/test_m1_postgres_cutover.py tests/integration/te
 
 Expected: 全部 PASS；PG gate不能 skip。
 
-- [ ] **Step 6: 运行 frontend check、unit 与 Playwright**
+- [x] **Step 6: 运行 frontend check、unit 与 Playwright**
 
 Run:
 
@@ -1783,7 +1784,7 @@ pnpm exec playwright test
 
 Expected: lint/typecheck、全部 unit、全部 E2E PASS。
 
-- [ ] **Step 7: 运行 root/secret/log/doc consistency checks**
+- [x] **Step 7: 运行 root/secret/log/doc consistency checks**
 
 Run:
 
@@ -1797,22 +1798,22 @@ git status --short
 
 Expected: DB/doctor通过；过期状态搜索无命中（历史完成文档中明确的旧里程碑叙述除外，并逐条人工确认）；diff check干净；status只含M4预期文件。
 
-- [ ] **Step 8: 使用 `superpowers:requesting-code-review` 做独立 review**
+- [x] **Step 8: 使用 `superpowers:requesting-code-review` 做独立 review**
 
 review scope覆盖规格全部完成标准，重点检查：unscoped query/raw saver bypass、in-memory RunManager scope hit、secret persistence、file success ordering、migration fail-before-DDL、legacy cutover、frontend late response。任何 Critical/Important finding先修复，再从受影响 focused test开始重跑，并重复 Steps 4–7。
 
-- [ ] **Step 9: 使用 `superpowers:verification-before-completion` 复核 fresh evidence**
+- [x] **Step 9: 使用 `superpowers:verification-before-completion` 复核 fresh evidence**
 
 不得引用旧输出。确认测试 exit code、skip count、PG database names、frontend check和git diff均来自当前 HEAD；随后才把总体设计 M4改为“已完成”、进度改为4/8，并将本计划 checkbox标记 `[x]`、顶部增加完成日期。
 
-- [ ] **Step 10: 提交文档与完成状态**
+- [x] **Step 10: 提交文档与完成状态**
 
 ```bash
 git add README.md README_zh.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs .github/workflows/project-foundation-postgres-tests.yml
 git commit -m "docs: complete M4 private work milestone"
 ```
 
-- [ ] **Step 11: 进入分支收尾流程**
+- [x] **Step 11: 进入分支收尾流程**
 
 使用 `superpowers:finishing-a-development-branch` 展示 merge/PR/保留/清理选项；未经用户选择不自动 merge、push 或删除分支。
 
@@ -1820,15 +1821,15 @@ git commit -m "docs: complete M4 private work milestone"
 
 ## Final acceptance checklist
 
-- [ ] 所有私有根表的 project/owner 非空，所有父子关系有完整复合约束。
-- [ ] 产品访问只使用 `PrivateWorkContext`、scoped repository 与 scoped checkpointer。
-- [ ] 项目 Thread/run 复用现有 runtime，并保存 exact M3 asset/grant snapshot。
-- [ ] credential/private content 在 M4 persistence 与日志面零泄漏。
-- [ ] PostgreSQL 是 file/artifact authority，sandbox只作有 hash验证的临时投影。
-- [ ] Memory queue与connection inbound捕获并重验真实 project-owner scope。
-- [ ] membership/project revoke可跨 worker在下一副作用边界终止 run。
-- [ ] staged migration、encrypted backup、ledger、probe、finalize和cutover marker顺序可验证、可幂等重跑。
-- [ ] 项目 chats/Memory/connections/files及account/project cache隔离完整，Viewer与static-mode规则正确。
-- [ ] legacy private API在cutover后只返回 `PRIVATE_WORK_CUTOVER`，不能读取project rows。
-- [ ] M1–M4 PostgreSQL、完整 backend、frontend check/unit/Playwright全部fresh通过且无意外skip。
-- [ ] README、AGENTS、总体设计、专项设计和运维runbook一致，独立review无Critical/Important finding。
+- [x] 所有私有根表的 project/owner 非空，所有父子关系有完整复合约束。
+- [x] 产品访问只使用 `PrivateWorkContext`、scoped repository 与 scoped checkpointer。
+- [x] 项目 Thread/run 复用现有 runtime，并保存 exact M3 asset/grant snapshot。
+- [x] credential/private content 在 M4 persistence 与日志面零泄漏。
+- [x] PostgreSQL 是 file/artifact authority，sandbox只作有 hash验证的临时投影。
+- [x] Memory queue与connection inbound捕获并重验真实 project-owner scope。
+- [x] membership/project revoke可跨 worker在下一副作用边界终止 run。
+- [x] staged migration、外部 operator backup proof、ledger、probe、finalize和cutover marker顺序可验证、可幂等重跑。
+- [x] 项目 chats/Memory/connections/files及account/project cache隔离完整，Viewer与static-mode规则正确。
+- [x] legacy private API在cutover后只返回 `PRIVATE_WORK_CUTOVER`，不能读取project rows。
+- [x] M1–M4 PostgreSQL、完整 backend、frontend check/unit/Playwright全部fresh通过且无意外skip。
+- [x] README、AGENTS、总体设计、专项设计和运维runbook一致，单次独立review的Critical/Important findings已修复并由parent verification关闭。

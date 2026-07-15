@@ -84,8 +84,8 @@ file/artifact/sidecar；所有项目私有数据 URL 均从当前 `ProjectPrivat
 Memory、Connections 和 recent-work 入口仍必须同时通过服务端 readiness 与 capability gate；静态构建不
 暴露入口。M4 已接入 singleton
 `private_work_cutover_state` guard：final schema 且 marker 完成后开放 project private API，同时关闭
-legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run`。M4 当前是实现与
-门禁候选，待独立审查；M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、M7 legacy cleanup 和
+legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run`。M4 已于
+2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁；M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、M7 legacy cleanup 和
 M8 发布验收尚未完成，因此当前仍不能作为完整多用户 SaaS 发布。
 
 Scheduled-task note:

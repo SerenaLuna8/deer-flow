@@ -1089,7 +1089,7 @@ transaction；`lock=True` 在同一 transaction 内先执行 project `FOR UPDATE
 membership `FOR UPDATE`，以两条显式语句固定 project → membership 锁序。private-work HTTP 错误只映射固定
 `code/message/request_id`，不得拼接底层异常或资源细节。
 
-M4 项目私有 backend 已作为实现与门禁候选挂载：`/api/projects/{project_id}/private-work`
+M4 项目私有 backend 已完成并挂载：`/api/projects/{project_id}/private-work`
 负责 readiness、Thread、run/stream/wait、feed、file 和 artifact，项目 Memory 与 Connections
 使用各自的 project UUID 路由。Gateway lifespan 只在同一 PostgreSQL 配置上创建 scoped
 repositories、`ProjectScopedCheckpointer` 和专用 PostgreSQL private run-event store；普通项目

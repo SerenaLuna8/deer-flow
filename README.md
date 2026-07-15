@@ -342,7 +342,7 @@ submit/approve 流程发布；Credential 页面不提供明文查看或复制，
 M3 的兼容运行不会构造项目运行身份：credential materialization 只接受应用内部解析出的真实、
 不可变 `ProjectContext`。
 
-### 项目私有工作（M4 候选，待独立审查）
+### 项目私有工作（M4 已完成）
 
 进入 `/projects/{project_slug}` 后，服务端 readiness 为 `ready` 且当前成员具有
 `private_work.read_own` 时，项目菜单会显示 Chats、Memory 和 Connections。Chats 支持创建和继续
@@ -399,7 +399,7 @@ dry-run 只输出脱敏 counts 与稳定 source hash，不升级 schema、不写
 目录。execute 固定按 0008 expand、分域 ledger、0009 finalize、0010/0011、最后
 `cutover_complete` marker 的顺序执行；同一已完成 cutover 再执行会直接 no-op。
 
-M4 当前仅是实现与门禁候选，仍待独立审查。M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、
+M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、
 M7 legacy source/API 清理和 M8 完整发布验收均未完成，因此 DeerFlow 仍不能作为完整多用户 SaaS 发布。
 
 #### M3 共享资产迁移与 credential 轮换
