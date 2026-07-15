@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
@@ -35,6 +35,9 @@ class ScheduledTaskPatch:
     timezone: str | None = None
     next_run_at: datetime | None = None
     status: str | None = None
+
+
+_TASK_PATCH_FIELDS = frozenset(field.name for field in fields(ScheduledTaskPatch))
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +254,8 @@ class ScheduledTaskRepository:
         expected_version: int,
         values: Mapping[str, object],
     ) -> ScheduledTaskRecord | None:
+        if set(values) - _TASK_PATCH_FIELDS:
+            raise ValueError("values contain non-patchable scheduled-task fields")
         statement = (
             sa.update(ScheduledTaskRow)
             .where(

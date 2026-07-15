@@ -20,6 +20,43 @@ depends_on: str | Sequence[str] | None = None
 
 AUTOMATION_LEDGER_DOMAINS = frozenset({"scheduled_tasks", "scheduled_task_runs"})
 
+_CREATE_AGENT_PROJECT_INTEGRITY_FUNCTION = """
+CREATE OR REPLACE FUNCTION enforce_scheduled_task_agent_project()
+RETURNS trigger AS $$
+BEGIN
+    IF TG_TABLE_NAME = 'scheduled_tasks' THEN
+        IF NEW.agent_scope = 'project' THEN
+            PERFORM 1
+            FROM agents
+            WHERE id = NEW.agent_asset_id
+              AND scope = 'project'
+              AND project_id = NEW.project_id
+            FOR SHARE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'project Agent must belong to the scheduled task project'
+                    USING ERRCODE = 'foreign_key_violation';
+            END IF;
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF TG_TABLE_NAME = 'agents'
+       AND NEW.project_id IS DISTINCT FROM OLD.project_id
+       AND EXISTS (
+           SELECT 1
+           FROM scheduled_tasks task
+           WHERE task.agent_asset_id = OLD.id
+             AND task.agent_scope = 'project'
+             AND task.project_id IS DISTINCT FROM NEW.project_id
+       ) THEN
+        RAISE EXCEPTION 'cannot move a project Agent referenced by scheduled tasks'
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+"""
+
 
 def _is_empty_automation_domain(connection: Connection) -> bool:
     return all(
@@ -154,6 +191,7 @@ def _assert_scope_agent_thread_run_relations(connection: Connection) -> None:
                    OR owner.id IS NULL
                    OR membership.id IS NULL
                    OR agent.id IS NULL
+                   OR (agent.scope='project' AND agent.project_id IS DISTINCT FROM task.project_id)
                    OR (task.thread_id IS NOT NULL AND thread.thread_id IS NULL)
                    OR (task.context_mode='reuse_thread' AND task.thread_id IS NULL)
                    OR (task.context_mode='fresh_thread_per_run' AND task.thread_id IS NOT NULL)
@@ -285,6 +323,12 @@ def _install_final_task_constraints() -> None:
         op.create_check_constraint(name, "scheduled_tasks", condition)
 
 
+def _install_agent_project_integrity() -> None:
+    op.execute(_CREATE_AGENT_PROJECT_INTEGRITY_FUNCTION)
+    op.execute("CREATE TRIGGER trg_scheduled_tasks_agent_project BEFORE INSERT OR UPDATE OF project_id, agent_asset_id, agent_scope ON scheduled_tasks FOR EACH ROW EXECUTE FUNCTION enforce_scheduled_task_agent_project()")
+    op.execute("CREATE TRIGGER trg_agents_scheduled_task_project BEFORE UPDATE OF project_id ON agents FOR EACH ROW EXECUTE FUNCTION enforce_scheduled_task_agent_project()")
+
+
 def _install_final_occurrence_constraints() -> None:
     op.create_unique_constraint(
         "uq_scheduled_task_runs_occurrence",
@@ -409,6 +453,22 @@ def _record_final_schema_probe(connection: Connection) -> None:
         or "user_id" in task_columns
     ):
         raise RuntimeError("automation final schema probe failed")
+    triggers = set(
+        connection.execute(
+            sa.text(
+                """SELECT trigger_name FROM information_schema.triggers
+                WHERE event_object_schema=current_schema()
+                  AND trigger_name IN
+                      ('trg_scheduled_tasks_agent_project',
+                       'trg_agents_scheduled_task_project')"""
+            )
+        ).scalars()
+    )
+    if triggers != {
+        "trg_scheduled_tasks_agent_project",
+        "trg_agents_scheduled_task_project",
+    }:
+        raise RuntimeError("automation final Agent scope probe failed")
 
     stage = connection.execute(sa.text("SELECT stage FROM automation_cutover_state WHERE id=1")).scalar_one()
     if stage == "empty_install":
@@ -495,6 +555,7 @@ def upgrade() -> None:
         )
 
     _install_final_task_constraints()
+    _install_agent_project_integrity()
     _install_final_occurrence_constraints()
     _record_final_schema_probe(connection)
 
@@ -509,6 +570,9 @@ def _assert_downgrade_safe() -> None:
 def downgrade() -> None:
     _assert_downgrade_safe()
     connection = op.get_bind()
+    op.execute("DROP TRIGGER IF EXISTS trg_agents_scheduled_task_project ON agents")
+    op.execute("DROP TRIGGER IF EXISTS trg_scheduled_tasks_agent_project ON scheduled_tasks")
+    op.execute("DROP FUNCTION IF EXISTS enforce_scheduled_task_agent_project()")
     connection.execute(
         sa.text(
             """UPDATE automation_cutover_state

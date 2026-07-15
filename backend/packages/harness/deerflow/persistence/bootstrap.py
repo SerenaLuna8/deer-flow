@@ -563,6 +563,17 @@ def _automation_schema_is_final_sync(sync_conn: Any) -> bool:
         return False
     task_columns = {column["name"] for column in inspector.get_columns("scheduled_tasks")}
     run_columns = {column["name"] for column in inspector.get_columns("scheduled_task_runs")}
+    triggers = set(
+        sync_conn.execute(
+            text(
+                """SELECT trigger_name FROM information_schema.triggers
+                WHERE event_object_schema=current_schema()
+                  AND trigger_name IN
+                      ('trg_scheduled_tasks_agent_project',
+                       'trg_agents_scheduled_task_project')"""
+            )
+        ).scalars()
+    )
     return (
         {"project_id", "owner_user_id", "agent_asset_id", "version"} <= task_columns
         and {"user_id", "assistant_id", "last_run_id", "lease_owner"}.isdisjoint(task_columns)
@@ -575,6 +586,11 @@ def _automation_schema_is_final_sync(sync_conn: Any) -> bool:
         }
         <= run_columns
         and "error" not in run_columns
+        and triggers
+        == {
+            "trg_scheduled_tasks_agent_project",
+            "trg_agents_scheduled_task_project",
+        }
     )
 
 

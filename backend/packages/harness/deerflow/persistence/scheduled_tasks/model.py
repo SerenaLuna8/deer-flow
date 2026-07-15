@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    DDL,
     JSON,
     BigInteger,
     CheckConstraint,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    event,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -119,3 +121,58 @@ class ScheduledTaskRow(Base):
             name="ck_scheduled_tasks_last_outcome",
         ),
     )
+
+
+_CREATE_AGENT_PROJECT_INTEGRITY_FUNCTION = """
+CREATE OR REPLACE FUNCTION enforce_scheduled_task_agent_project()
+RETURNS trigger AS $$
+BEGIN
+    IF TG_TABLE_NAME = 'scheduled_tasks' THEN
+        IF NEW.agent_scope = 'project' THEN
+            PERFORM 1
+            FROM agents
+            WHERE id = NEW.agent_asset_id
+              AND scope = 'project'
+              AND project_id = NEW.project_id
+            FOR SHARE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'project Agent must belong to the scheduled task project'
+                    USING ERRCODE = 'foreign_key_violation';
+            END IF;
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF TG_TABLE_NAME = 'agents'
+       AND NEW.project_id IS DISTINCT FROM OLD.project_id
+       AND EXISTS (
+           SELECT 1
+           FROM scheduled_tasks task
+           WHERE task.agent_asset_id = OLD.id
+             AND task.agent_scope = 'project'
+             AND task.project_id IS DISTINCT FROM NEW.project_id
+       ) THEN
+        RAISE EXCEPTION 'cannot move a project Agent referenced by scheduled tasks'
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+"""
+
+_AGENT_PROJECT_TRIGGER_DDL = (
+    _CREATE_AGENT_PROJECT_INTEGRITY_FUNCTION,
+    "CREATE TRIGGER trg_scheduled_tasks_agent_project BEFORE INSERT OR UPDATE OF project_id, agent_asset_id, agent_scope ON scheduled_tasks FOR EACH ROW EXECUTE FUNCTION enforce_scheduled_task_agent_project()",
+    "CREATE TRIGGER trg_agents_scheduled_task_project BEFORE UPDATE OF project_id ON agents FOR EACH ROW EXECUTE FUNCTION enforce_scheduled_task_agent_project()",
+)
+
+
+def _install_agent_project_integrity(_target, connection, **kwargs) -> None:
+    created_tables = {table.name for table in kwargs.get("tables", ())}
+    if not {"agents", "scheduled_tasks"} <= created_tables or connection.dialect.name != "postgresql":
+        return
+    for statement in _AGENT_PROJECT_TRIGGER_DDL:
+        connection.execute(DDL(statement))
+
+
+event.listen(Base.metadata, "after_create", _install_agent_project_integrity)

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.exc import IntegrityError
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from deerflow.persistence.scheduled_task_runs import (
@@ -107,6 +108,103 @@ async def test_task_repository_never_returns_or_mutates_cross_owner(
         assert owner is not None
         assert owner.title == "Owner task"
         assert owner.deleted_at is None
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_task_repository_enforces_project_agent_ownership_and_allows_system_agents(
+    automation_seed: M4ThreadSeed,
+) -> None:
+    seed = automation_seed
+    async with seed.factory() as session, session.begin():
+        repository = ScheduledTaskRepository(session)
+        system_task = await repository.create(
+            seed.owner_a_scope,
+            _task_create(seed, "task-system-agent"),
+        )
+        project_task = await repository.create(
+            seed.owner_a_scope,
+            replace(
+                _task_create(seed, "task-project-agent"),
+                agent_asset_id=seed.project_agent_id,
+                agent_scope="project",
+            ),
+        )
+        assert system_task.agent_scope == "system"
+        assert project_task.agent_asset_id == seed.project_agent_id
+
+    with pytest.raises(IntegrityError):
+        async with seed.factory() as session, session.begin():
+            await ScheduledTaskRepository(session).create(
+                seed.owner_a_scope,
+                replace(
+                    _task_create(seed, "task-cross-project-agent"),
+                    agent_asset_id=seed.project_b_agent_id,
+                    agent_scope="project",
+                ),
+            )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_task_repository_rejects_server_owned_update_fields(
+    automation_seed: M4ThreadSeed,
+) -> None:
+    seed = automation_seed
+    created = await _create_task(seed, "task-protected-fields")
+    protected_values = {
+        "id": "forged-id",
+        "project_id": seed.project_b_owner_a.project_id,
+        "owner_user_id": seed.owner_b.user_id,
+        "thread_id": "forged-thread",
+        "context_mode": "reuse_thread",
+        "agent_asset_id": seed.project_b_agent_id,
+        "agent_scope": "project",
+        "schedule_type": "once",
+        "overlap_policy": "parallel",
+        "last_run_at": datetime(2026, 7, 17, 2, 0, tzinfo=UTC),
+        "last_outcome": "success",
+        "last_error_code": "FORGED",
+        "run_count": 99,
+        "version": 99,
+        "frozen_at": datetime(2026, 7, 17, 2, 0, tzinfo=UTC),
+        "deleted_at": datetime(2026, 7, 17, 2, 0, tzinfo=UTC),
+        "created_at": datetime(2026, 7, 17, 2, 0, tzinfo=UTC),
+        "updated_at": datetime(2026, 7, 17, 2, 0, tzinfo=UTC),
+    }
+
+    async with seed.factory() as session, session.begin():
+        repository = ScheduledTaskRepository(session)
+        for field_name, value in protected_values.items():
+            with pytest.raises(ValueError, match="patchable"):
+                await repository.update(
+                    seed.owner_a_scope,
+                    created.id,
+                    expected_version=1,
+                    values={field_name: value},
+                )
+        updated = await repository.update(
+            seed.owner_a_scope,
+            created.id,
+            expected_version=1,
+            values={"title": "Legitimate patch"},
+        )
+        assert updated is not None
+        assert updated.title == "Legitimate patch"
+        assert updated.version == 2
+
+    async with seed.factory() as session:
+        persisted = await ScheduledTaskRepository(session).get(
+            seed.owner_a_scope,
+            created.id,
+        )
+        assert persisted is not None
+        assert persisted.id == created.id
+        assert persisted.project_id == seed.owner_a.project_id
+        assert persisted.owner_user_id == str(seed.owner_a.user_id)
+        assert persisted.run_count == 0
+        assert persisted.frozen_at is None
+        assert persisted.deleted_at is None
 
 
 @pytest.mark.postgres
