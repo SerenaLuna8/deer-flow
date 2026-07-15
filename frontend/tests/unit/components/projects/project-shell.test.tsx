@@ -1,4 +1,5 @@
 import { describe, expect, test } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ProjectShell } from "@/components/projects/project-shell";
@@ -26,13 +27,15 @@ const adminProject: Project = {
 
 function renderShell(project: Project) {
   return renderToStaticMarkup(
-    <ProjectShell
-      project={project}
-      accountEmail="member@example.com"
-      onLogout={() => undefined}
-    >
-      <p>Project content</p>
-    </ProjectShell>,
+    <QueryClientProvider client={new QueryClient()}>
+      <ProjectShell
+        project={project}
+        accountEmail="member@example.com"
+        onLogout={() => undefined}
+      >
+        <p>Project content</p>
+      </ProjectShell>
+    </QueryClientProvider>,
   );
 }
 

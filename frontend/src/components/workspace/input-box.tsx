@@ -261,6 +261,9 @@ export function InputBox({
   onContextChange,
   onFollowupsVisibilityChange,
   onGoalChange,
+  goalCommandsEnabled = true,
+  compactCommandEnabled = true,
+  uploadsEnabled = true,
   onSubmit,
   onStop,
   ...props
@@ -295,6 +298,9 @@ export function InputBox({
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onGoalChange?: (goal: GoalState | null) => void;
+  goalCommandsEnabled?: boolean;
+  compactCommandEnabled?: boolean;
+  uploadsEnabled?: boolean;
   onSubmit?: (
     message: PromptInputMessage,
     options?: InputBoxSubmitOptions,
@@ -356,18 +362,31 @@ export function InputBox({
   );
   const builtinSlashCommands = useMemo<SlashSuggestion[]>(
     () => [
-      {
-        name: "goal",
-        description: t.inputBox.goalCommandDescription,
-        kind: "builtin",
-      },
-      {
-        name: "compact",
-        description: t.inputBox.compactCommandDescription,
-        kind: "builtin",
-      },
+      ...(goalCommandsEnabled
+        ? [
+            {
+              name: "goal" as const,
+              description: t.inputBox.goalCommandDescription,
+              kind: "builtin" as const,
+            },
+          ]
+        : []),
+      ...(compactCommandEnabled
+        ? [
+            {
+              name: "compact" as const,
+              description: t.inputBox.compactCommandDescription,
+              kind: "builtin" as const,
+            },
+          ]
+        : []),
     ],
-    [t.inputBox.compactCommandDescription, t.inputBox.goalCommandDescription],
+    [
+      compactCommandEnabled,
+      goalCommandsEnabled,
+      t.inputBox.compactCommandDescription,
+      t.inputBox.goalCommandDescription,
+    ],
   );
 
   const reportUploadLimitViolations = useCallback(
@@ -863,7 +882,7 @@ export function InputBox({
         fileCount: messageWithSlashSkill.files.length,
         status,
       });
-      if (submitAction.kind === "goal") {
+      if (submitAction.kind === "goal" && goalCommandsEnabled) {
         promptHistoryIndexRef.current = null;
         promptHistoryDraftRef.current = "";
         setFollowups([]);
@@ -880,7 +899,7 @@ export function InputBox({
         }
         return;
       }
-      if (submitAction.kind === "compact") {
+      if (submitAction.kind === "compact" && compactCommandEnabled) {
         return handleCompactCommand();
       }
       if (submitAction.kind === "stop") {
@@ -898,6 +917,8 @@ export function InputBox({
     [
       handleCompactCommand,
       handleGoalCommand,
+      compactCommandEnabled,
+      goalCommandsEnabled,
       onStop,
       selectedSlashSkill,
       status,
@@ -1726,11 +1747,13 @@ export function InputBox({
               />
             </PromptInputActionMenuContent>
           </PromptInputActionMenu> */}
-            <AddAttachmentsButton
-              className="px-2!"
-              disabled={composerLocked}
-              uploadLimits={uploadLimits}
-            />
+            {uploadsEnabled && (
+              <AddAttachmentsButton
+                className="px-2!"
+                disabled={composerLocked}
+                uploadLimits={uploadLimits}
+              />
+            )}
             <Tooltip
               content={
                 polishingInput

@@ -46,7 +46,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace` (multi-project workspace; `/workspace/projects` redirects here), `/projects/[project_slug]` (independent project home), `/admin/assets/{agents,skills,mcp,credentials}` (server-gated system asset administration), `/workspace/chats/[thread_id]` (legacy chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace` (multi-project workspace; `/workspace/projects` redirects here), `/projects/[project_slug]` (independent project home), `/projects/[project_slug]/chats` (owner-scoped project conversations), `/admin/assets/{agents,skills,mcp,credentials}` (server-gated system asset administration), `/workspace/chats/[thread_id]` (legacy chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
@@ -125,8 +125,11 @@ cache、响应或错误；用户在 password control 中输入的值提交后必
 残留或被 UI 回显。
 M3 的前端资产交付到此为止：`/admin/assets`、四类项目资产页和旧入口只读 catalog 已接入。
 M4 Task 14 只补齐 account/project-scoped LangGraph client、cache ownership 与 Thread/upload 底层
-注入；项目 chats、Memory、connections 与 automation 页面仍未接入，因此现有资产页不得自行增加
-运行入口，也不能把当前界面描述为完整多用户 SaaS。
+注入。M4 Task 15 的项目 chats 列表和详情复用 `ScopedChatPage`，但通过项目 route scope 关闭
+goal、compact、branch、regenerate、sidecar、artifact 和 scheduled-task 入口；项目 route 只使用
+`ProjectPrivateWorkProvider` client，不能回退到 legacy `/api/threads/*`。新建入口必须同时满足
+编译期 feature flag、服务端 readiness=ready、`private_work.create` 和 `shared_assets.execute`；
+Memory、connections 与 automation 页面仍未接入，不能把当前界面描述为完整多用户 SaaS。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie
@@ -166,8 +169,8 @@ Human input requests are a structured message protocol layered on normal chat hi
 
 ### Interaction Ownership
 
-- `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
-- `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
+- `src/components/workspace/chats/scoped-chat-page.tsx` owns shared workspace/project composer busy-state wiring; route adapters supply capability and navigation scope.
+- `src/components/workspace/chats/scoped-chat-page.tsx` owns branch-from-turn submission and navigation when the route scope enables it; sidecar `MessageList` instances do not receive the branch action.
 - `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
 - `src/components/workspace/messages/message-list.tsx` owns human-input card answered/latest/pending gating; entry pages only translate a submitted card response into `sendMessage` calls.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.

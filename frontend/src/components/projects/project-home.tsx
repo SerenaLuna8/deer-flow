@@ -1,7 +1,9 @@
 import { BotIcon, PlugZapIcon, SparklesIcon } from "lucide-react";
 
+import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
 
+import { RecentPrivateWork } from "./private-work/recent-private-work";
 import { ProjectHeader } from "./project-header";
 import { ProjectPrivateWorkCta } from "./project-private-work-cta";
 
@@ -52,7 +54,11 @@ export function ProjectHome({ project }: { project: Project }) {
             ))}
           </div>
         </section>
-        <ProjectPrivateWorkCta />
+        {PROJECT_PRIVATE_WORKSPACE &&
+          project.capabilities.includes("private_work.read_own") && (
+            <RecentPrivateWork project={project} />
+          )}
+        <ProjectPrivateWorkCta project={project} />
       </main>
     </div>
   );

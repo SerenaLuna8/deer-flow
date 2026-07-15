@@ -5,6 +5,7 @@ import {
   BotIcon,
   FolderKanbanIcon,
   KeyRoundIcon,
+  MessagesSquareIcon,
   MenuIcon,
   NetworkIcon,
   SettingsIcon,
@@ -24,7 +25,13 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import {
+  projectPrivateWorkEntryEnabled,
+  useProjectPrivateWorkReadiness,
+} from "@/core/private-work/readiness";
+import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { cn } from "@/lib/utils";
 
 type ProjectNavigationItem = {
@@ -43,12 +50,26 @@ function canViewSettings(project: Project): boolean {
 
 export function projectNavigationItems(
   project: Project,
+  privateWorkReady = false,
 ): ProjectNavigationItem[] {
   const base = `/projects/${encodeURIComponent(project.slug)}`;
   const items: ProjectNavigationItem[] = [
     { href: base, icon: FolderKanbanIcon, label: "项目概览" },
     { href: `${base}/members`, icon: UsersIcon, label: "成员与邀请" },
   ];
+  if (
+    projectPrivateWorkEntryEnabled(
+      PROJECT_PRIVATE_WORKSPACE,
+      project.capabilities.includes("private_work.read_own"),
+      privateWorkReady ? "ready" : undefined,
+    )
+  ) {
+    items.push({
+      href: `${base}/chats`,
+      icon: MessagesSquareIcon,
+      label: "Chats",
+    });
+  }
   if (project.capabilities.includes("shared_assets.read")) {
     items.push(
       { href: `${base}/agents`, icon: BotIcon, label: "Agent" },
@@ -101,33 +122,40 @@ function ProjectNavigationLinks({
   project: Project;
   mobile?: boolean;
 }) {
-  const links = projectNavigationItems(project).map(
-    ({ href, icon: Icon, label }) => {
-      const link = (
-        <Link
-          href={href}
-          className="hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:outline-none"
-        >
-          <Icon aria-hidden className="text-muted-foreground size-4" />
-          {label}
-        </Link>
-      );
-      return mobile ? (
-        <SheetClose key={href} asChild>
-          {link}
-        </SheetClose>
-      ) : (
-        <Link
-          key={href}
-          href={href}
-          className="hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:outline-none"
-        >
-          <Icon aria-hidden className="text-muted-foreground size-4" />
-          {label}
-        </Link>
-      );
-    },
+  const canReadPrivateWork = project.capabilities.includes(
+    "private_work.read_own",
   );
+  const readiness = useProjectPrivateWorkReadiness(
+    canReadPrivateWork && !isStaticWebsiteOnly(),
+  );
+  const links = projectNavigationItems(
+    project,
+    readiness.data?.status === "ready",
+  ).map(({ href, icon: Icon, label }) => {
+    const link = (
+      <Link
+        href={href}
+        className="hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:outline-none"
+      >
+        <Icon aria-hidden className="text-muted-foreground size-4" />
+        {label}
+      </Link>
+    );
+    return mobile ? (
+      <SheetClose key={href} asChild>
+        {link}
+      </SheetClose>
+    ) : (
+      <Link
+        key={href}
+        href={href}
+        className="hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:outline-none"
+      >
+        <Icon aria-hidden className="text-muted-foreground size-4" />
+        {label}
+      </Link>
+    );
+  });
   const workspaceLink = (
     <Link
       href="/workspace"

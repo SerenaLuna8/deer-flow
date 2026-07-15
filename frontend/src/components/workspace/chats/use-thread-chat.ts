@@ -24,7 +24,9 @@ export function resetThreadChatAfterDelete(detail: ThreadChatResetDetail) {
   );
 }
 
-export function useThreadChat() {
+export function useThreadChat({
+  allowNewThread = true,
+}: { allowNewThread?: boolean } = {}) {
   const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
   const pathname = usePathname();
   // Render-time values use the committed browser URL. The sync effect below
@@ -32,9 +34,9 @@ export function useThreadChat() {
   // schedules a reset when window.location is stale during render.
   const actualPathname =
     typeof window === "undefined" ? pathname : window.location.pathname;
-  const isNewPath = actualPathname.endsWith("/new");
+  const isNewPath = allowNewThread && actualPathname.endsWith("/new");
   const newThreadIdRef = useRef<string | null>(
-    threadIdFromPath === "new" ? uuid() : null,
+    allowNewThread && threadIdFromPath === "new" ? uuid() : null,
   );
 
   if (isNewPath && !newThreadIdRef.current) {
@@ -43,13 +45,13 @@ export function useThreadChat() {
 
   const searchParams = useSearchParams();
   const [threadId, setThreadIdState] = useState(() => {
-    return threadIdFromPath === "new"
+    return allowNewThread && threadIdFromPath === "new"
       ? (newThreadIdRef.current ?? uuid())
       : threadIdFromPath;
   });
 
   const [isNewThreadState, setIsNewThreadState] = useState(
-    () => threadIdFromPath === "new",
+    () => allowNewThread && threadIdFromPath === "new",
   );
 
   const resetToNewThread = useCallback(() => {
@@ -60,7 +62,7 @@ export function useThreadChat() {
   }, []);
 
   useEffect(() => {
-    if (pathname.endsWith("/new")) {
+    if (allowNewThread && pathname.endsWith("/new")) {
       const nextThreadId = newThreadIdRef.current ?? uuid();
       newThreadIdRef.current = nextThreadId;
       setIsNewThreadState(true);
@@ -76,7 +78,7 @@ export function useThreadChat() {
     }
     setIsNewThreadState(false);
     setThreadIdState(threadIdFromPath);
-  }, [pathname, threadIdFromPath]);
+  }, [allowNewThread, pathname, threadIdFromPath]);
 
   useEffect(() => {
     const handleReset = (event: Event) => {

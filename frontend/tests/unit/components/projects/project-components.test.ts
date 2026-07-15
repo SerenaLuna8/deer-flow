@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
-import { createElement } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ProjectCard } from "@/components/projects/project-card";
@@ -29,6 +30,12 @@ const project: Project = {
   membership_version: 1,
   request_id: "trace",
 };
+
+function renderWithQueryClient(node: ReactNode): string {
+  return renderToStaticMarkup(
+    createElement(QueryClientProvider, { client: new QueryClient() }, node),
+  );
+}
 
 describe("project presentation contracts", () => {
   test("card shows public project fields and capability-gated edit only", () => {
@@ -61,7 +68,7 @@ describe("project presentation contracts", () => {
   });
 
   test("home keeps privacy boundary and leaves navigation to the project shell", () => {
-    const html = renderToStaticMarkup(createElement(ProjectHome, { project }));
+    const html = renderWithQueryClient(createElement(ProjectHome, { project }));
     expect(html).toContain("对话和记忆私有");
     expect(html).toContain("Agent、Skill 和 MCP 共享");
     expect(html).not.toContain("返回工作空间");
@@ -72,9 +79,11 @@ describe("project presentation contracts", () => {
     expect(html).not.toContain("项目切换");
   });
 
-  test("private CTA is hard-disabled and has no Thread dependency", () => {
-    const html = renderToStaticMarkup(createElement(ProjectPrivateWorkCta));
-    expect(html).toContain("私有工作区将在后续里程碑开放");
+  test("private CTA stays readiness-gated while exposing project chat intent", () => {
+    const html = renderWithQueryClient(
+      createElement(ProjectPrivateWorkCta, { project }),
+    );
+    expect(html).toContain("开始私有对话");
     const source = readFileSync(
       resolve(
         process.cwd(),
@@ -82,7 +91,14 @@ describe("project presentation contracts", () => {
       ),
       "utf8",
     );
-    expect(source).not.toMatch(/threads|createThread|router\.push/iu);
+    expect(source).toContain("PROJECT_PRIVATE_WORKSPACE");
+    expect(source).toContain("useProjectPrivateWorkReadiness");
+    const navigationSource = readFileSync(
+      resolve(process.cwd(), "src/components/projects/project-nav.tsx"),
+      "utf8",
+    );
+    expect(navigationSource).toContain("useProjectPrivateWorkReadiness");
+    expect(navigationSource).toContain("projectPrivateWorkEntryEnabled");
   });
 
   test("project dialogs expose synchronous submit contracts", () => {

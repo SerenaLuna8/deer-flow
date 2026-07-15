@@ -3,7 +3,9 @@ import { z } from "zod";
 
 export const projectClientScopeSchema = z
   .object({
-    accountId: z.string().uuid(),
+    // Local auth-disabled mode uses the backend's canonical synthetic
+    // account. It is cache identity only; project authority is server-derived.
+    accountId: z.union([z.string().uuid(), z.literal("default")]),
     projectId: z.string().uuid(),
   })
   .strict();

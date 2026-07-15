@@ -31,7 +31,12 @@ interface ArtifactsProviderProps {
   children: ReactNode;
 }
 
-export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
+function ArtifactsStateProvider({
+  children,
+  setSidebarOpen,
+}: ArtifactsProviderProps & {
+  setSidebarOpen: (open: boolean) => void;
+}) {
   const [artifacts, setArtifacts] = useState<string[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
   const [autoSelect, setAutoSelect] = useState(true);
@@ -39,7 +44,6 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
   const [autoOpen, setAutoOpen] = useState(true);
-  const { setOpen: setSidebarOpen } = useSidebar();
 
   const select = useCallback(
     (artifact: string, autoSelect = false) => {
@@ -84,6 +88,25 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     <ArtifactsContext.Provider value={value}>
       {children}
     </ArtifactsContext.Provider>
+  );
+}
+
+export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
+  const { setOpen: setSidebarOpen } = useSidebar();
+  return (
+    <ArtifactsStateProvider setSidebarOpen={setSidebarOpen}>
+      {children}
+    </ArtifactsStateProvider>
+  );
+}
+
+export function StandaloneArtifactsProvider({
+  children,
+}: ArtifactsProviderProps) {
+  return (
+    <ArtifactsStateProvider setSidebarOpen={() => undefined}>
+      {children}
+    </ArtifactsStateProvider>
   );
 }
 

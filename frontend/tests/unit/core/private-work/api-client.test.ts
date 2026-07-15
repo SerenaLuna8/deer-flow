@@ -6,6 +6,7 @@ import {
   getProjectAPIClient,
   projectPrivateWorkBaseURL,
 } from "@/core/private-work/api-client";
+import { projectClientScopeSchema } from "@/core/private-work/types";
 
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
@@ -44,6 +45,15 @@ describe("project private-work API client", () => {
       ),
     ).toBe(true);
     expect(() => projectPrivateWorkBaseURL("../admin")).toThrow();
+  });
+
+  test("accepts only UUID accounts plus the canonical local auth-disabled account", () => {
+    expect(
+      projectClientScopeSchema.parse({ accountId: "default", projectId: P1 }),
+    ).toEqual({ accountId: "default", projectId: P1 });
+    expect(() =>
+      projectClientScopeSchema.parse({ accountId: "someone", projectId: P1 }),
+    ).toThrow();
   });
 
   test("keeps the existing CSRF request wrapper", async () => {
