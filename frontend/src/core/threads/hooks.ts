@@ -1904,12 +1904,14 @@ export function useThreadHistory(
 export function useThreads(
   params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
   explicitPrivateWork?: PrivateWorkAccess,
+  queryOptions: { enabled?: boolean } = {},
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const options = buildThreadsSearchQueryOptions(privateWork.client, params);
   return useQuery<AgentThread[]>({
     ...options,
     queryKey: scopedThreadQueryKey(privateWork.scope, ...options.queryKey),
+    ...{ enabled: queryOptions.enabled },
   });
 }
 

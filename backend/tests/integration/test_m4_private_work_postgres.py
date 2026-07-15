@@ -124,6 +124,25 @@ async def test_viewer_reads_and_deletes_own_thread_but_cannot_create(
                 agent=ThreadAgentRef(scenario.seed.project_agent_id, "project"),
             )
         assert await scenario.thread_service.get(scenario.seed.viewer, owned.thread_id) == owned
+        with pytest.raises(PrivateWorkForbidden):
+            await PrivateRunAdmissionService(scenario.seed.factory).admit(
+                scenario.seed.viewer,
+                owned.thread_id,
+                PrivateRunCreate(),
+            )
+        async with scenario.seed.factory() as session:
+            denied_rows = (
+                await session.execute(
+                    text(
+                        """SELECT
+                        (SELECT count(*) FROM runs WHERE thread_id=:thread_id),
+                        (SELECT count(*) FROM run_asset_versions WHERE thread_id=:thread_id),
+                        (SELECT count(*) FROM run_mcp_grant_snapshots WHERE thread_id=:thread_id)"""
+                    ),
+                    {"thread_id": owned.thread_id},
+                )
+            ).one()
+        assert tuple(denied_rows) == (0, 0, 0)
         await scenario.thread_service.delete(
             scenario.seed.viewer,
             owned.thread_id,

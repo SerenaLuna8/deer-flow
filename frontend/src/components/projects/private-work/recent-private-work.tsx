@@ -2,7 +2,10 @@
 
 import Link from "next/link";
 
+import { useProjectPrivateWorkReadiness } from "@/core/private-work/readiness";
+import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { useThreads } from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
 import { titleOfThread } from "@/core/threads/utils";
@@ -53,13 +56,24 @@ export function RecentPrivateWorkView({
 }
 
 export function RecentPrivateWork({ project }: { project: Project }) {
-  const threads = useThreads({
-    limit: RECENT_PRIVATE_WORK_LIMIT,
-    offset: 0,
-    sortBy: "updated_at",
-    sortOrder: "desc",
-    select: ["thread_id", "updated_at", "values", "metadata"],
-  });
+  const canRead = project.capabilities.includes("private_work.read_own");
+  const staticWebsiteOnly = isStaticWebsiteOnly();
+  const readinessEnabled =
+    PROJECT_PRIVATE_WORKSPACE && canRead && !staticWebsiteOnly;
+  const readiness = useProjectPrivateWorkReadiness(readinessEnabled);
+  const enabled = readinessEnabled && readiness.data?.status === "ready";
+  const threads = useThreads(
+    {
+      limit: RECENT_PRIVATE_WORK_LIMIT,
+      offset: 0,
+      sortBy: "updated_at",
+      sortOrder: "desc",
+      select: ["thread_id", "updated_at", "values", "metadata"],
+    },
+    undefined,
+    { enabled },
+  );
+  if (!enabled) return null;
   return (
     <RecentPrivateWorkView
       projectSlug={project.slug}

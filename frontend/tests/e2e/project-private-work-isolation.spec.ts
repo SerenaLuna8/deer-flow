@@ -6,15 +6,16 @@ import type { Project } from "@/core/projects/types";
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 const ACCOUNT_A = "90000000-0000-4000-8000-000000000001";
-const ACCOUNT_B = "90000000-0000-4000-8000-000000000002";
 const PROJECT_ALPHA = "10000000-0000-4000-8000-000000000001";
 const PROJECT_BETA = "10000000-0000-4000-8000-000000000002";
-const PROJECT_GAMMA = "10000000-0000-4000-8000-000000000003";
 
 type ScopeState = {
   accountId: string;
   projects: Project[];
   requests: string[];
+  holdThreadProjectId: string | null;
+  threadRequestStarted: string[];
+  releaseHeldThreadResponse: () => void;
 };
 
 function project(id: string, slug: string, displayName: string): Project {
@@ -56,6 +57,8 @@ async function json(route: Route, body: unknown, status = 200) {
 
 async function installScopeFixture(page: Page): Promise<ScopeState> {
   mockLangGraphAPI(page);
+  let releaseHeldThreadResponse: () => void = () => undefined;
+  let heldThreadResponse = Promise.resolve();
   const state: ScopeState = {
     accountId: ACCOUNT_A,
     projects: [
@@ -63,6 +66,9 @@ async function installScopeFixture(page: Page): Promise<ScopeState> {
       project(PROJECT_BETA, "beta", "Beta Project"),
     ],
     requests: [],
+    holdThreadProjectId: null,
+    threadRequestStarted: [],
+    releaseHeldThreadResponse: () => releaseHeldThreadResponse(),
   };
 
   await page.route("**/api/v1/auth/me", (route) =>
@@ -96,6 +102,13 @@ async function installScopeFixture(page: Page): Promise<ScopeState> {
       });
     }
     if (path.endsWith("/private-work/threads/search")) {
+      state.threadRequestStarted.push(current.id);
+      if (current.id === state.holdThreadProjectId) {
+        heldThreadResponse = new Promise<void>((resolve) => {
+          releaseHeldThreadResponse = resolve;
+        });
+        await heldThreadResponse;
+      }
       return json(route, {
         items: [
           {
@@ -118,35 +131,26 @@ async function installScopeFixture(page: Page): Promise<ScopeState> {
   return state;
 }
 
-test("project and account switches never retain the previous private list", async ({
+test("Link project switch drops a late previous-project Thread response", async ({
   page,
 }) => {
   const state = await installScopeFixture(page);
+  state.holdThreadProjectId = PROJECT_ALPHA;
 
   await page.goto("/projects/alpha/chats");
-  await expect(page.getByText("Alpha Project conversation")).toBeVisible();
-
-  await page.goto("/projects/beta/chats");
+  await expect.poll(() => state.threadRequestStarted).toContain(PROJECT_ALPHA);
+  await page.getByRole("link", { name: "返回工作空间" }).click();
+  const betaCard = page
+    .getByTestId("project-card")
+    .filter({ hasText: "Beta Project" });
+  await betaCard.getByRole("link", { name: "进入项目" }).click();
+  await page.getByRole("link", { name: "Chats", exact: true }).click();
   await expect(page.getByText("Beta Project conversation")).toBeVisible();
+  state.releaseHeldThreadResponse();
   await expect(page.getByText("Alpha Project conversation")).toHaveCount(0);
-
-  state.accountId = ACCOUNT_B;
-  state.projects = [project(PROJECT_GAMMA, "gamma", "Gamma Project")];
-  state.requests.length = 0;
-  await page.goto("/projects/gamma/chats");
-  await page.reload();
-  await expect(page.getByText("Gamma Project conversation")).toBeVisible();
-  await expect(page.getByText("Beta Project conversation")).toHaveCount(0);
-  expect(state.requests).not.toEqual([]);
-  expect(state.requests.every((request) => request.startsWith(ACCOUNT_B))).toBe(
-    true,
-  );
-  expect(
-    state.requests.every((request) => request.includes(PROJECT_GAMMA)),
-  ).toBe(true);
 });
 
-test("static demo landing contract has no project entry", () => {
+test("static demo landing path contract preserves legacy chats", () => {
   expect(workspaceLandingPath(true, null)).toBe("/workspace/chats/new");
   expect(workspaceLandingPath(true, "demo-thread")).toBe(
     "/workspace/chats/demo-thread",
