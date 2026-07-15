@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.base import Base
 from deerflow.persistence.bootstrap import _get_alembic_config, bootstrap_schema
+from deerflow.persistence.revisions import REVISION_ANCESTRY
 
 M4_TABLES = {
     "run_asset_versions",
@@ -203,7 +204,9 @@ def test_private_artifact_tombstone_revision_is_alembic_head() -> None:
 
     assert migration.revision == "0011_private_artifact_tombstone"
     assert migration.down_revision == "0010_private_file_source"
-    assert ScriptDirectory.from_config(cfg).get_current_head() == migration.revision
+    current_head = ScriptDirectory.from_config(cfg).get_current_head()
+    assert current_head == "0013_project_automation_finalize"
+    assert REVISION_ANCESTRY.contains(current_head, migration.revision)
 
 
 @pytest.mark.postgres
@@ -219,7 +222,11 @@ async def test_0011_accepts_manual_shape_and_retries_with_exact_partial_index(
         async with engine.begin() as connection:
             await connection.execute(text("ALTER TABLE artifacts ADD COLUMN deleted_at TIMESTAMPTZ NULL"))
 
-        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await asyncio.to_thread(
+            command.upgrade,
+            cfg,
+            "0011_private_artifact_tombstone",
+        )
         await engine.dispose()
         async with engine.begin() as connection:
             await connection.execute(
@@ -229,7 +236,11 @@ async def test_0011_accepts_manual_shape_and_retries_with_exact_partial_index(
                 )
             )
 
-        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await asyncio.to_thread(
+            command.upgrade,
+            cfg,
+            "0011_private_artifact_tombstone",
+        )
         await engine.dispose()
         async with engine.connect() as connection:
             revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
@@ -275,7 +286,7 @@ async def test_0011_downgrade_is_retry_safe_and_can_upgrade_again(
         async with engine.connect() as connection:
             revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
             columns = await connection.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("artifacts")})
-        assert revision == "0011_private_artifact_tombstone"
+        assert revision == "0013_project_automation_finalize"
         assert "deleted_at" in columns
     finally:
         await engine.dispose()
@@ -428,7 +439,7 @@ async def test_m4_finalize_schema_has_private_scope_and_composite_fks(
         assert marker.empty_domain_probe_complete is True
         assert marker.checkpoint_marker_probe_complete is True
         assert marker.cutover_at is not None
-        assert revision == "0011_private_artifact_tombstone"
+        assert revision == "0013_project_automation_finalize"
     finally:
         await engine.dispose()
 
@@ -555,7 +566,11 @@ async def test_fresh_and_staged_private_work_catalogs_are_identical(
                         ),
                         [{"run_id": migration_run_id, "domain": domain, "digest": f"{index:064x}"} for index, domain in enumerate(sorted(migration.FINALIZE_LEDGER_DOMAINS), start=1)],
                     )
-                await asyncio.to_thread(command.upgrade, staged_cfg, "head")
+                await asyncio.to_thread(
+                    command.upgrade,
+                    staged_cfg,
+                    "0011_private_artifact_tombstone",
+                )
 
                 async with fresh_engine.connect() as connection:
                     fresh_catalog = await connection.run_sync(_private_work_catalog)
@@ -684,7 +699,7 @@ async def test_0009_downgrade_rejects_scoped_channel_rows_before_schema_changes(
         final_identity = next(constraint for constraint in unique_constraints if constraint["name"] == "uq_channel_connection_owner_provider_identity")
         # PostgreSQL rolls back the complete downgrade transaction, including
         # the preceding 0011/0010 downgrades, when 0009 rejects scoped rows.
-        assert revision == "0011_private_artifact_tombstone"
+        assert revision == "0013_project_automation_finalize"
         assert final_identity["column_names"] == [
             "project_id",
             "owner_user_id",
@@ -802,7 +817,11 @@ async def test_0009_finalizes_completed_empty_domain_migration_and_downgrades_sa
                 [{"run_id": migration_run_id, "domain": domain, "digest": f"{index:064x}"} for index, domain in enumerate(sorted(migration.FINALIZE_LEDGER_DOMAINS), start=1)],
             )
 
-        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await asyncio.to_thread(
+            command.upgrade,
+            cfg,
+            "0011_private_artifact_tombstone",
+        )
         async with engine.connect() as connection:
             assert (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0011_private_artifact_tombstone"
             thread_columns = await connection.run_sync(lambda sync: {item["name"]: item for item in inspect(sync).get_columns("threads_meta")})

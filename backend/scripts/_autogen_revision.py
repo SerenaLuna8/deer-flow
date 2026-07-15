@@ -163,6 +163,15 @@ async def _seed_empty_finalize_prerequisites(database_url: str) -> None:
                 VALUES ($1,$2,$3,$3,$3,'complete',0,0)""",
                 [(migration_run_id, domain, empty_digest) for domain in _EMPTY_FINALIZE_DOMAINS],
             )
+            await connection.execute(
+                """INSERT INTO private_work_cutover_state
+                (id,stage,migration_run_id,cutover_at,updated_at)
+                VALUES (1,'cutover_complete',$1,now(),now())
+                ON CONFLICT (id) DO UPDATE
+                SET stage='cutover_complete',migration_run_id=EXCLUDED.migration_run_id,
+                    cutover_at=EXCLUDED.cutover_at,updated_at=EXCLUDED.updated_at""",
+                migration_run_id,
+            )
     finally:
         await connection.close()
 

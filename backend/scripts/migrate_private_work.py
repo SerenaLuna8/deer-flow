@@ -164,6 +164,8 @@ _UNSUPPORTED_DATABASE_TABLES: tuple[str, ...] = (
     "channel_oauth_states",
     "channel_conversations",
 )
+_PRIVATE_WORK_FINAL_REVISION = "0011_private_artifact_tombstone"
+_PROJECT_AUTOMATION_FINAL_REVISION = "0013_project_automation_finalize"
 
 
 def load_owner_map(path: Path) -> dict[str, uuid.UUID]:
@@ -1110,7 +1112,9 @@ async def run_private_work_migration(
                     "0008_project_private_work_expand",
                     "0009_project_private_work_finalize",
                     "0010_private_file_source",
-                    "0011_private_artifact_tombstone",
+                    _PRIVATE_WORK_FINAL_REVISION,
+                    "0012_project_automation_expand",
+                    _PROJECT_AUTOMATION_FINAL_REVISION,
                 }:
                     raise PrivateWorkMigrationError("unsupported database revision")
                 return PrivateWorkMigrationReport(
@@ -1161,13 +1165,13 @@ async def run_private_work_migration(
         await asyncio.to_thread(
             command.upgrade,
             _get_alembic_config(engine),
-            "head",
+            _PRIVATE_WORK_FINAL_REVISION,
         )
         await engine.dispose()
         engine = create_async_engine(database_url)
         async with engine.begin() as connection:
             revision = await _current_revision(connection)
-            if revision != "0011_private_artifact_tombstone":
+            if revision != _PRIVATE_WORK_FINAL_REVISION:
                 raise PrivateWorkMigrationError("private-work finalize revision is incomplete")
             await connection.execute(
                 text(
@@ -1182,6 +1186,30 @@ async def run_private_work_migration(
             )
             if not await _cutover_complete(connection):
                 raise PrivateWorkMigrationError("private-work cutover marker is incomplete")
+
+        # M5 finalize requires the M4 marker to be complete. Cross that newer
+        # boundary only after the private-work transaction above commits.
+        await asyncio.to_thread(
+            command.upgrade,
+            _get_alembic_config(engine),
+            "head",
+        )
+        await engine.dispose()
+        engine = create_async_engine(database_url)
+        async with engine.connect() as connection:
+            revision = await _current_revision(connection)
+            if revision != _PROJECT_AUTOMATION_FINAL_REVISION:
+                raise PrivateWorkMigrationError("database head revision is incomplete")
+            automation_marker = (
+                await connection.execute(
+                    text(
+                        """SELECT stage,final_schema_probe_complete,cutover_at
+                        FROM automation_cutover_state WHERE id=1"""
+                    )
+                )
+            ).one_or_none()
+            if automation_marker is None or automation_marker.stage != "cutover_complete" or automation_marker.final_schema_probe_complete is not True or automation_marker.cutover_at is None:
+                raise PrivateWorkMigrationError("project automation finalize marker is incomplete")
         return PrivateWorkMigrationReport(
             mode="execute",
             counts=counts,

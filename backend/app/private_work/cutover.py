@@ -10,9 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.errors import PrivateWorkCutover, PrivateWorkUnavailable
 from deerflow.persistence.private_work.model import PrivateWorkCutoverStateRow
+from deerflow.persistence.revisions import REVISION_ANCESTRY, RevisionAncestry
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
-PRIVATE_WORK_FINAL_REVISION = "0011_private_artifact_tombstone"
+PRIVATE_WORK_REQUIRED_REVISION = "0011_private_artifact_tombstone"
+# Compatibility export for test/support callers that still use the old name.
+PRIVATE_WORK_FINAL_REVISION = PRIVATE_WORK_REQUIRED_REVISION
 
 
 @dataclass(frozen=True)
@@ -29,10 +32,12 @@ class PrivateWorkCutoverGuard:
         session_factory: Callable[[], AsyncSession],
         *,
         request_id: str | None = None,
+        revisions: RevisionAncestry = REVISION_ANCESTRY,
     ) -> None:
         self._session_factory = session_factory
         self._request_session: AsyncSession | None = None
         self._request_id = request_id
+        self._revisions = revisions
 
     @classmethod
     def for_session(
@@ -40,11 +45,13 @@ class PrivateWorkCutoverGuard:
         session: AsyncSession,
         *,
         request_id: str | None = None,
+        revisions: RevisionAncestry = REVISION_ANCESTRY,
     ) -> PrivateWorkCutoverGuard:
         guard = cls.__new__(cls)
         guard._session_factory = None
         guard._request_session = session
         guard._request_id = request_id
+        guard._revisions = revisions
         return guard
 
     @property
@@ -94,11 +101,12 @@ class PrivateWorkCutoverGuard:
                 revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
         except SQLAlchemyError:
             raise PrivateWorkUnavailable(self.request_id) from None
-        if not marker.cutover_complete or revision != PRIVATE_WORK_FINAL_REVISION:
+        if not marker.cutover_complete or not self._revisions.contains(str(revision), PRIVATE_WORK_REQUIRED_REVISION):
             raise PrivateWorkCutover(self.request_id)
 
 
 __all__ = [
     "PRIVATE_WORK_FINAL_REVISION",
+    "PRIVATE_WORK_REQUIRED_REVISION",
     "PrivateWorkCutoverGuard",
 ]

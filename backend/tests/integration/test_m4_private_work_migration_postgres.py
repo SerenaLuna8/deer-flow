@@ -416,7 +416,7 @@ async def test_legacy_sqlite_private_rows_reach_final_m4_scope_through_0007(
     engine = create_async_engine(postgres_database_url)
     try:
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0011_private_artifact_tombstone"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013_project_automation_finalize"
             scoped_thread = (
                 (
                     await connection.execute(
@@ -495,7 +495,7 @@ async def test_dry_run_is_zero_write_and_execute_migrates_core_rows_idempotently
     engine = create_async_engine(postgres_database_url)
     try:
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0011_private_artifact_tombstone"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013_project_automation_finalize"
             assert await connection.scalar(text("SELECT project_id FROM threads_meta WHERE thread_id='thread-1'")) == project
             assert await connection.scalar(text("SELECT owner_user_id FROM runs WHERE run_id='run-1'")) == owner
             assert await connection.scalar(text("SELECT content FROM run_events WHERE run_id='run-1'")) == "private event"

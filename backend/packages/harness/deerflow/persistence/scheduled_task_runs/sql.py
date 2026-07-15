@@ -1,139 +1,277 @@
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.utils.time import coerce_iso
+from deerflow.runtime.private_scope import PrivateResourceScope
 
-TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"success", "failed", "skipped", "interrupted"})
-ACTIVE_RUN_STATUSES: tuple[str, ...] = ("queued", "running")
+TERMINAL_OCCURRENCE_STATUSES = frozenset({"success", "failed", "skipped", "interrupted", "cancelled", "rejected"})
+ACTIVE_OCCURRENCE_STATUSES = frozenset({"queued", "launching", "running"})
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledTaskRunCreate:
+    occurrence_id: str
+    task_id: str
+    task_version: int
+    occurrence_key: str
+    manual_idempotency_hash: str | None
+    scheduled_for: datetime
+    trigger: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledTaskRunRecord:
+    id: str
+    project_id: uuid.UUID
+    owner_user_id: str
+    task_id: str
+    task_version: int
+    occurrence_key: str
+    scheduled_for: datetime
+    trigger: str
+    status: str
+    thread_id: str | None
+    run_id: str | None
+    resolved_membership_id: uuid.UUID | None
+    resolved_membership_version: int | None
+    launch_attempt_count: int
+    next_attempt_at: datetime | None
+    error_code: str | None
+    error_message: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class ScheduledTaskRunRepository:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self._sf = session_factory
+    """Session-bound occurrence repository with mandatory private scope."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
 
     @staticmethod
-    def _row_to_dict(row: ScheduledTaskRunRow) -> dict[str, Any]:
-        data = row.to_dict()
-        for key in ("scheduled_for", "started_at", "finished_at", "created_at"):
-            if data.get(key) is not None:
-                data[key] = coerce_iso(data[key])
-        return data
+    def coordinates(scope: PrivateResourceScope) -> tuple[uuid.UUID, str]:
+        if type(scope) is not PrivateResourceScope:
+            raise TypeError("PrivateResourceScope is required")
+        try:
+            return uuid.UUID(scope.project_id), str(uuid.UUID(scope.owner_user_id))
+        except (TypeError, ValueError):
+            raise TypeError("PrivateResourceScope is invalid") from None
+
+    @classmethod
+    def predicates(cls, scope: PrivateResourceScope):
+        project_id, owner_user_id = cls.coordinates(scope)
+        return (
+            ScheduledTaskRunRow.project_id == project_id,
+            ScheduledTaskRunRow.owner_user_id == owner_user_id,
+        )
+
+    @staticmethod
+    def record(row: ScheduledTaskRunRow) -> ScheduledTaskRunRecord:
+        return ScheduledTaskRunRecord(
+            id=row.id,
+            project_id=row.project_id,
+            owner_user_id=row.owner_user_id,
+            task_id=row.task_id,
+            task_version=row.task_version,
+            occurrence_key=row.occurrence_key,
+            scheduled_for=row.scheduled_for,
+            trigger=row.trigger,
+            status=row.status,
+            thread_id=row.thread_id,
+            run_id=row.run_id,
+            resolved_membership_id=row.resolved_membership_id,
+            resolved_membership_version=row.resolved_membership_version,
+            launch_attempt_count=row.launch_attempt_count,
+            next_attempt_at=row.next_attempt_at,
+            error_code=row.error_code,
+            error_message=row.error_message,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _validate_page(limit: int, offset: int) -> None:
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
 
     async def create(
         self,
-        *,
-        run_record_id: str,
-        task_id: str,
-        thread_id: str,
-        scheduled_for: datetime,
-        trigger: str,
-        status: str,
-    ) -> dict[str, Any]:
+        scope: PrivateResourceScope,
+        request: ScheduledTaskRunCreate,
+    ) -> ScheduledTaskRunRecord:
+        project_id, owner_user_id = self.coordinates(scope)
+        now = datetime.now(UTC)
         row = ScheduledTaskRunRow(
-            id=run_record_id,
-            task_id=task_id,
-            thread_id=thread_id,
-            scheduled_for=scheduled_for,
-            trigger=trigger,
-            status=status,
-            created_at=datetime.now(UTC),
+            id=request.occurrence_id,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            task_id=request.task_id,
+            task_version=request.task_version,
+            occurrence_key=request.occurrence_key,
+            manual_idempotency_hash=request.manual_idempotency_hash,
+            scheduled_for=request.scheduled_for,
+            trigger=request.trigger,
+            status=request.status,
+            resolved_membership_version=scope.membership_version,
+            launch_attempt_count=0,
+            created_at=now,
+            updated_at=now,
         )
-        async with self._sf() as session:
-            session.add(row)
-            await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row)
+        self.session.add(row)
+        await self.session.flush()
+        return self.record(row)
 
-    async def list_by_task(self, task_id: str, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        stmt = (
-            select(ScheduledTaskRunRow)
-            .where(ScheduledTaskRunRow.task_id == task_id)
-            .order_by(
-                ScheduledTaskRunRow.created_at.desc(),
-                ScheduledTaskRunRow.id.desc(),
-            )
-            .limit(limit)
-            .offset(offset)
-        )
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            return [self._row_to_dict(row) for row in result.scalars()]
-
-    async def count_active_runs(self) -> int:
-        """Global count of queued/running rows, used to bound cross-task concurrency."""
-        stmt = select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES))
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            return int(result.scalar() or 0)
-
-    async def update_status(
+    async def get(
         self,
-        run_record_id: str,
+        scope: PrivateResourceScope,
+        occurrence_id: str,
+        *,
+        lock: bool = False,
+    ) -> ScheduledTaskRunRecord | None:
+        statement = sa.select(ScheduledTaskRunRow).where(
+            ScheduledTaskRunRow.id == occurrence_id,
+            *self.predicates(scope),
+        )
+        if lock:
+            statement = statement.with_for_update(of=ScheduledTaskRunRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def get_by_agent_run_id(
+        self,
+        scope: PrivateResourceScope,
+        run_id: str,
+        *,
+        lock: bool = False,
+    ) -> ScheduledTaskRunRecord | None:
+        statement = sa.select(ScheduledTaskRunRow).where(
+            ScheduledTaskRunRow.run_id == run_id,
+            *self.predicates(scope),
+        )
+        if lock:
+            statement = statement.with_for_update(of=ScheduledTaskRunRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def list_by_task(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[ScheduledTaskRunRecord, ...]:
+        self._validate_page(limit, offset)
+        rows = (
+            await self.session.execute(
+                sa.select(ScheduledTaskRunRow)
+                .where(
+                    ScheduledTaskRunRow.task_id == task_id,
+                    *self.predicates(scope),
+                )
+                .order_by(
+                    ScheduledTaskRunRow.created_at.desc(),
+                    ScheduledTaskRunRow.id.desc(),
+                )
+                .limit(limit)
+                .offset(offset)
+            )
+        ).scalars()
+        return tuple(self.record(row) for row in rows)
+
+    async def has_active(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+    ) -> bool:
+        row = (
+            await self.session.execute(
+                sa.select(ScheduledTaskRunRow.id)
+                .where(
+                    ScheduledTaskRunRow.task_id == task_id,
+                    ScheduledTaskRunRow.status.in_(ACTIVE_OCCURRENCE_STATUSES),
+                    *self.predicates(scope),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return row is not None
+
+    async def finish(
+        self,
+        scope: PrivateResourceScope,
+        occurrence_id: str,
         *,
         status: str,
-        run_id: str | None = None,
-        error: str | None = None,
-        started_at: datetime | None = None,
-        finished_at: datetime | None = None,
-        protect_terminal: bool = False,
-    ) -> None:
-        async with self._sf() as session:
-            row = await session.get(ScheduledTaskRunRow, run_record_id)
-            if row is None:
-                return
-            if protect_terminal and row.status in TERMINAL_RUN_STATUSES:
-                # The launch-path "running" write lost the race against the
-                # completion hook; keep the terminal status/error and only
-                # backfill bookkeeping the completion write could not know.
-                if row.run_id is None and run_id is not None:
-                    row.run_id = run_id
-                if row.started_at is None and started_at is not None:
-                    row.started_at = started_at
-                await session.commit()
-                return
-            row.status = status
-            row.run_id = run_id
-            row.error = error
-            if started_at is not None:
-                row.started_at = started_at
-            if finished_at is not None:
-                row.finished_at = finished_at
-            await session.commit()
+        error_code: str | None,
+        error_message: str | None,
+        finished_at: datetime,
+    ) -> bool:
+        if status not in TERMINAL_OCCURRENCE_STATUSES:
+            raise ValueError("status must be terminal")
+        result = await self.session.execute(
+            sa.update(ScheduledTaskRunRow)
+            .where(
+                ScheduledTaskRunRow.id == occurrence_id,
+                ScheduledTaskRunRow.status.not_in(TERMINAL_OCCURRENCE_STATUSES),
+                *self.predicates(scope),
+            )
+            .values(
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+                finished_at=finished_at,
+                lease_owner=None,
+                lease_expires_at=None,
+                updated_at=finished_at,
+            )
+        )
+        return result.rowcount == 1
 
-    async def has_active_runs(self, task_id: str) -> bool:
-        stmt = (
-            select(ScheduledTaskRunRow.id)
+    async def cancel_queued(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+        *,
+        now: datetime,
+        error_code: str,
+    ) -> int:
+        result = await self.session.execute(
+            sa.update(ScheduledTaskRunRow)
             .where(
                 ScheduledTaskRunRow.task_id == task_id,
-                ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+                ScheduledTaskRunRow.status == "queued",
+                *self.predicates(scope),
             )
-            .limit(1)
+            .values(
+                status="cancelled",
+                error_code=error_code,
+                finished_at=now,
+                lease_owner=None,
+                lease_expires_at=None,
+                updated_at=now,
+            )
         )
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            return result.scalars().first() is not None
+        return result.rowcount
 
-    async def mark_stale_active_runs(self, *, error: str) -> int:
-        """Fail-fast bookkeeping for runs orphaned by a process crash.
 
-        Agent runs execute in-process, so any ``queued``/``running`` row found
-        at scheduler startup belongs to a run whose process is gone. Only valid
-        under the MVP's single-scheduler-instance assumption.
-        """
-        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES))
-        now = datetime.now(UTC)
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            rows = list(result.scalars())
-            for row in rows:
-                row.status = "interrupted"
-                row.error = error
-                row.finished_at = now
-            await session.commit()
-            return len(rows)
+__all__ = [
+    "ACTIVE_OCCURRENCE_STATUSES",
+    "ScheduledTaskRunCreate",
+    "ScheduledTaskRunRecord",
+    "ScheduledTaskRunRepository",
+    "TERMINAL_OCCURRENCE_STATUSES",
+]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import sqlite3
 from datetime import UTC, datetime
@@ -8,11 +9,14 @@ from types import SimpleNamespace
 
 import asyncpg
 import pytest
+from alembic import command
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from sqlalchemy import DateTime, UniqueConstraint
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.base import Base
+from deerflow.persistence.bootstrap import _get_alembic_config
 from deerflow.persistence.migration_ledger import MigrationLedgerRow
 from scripts.migrate_sqlite_to_postgres import (
     USER_REFERENCE_ALLOWLIST,
@@ -1295,6 +1299,15 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
     _add_scheduled_task(sources[1], "task-second", "legacy-admin")
     request = _reconciliation_request(sources)
     plan = _preflight_cross_source(sources, request)
+    engine = create_async_engine(migrated_postgres_database_url)
+    try:
+        await asyncio.to_thread(
+            command.downgrade,
+            _get_alembic_config(engine),
+            "0007_project_shared_assets",
+        )
+    finally:
+        await engine.dispose()
 
     for index, source in enumerate(sources):
         await migrate_source(
@@ -1303,6 +1316,7 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
             dry_run=True,
             union_reference_keys=plan.per_source_reference_keys[index],
             source_reconciliation=plan.per_source_reconciliations[index],
+            target_mode=MigrationTargetMode.M4_STAGING,
         )
 
     async def migrate_all() -> None:
@@ -1313,6 +1327,7 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
                 dry_run=False,
                 union_reference_keys=plan.per_source_reference_keys[index],
                 source_reconciliation=plan.per_source_reconciliations[index],
+                target_mode=MigrationTargetMode.M4_STAGING,
             )
 
     await migrate_all()
@@ -1419,10 +1434,10 @@ async def test_real_postgres_semantic_migration_and_idempotent_replay(
             );
             CREATE TABLE store_migrations (v INTEGER PRIMARY KEY);
             INSERT INTO store VALUES (
-                'synthetic.namespace', 'key', '{"answer":42}',
-                '2026-07-12T00:00:00+00:00', '2026-07-12T00:01:00+00:00',
-                '2026-07-12T00:30:00+00:00', 30
-            );
+                    'synthetic.namespace', 'key', '{"answer":42}',
+                    '2026-07-12T00:00:00+00:00', '2026-07-12T00:01:00+00:00',
+                    '2026-07-12T00:30:00+00:00', 30
+                );
             """
         )
         connection.execute(

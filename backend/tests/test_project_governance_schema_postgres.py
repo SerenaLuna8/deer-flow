@@ -129,7 +129,7 @@ async def test_m2_schema_has_governance_constraints(
         } <= _foreign_key_targets(invitation_fks)
         pending_email_index = next(index for index in invitation_indexes if index["name"] == "uq_project_invitations_pending_email")
         assert pending_email_index["unique"] is True
-        assert version == "0011_private_artifact_tombstone"
+        assert version == "0013_project_automation_finalize"
         assert "project_invitations" in Base.metadata.tables
         assert persistence_models.ProjectInvitationRow.__tablename__ == ("project_invitations")
         assert persistence_models.ProjectInvitationRateLimitRow.__tablename__ == ("project_invitation_rate_limits")

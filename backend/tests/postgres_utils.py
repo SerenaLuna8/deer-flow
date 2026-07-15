@@ -65,7 +65,7 @@ async def temporary_postgres_database(admin_url: str) -> AsyncIterator[str]:
     try:
         try:
             async with admin_engine.connect() as connection:
-                await connection.execute(text(f'CREATE DATABASE "{database}"'))
+                await connection.execute(text(f"CREATE DATABASE \"{database}\" TEMPLATE template0 ENCODING 'UTF8'"))
         except Exception:
             raise RuntimeError("unable to create isolated PostgreSQL test database") from None
 

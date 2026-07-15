@@ -31,6 +31,8 @@ from deerflow.persistence.bootstrap import (
         ("0009_project_private_work_finalize", False),
         ("0010_private_file_source", False),
         ("0011_private_artifact_tombstone", False),
+        ("0012_project_automation_expand", False),
+        ("0013_project_automation_finalize", False),
         ("0010_unknown_future_revision", True),
     ],
 )
@@ -201,6 +203,95 @@ async def test_gateway_bootstrap_never_enters_empty_receipt_state_machine_for_ve
         assert revision == "0007_project_shared_assets"
         assert receipts is None
         assert markers is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_gateway_bootstrap_requires_explicit_automation_migration_for_nonempty_0011(
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_schema(engine)
+        cfg = _get_alembic_config(engine)
+        await asyncio.to_thread(
+            alembic_command.downgrade,
+            cfg,
+            "0011_private_artifact_tombstone",
+        )
+        await engine.dispose()
+        engine = create_async_engine(postgres_database_url)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO scheduled_tasks
+                    (id,user_id,thread_id,context_mode,assistant_id,title,prompt,
+                     schedule_type,schedule_spec,timezone,status,overlap_policy,
+                     next_run_at,last_run_at,last_run_id,last_thread_id,last_error,
+                     lease_owner,lease_expires_at,run_count,created_at,updated_at)
+                    VALUES
+                    ('legacy-task','legacy-owner',NULL,'fresh_thread_per_run',NULL,
+                     'Legacy','private','once','{}'::json,'UTC','enabled','skip',
+                     NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,now(),now())"""
+                )
+            )
+
+        with pytest.raises(RuntimeError, match="automation migration required"):
+            await bootstrap_schema(engine)
+
+        async with engine.connect() as connection:
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            columns = await connection.run_sync(lambda sync: {column["name"] for column in inspect(sync).get_columns("scheduled_tasks")})
+        assert revision == "0011_private_artifact_tombstone"
+        assert "project_id" not in columns
+        assert "owner_user_id" not in columns
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_gateway_bootstrap_upgrades_empty_0011_automation_domain(
+    postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_schema(engine)
+        cfg = _get_alembic_config(engine)
+        await asyncio.to_thread(
+            alembic_command.downgrade,
+            cfg,
+            "0011_private_artifact_tombstone",
+        )
+        await engine.dispose()
+        engine = create_async_engine(postgres_database_url)
+
+        await bootstrap_schema(engine)
+
+        async with engine.connect() as connection:
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            marker = (
+                await connection.execute(
+                    text(
+                        """SELECT stage,empty_domain_probe_complete,
+                        final_schema_probe_complete,cutover_at
+                        FROM automation_cutover_state WHERE id=1"""
+                    )
+                )
+            ).one()
+        assert revision == "0013_project_automation_finalize"
+        assert marker.stage == "cutover_complete"
+        assert marker.empty_domain_probe_complete is True
+        assert marker.final_schema_probe_complete is True
+        assert marker.cutover_at is not None
     finally:
         await engine.dispose()
 

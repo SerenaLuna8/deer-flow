@@ -14,10 +14,13 @@ Three-branch decision (see ``_decide_state``)
 
 | DB state                              | Action                                  |
 |---------------------------------------|-----------------------------------------|
-| empty (no DeerFlow tables)            | ``create_all`` + ``stamp head`` + empty-source probes + cutover marker |
+| empty (no DeerFlow tables)            | ``create_all`` + ``stamp head`` + M4/M5 empty probes and markers |
 | legacy (DeerFlow tables, no alembic)  | baseline-era backfill + ``stamp 0001`` + ``upgrade 0007`` + require explicit M4 migration |
-| versioned at M4 final/head            | no-op                                   |
 | versioned before M4 final             | require explicit M4 migration before any upgrade |
+| versioned at M4 final through 0010    | upgrade to the 0011 Automation staging boundary |
+| versioned at 0011 with Automation rows| require explicit M5 migration before expand DDL |
+| versioned at 0011/0012 with empty rows| upgrade/finalize M5 and require the complete marker |
+| versioned at M5 final/head            | verify the complete M5 marker            |
 
 The legacy branch handles pre-alembic databases that already have at least one
 DeerFlow-owned table. A frozen 0001-era catalog runs first because stamping at
@@ -40,7 +43,9 @@ manual-ALTER cases for ``token_usage_by_model``) is answered by each
 the idempotent helpers in ``migrations/_helpers.py`` (``safe_add_column``
 no-ops when the column is already present and ``logger.warning``s on
 shape drift). The M4 boundary is crossed only by ``make migrate-private-work``;
-ordinary startup never invokes 0008/0009 for an existing database.
+ordinary startup never invokes 0008/0009 for an existing database. The M5
+boundary similarly stops a non-empty 0011 Automation domain before 0012/0013;
+only an empty domain may finalize during ordinary startup.
 
 Concurrency safety
 ------------------
@@ -74,6 +79,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from deerflow.config.runtime_paths import runtime_home
+from deerflow.persistence.revisions import REVISION_ANCESTRY
 
 logger = logging.getLogger(__name__)
 
@@ -102,13 +108,7 @@ _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
 _EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS = 5_000
 _EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS = 10_000
 
-_PRIVATE_WORK_SAFE_REVISIONS = frozenset(
-    {
-        "0009_project_private_work_finalize",
-        "0010_private_file_source",
-        "0011_private_artifact_tombstone",
-    }
-)
+_PRIVATE_WORK_FINAL_REVISION = "0009_project_private_work_finalize"
 _PRIVATE_WORK_PRE_EXPAND_REVISION = "0007_project_shared_assets"
 _PRIVATE_WORK_PRE_EXPAND_REVISIONS = frozenset(
     {
@@ -121,6 +121,8 @@ _PRIVATE_WORK_PRE_EXPAND_REVISIONS = frozenset(
         _PRIVATE_WORK_PRE_EXPAND_REVISION,
     }
 )
+_AUTOMATION_PRE_EXPAND_REVISION = "0011_private_artifact_tombstone"
+_AUTOMATION_FINAL_REVISION = "0013_project_automation_finalize"
 _LEGACY_PRIVATE_WORK_DB_TABLES: tuple[str, ...] = (
     "threads_meta",
     "runs",
@@ -437,7 +439,7 @@ def _decide_state(state: dict[str, bool]) -> str:
 
 def _requires_explicit_private_work_migration(revision: str) -> bool:
     """Return whether ordinary startup must stop at the M4 staged boundary."""
-    return revision not in _PRIVATE_WORK_SAFE_REVISIONS
+    return not REVISION_ANCESTRY.contains(revision, _PRIVATE_WORK_FINAL_REVISION)
 
 
 def _filesystem_has_legacy_private_source(home: Path) -> bool:
@@ -536,6 +538,92 @@ async def _write_empty_install_cutover_marker(engine: AsyncEngine) -> None:
                 ON CONFLICT (id) DO NOTHING"""
             )
         )
+
+
+def _database_has_legacy_automation_source_sync(sync_conn: Any) -> bool:
+    inspector = sa_inspect(sync_conn)
+    present = set(inspector.get_table_names())
+    for table in ("scheduled_tasks", "scheduled_task_runs"):
+        if table in present and sync_conn.execute(text(f'SELECT EXISTS (SELECT 1 FROM "{table}" LIMIT 1)')).scalar_one():  # noqa: S608 - fixed internal table allowlist
+            return True
+    return False
+
+
+def _automation_schema_is_final_sync(sync_conn: Any) -> bool:
+    inspector = sa_inspect(sync_conn)
+    present = set(inspector.get_table_names())
+    required_tables = {
+        "scheduled_tasks",
+        "scheduled_task_runs",
+        "automation_migration_runs",
+        "automation_migration_ledger",
+        "automation_cutover_state",
+    }
+    if not required_tables <= present:
+        return False
+    task_columns = {column["name"] for column in inspector.get_columns("scheduled_tasks")}
+    run_columns = {column["name"] for column in inspector.get_columns("scheduled_task_runs")}
+    return (
+        {"project_id", "owner_user_id", "agent_asset_id", "version"} <= task_columns
+        and {"user_id", "assistant_id", "last_run_id", "lease_owner"}.isdisjoint(task_columns)
+        and {
+            "project_id",
+            "owner_user_id",
+            "task_version",
+            "occurrence_key",
+            "launch_attempt_count",
+        }
+        <= run_columns
+        and "error" not in run_columns
+    )
+
+
+async def _write_empty_install_automation_cutover_marker(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.begin() as conn:
+        database_has_source = await conn.run_sync(_database_has_legacy_automation_source_sync)
+        if database_has_source:
+            raise RuntimeError("automation migration required; stop writers before schema finalize")
+        m4_marker = (
+            await conn.execute(
+                text(
+                    """SELECT stage,cutover_at FROM private_work_cutover_state
+                    WHERE id=1"""
+                )
+            )
+        ).one_or_none()
+        if m4_marker is None or m4_marker.stage != "cutover_complete" or m4_marker.cutover_at is None:
+            raise RuntimeError("automation finalize prerequisites are incomplete: M4 cutover is not complete")
+        schema_is_final = await conn.run_sync(_automation_schema_is_final_sync)
+        if not schema_is_final:
+            raise RuntimeError("automation final schema probe failed")
+        await conn.execute(
+            text(
+                """INSERT INTO automation_cutover_state
+                (id,stage,migration_run_id,empty_domain_probe_complete,
+                 final_schema_probe_complete,cutover_at,updated_at)
+                VALUES (1,'cutover_complete',NULL,true,true,now(),now())
+                ON CONFLICT (id) DO NOTHING"""
+            )
+        )
+
+
+async def _assert_automation_cutover_complete(engine: AsyncEngine) -> None:
+    async with engine.connect() as conn:
+        marker_table = await conn.scalar(text("SELECT to_regclass('automation_cutover_state')"))
+        if marker_table is None:
+            raise RuntimeError("automation migration required: cutover marker missing")
+        marker = (
+            await conn.execute(
+                text(
+                    """SELECT stage,final_schema_probe_complete,cutover_at
+                    FROM automation_cutover_state WHERE id=1"""
+                )
+            )
+        ).one_or_none()
+    if marker is None or marker.stage != "cutover_complete" or marker.final_schema_probe_complete is not True or marker.cutover_at is None:
+        raise RuntimeError("automation migration required: cutover is not complete")
 
 
 def _run_create_all_sync(sync_conn: Any) -> None:
@@ -842,6 +930,7 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
                 if has_filesystem_source:
                     raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
                 await _write_empty_install_cutover_marker(engine)
+                await _write_empty_install_automation_cutover_marker(engine)
             except BaseException:
                 # This invocation proved the DeerFlow-owned schema was empty
                 # before create_all. Restore that state so a failed stamp never
@@ -882,15 +971,36 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
             logger.info("bootstrap: branch=versioned -> upgrade head (%s)", head)
             async with engine.connect() as conn:
                 current_revision = await conn.scalar(text("SELECT version_num FROM alembic_version"))
-            if _requires_explicit_private_work_migration(str(current_revision)):
-                if str(current_revision) in _PRIVATE_WORK_PRE_EXPAND_REVISIONS and str(current_revision) != _PRIVATE_WORK_PRE_EXPAND_REVISION:
+            current_revision = str(current_revision)
+            if _requires_explicit_private_work_migration(current_revision):
+                if current_revision in _PRIVATE_WORK_PRE_EXPAND_REVISIONS and current_revision != _PRIVATE_WORK_PRE_EXPAND_REVISION:
                     await _run_alembic_offload(
                         _upgrade,
                         cfg,
                         _PRIVATE_WORK_PRE_EXPAND_REVISION,
                     )
                 raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
+
+            if not REVISION_ANCESTRY.contains(current_revision, _AUTOMATION_PRE_EXPAND_REVISION):
+                await _run_alembic_offload(
+                    _upgrade,
+                    cfg,
+                    _AUTOMATION_PRE_EXPAND_REVISION,
+                )
+                current_revision = _AUTOMATION_PRE_EXPAND_REVISION
+
+            if not REVISION_ANCESTRY.contains(current_revision, _AUTOMATION_FINAL_REVISION):
+                if current_revision == _AUTOMATION_PRE_EXPAND_REVISION:
+                    async with engine.connect() as conn:
+                        database_has_source = await conn.run_sync(_database_has_legacy_automation_source_sync)
+                    if database_has_source:
+                        raise RuntimeError("automation migration required; stop writers and run the staged automation migration")
+            # Preserve the historical no-op Alembic call at head. Besides
+            # making externally-added revisions discoverable, the offload is
+            # the cancellation/lock boundary exercised by bootstrap callers.
             await _run_alembic_offload(_upgrade, cfg, "head")
+
+            await _assert_automation_cutover_complete(engine)
 
         else:  # pragma: no cover -- defensive
             raise RuntimeError(f"bootstrap: unhandled decision {decision!r}")

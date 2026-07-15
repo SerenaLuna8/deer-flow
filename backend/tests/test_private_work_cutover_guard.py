@@ -163,6 +163,36 @@ async def test_pre_expand_schema_keeps_legacy_open_and_project_closed(
         await guard.require_project_open()
 
 
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_project_private_guard_accepts_descendant_revision(
+    seed: M4ThreadSeed,
+) -> None:
+    async with seed.engine.begin() as connection:
+        await connection.execute(
+            text(
+                """UPDATE alembic_version
+                SET version_num='0013_project_automation_finalize'"""
+            )
+        )
+
+    guard = PrivateWorkCutoverGuard(seed.factory, request_id="m5-descendant")
+    await guard.require_project_open()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_project_private_guard_fails_closed_for_unknown_revision(
+    seed: M4ThreadSeed,
+) -> None:
+    async with seed.engine.begin() as connection:
+        await connection.execute(text("UPDATE alembic_version SET version_num='unknown_branch'"))
+
+    guard = PrivateWorkCutoverGuard(seed.factory, request_id="unknown-branch")
+    with pytest.raises(PrivateWorkCutover):
+        await guard.require_project_open()
+
+
 class _RejectingLegacyGuard:
     async def require_legacy_open(self) -> None:
         raise PrivateWorkCutover("runtime-cutover")

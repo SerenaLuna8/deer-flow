@@ -306,11 +306,14 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.persistence.thread_meta import make_thread_store
 
         app.state.thread_store = make_thread_store(sf)
-        from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
-        from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
-
-        app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
-        app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
+        # M5 repositories are session-bound and accept only an exact
+        # PrivateResourceScope. They are constructed inside project service
+        # transactions; never hand them to the legacy user-scoped router or
+        # scheduler, which still passes naked user/task identifiers. Task 7
+        # installs the new occurrence orchestrator and Task 9 owns the stable
+        # legacy cutover response.
+        app.state.scheduled_task_repo = None
+        app.state.scheduled_task_run_repo = None
 
         # Legacy run event store. The store and the matching
         # ``run_events_config`` are both frozen at startup so

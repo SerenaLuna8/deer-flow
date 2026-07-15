@@ -262,7 +262,7 @@ async def test_m3_schema_has_all_typed_tables(migrated_postgres_database_url: st
             tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
             revision = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
         assert EXPECTED_TABLES <= tables
-        assert revision == "0011_private_artifact_tombstone"
+        assert revision == "0013_project_automation_finalize"
         assert EXPECTED_TABLES <= set(Base.metadata.tables)
 
         shared_assets = importlib.import_module("deerflow.persistence.shared_assets")

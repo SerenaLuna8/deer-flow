@@ -160,6 +160,14 @@ _SOURCE_TYPE_COLUMN_ALIASES = {
     ("runs", "user_id"): "owner_user_id",
     ("run_events", "user_id"): "owner_user_id",
     ("feedback", "user_id"): "owner_user_id",
+    ("scheduled_tasks", "user_id"): "owner_user_id",
+    ("scheduled_tasks", "assistant_id"): "agent_scope",
+    ("scheduled_tasks", "last_run_id"): "id",
+    ("scheduled_tasks", "last_thread_id"): "thread_id",
+    ("scheduled_tasks", "last_error"): "prompt",
+    ("scheduled_tasks", "lease_owner"): "title",
+    ("scheduled_tasks", "lease_expires_at"): "next_run_at",
+    ("scheduled_task_runs", "error"): "error_message",
 }
 _FROZEN_SOURCE_UNIQUE_SPECS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
     "channel_connections": (

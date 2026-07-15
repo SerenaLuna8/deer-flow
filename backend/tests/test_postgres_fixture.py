@@ -289,6 +289,7 @@ async def test_temporary_database_is_generated_and_dropped(postgres_admin_url: s
         engine = create_async_engine(database_url)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT current_database()")) == database
+            assert await connection.scalar(text("SHOW server_encoding")) == "UTF8"
         await engine.dispose()
 
     admin_engine = create_async_engine(postgres_admin_url)
