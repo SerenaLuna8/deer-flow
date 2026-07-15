@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import hashlib
+import json
 import logging
 import os
 import shlex
@@ -40,9 +41,11 @@ from typing import Any
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config import get_app_config
+from deerflow.private_scope import PrivateResourceScope
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, SandboxProvider
 
 from .e2b_sandbox import DEFAULT_E2B_HOME_DIR, E2BSandbox, _is_sandbox_gone_error
 
@@ -62,7 +65,52 @@ MAX_E2B_TIMEOUT = 24 * 60 * 60
 META_KEY_USER = "deer_flow_user"
 META_KEY_THREAD = "deer_flow_thread"
 META_KEY_PROVIDER = "deer_flow_provider"
+META_KEY_PROJECT = "deer_flow_project"
+META_KEY_RUN = "deer_flow_run"
 META_VAL_PROVIDER = "e2b_sandbox_provider"
+PRIVATE_EXECUTION_USER = "deerflow_agent"
+PRIVATE_HOME_DIR = f"/home/{PRIVATE_EXECUTION_USER}/user-data"
+PRIVATE_READ_ONLY_PROBE_ROOT = "/mnt/deerflow-private-skills-probe"
+_PRIVATE_IDENTITY_PROBE = r"""
+import grp
+import json
+import os
+import shutil
+import subprocess
+
+status = {}
+with open("/proc/self/status", encoding="utf-8") as stream:
+    for line in stream:
+        if ":" in line:
+            key, value = line.split(":", 1)
+            status[key] = value.strip()
+
+groups = []
+for gid in sorted({os.getgid(), *os.getgroups()}):
+    try:
+        groups.append(grp.getgrgid(gid).gr_name)
+    except KeyError:
+        groups.append(str(gid))
+
+sudo = shutil.which("sudo")
+sudo_returncode = None
+if sudo is not None:
+    sudo_returncode = subprocess.run(
+        [sudo, "-n", "true"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode
+
+print(json.dumps({
+    "uid": os.getuid(),
+    "groups": groups,
+    "cap_eff": int(status.get("CapEff", "-1"), 16),
+    "no_new_privs": int(status.get("NoNewPrivs", "-1")),
+    "sudo_returncode": sudo_returncode,
+}, separators=(",", ":")))
+"""
 
 
 class E2BSandboxProvider(SandboxProvider):
@@ -73,6 +121,7 @@ class E2BSandboxProvider(SandboxProvider):
     # remote backend in AioSandboxProvider sets the same flag).
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
+    _supports_isolated_private_file_authority = True
 
     # ── Construction & config ────────────────────────────────────────────
 
@@ -203,6 +252,217 @@ class E2BSandboxProvider(SandboxProvider):
             with self._get_thread_lock(thread_id, effective_user_id):
                 return self._acquire_internal(thread_id, user_id=effective_user_id)
         return self._acquire_internal(thread_id, user_id=effective_user_id)
+
+    def _acquire_private_fresh(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        """Allocate one e2b VM tagged with the complete private identity."""
+
+        sandbox_cls = self._get_sandbox_cls()
+        create_kwargs: dict[str, Any] = {
+            "template": self._config["template"],
+            "metadata": {
+                META_KEY_PROVIDER: META_VAL_PROVIDER,
+                META_KEY_PROJECT: scope.project_id,
+                META_KEY_USER: scope.owner_user_id,
+                META_KEY_THREAD: thread_id,
+                META_KEY_RUN: run_id,
+            },
+            **self._common_kwargs(),
+        }
+        if self._config["idle_timeout"] > 0:
+            create_kwargs["timeout"] = self._config["idle_timeout"]
+        if self._config["environment"]:
+            create_kwargs["envs"] = self._config["environment"]
+        client = sandbox_cls.create(**create_kwargs)  # type: ignore[attr-defined]
+        sandbox_id = getattr(client, "sandbox_id", None)
+        if not isinstance(sandbox_id, str) or not sandbox_id:
+            self._safe_close_client(client)
+            raise SandboxRuntimeError("e2b returned an invalid private sandbox id")
+        try:
+            read_only_roots = self._provision_private_runtime(client, mounts)
+            self._probe_private_runtime(client, read_only_roots)
+            sandbox = E2BSandbox(
+                id=sandbox_id,
+                client=client,
+                home_dir=PRIVATE_HOME_DIR,
+                execution_user=PRIVATE_EXECUTION_USER,
+                read_only_roots=read_only_roots,
+            )
+            with self._lock:
+                self._sandboxes[sandbox_id] = sandbox
+            return sandbox_id
+        except BaseException:
+            try:
+                kill = getattr(client, "kill", None)
+                if callable(kill):
+                    kill()
+            finally:
+                self._safe_close_client(client)
+            raise
+
+    @classmethod
+    def _provision_private_runtime(
+        cls,
+        client: E2BClientSandbox,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> tuple[str, ...]:
+        """Create the no-sudo agent user and immutable skill trees as root."""
+
+        bootstrap = (
+            "set -eu; command -v setpriv >/dev/null; "
+            f"if id -u {PRIVATE_EXECUTION_USER} >/dev/null 2>&1; then exit 64; fi; "
+            f"useradd --create-home --shell /bin/sh {PRIVATE_EXECUTION_USER}; "
+            f"install -d -o {PRIVATE_EXECUTION_USER} -g {PRIVATE_EXECUTION_USER} -m 0700 "
+            f"/home/{PRIVATE_EXECUTION_USER} {PRIVATE_HOME_DIR} "
+            f"{PRIVATE_HOME_DIR}/workspace {PRIVATE_HOME_DIR}/uploads "
+            f"{PRIVATE_HOME_DIR}/outputs /home/{PRIVATE_EXECUTION_USER}/acp-workspace; "
+            f"install -d -o root -g root -m 0555 {PRIVATE_READ_ONLY_PROBE_ROOT}; "
+            "rm -rf /mnt/user-data /mnt/acp-workspace; "
+            f"ln -s {PRIVATE_HOME_DIR} /mnt/user-data; "
+            f"ln -s /home/{PRIVATE_EXECUTION_USER}/acp-workspace /mnt/acp-workspace"
+        )
+        result = client.commands.run(bootstrap, user="root")
+        if getattr(result, "exit_code", 0) not in (0, None) or getattr(result, "stderr", ""):
+            raise SandboxRuntimeError("Failed to provision private e2b user")
+
+        roots: list[str] = []
+        for mount in mounts:
+            container_root = mount.container_path.rstrip("/")
+            if (
+                not container_root.startswith("/")
+                or container_root in {"", "/", "/mnt/user-data"}
+                or container_root.startswith("/mnt/user-data/")
+                or any(container_root == root or container_root.startswith(f"{root}/") or root.startswith(f"{container_root}/") for root in roots)
+            ):
+                raise SandboxRuntimeError("Invalid private read-only mount target")
+            cls._upload_private_mount_as_root(
+                client,
+                Path(mount.host_path),
+                container_root,
+            )
+            protect = f"set -eu; chown -R root:root -- {shlex.quote(container_root)}; find {shlex.quote(container_root)} -type d -exec chmod 0555 {{}} +; find {shlex.quote(container_root)} -type f -exec chmod 0555 {{}} +"
+            protected = client.commands.run(protect, user="root")
+            if getattr(protected, "exit_code", 0) not in (0, None) or getattr(protected, "stderr", ""):
+                raise SandboxRuntimeError("Failed to protect private e2b mount")
+            roots.append(container_root)
+        return tuple(roots)
+
+    @classmethod
+    def _probe_private_runtime(
+        cls,
+        client: E2BClientSandbox,
+        read_only_roots: tuple[str, ...],
+    ) -> None:
+        """Prove the E2B runtime boundary before exposing it as authority."""
+
+        command = f"setpriv --no-new-privs -- python3 -c {shlex.quote(_PRIVATE_IDENTITY_PROBE)}"
+        result = client.commands.run(command, user=PRIVATE_EXECUTION_USER)
+        if getattr(result, "exit_code", 0) not in (0, None) or getattr(result, "stderr", ""):
+            raise SandboxRuntimeError("Private e2b identity probe failed")
+        try:
+            payload = json.loads(getattr(result, "stdout", "") or "")
+        except (TypeError, ValueError) as exc:
+            raise SandboxRuntimeError("Private e2b identity probe returned invalid data") from exc
+        groups = payload.get("groups")
+        sudo_returncode = payload.get("sudo_returncode")
+        privileged_groups = {
+            "admin",
+            "containerd",
+            "docker",
+            "lxd",
+            "podman",
+            "root",
+            "sudo",
+            "wheel",
+        }
+        if (
+            type(payload.get("uid")) is not int
+            or payload["uid"] <= 0
+            or not isinstance(groups, list)
+            or not all(isinstance(group, str) for group in groups)
+            or any(group.casefold() in privileged_groups for group in groups)
+            or payload.get("cap_eff") != 0
+            or payload.get("no_new_privs") != 1
+            or sudo_returncode == 0
+        ):
+            raise SandboxRuntimeError("Private e2b identity boundary is unsafe")
+
+        probe_roots = read_only_roots or (PRIVATE_READ_ONLY_PROBE_ROOT,)
+        for root in probe_roots:
+            target = f"{root.rstrip('/')}/.deerflow-private-write-probe"
+            shell_probe = f"if (: > {shlex.quote(target)}) 2>/dev/null; then rm -f -- {shlex.quote(target)}; exit 91; fi"
+            shell_result = client.commands.run(
+                f"setpriv --no-new-privs -- sh -lc {shlex.quote(shell_probe)}",
+                user=PRIVATE_EXECUTION_USER,
+            )
+            if getattr(shell_result, "exit_code", 0) not in (0, None):
+                raise SandboxRuntimeError("Private e2b shell write probe failed")
+
+            try:
+                client.files.write(target, b"probe", user=PRIVATE_EXECUTION_USER)
+            except Exception:
+                pass
+            else:
+                client.commands.run(
+                    f"rm -f -- {shlex.quote(target)}",
+                    user="root",
+                )
+                raise SandboxRuntimeError("Private e2b file API bypassed read-only skills")
+
+            absent = client.commands.run(
+                f"setpriv --no-new-privs -- sh -lc {shlex.quote(f'test ! -e {shlex.quote(target)}')}",
+                user=PRIVATE_EXECUTION_USER,
+            )
+            if getattr(absent, "exit_code", 0) not in (0, None):
+                raise SandboxRuntimeError("Private e2b file API write probe was inconclusive")
+
+    @staticmethod
+    def _upload_private_mount_as_root(
+        client: E2BClientSandbox,
+        source: Path,
+        container_root: str,
+    ) -> None:
+        if not source.exists() or source.is_symlink():
+            raise SandboxRuntimeError("Invalid private read-only mount source")
+        make_dir = getattr(client.files, "make_dir", None)
+        if callable(make_dir):
+            make_dir(container_root, user="root")
+        paths = (source,) if source.is_file() else tuple(sorted(source.rglob("*"), key=lambda item: item.as_posix()))
+        for path in paths:
+            before = path.lstat()
+            if path.is_symlink():
+                raise SandboxRuntimeError("Private read-only mount contains a link")
+            relative = path.name if source.is_file() else path.relative_to(source).as_posix()
+            target = f"{container_root}/{relative}"
+            if path.is_dir():
+                if callable(make_dir):
+                    make_dir(target, user="root")
+                continue
+            if not path.is_file() or before.st_nlink != 1:
+                raise SandboxRuntimeError("Private read-only mount contains an unsafe file")
+            content = path.read_bytes()
+            after = path.lstat()
+            if before.st_dev != after.st_dev or before.st_ino != after.st_ino or before.st_size != after.st_size:
+                raise SandboxRuntimeError("Private read-only mount changed during copy")
+            parent = target.rsplit("/", 1)[0]
+            if callable(make_dir):
+                make_dir(parent, user="root")
+            client.files.write(target, content, user="root")
+
+    def _destroy_private_sandbox(self, sandbox_id: str) -> None:
+        with self._lock:
+            sandbox = self._sandboxes.pop(sandbox_id, None)
+            self._warm_pool.pop(sandbox_id, None)
+            for key in [key for key, registered in self._thread_sandboxes.items() if registered == sandbox_id]:
+                self._thread_sandboxes.pop(key, None)
+        if sandbox is not None:
+            self._kill_and_close(sandbox)
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)

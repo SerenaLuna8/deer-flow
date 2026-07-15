@@ -1,6 +1,6 @@
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -131,7 +131,12 @@ class Sandbox(ABC):
     def id(self) -> str:
         return self._id
 
-    def list_secure_files(self, root: str) -> tuple[SandboxFileInfo, ...]:
+    def list_secure_files(
+        self,
+        root: str,
+        *,
+        max_entries: int,
+    ) -> Iterator[SandboxFileInfo]:
         """List regular and rejected objects without following links.
 
         Providers that do not implement this private-work boundary fail closed.
@@ -172,8 +177,9 @@ class Sandbox(ABC):
         self._private_atomic_writers[handle].write(content)
 
     def publish_atomic_file(self, handle: str) -> None:
-        writer = self._private_atomic_writers.pop(handle)
+        writer = self._private_atomic_writers[handle]
         writer.commit()
+        self._private_atomic_writers.pop(handle, None)
 
     def abort_atomic_file(self, handle: str) -> None:
         writer = self._private_atomic_writers.pop(handle, None)
@@ -200,6 +206,24 @@ class Sandbox(ABC):
         reader = self._private_regular_readers.pop(handle, None)
         if reader is not None:
             reader.close()
+
+    def close_private_file_authority(self) -> None:
+        """Close every opaque secure-I/O handle owned by this lease."""
+
+        writers = tuple(self._private_atomic_writers.values())
+        readers = tuple(self._private_regular_readers.values())
+        self._private_atomic_writers.clear()
+        self._private_regular_readers.clear()
+        for writer in writers:
+            try:
+                writer.abort()
+            except Exception:
+                pass
+        for reader in readers:
+            try:
+                reader.close()
+            except Exception:
+                pass
 
     @abstractmethod
     def execute_command(

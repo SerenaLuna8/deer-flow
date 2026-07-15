@@ -6,14 +6,17 @@
 - Baseline: `abe99ce73e8069d68993565d1149434cbb97e9d2`
 - Branch: `codex/m4-private-work`
 - Scope: Task 8 only
-- Implementation: GREEN candidate
-- Independent fixed-commit review: pending
+- Implementation: repaired GREEN candidate
+- Initial fixed-commit review: changes requested (2 Critical / 11 unique Important)
+- Frozen repair checklist: closed; final fixed-commit check pending
 - Task 9 / Task 11 / Task 12: not started
 
-Task 8 now implements the project-private sandbox restore, finalization, Thread
-lifecycle, and latest-visible-turn branch authority boundary. The implementation
-is not marked approved until an independent fixed-commit review reports 0
-Critical / 0 Important findings.
+Task 8 implements the project-private sandbox restore, finalization, Thread
+lifecycle, latest-visible-turn branch authority boundary, and provider-specific
+private leases. The initial fixed-commit review did not approve `f017dde8`; the
+resulting frozen repair list is now closed and merged verification is green. The
+task remains unapproved until one final fixed-commit check confirms the frozen
+Critical/Important list is closed.
 
 ## Delivered boundary
 
@@ -28,8 +31,10 @@ Critical / 0 Important findings.
 - Cancellation joins the finalizer commit and then rethrows
   `CancelledError`. Rollback, authorization revocation, LLM failure, and general
   worker failure durably mark private finalization failed before terminal status.
-- Skill mounts are validated and released by the private authority exactly once;
-  legacy worker and middleware lifetime remains unchanged.
+- Skill mounts are validated and released by the private authority. Provider
+  destroy failures retain the lease for retry; worker cleanup retries at most
+  three times without sleeping and does not report success after exhaustion.
+  Legacy worker and middleware lifetime remains unchanged.
 
 ### Bounded Local secure I/O and projection
 
@@ -45,9 +50,13 @@ Critical / 0 Important findings.
   hashes and whole-file hashes, revalidates membership per chunk page and after
   publication, and removes every partial/published file on failure or
   revocation.
-- AIO, E2B, and Boxlite are explicitly unsupported for project-private leases
-  in Task 8. Their `acquire_private` path fails before legacy acquisition; there
-  is no silent project-to-legacy fallback.
+- Local, AIO LocalContainer, E2B, and Boxlite implement run-scoped private
+  leases plus bounded descriptor-anchored binary I/O. AIO LocalContainer uses a
+  true read-only bind and rejects overlapping writable aliases/runtime sockets;
+  E2B uses a verified non-root/no-sudo execution identity; Boxlite uses native
+  hypervisor read-only volumes. AIO RemoteProvisioner cannot attest the required
+  hardened runtime and therefore fails before allocating a Pod. No project path
+  silently falls back to legacy acquisition.
 
 ### Finalization and presented artifacts
 
@@ -90,10 +99,10 @@ Critical / 0 Important findings.
 
 ### Bootstrap and legacy Gateway compatibility
 
-- Fresh/legacy databases at version `<= 0007` with no private source may take a
-  probe-gated empty install through `0008`, exact zero-ledger finalize receipts,
-  and the Task 8 head. Actual private source, unknown revision, or failed probes
-  remain fail closed.
+- Only a truly new, unversioned empty database may use the existing empty-install
+  bootstrap. Existing/versioned databases stop safely at the `0007` staged
+  boundary and require the future explicit Task 13 private-work migrator; normal
+  startup never synthesizes migration receipts or crosses `0008/0009`.
 - Alembic DDL bootstrap disposes the SQLAlchemy pool before returning so stale
   asyncpg prepared statement caches cannot survive schema changes.
 - Gateway recursive private-authority stripping keeps strict project behavior,
@@ -109,7 +118,7 @@ post-replace fsync failure, same-size second-scan mutation, and Gateway runtime
 selection stripping. Each was observed failing before the minimal production
 change and then rerun GREEN.
 
-The resume review also closed:
+The initial fixed-commit review and repair wave also closed:
 
 - branch requested/head selection escaping the source lock;
 - exact checkpoint-id comparison misclassifying metadata-only heads;
@@ -117,34 +126,34 @@ The resume review also closed:
 - target checkpoint copies losing channel values;
 - post-publication atomic-writer cleanup;
 - broad transaction rollback deleting unrelated target authority.
+- mapping-root and ancestor replacement, handle/fd leaks, unbounded directory
+  scans, Unicode canonical collisions, and post-publish rollback gaps;
+- concurrent authority changes between restore and final commit;
+- premature `finalizing` release, incompatible workspace-change events, and
+  project `present_files` legacy fallback;
+- staged-bootstrap boundary drift, branch chunk TOCTOU/whole-file aggregation,
+  cross-scope target enumeration, and partial migration retry;
+- AIO/E2B/Boxlite private lease, immutable skill delivery, lifecycle cleanup,
+  and provider capability checks.
 
 ## Fresh verification
 
-All PostgreSQL commands used the isolated PostgreSQL 14 cluster at port `55482`;
+Final merged PostgreSQL commands used the isolated PostgreSQL 14 cluster at port `55483`;
 fixtures created and dropped random `deerflow_test_*` databases. No business
 database was used.
 
 | Gate | Result |
 | --- | --- |
-| Core Task 8: sandbox projection + finalizer + Thread branch + file service | 133 passed, 0 skipped |
-| Cumulative `tests/test_private_*.py` authority matrix | 294 passed, 0 skipped |
-| Gateway/checkpointer/worker/middleware/context affected group | 312 passed, 0 skipped |
-| Local/base sandbox affected group | 107 passed, 1 platform skip |
-| Cumulative M1-M4 PostgreSQL schema files | 53 passed, 0 skipped |
-| Bootstrap / cumulative upgrade | 33 passed, 0 skipped |
-| `tests/integration` | 73 passed, 0 skipped |
-| `ruff format --check app packages tests` | 958 files formatted |
+| Merged Task 8 core + worker + middleware + Gateway | 477 passed, 0 skipped |
+| Cumulative M1-M4 schema + bootstrap + `tests/integration` | 165 passed, 0 skipped |
+| AIO/E2B/Boxlite/remote-contract + provider lifecycle | 210 passed, 0 skipped |
+| `ruff format --check app packages tests` | 960 files formatted |
 | `ruff check app packages tests` | passed |
 | `python -m compileall -q app packages tests` | passed |
 | `git diff --check` | passed |
 
-The single sandbox skip is
-`test_local_sandbox_command_timeout.py:44`, which requires Linux `/proc` fd
-links and is not runnable on the current macOS host. Focused Task 8 and every
-PostgreSQL gate completed with zero skips.
-
 ## Remaining release condition
 
-Create one fixed implementation commit, run an independent review against that
-commit, and repair until the review reaches 0 Critical / 0 Important. Task 8
-must remain review-pending until then. Do not start Task 9 from this report.
+Create one repair commit and run one final fixed-checklist review against the
+frozen Critical/Important findings. Task 8 remains review-pending until that
+check reaches 0 Critical / 0 Important. Task 9 has not started.

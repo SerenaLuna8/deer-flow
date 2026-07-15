@@ -18,6 +18,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import time
 
 import requests
 
@@ -28,6 +29,9 @@ from .backend import SandboxBackend
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+
+_PRIVATE_DESTROY_CONFIRM_TIMEOUT = 15.0
+_PRIVATE_DESTROY_POLL_INTERVAL = 0.25
 
 
 class RemoteSandboxBackend(SandboxBackend):
@@ -76,6 +80,11 @@ class RemoteSandboxBackend(SandboxBackend):
     def destroy(self, info: SandboxInfo) -> None:
         """Destroy a sandbox Pod + Service via the provisioner."""
         self._provisioner_destroy(info.sandbox_id)
+
+    def destroy_private(self, info: SandboxInfo) -> None:
+        """Destroy a private Pod, raising unless deletion is confirmed."""
+
+        self._provisioner_destroy(info.sandbox_id, strict=True)
 
     def is_alive(self, info: SandboxInfo) -> bool:
         """Check whether the sandbox Pod is running."""
@@ -169,19 +178,65 @@ class RemoteSandboxBackend(SandboxBackend):
             logger.error(f"Provisioner create failed for {sandbox_id}: {exc}")
             raise RuntimeError(f"Provisioner create failed: {exc}") from exc
 
-    def _provisioner_destroy(self, sandbox_id: str) -> None:
+    def _provisioner_destroy(self, sandbox_id: str, *, strict: bool = False) -> None:
         """DELETE /api/sandboxes/{sandbox_id} → destroy Pod + Service."""
         try:
             resp = requests.delete(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
                 timeout=15,
             )
-            if resp.ok:
-                logger.info(f"Provisioner destroyed sandbox {sandbox_id}")
-            else:
+            if resp.status_code == 404:
+                logger.info(f"Provisioner sandbox {sandbox_id} was already absent")
+                return
+            if not resp.ok:
                 logger.warning(f"Provisioner destroy returned {resp.status_code}: {resp.text}")
+                if strict:
+                    raise RuntimeError(f"Provisioner private destroy failed: HTTP {resp.status_code}")
+                return
+            if strict:
+                self._confirm_private_destroyed(sandbox_id)
+            logger.info(f"Provisioner destroyed sandbox {sandbox_id}")
         except requests.RequestException as exc:
             logger.warning(f"Provisioner destroy failed for {sandbox_id}: {exc}")
+            if strict:
+                # DELETE may have reached the server before the client timed
+                # out.  Confirm absence before deciding whether release must
+                # remain retryable.
+                try:
+                    if self._private_sandbox_is_absent(sandbox_id):
+                        logger.info(f"Provisioner sandbox {sandbox_id} was absent after DELETE failure")
+                        return
+                except (requests.RequestException, RuntimeError):
+                    pass
+                raise RuntimeError("Provisioner private destroy request failed") from exc
+
+    def _private_sandbox_is_absent(self, sandbox_id: str) -> bool:
+        response = requests.get(
+            f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
+            timeout=10,
+        )
+        if response.status_code == 404:
+            return True
+        if response.ok:
+            return False
+        raise RuntimeError(f"Provisioner private destroy confirmation failed: HTTP {response.status_code}")
+
+    def _confirm_private_destroyed(self, sandbox_id: str) -> None:
+        deadline = time.monotonic() + _PRIVATE_DESTROY_CONFIRM_TIMEOUT
+        last_error: Exception | None = None
+        while True:
+            try:
+                if self._private_sandbox_is_absent(sandbox_id):
+                    return
+                last_error = None
+            except (requests.RequestException, RuntimeError) as exc:
+                last_error = exc
+            if time.monotonic() >= deadline:
+                error = RuntimeError("Provisioner private destroy was not confirmed")
+                if last_error is not None:
+                    raise error from last_error
+                raise error
+            time.sleep(_PRIVATE_DESTROY_POLL_INTERVAL)
 
     def _provisioner_is_alive(self, sandbox_id: str) -> bool:
         """GET /api/sandboxes/{sandbox_id} → check Pod phase."""

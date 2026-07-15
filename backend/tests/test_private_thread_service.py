@@ -765,6 +765,144 @@ async def test_private_thread_branch_db_failure_does_not_delete_existing_target_
     assert [(item.id, item.logical_path, item.sha256) for item in ready] == [(existing.id, existing.logical_path, existing.sha256)]
 
 
+@pytest.mark.asyncio
+@pytest.mark.postgres
+@pytest.mark.parametrize(
+    ("target_context", "target_agent", "expected_error"),
+    (
+        ("same", "project_a", PrivateWorkConflict),
+        ("cross", "project_b", PrivateWorkNotFound),
+    ),
+)
+async def test_private_thread_branch_target_collision_hides_cross_scope_existence(
+    seed: M4ThreadSeed,
+    target_context: str,
+    target_agent: str,
+    expected_error: type[Exception],
+) -> None:
+    from app.private_work.thread_repository import ThreadAgentRef
+
+    service, _raw, scoped = _service(seed)
+    source = await service.create(
+        seed.owner_a,
+        thread_id=f"collision-source-{target_context}",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    target_id = f"collision-target-{target_context}"
+    target_owner = seed.owner_a if target_context == "same" else seed.project_b_owner_a
+    target_agent_id = seed.project_agent_id if target_agent == "project_a" else seed.project_b_agent_id
+    await service.create(
+        target_owner,
+        thread_id=target_id,
+        agent=ThreadAgentRef(target_agent_id, "project"),
+    )
+    selected = await scoped.for_context(seed.owner_a).aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        _checkpoint_with_messages(AIMessage(content="done", id="assistant-tail")),
+        {"source": "loop", "step": 0, "parents": {}},
+        {"messages": "messages-v1"},
+    )
+
+    with pytest.raises(expected_error):
+        await service.branch(
+            seed.owner_a,
+            source_thread_id=source.thread_id,
+            target_thread_id=target_id,
+            checkpoint_id=selected["configurable"]["checkpoint_id"],
+            expected_source_version=source.version,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+@pytest.mark.parametrize(
+    ("target_context", "target_agent", "expected_error"),
+    (
+        ("same", "project_a", PrivateWorkConflict),
+        ("cross", "project_b", PrivateWorkNotFound),
+    ),
+)
+async def test_private_thread_branch_savepoint_loser_rechecks_collision_scope(
+    seed: M4ThreadSeed,
+    target_context: str,
+    target_agent: str,
+    expected_error: type[Exception],
+) -> None:
+    from sqlalchemy import event
+
+    from app.private_work.thread_repository import ThreadAgentRef
+    from app.private_work.thread_service import PrivateThreadService
+
+    normal_service, _raw, scoped = _service(seed)
+    source = await normal_service.create(
+        seed.owner_a,
+        thread_id=f"savepoint-source-{target_context}",
+        agent=ThreadAgentRef(seed.project_agent_id, "project"),
+    )
+    target_id = f"savepoint-target-{target_context}"
+    target_owner = seed.owner_a if target_context == "same" else seed.project_b_owner_a
+    target_agent_id = seed.project_agent_id if target_agent == "project_a" else seed.project_b_agent_id
+    await normal_service.create(
+        target_owner,
+        thread_id=target_id,
+        agent=ThreadAgentRef(target_agent_id, "project"),
+    )
+    selected = await scoped.for_context(seed.owner_a).aput(
+        {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
+        _checkpoint_with_messages(AIMessage(content="done", id="assistant-tail")),
+        {"source": "loop", "step": 0, "parents": {}},
+        {"messages": "messages-v1"},
+    )
+
+    class StaleTargetPreflightService(PrivateThreadService):
+        target_checks = 0
+
+        async def _raise_if_branch_target_exists(self, session, context, target_thread_id):
+            self.target_checks += 1
+            if self.target_checks == 1:
+                return
+            await super()._raise_if_branch_target_exists(
+                session,
+                context,
+                target_thread_id,
+            )
+
+    service = StaleTargetPreflightService(seed.factory, scoped)
+    unique_violations: list[str | None] = []
+
+    def capture_integrity_error(exception_context) -> None:
+        statement = exception_context.statement or ""
+        if "INSERT INTO threads_meta" in statement:
+            unique_violations.append(getattr(exception_context.original_exception, "sqlstate", None))
+
+    event.listen(seed.engine.sync_engine, "handle_error", capture_integrity_error)
+    try:
+        with pytest.raises(expected_error):
+            await service.branch(
+                seed.owner_a,
+                source_thread_id=source.thread_id,
+                target_thread_id=target_id,
+                checkpoint_id=selected["configurable"]["checkpoint_id"],
+                expected_source_version=source.version,
+            )
+    finally:
+        event.remove(seed.engine.sync_engine, "handle_error", capture_integrity_error)
+
+    assert service.target_checks == 2
+    assert unique_violations == ["23505"]
+    async with seed.engine.connect() as connection:
+        coordinates = (
+            await connection.execute(
+                text(
+                    """SELECT project_id,owner_user_id FROM threads_meta
+                    WHERE thread_id=:thread_id"""
+                ),
+                {"thread_id": target_id},
+            )
+        ).one()
+    assert coordinates == (target_owner.project_id, str(target_owner.user_id))
+
+
 def test_private_thread_service_does_not_read_host_thread_directories() -> None:
     from app.private_work.thread_service import (
         BranchAuthorityCopyHook,

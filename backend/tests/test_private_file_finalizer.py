@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import threading
 import uuid
@@ -34,12 +35,14 @@ class MemorySecureSandbox:
         self.closed: list[str] = []
         self.order: list[str] = []
 
-    def list_secure_files(self, root: str):
+    def list_secure_files(self, root: str, *, max_entries: int):
         from deerflow.sandbox.sandbox import SandboxFileInfo
 
         self.order.append("scan")
         entries = [SandboxFileInfo(path=path, size=len(payload), file_type="regular") for path, payload in self.files.items() if path.startswith(root.rstrip("/") + "/")]
         entries.extend(SandboxFileInfo(path=path, size=0, file_type="symlink") for path in self.symlinks if path.startswith(root.rstrip("/") + "/"))
+        if len(entries) > max_entries:
+            raise OSError(errno.EFBIG, "secure scan limit exceeded")
         return tuple(sorted(entries, key=lambda item: item.path))
 
     def open_regular_file(self, path: str) -> str:
@@ -80,16 +83,30 @@ class BlockingReadSandbox(MemorySecureSandbox):
         return super().read_regular_file(handle, max_bytes)
 
 
+class BlockingOpenSandbox(MemorySecureSandbox):
+    def __init__(self, files: dict[str, bytes]) -> None:
+        super().__init__(files)
+        self.open_started = threading.Event()
+        self.allow_open = threading.Event()
+
+    def open_regular_file(self, path: str) -> str:
+        handle = super().open_regular_file(path)
+        self.open_started.set()
+        if not self.allow_open.wait(2):
+            raise TimeoutError("test did not release sandbox open")
+        return handle
+
+
 class MutatingSecondScanSandbox(MemorySecureSandbox):
     def __init__(self, files: dict[str, bytes]) -> None:
         super().__init__(files)
         self._root_scans = 0
 
-    def list_secure_files(self, root: str):
+    def list_secure_files(self, root: str, *, max_entries: int):
         self._root_scans += 1
         if self._root_scans == 3:
             self.files["/mnt/user-data/outputs/report.txt"] = b"changed"
-        return super().list_secure_files(root)
+        return super().list_secure_files(root, max_entries=max_entries)
 
 
 async def _seed_staging_sentinel(seed, thread_id: str, run_id: str) -> uuid.UUID:
@@ -118,6 +135,20 @@ async def _staging_ids(seed, run_id: str) -> tuple[uuid.UUID, ...]:
             )
         ).scalars()
         return tuple(rows)
+
+
+def _manifest_entry(file):
+    from app.private_work.sandbox_files import AuthorityManifestEntry
+
+    return AuthorityManifestEntry(
+        file_id=file.id,
+        logical_path=file.logical_path,
+        kind=file.kind,
+        media_type=file.media_type,
+        size=file.size,
+        sha256=file.sha256,
+        version=file.version,
+    )
 
 
 @pytest_asyncio.fixture()
@@ -259,7 +290,7 @@ async def test_finalizer_persists_unpresented_output_without_creating_artifact(f
     from app.private_work.file_finalizer import PrivateFileFinalizer
     from app.private_work.sandbox_files import AuthorityManifest, PrivateFileRunScope
 
-    seed, thread_id, run_id, _old = finalizer_seed
+    seed, thread_id, run_id, old = finalizer_seed
     sandbox = MemorySecureSandbox(
         {
             "/mnt/user-data/outputs/presented.txt": b"presented",
@@ -269,7 +300,7 @@ async def test_finalizer_persists_unpresented_output_without_creating_artifact(f
 
     result = await PrivateFileFinalizer(seed.factory).finalize(
         PrivateFileRunScope(seed.owner_a, thread_id=thread_id, run_id=run_id),
-        AuthorityManifest(entries=()),
+        AuthorityManifest(entries=(_manifest_entry(old),)),
         sandbox,
         presented_paths=("/mnt/user-data/outputs/presented.txt",),
     )
@@ -290,11 +321,10 @@ async def test_finalizer_creates_current_run_artifact_for_unchanged_presented_ou
     from app.private_work.file_service import PrivateFileService
     from app.private_work.sandbox_files import (
         AuthorityManifest,
-        AuthorityManifestEntry,
         PrivateFileRunScope,
     )
 
-    seed, thread_id, run_id, _old = finalizer_seed
+    seed, thread_id, run_id, old = finalizer_seed
     ready = await PrivateFileService(seed.factory).upload(
         seed.owner_a,
         thread_id=thread_id,
@@ -302,19 +332,7 @@ async def test_finalizer_creates_current_run_artifact_for_unchanged_presented_ou
         media_type="text/plain",
         chunks=_chunks(b"unchanged"),
     )
-    manifest = AuthorityManifest(
-        entries=(
-            AuthorityManifestEntry(
-                file_id=ready.id,
-                logical_path=ready.logical_path,
-                kind=ready.kind,
-                media_type=ready.media_type,
-                size=ready.size,
-                sha256=ready.sha256,
-                version=ready.version,
-            ),
-        )
-    )
+    manifest = AuthorityManifest(entries=(_manifest_entry(old), _manifest_entry(ready)))
 
     result = await PrivateFileFinalizer(seed.factory).finalize(
         PrivateFileRunScope(seed.owner_a, thread_id=thread_id, run_id=run_id),
@@ -365,6 +383,98 @@ async def test_finalizer_second_secure_scan_rejects_exact_manifest_drift(finaliz
 
     assert sandbox.order == ["scan", "scan", "scan", "scan"]
     assert await _staging_ids(seed, run_id) == ()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_finalizer_rejects_nfc_collision_before_any_staging(finalizer_seed) -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizer
+    from app.private_work.sandbox_files import AuthorityManifest, PrivateFileRunScope
+
+    seed, thread_id, run_id, _old = finalizer_seed
+    sandbox = MemorySecureSandbox(
+        {
+            "/mnt/user-data/outputs/caf\N{LATIN SMALL LETTER E WITH ACUTE}.txt": b"nfc",
+            "/mnt/user-data/outputs/cafe\N{COMBINING ACUTE ACCENT}.txt": b"nfd",
+        }
+    )
+
+    finalizer = PrivateFileFinalizer(seed.factory)
+    finalizer._stage_file = AsyncMock(side_effect=AssertionError("NFC collision reached staging"))
+
+    with pytest.raises(PrivateWorkInvalid):
+        await finalizer.finalize(
+            PrivateFileRunScope(seed.owner_a, thread_id=thread_id, run_id=run_id),
+            AuthorityManifest(entries=()),
+            sandbox,
+        )
+
+    finalizer._stage_file.assert_not_awaited()
+    assert sandbox._reads == {}
+    assert await _staging_ids(seed, run_id) == ()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("concurrent_change", ["upload", "delete"])
+async def test_finalizer_optimistic_authority_compare_rejects_concurrent_change(
+    finalizer_seed,
+    concurrent_change: str,
+) -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizer
+    from app.private_work.file_service import PrivateFileService
+    from app.private_work.sandbox_files import (
+        AuthorityManifest,
+        AuthorityManifestEntry,
+        PrivateFileRunScope,
+    )
+
+    seed, thread_id, run_id, old = finalizer_seed
+    manifest = AuthorityManifest(
+        entries=(
+            AuthorityManifestEntry(
+                file_id=old.id,
+                logical_path=old.logical_path,
+                kind=old.kind,
+                media_type=old.media_type,
+                size=old.size,
+                sha256=old.sha256,
+                version=old.version,
+            ),
+        )
+    )
+    service = PrivateFileService(seed.factory)
+    if concurrent_change == "upload":
+        concurrent = await service.upload(
+            seed.owner_a,
+            thread_id=thread_id,
+            logical_path="workspace/concurrent.txt",
+            media_type="text/plain",
+            chunks=_chunks(b"concurrent"),
+        )
+    else:
+        concurrent = await service.delete_ready(
+            seed.owner_a,
+            thread_id=thread_id,
+            file_id=old.id,
+        )
+
+    with pytest.raises(PrivateWorkUnavailable):
+        await PrivateFileFinalizer(seed.factory).finalize(
+            PrivateFileRunScope(seed.owner_a, thread_id=thread_id, run_id=run_id),
+            manifest,
+            MemorySecureSandbox({"/mnt/user-data/workspace/draft.txt": b"old"}),
+        )
+
+    assert await _staging_ids(seed, run_id) == ()
+    async with seed.engine.connect() as connection:
+        current = (
+            await connection.execute(
+                text("SELECT id,status FROM files WHERE id=:file_id"),
+                {"file_id": concurrent.id},
+            )
+        ).one()
+    assert current == (concurrent.id, "ready" if concurrent_change == "upload" else "deleted")
 
 
 @pytest.mark.postgres
@@ -488,6 +598,34 @@ async def test_finalizer_cancelled_read_joins_and_cleans_only_its_exact_staging_
             {"run_id": run_id},
         )
     assert status == "failed"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_finalizer_cancelled_during_reader_open_closes_returned_handle(
+    finalizer_seed,
+) -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizer
+    from app.private_work.sandbox_files import AuthorityManifest, PrivateFileRunScope
+
+    seed, thread_id, run_id, _old = finalizer_seed
+    sandbox = BlockingOpenSandbox({"/mnt/user-data/outputs/new.txt": b"new"})
+    task = asyncio.create_task(
+        PrivateFileFinalizer(seed.factory).finalize(
+            PrivateFileRunScope(seed.owner_a, thread_id=thread_id, run_id=run_id),
+            AuthorityManifest(entries=()),
+            sandbox,
+        )
+    )
+    assert await asyncio.to_thread(sandbox.open_started.wait, 2)
+    task.cancel()
+    sandbox.allow_open.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sandbox._reads == {}
+    assert len(sandbox.closed) == 1
 
 
 @pytest.mark.postgres

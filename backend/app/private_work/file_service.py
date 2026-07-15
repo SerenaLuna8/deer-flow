@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeVar
 
-from sqlalchemy import delete, insert, literal, select, text
+from sqlalchemy import delete, insert, literal, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -697,35 +697,32 @@ class PrivateFileService:
         await session.flush()
         for source, target in copies:
             target.source_file_id = id_map.get(source.source_file_id)
-            stats = (
-                await session.execute(
-                    text(
-                        """SELECT count(*) AS chunk_count,
-                                  coalesce(sum(size), 0) AS total_size,
-                                  min(chunk_index) AS first_index,
-                                  max(chunk_index) AS last_index,
-                                  coalesce(bool_and(
-                                      size = octet_length(content)
-                                      AND size > 0
-                                      AND size <= :chunk_size
-                                      AND encode(sha256(content), 'hex') = sha256
-                                  ), true) AS chunks_valid,
-                                  encode(sha256(coalesce(
-                                      string_agg(content, ''::bytea ORDER BY chunk_index),
-                                      ''::bytea
-                                  )), 'hex') AS whole_sha256
-                           FROM file_chunks
-                           WHERE file_id = :source_file_id"""
-                    ),
-                    {
-                        "source_file_id": source.id,
-                        "chunk_size": PRIVATE_FILE_CHUNK_SIZE,
-                    },
+            chunk_stream = await session.stream(
+                select(
+                    PrivateFileChunkRow.chunk_index,
+                    PrivateFileChunkRow.content,
+                    PrivateFileChunkRow.size,
+                    PrivateFileChunkRow.sha256,
                 )
-            ).one()
-            chunk_count = stats.chunk_count
-            indices_valid = (chunk_count == 0 and stats.first_index is None and stats.last_index is None) or (chunk_count > 0 and stats.first_index == 0 and stats.last_index == chunk_count - 1)
-            if not indices_valid or not stats.chunks_valid or stats.total_size != source.size or stats.whole_sha256 != source.sha256:
+                .where(PrivateFileChunkRow.file_id == source.id)
+                .order_by(PrivateFileChunkRow.chunk_index)
+                .with_for_update(read=True, of=PrivateFileChunkRow),
+                execution_options={"yield_per": 1},
+            )
+            whole_hasher = hashlib.sha256()
+            chunk_count = 0
+            total_size = 0
+            try:
+                async for chunk in chunk_stream:
+                    content = chunk.content
+                    if chunk.chunk_index != chunk_count or chunk.size <= 0 or chunk.size > PRIVATE_FILE_CHUNK_SIZE or len(content) != chunk.size or hashlib.sha256(content).hexdigest() != chunk.sha256:
+                        raise PrivateFileIntegrityError
+                    whole_hasher.update(content)
+                    total_size += chunk.size
+                    chunk_count += 1
+            finally:
+                await chunk_stream.close()
+            if total_size != source.size or whole_hasher.hexdigest() != source.sha256:
                 raise PrivateFileIntegrityError
             copied = await session.execute(
                 insert(PrivateFileChunkRow).from_select(

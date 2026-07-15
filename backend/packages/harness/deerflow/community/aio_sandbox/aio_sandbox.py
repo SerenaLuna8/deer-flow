@@ -8,8 +8,21 @@ import uuid
 from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
 
+from deerflow.community.remote_file_authority import (
+    PRIVATE_GUEST_REQUEST_ENV,
+    PRIVATE_GUEST_SCRIPT,
+    RemotePrivateFileAuthority,
+    decode_guest_response,
+    encode_guest_request,
+)
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.exceptions import SandboxRuntimeError
+from deerflow.sandbox.sandbox import (
+    Sandbox,
+    SandboxAtomicWriter,
+    SandboxBinaryReader,
+    _validate_extra_env,
+)
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 logger = logging.getLogger(__name__)
@@ -57,6 +70,10 @@ class AioSandbox(Sandbox):
         # Set to True after bash.exec answers 404 (image predates /v1/bash/*),
         # so later env-bearing calls fail fast instead of re-hitting HTTP (#3921).
         self._bash_exec_unsupported = False
+        self._private_files = RemotePrivateFileAuthority(
+            execute=self._execute_private_guest,
+            resolve_path=lambda path: path,
+        )
 
     @property
     def base_url(self) -> str:
@@ -285,6 +302,62 @@ class AioSandbox(Sandbox):
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
+
+    def _execute_private_guest(
+        self,
+        request: dict[str, object],
+    ) -> dict[str, object]:
+        """Run the fixed secure-I/O helper with separately encoded input."""
+
+        command = f"python3 -c {shlex.quote(PRIVATE_GUEST_SCRIPT)}"
+        encoded = encode_guest_request(request)
+        with self._lock:
+            client = self._client
+            if client is None:
+                raise OSError("Sandbox client has been closed")
+            try:
+                result = client.bash.exec(
+                    command=command,
+                    env={PRIVATE_GUEST_REQUEST_ENV: encoded},
+                    hard_timeout=self._DEFAULT_HARD_TIMEOUT,
+                )
+            except Exception as exc:
+                raise OSError("AIO private file helper failed") from exc
+        data = result.data if result else None
+        stdout = (data.stdout or "") if data else ""
+        stderr = (data.stderr or "") if data else ""
+        if stderr and not stdout:
+            raise OSError("AIO private file helper returned no result")
+        return decode_guest_response(stdout)
+
+    def list_secure_files(
+        self,
+        root: str,
+        *,
+        max_entries: int,
+    ):
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.list_secure_files(root, max_entries=max_entries)
+
+    def open_regular_reader(self, path: str) -> SandboxBinaryReader:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.open_regular_reader(path)
+
+    def open_atomic_writer(self, path: str) -> SandboxAtomicWriter:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.open_atomic_writer(path)
+
+    def remove_path(self, path: str) -> None:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        boundary.remove_path(path)
 
     def download_file(self, path: str) -> bytes:
         """Download file bytes from the sandbox.

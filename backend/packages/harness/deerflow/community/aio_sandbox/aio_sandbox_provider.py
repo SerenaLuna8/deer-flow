@@ -16,10 +16,12 @@ import hashlib
 import logging
 import os
 import signal
+import stat
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path, PurePosixPath
 
 try:
     import fcntl
@@ -37,9 +39,11 @@ from deerflow.community.warm_pool_lifecycle import (
 )
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
+from deerflow.private_scope import PrivateResourceScope
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, SandboxProvider
 from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .aio_sandbox import AioSandbox
@@ -136,6 +140,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
           API_KEY: $MY_API_KEY
     """
 
+    _supports_isolated_private_file_authority = True
+
     def __init__(self):
         self._lock = threading.Lock()
         self._sandboxes: dict[str, AioSandbox] = {}  # sandbox_id -> AioSandbox instance
@@ -143,6 +149,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._thread_sandboxes: dict[tuple[str, str], str] = {}  # (user_id, thread_id) -> sandbox_id
         self._thread_locks: dict[tuple[str, str], threading.Lock] = {}  # (user_id, thread_id) -> in-process lock
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
+        self._private_runtime_ids: set[str] = set()
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
         # Containers here can be reclaimed quickly (no cold-start) or destroyed
@@ -422,6 +429,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         with self._lock:
             # Active sandboxes: tracked via _last_activity
             for sandbox_id, last_activity in self._last_activity.items():
+                if sandbox_id in getattr(self, "_private_runtime_ids", ()):
+                    continue
                 idle_duration = current_time - last_activity
                 if idle_duration > idle_timeout:
                     active_to_destroy.append(sandbox_id)
@@ -434,6 +443,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 # Between the snapshot above and here, the sandbox may have been
                 # re-acquired (last_activity updated) or already released/destroyed.
                 with self._lock:
+                    if sandbox_id in getattr(self, "_private_runtime_ids", ()):
+                        continue
                     last_activity = self._last_activity.get(sandbox_id)
                     if last_activity is None:
                         # Already released or destroyed by another path — skip.
@@ -603,13 +614,27 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         logger.info(f"Discovered existing sandbox {info.sandbox_id} for user/thread {user_id}/{thread_id} at {info.sandbox_url}")
         return info.sandbox_id
 
-    def _register_created_sandbox(self, thread_id: str | None, sandbox_id: str, info: SandboxInfo, *, user_id: str | None = None) -> str:
+    def _register_created_sandbox(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        info: SandboxInfo,
+        *,
+        user_id: str | None = None,
+        private: bool = False,
+    ) -> str:
         """Track a newly-created sandbox in the active maps."""
         sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
         with self._lock:
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
             self._last_activity[sandbox_id] = time.time()
+            if private:
+                private_ids = getattr(self, "_private_runtime_ids", None)
+                if private_ids is None:
+                    private_ids = set()
+                    self._private_runtime_ids = private_ids
+                private_ids.add(sandbox_id)
             if thread_id:
                 self._thread_sandboxes[self._thread_key(thread_id, self._effective_acquire_user_id(user_id))] = sandbox_id
 
@@ -705,6 +730,132 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.info(f"Destroyed warm-pool sandbox {sandbox_id} for {reason}")
 
     # ── Core: acquire / get / release / shutdown ─────────────────────────
+
+    def _acquire_private_fresh(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        """Create a non-discoverable, non-warm sandbox for exactly one run."""
+
+        identity = f"{scope.project_id}:{scope.owner_user_id}:{thread_id}:{run_id}:{uuid.uuid4().hex}"
+        sandbox_id = f"private-{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
+        if isinstance(self._backend, RemoteSandboxBackend):
+            raise SandboxRuntimeError("Remote AIO provisioner lacks required private sandbox security capabilities")
+        if not isinstance(self._backend, LocalContainerBackend):
+            raise SandboxRuntimeError("AIO backend lacks required private sandbox security capabilities")
+        extra_mounts = self._validated_private_local_mounts(mounts)
+        info = self._backend.create(
+            f"private-{hashlib.sha256(identity.encode()).hexdigest()[:16]}",
+            sandbox_id,
+            extra_mounts=extra_mounts or None,
+            user_id=scope.owner_user_id,
+        )
+        try:
+            if not wait_for_sandbox_ready(info.sandbox_url, timeout=60):
+                raise SandboxRuntimeError("Private AIO sandbox failed readiness")
+            self._register_created_sandbox(None, sandbox_id, info, private=True)
+            return sandbox_id
+        except BaseException:
+            self._backend.destroy_private(info)
+            raise
+
+    def _destroy_private_sandbox(self, sandbox_id: str) -> None:
+        with self._lock:
+            info = self._sandbox_infos.get(sandbox_id)
+        if info is None:
+            raise SandboxRuntimeError("Private AIO sandbox is not tracked")
+
+        # Destroy the container first.  Tracking is intentionally retained if
+        # the backend cannot confirm destruction so release_private() can retry
+        # the exact lease against the exact same resource.
+        self._backend.destroy_private(info)
+        sandbox, removed_info, removed = self._remove_tracked_sandbox(
+            sandbox_id,
+            expected_info=info,
+        )
+        if not removed or removed_info is not info:
+            raise SandboxRuntimeError("Private AIO sandbox tracking changed during destroy")
+        if sandbox is not None:
+            sandbox.close()
+        with self._lock:
+            private_ids = getattr(self, "_private_runtime_ids", None)
+            if private_ids is not None:
+                private_ids.discard(sandbox_id)
+
+    def _validated_private_local_mounts(
+        self,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> list[tuple[str, str, bool]]:
+        """Fail closed on mount aliases that can escape private authority."""
+
+        protected_container_roots = [
+            PurePosixPath("/mnt/user-data"),
+            PurePosixPath("/mnt/acp-workspace"),
+        ]
+        container_socket_roots = tuple(
+            PurePosixPath(path)
+            for path in (
+                "/var/run/docker.sock",
+                "/run/docker.sock",
+                "/run/containerd/containerd.sock",
+                "/run/k3s/containerd/containerd.sock",
+                "/var/run/podman/podman.sock",
+                "/run/podman/podman.sock",
+            )
+        )
+        host_socket_roots = tuple(Path(path).resolve() for path in container_socket_roots)
+
+        def paths_overlap(left, right) -> bool:
+            return left == right or left in right.parents or right in left.parents
+
+        def resolve_host(path: str) -> Path:
+            source = Path(path)
+            try:
+                before = source.lstat()
+                resolved = source.resolve(strict=True)
+                mode = resolved.stat().st_mode
+            except OSError as exc:
+                raise SandboxRuntimeError("Invalid private AIO mount source") from exc
+            if stat.S_ISLNK(before.st_mode) or stat.S_ISSOCK(mode):
+                raise SandboxRuntimeError("Private AIO mount source is unsafe")
+            if any(paths_overlap(resolved, socket_path) for socket_path in host_socket_roots):
+                raise SandboxRuntimeError("Private AIO mount exposes a container runtime socket")
+            return resolved
+
+        def resolve_container(path: str) -> PurePosixPath:
+            candidate = PurePosixPath(path)
+            if not path.startswith("/") or ".." in candidate.parts or candidate.as_posix() != path.rstrip("/"):
+                raise SandboxRuntimeError("Invalid private AIO mount target")
+            if any(paths_overlap(candidate, socket_path) for socket_path in container_socket_roots):
+                raise SandboxRuntimeError("Private AIO mount exposes a container runtime socket")
+            return candidate
+
+        run_mounts: list[tuple[Path, PurePosixPath]] = []
+        for mount in mounts:
+            host = resolve_host(mount.host_path)
+            container = resolve_container(mount.container_path)
+            if any(paths_overlap(container, protected) for protected in protected_container_roots):
+                raise SandboxRuntimeError("Private AIO run mount overlaps private storage")
+            if any(paths_overlap(host, other_host) or paths_overlap(container, other_container) for other_host, other_container in run_mounts):
+                raise SandboxRuntimeError("Private AIO mounts overlap")
+            run_mounts.append((host, container))
+
+        config_mounts = getattr(self._backend, "_config_mounts", ())
+        for mount in config_mounts:
+            host = resolve_host(mount.host_path)
+            container = resolve_container(mount.container_path)
+            if any(paths_overlap(container, protected) for protected in protected_container_roots):
+                raise SandboxRuntimeError("Private AIO config mount overlaps private storage")
+            host_alias = any(paths_overlap(host, run_host) for run_host, _ in run_mounts)
+            container_alias = any(paths_overlap(container, run_container) for _, run_container in run_mounts)
+            if container_alias or (host_alias and not mount.read_only):
+                raise SandboxRuntimeError("Private AIO config mount bypasses a run read-only mount")
+
+        return [(str(host), container.as_posix(), True) for host, container in run_mounts]
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.

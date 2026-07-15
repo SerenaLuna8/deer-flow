@@ -21,13 +21,16 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.private_scope import PrivateResourceScope
+from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, SandboxProvider
 
 from ..warm_pool_lifecycle import WarmPoolLifecycleMixin
 from .box import BoxliteBox
@@ -158,6 +161,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
+    _supports_isolated_private_file_authority = True
     _idle_checker_thread_name = "boxlite-idle-reaper"
 
     @staticmethod
@@ -371,7 +375,62 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 self._thread_boxes[key] = box.id
             return box.id
 
-    def _create_box(self, sandbox_id: str) -> BoxliteBox:
+    def _acquire_private_fresh(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        """Boot one micro-VM whose ID covers project/owner/thread/run."""
+
+        identity = f"{scope.project_id}:{scope.owner_user_id}:{thread_id}:{run_id}:{uuid.uuid4().hex}"
+        sandbox_id = hashlib.sha256(identity.encode()).hexdigest()[:24]
+        volumes: list[tuple[str, str, str]] = []
+        for mount in mounts:
+            source = Path(mount.host_path)
+            if not source.exists() or source.is_symlink():
+                raise SandboxRuntimeError("Invalid private read-only mount source")
+            volumes.append((mount.host_path, mount.container_path, "ro"))
+        box = self._create_box(sandbox_id, volumes=tuple(volumes))
+        try:
+            with self._lock:
+                self._boxes[sandbox_id] = box
+            return sandbox_id
+        except BaseException:
+            box.close()
+            raise
+
+    def _destroy_private_sandbox(self, sandbox_id: str) -> None:
+        with self._lock:
+            box = self._boxes.get(sandbox_id)
+            warm = self._warm_pool.get(sandbox_id)
+        target = box or (warm[0] if warm is not None else None)
+        if target is None:
+            raise SandboxRuntimeError("Private BoxLite sandbox is not tracked")
+
+        close_private = getattr(target, "close_private", None)
+        if not callable(close_private):
+            raise SandboxRuntimeError("Private BoxLite sandbox lacks strict destroy support")
+        close_private()
+
+        with self._lock:
+            if self._boxes.get(sandbox_id) is target:
+                self._boxes.pop(sandbox_id, None)
+            current_warm = self._warm_pool.get(sandbox_id)
+            if current_warm is not None and current_warm[0] is target:
+                self._warm_pool.pop(sandbox_id, None)
+            self._skip_health_check_warm_ids.discard(sandbox_id)
+            for key in [key for key, registered in self._thread_boxes.items() if registered == sandbox_id]:
+                self._thread_boxes.pop(key, None)
+
+    def _create_box(
+        self,
+        sandbox_id: str,
+        *,
+        volumes: tuple[tuple[str, str, str], ...] = (),
+    ) -> BoxliteBox:
         # Enforce replica limit: evict oldest warm-pool box if active + warm boxes are at capacity.
         replicas, total = self._replica_count()
         if total >= replicas:
@@ -381,11 +440,16 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         mkdir_cmd = "mkdir -p " + " ".join(_VIRTUAL_DIRS)
 
         async def _make() -> SimpleBox:
+            options: dict[str, object] = {
+                "name": self._box_name(sandbox_id),
+                "image": self._config["image"],
+                "memory_mib": self._config["memory_mib"],
+                "cpus": self._config["cpus"],
+            }
+            if volumes:
+                options["volumes"] = volumes
             box = simplebox_cls(
-                name=self._box_name(sandbox_id),
-                image=self._config["image"],
-                memory_mib=self._config["memory_mib"],
-                cpus=self._config["cpus"],
+                **options,
             )
             await box.start()
             # Materialise DeerFlow's virtual prefixes so file ops resolve natively.

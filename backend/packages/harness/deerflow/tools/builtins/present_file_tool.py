@@ -7,6 +7,7 @@ from langgraph.config import get_config
 from langgraph.types import Command
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.file_authority import require_private_file_authority
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
 
@@ -14,10 +15,10 @@ OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 
 
 def _private_file_authority(runtime: Runtime) -> object | None:
-    context = runtime.context
-    if not isinstance(context, dict):
-        return None
-    return context.get("__file_authority")
+    return require_private_file_authority(
+        runtime.context,
+        method="record_presented_paths",
+    )
 
 
 def _normalize_private_presented_filepath(filepath: str) -> str:
@@ -133,11 +134,8 @@ def present_file_tool(
         if authority is None:
             normalized_paths = [_normalize_presented_filepath(runtime, filepath) for filepath in filepaths]
         else:
-            register = getattr(authority, "record_presented_paths", None)
-            if not callable(register):
-                raise ValueError("Private file authority is unavailable")
             normalized_paths = [_normalize_private_presented_filepath(filepath) for filepath in filepaths]
-            register(tuple(normalized_paths))
+            authority.record_presented_paths(tuple(normalized_paths))
     except ValueError as exc:
         return Command(
             update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]},

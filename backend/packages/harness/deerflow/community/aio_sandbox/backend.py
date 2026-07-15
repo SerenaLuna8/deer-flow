@@ -105,6 +105,16 @@ class SandboxBackend(ABC):
         """
         ...
 
+    def destroy_private(self, info: SandboxInfo) -> None:
+        """Destroy a private sandbox and report any authoritative failure.
+
+        Backends whose legacy ``destroy`` path is intentionally best-effort
+        override this hook.  Private lease release must be retryable, so it
+        cannot treat an unconfirmed destroy as success.
+        """
+
+        self.destroy(info)
+
     @abstractmethod
     def is_alive(self, info: SandboxInfo) -> bool:
         """Quick check whether a sandbox is still alive.

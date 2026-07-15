@@ -1267,7 +1267,7 @@ async def test_service_lists_and_soft_deletes_ready_file_without_removing_chunks
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_branch_authority_copies_chunk_payload_server_side_without_returning_content(
+async def test_branch_authority_streams_bounded_hash_validation_and_copies_payload_server_side(
     file_service_seed,
 ) -> None:
     from sqlalchemy import event
@@ -1312,7 +1312,8 @@ async def test_branch_authority_copies_chunk_payload_server_side_without_returni
         event.remove(seed.engine.sync_engine, "before_cursor_execute", capture_statement)
 
     normalized = [" ".join(statement.lower().split()) for statement in statements]
-    assert not any(statement.startswith("select") and "file_chunks.content" in statement for statement in normalized)
+    assert not any("string_agg" in statement or "array_agg" in statement for statement in normalized)
+    assert any(statement.startswith("select") and "file_chunks.content" in statement and "order by file_chunks.chunk_index" in statement and "for share" in statement for statement in normalized)
     assert any(statement.startswith("insert into file_chunks") and "select" in statement and "file_chunks.content" in statement for statement in normalized)
     async with seed.engine.connect() as connection:
         copied = (
@@ -1343,6 +1344,94 @@ async def test_branch_authority_copies_chunk_payload_server_side_without_returni
     assert chunk_summary == (2, source.size, 0, 1)
     assert artifact_count == 0
     assert run_count == 0
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_branch_authority_holds_chunk_locks_between_validation_and_server_copy(
+    file_service_seed,
+) -> None:
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from app.private_work.file_service import PrivateFileService
+
+    seed, source_thread_id = file_service_seed
+    target_thread_id = f"branch-lock-{uuid.uuid4()}"
+    async with seed.factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=seed.owner_a_scope,
+            thread_id=target_thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+    source = await PrivateFileService(seed.factory).upload(
+        seed.owner_a,
+        thread_id=source_thread_id,
+        logical_path="workspace/locked.bin",
+        media_type="application/octet-stream",
+        chunks=_chunks(b"a" * 4096),
+    )
+
+    validation_complete = asyncio.Event()
+    allow_insert = asyncio.Event()
+
+    class PauseBeforeChunkInsertSession(AsyncSession):
+        async def execute(self, statement, *args, **kwargs):
+            table = getattr(statement, "table", None)
+            if getattr(statement, "is_insert", False) and getattr(table, "name", None) == "file_chunks":
+                validation_complete.set()
+                await allow_insert.wait()
+            return await super().execute(statement, *args, **kwargs)
+
+    pausing_factory = async_sessionmaker(
+        seed.engine,
+        class_=PauseBeforeChunkInsertSession,
+        expire_on_commit=False,
+    )
+    copy_task = asyncio.create_task(
+        PrivateFileService(pausing_factory).copy_thread_files(
+            seed.owner_a_scope,
+            source_thread_id,
+            target_thread_id,
+        )
+    )
+    try:
+        await asyncio.wait_for(validation_complete.wait(), timeout=2)
+        replacement = b"b" * 4096
+        with pytest.raises(DBAPIError, match="lock timeout"):
+            async with seed.engine.begin() as connection:
+                await connection.execute(text("SET LOCAL lock_timeout = '200ms'"))
+                await connection.execute(
+                    text(
+                        """UPDATE file_chunks
+                        SET content=:content,size=:size,sha256=:sha256
+                        WHERE file_id=:file_id AND chunk_index=0"""
+                    ),
+                    {
+                        "content": replacement,
+                        "size": len(replacement),
+                        "sha256": hashlib.sha256(replacement).hexdigest(),
+                        "file_id": source.id,
+                    },
+                )
+    finally:
+        allow_insert.set()
+        await copy_task
+
+    async with seed.engine.connect() as connection:
+        copied = (
+            await connection.execute(
+                text(
+                    """SELECT files.sha256,file_chunks.content
+                    FROM files JOIN file_chunks ON file_chunks.file_id=files.id
+                    WHERE files.thread_id=:thread_id
+                      AND files.logical_path='workspace/locked.bin'"""
+                ),
+                {"thread_id": target_thread_id},
+            )
+        ).one()
+    assert copied.content == b"a" * 4096
+    assert hashlib.sha256(copied.content).hexdigest() == copied.sha256
 
 
 @pytest.mark.postgres

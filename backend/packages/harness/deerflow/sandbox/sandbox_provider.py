@@ -64,6 +64,7 @@ class SandboxProvider(ABC):
 
     uses_thread_data_mounts: bool = False
     needs_upload_permission_adjustment: bool = True
+    _supports_isolated_private_file_authority: bool = False
 
     @staticmethod
     def _private_storage_key(scope: PrivateResourceScope) -> str:
@@ -79,15 +80,135 @@ class SandboxProvider(ABC):
         run_id: str,
         mounts: tuple[RunScopedReadOnlyMount, ...] = (),
     ) -> PrivateSandboxLease:
-        """Acquire a private lease or fail closed when unsupported.
+        """Acquire one fresh, scope-bound private lease or fail closed.
 
         A private authority requires bounded, no-link-following secure file
         primitives in addition to allocation isolation. Providers must opt in
         by overriding this method; reusing legacy acquire is not sufficient.
         """
 
-        del thread_id, scope, user_id, run_id, mounts
+        if not self._supports_isolated_private_file_authority:
+            raise SandboxRuntimeError("Private file authority is unsupported by this sandbox provider")
+        if type(scope) is not PrivateResourceScope:
+            raise SandboxRuntimeError("Invalid private sandbox scope")
+        if user_id != scope.owner_user_id:
+            raise SandboxRuntimeError("Private sandbox owner mismatch")
+        if not run_id or "/" in run_id or "\\" in run_id:
+            raise SandboxRuntimeError("Invalid private sandbox run")
+        relative_root = private_sandbox_relative_root(scope, thread_id)
+        for mount in mounts:
+            if type(mount) is not RunScopedReadOnlyMount or mount.run_id != run_id:
+                raise SandboxRuntimeError("Invalid private sandbox mount")
+
+        sandbox_id: str | None = None
+        try:
+            sandbox_id = self._acquire_private_fresh(
+                scope=scope,
+                thread_id=thread_id,
+                run_id=run_id,
+                mounts=mounts,
+            )
+            if not isinstance(sandbox_id, str) or not sandbox_id:
+                raise SandboxRuntimeError("Invalid private sandbox identifier")
+            sandbox = self.get(sandbox_id)
+            if sandbox is None:
+                raise SandboxRuntimeError("Private sandbox was not registered")
+            # Exercise the real secure metadata boundary before returning a
+            # lease.  Merely allocating a fresh VM is not enough.
+            tuple(
+                sandbox.list_secure_files(
+                    "/mnt/user-data/workspace",
+                    max_entries=1,
+                )
+            )
+            lock, leases = self._private_lease_state()
+            with lock:
+                if sandbox_id in leases or any(registered.run_id == run_id for registered in leases.values()):
+                    raise SandboxRuntimeError("Private sandbox lease already active")
+                lease = PrivateSandboxLease(
+                    sandbox_id=sandbox_id,
+                    run_id=run_id,
+                    relative_root=relative_root,
+                )
+                leases[sandbox_id] = lease
+            return lease
+        except BaseException:
+            if sandbox_id:
+                try:
+                    self._destroy_private_sandbox(sandbox_id)
+                except Exception:
+                    pass
+            raise
+
+    def _acquire_private_fresh(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        del scope, thread_id, run_id, mounts
         raise SandboxRuntimeError("Private file authority is unsupported by this sandbox provider")
+
+    def _destroy_private_sandbox(self, sandbox_id: str) -> None:
+        self.release(sandbox_id)
+
+    def _private_lease_state(
+        self,
+    ) -> tuple[threading.RLock, dict[str, PrivateSandboxLease]]:
+        lock = getattr(self, "_private_lease_lock", None)
+        leases = getattr(self, "_private_leases", None)
+        if lock is None or leases is None:
+            provider_lock = getattr(self, "_lock", None)
+            if provider_lock is None:
+                lock = lock or threading.RLock()
+                leases = leases or {}
+                self._private_lease_lock = lock
+                self._private_leases = leases
+            else:
+                with provider_lock:
+                    lock = getattr(self, "_private_lease_lock", None)
+                    if lock is None:
+                        lock = threading.RLock()
+                        self._private_lease_lock = lock
+                    leases = getattr(self, "_private_leases", None)
+                    if leases is None:
+                        leases = {}
+                        self._private_leases = leases
+        return lock, leases
+
+    def release_private(self, lease: PrivateSandboxLease) -> None:
+        """Destroy exactly one private run sandbox; never park it warm."""
+
+        if type(lease) is not PrivateSandboxLease:
+            raise SandboxRuntimeError("Invalid private sandbox lease")
+        if not self._supports_isolated_private_file_authority:
+            # LocalSandboxProvider owns its own private reservation contract and
+            # predates the remote registry in this base class.
+            self.release(lease.sandbox_id)
+            return
+        lock, leases = self._private_lease_state()
+        with lock:
+            registered = leases.get(lease.sandbox_id)
+            if registered != lease:
+                raise SandboxRuntimeError("Invalid or inactive private sandbox lease")
+            releasing = getattr(self, "_private_releasing", None)
+            if releasing is None:
+                releasing = set()
+                self._private_releasing = releasing
+            if lease.sandbox_id in releasing:
+                raise SandboxRuntimeError("Private sandbox lease is already releasing")
+            releasing.add(lease.sandbox_id)
+        try:
+            self._destroy_private_sandbox(lease.sandbox_id)
+        except BaseException:
+            with lock:
+                releasing.discard(lease.sandbox_id)
+            raise
+        with lock:
+            releasing.discard(lease.sandbox_id)
+            leases.pop(lease.sandbox_id, None)
 
     async def acquire_private_async(
         self,
@@ -113,7 +234,7 @@ class SandboxProvider(ABC):
         if type(lease) is not PrivateSandboxLease:
             raise SandboxRuntimeError("Invalid private sandbox lease")
         if cancellation_pending:
-            cleanup_task = asyncio.create_task(asyncio.to_thread(self.release, lease.sandbox_id))
+            cleanup_task = asyncio.create_task(asyncio.to_thread(self.release_private, lease))
             await _await_joined_thread(cleanup_task)
             raise asyncio.CancelledError
         return lease
@@ -121,7 +242,7 @@ class SandboxProvider(ABC):
     async def release_private_async(self, lease: PrivateSandboxLease) -> None:
         if type(lease) is not PrivateSandboxLease:
             raise SandboxRuntimeError("Invalid private sandbox lease")
-        task = asyncio.create_task(asyncio.to_thread(self.release, lease.sandbox_id))
+        task = asyncio.create_task(asyncio.to_thread(self.release_private, lease))
         _, cancellation_pending = await _await_joined_thread(task)
         if cancellation_pending:
             raise asyncio.CancelledError

@@ -15,10 +15,9 @@ Three-branch decision (see ``_decide_state``)
 | DB state                              | Action                                  |
 |---------------------------------------|-----------------------------------------|
 | empty (no DeerFlow tables)            | ``create_all`` + ``stamp head`` + empty-source probes + cutover marker |
-| legacy (DeerFlow tables, no alembic)  | source probes, then staged migration or empty-install cutover |
+| legacy (DeerFlow tables, no alembic)  | baseline-era backfill + ``stamp 0001`` + ``upgrade 0007`` + require explicit M4 migration |
 | versioned at M4 final/head            | no-op                                   |
-| versioned through ``0007``             | source probes, then staged migration or empty-install cutover |
-| versioned at ``0008``                  | require completed explicit M4 migration |
+| versioned before M4 final             | require explicit M4 migration before any upgrade |
 
 The legacy branch handles pre-alembic databases that already have at least one
 DeerFlow-owned table. A frozen 0001-era catalog runs first because stamping at
@@ -40,9 +39,8 @@ manual-ALTER cases for ``token_usage_by_model``) is answered by each
 ``versions/*.py`` revision via
 the idempotent helpers in ``migrations/_helpers.py`` (``safe_add_column``
 no-ops when the column is already present and ``logger.warning``s on
-shape drift). The M4 boundary is crossed by ``make migrate-private-work`` when
-a database or filesystem private source exists. A database through ``0007``
-with both source probes empty uses the auditable empty-install path.
+shape drift). The M4 boundary is crossed only by ``make migrate-private-work``;
+ordinary startup never invokes 0008/0009 for an existing database.
 
 Concurrency safety
 ------------------
@@ -61,10 +59,7 @@ semantics, so the second-N-th actor simply observes head and exits.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import importlib
 import logging
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -115,8 +110,7 @@ _PRIVATE_WORK_SAFE_REVISIONS = frozenset(
     }
 )
 _PRIVATE_WORK_PRE_EXPAND_REVISION = "0007_project_shared_assets"
-_PRIVATE_WORK_EXPAND_REVISION = "0008_project_private_work_expand"
-_PRIVATE_WORK_AUTO_EMPTY_REVISIONS = frozenset(
+_PRIVATE_WORK_PRE_EXPAND_REVISIONS = frozenset(
     {
         "0001_baseline",
         "0002_runs_token_usage",
@@ -124,7 +118,7 @@ _PRIVATE_WORK_AUTO_EMPTY_REVISIONS = frozenset(
         "0004_migration_ledger",
         "0005_project_foundation",
         "0006_project_governance",
-        "0007_project_shared_assets",
+        _PRIVATE_WORK_PRE_EXPAND_REVISION,
     }
 )
 _LEGACY_PRIVATE_WORK_DB_TABLES: tuple[str, ...] = (
@@ -544,116 +538,6 @@ async def _write_empty_install_cutover_marker(engine: AsyncEngine) -> None:
         )
 
 
-async def _prepare_versioned_empty_install(engine: AsyncEngine) -> uuid.UUID:
-    """Write the auditable zero-source receipt required by revision 0009."""
-
-    if await asyncio.to_thread(
-        _filesystem_has_legacy_private_source,
-        runtime_home(),
-    ):
-        raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
-    finalize = importlib.import_module("deerflow.persistence.migrations.versions.0009_project_private_work_finalize")
-    domains = tuple(sorted(finalize.FINALIZE_LEDGER_DOMAINS))
-    run_id = uuid.uuid4()
-    source_digest = hashlib.sha256(b"deerflow-private-work-versioned-empty-install-v1").hexdigest()
-
-    async with engine.begin() as conn:
-        if await conn.run_sync(_database_has_legacy_private_source_sync):
-            raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
-        await conn.execute(
-            text(
-                """INSERT INTO private_work_migration_runs
-                (id,mode,status,source_fingerprint,owner_map_digest,
-                 legacy_source_probe_complete,checkpoint_marker_probe_complete,
-                 cross_scope_probe_complete,completed_at)
-                VALUES (:run_id,'execute','completed',:digest,:digest,
-                        true,true,true,now())
-                """
-            ),
-            {"run_id": run_id, "digest": source_digest},
-        )
-        await conn.execute(
-            text(
-                """INSERT INTO private_work_migration_ledger
-                (migration_run_id,domain,source_key_hash,source_fingerprint,
-                 target_digest,status,row_count,byte_count)
-                VALUES (:run_id,:domain,:domain_digest,:source_digest,
-                        :domain_digest,'complete',0,0)
-                """
-            ),
-            [
-                {
-                    "run_id": run_id,
-                    "domain": domain,
-                    "domain_digest": hashlib.sha256(f"empty:{domain}".encode()).hexdigest(),
-                    "source_digest": source_digest,
-                }
-                for domain in domains
-            ],
-        )
-        completed = set(
-            (
-                await conn.execute(
-                    text(
-                        """SELECT domain FROM private_work_migration_ledger
-                        WHERE migration_run_id=:run_id AND status='complete'"""
-                    ),
-                    {"run_id": run_id},
-                )
-            ).scalars()
-        )
-        if completed != set(domains):
-            raise RuntimeError("private-work empty-install receipt is incomplete")
-        await conn.execute(
-            text(
-                """INSERT INTO private_work_cutover_state
-                (id,stage,migration_run_id,empty_domain_probe_complete,
-                 checkpoint_marker_probe_complete,cutover_at,updated_at)
-                VALUES (1,'migration_ready',:run_id,true,true,NULL,now())"""
-            ),
-            {"run_id": run_id},
-        )
-    return run_id
-
-
-async def _complete_versioned_empty_install(
-    engine: AsyncEngine,
-    run_id: uuid.UUID,
-) -> None:
-    async with engine.begin() as conn:
-        result = await conn.execute(
-            text(
-                """UPDATE private_work_cutover_state
-                SET stage='cutover_complete',cutover_at=now(),updated_at=now()
-                WHERE id=1 AND stage='migration_ready'
-                  AND migration_run_id=:run_id
-                  AND empty_domain_probe_complete
-                  AND checkpoint_marker_probe_complete"""
-            ),
-            {"run_id": run_id},
-        )
-        if result.rowcount != 1:
-            raise RuntimeError("private-work empty-install cutover marker is unavailable")
-
-
-async def _upgrade_versioned_empty_install(
-    engine: AsyncEngine,
-    cfg: AlembicConfig,
-) -> None:
-    await _run_alembic_offload(_upgrade, cfg, _PRIVATE_WORK_EXPAND_REVISION)
-    try:
-        run_id = await _prepare_versioned_empty_install(engine)
-        await _run_alembic_offload(_upgrade, cfg, "head")
-        await _complete_versioned_empty_install(engine, run_id)
-    finally:
-        # Alembic owns a separate synchronous engine. Drop idle asyncpg pooled
-        # connections whose prepared-statement caches predate its external DDL,
-        # including when a second source probe fails after revision 0008.
-        # The advisory-lock connection is still checked out and will close when
-        # its disposed pool receives it back.
-        await engine.dispose()
-
-
 def _run_create_all_sync(sync_conn: Any) -> None:
     """Create all DeerFlow-owned tables on *sync_conn*."""
     # Import here to ensure all model classes are registered with Base.metadata.
@@ -974,7 +858,7 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
             if database_has_source or filesystem_has_source:
                 raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
             logger.info(
-                "bootstrap: branch=legacy -> baseline-era backfill + stamp %s + upgrade %s + empty-install cutover",
+                "bootstrap: branch=legacy -> baseline-era backfill + stamp %s + upgrade %s + require explicit M4 migration",
                 _BASELINE_REVISION,
                 _PRIVATE_WORK_PRE_EXPAND_REVISION,
             )
@@ -992,24 +876,21 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
                 await conn.run_sync(_run_baseline_create_all_sync)
             await _run_alembic_offload(_stamp, cfg, _BASELINE_REVISION)
             await _run_alembic_offload(_upgrade, cfg, _PRIVATE_WORK_PRE_EXPAND_REVISION)
-            await _upgrade_versioned_empty_install(engine, cfg)
+            raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
 
         elif decision == "versioned":
             logger.info("bootstrap: branch=versioned -> upgrade head (%s)", head)
             async with engine.connect() as conn:
                 current_revision = await conn.scalar(text("SELECT version_num FROM alembic_version"))
             if _requires_explicit_private_work_migration(str(current_revision)):
-                async with engine.connect() as conn:
-                    database_has_source = await conn.run_sync(_database_has_legacy_private_source_sync)
-                filesystem_has_source = await asyncio.to_thread(
-                    _filesystem_has_legacy_private_source,
-                    runtime_home(),
-                )
-                if str(current_revision) not in _PRIVATE_WORK_AUTO_EMPTY_REVISIONS or database_has_source or filesystem_has_source:
-                    raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
-                await _upgrade_versioned_empty_install(engine, cfg)
-            else:
-                await _run_alembic_offload(_upgrade, cfg, "head")
+                if str(current_revision) in _PRIVATE_WORK_PRE_EXPAND_REVISIONS and str(current_revision) != _PRIVATE_WORK_PRE_EXPAND_REVISION:
+                    await _run_alembic_offload(
+                        _upgrade,
+                        cfg,
+                        _PRIVATE_WORK_PRE_EXPAND_REVISION,
+                    )
+                raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
+            await _run_alembic_offload(_upgrade, cfg, "head")
 
         else:  # pragma: no cover -- defensive
             raise RuntimeError(f"bootstrap: unhandled decision {decision!r}")

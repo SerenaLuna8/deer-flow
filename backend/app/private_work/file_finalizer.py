@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import mimetypes
 import uuid
@@ -113,38 +114,55 @@ class PrivateFileFinalizer:
 
     def _scan(self, run_scope: PrivateFileRunScope, sandbox: Any) -> tuple[_AfterFile, ...]:
         files: list[_AfterFile] = []
+        logical_paths: set[str] = set()
         count = 0
         total = 0
         for virtual_root, logical_root, kind in _SCAN_ROOTS:
-            entries = sandbox.list_secure_files(virtual_root)
             prefix = virtual_root.rstrip("/") + "/"
-            for entry in entries:
-                if entry.file_type == "directory":
-                    continue
-                if entry.file_type != "regular" or not entry.path.startswith(prefix):
-                    raise PrivateWorkInvalid(run_scope.context.request_id)
-                relative = entry.path[len(prefix) :]
-                relative_path = PurePosixPath(relative)
-                if not relative or relative_path.is_absolute() or ".." in relative_path.parts or any(part.startswith(".deerflow") for part in relative_path.parts):
-                    raise PrivateWorkInvalid(run_scope.context.request_id)
-                logical_path = normalize_private_logical_path(
-                    f"{logical_root}/{relative_path.as_posix()}",
-                    request_id=run_scope.context.request_id,
+            entries = None
+            try:
+                entries = sandbox.list_secure_files(
+                    virtual_root,
+                    max_entries=self._limits.max_files + 1,
                 )
-                count += 1
-                total += entry.size
-                if count > self._limits.max_files or entry.size > self._limits.max_file_size or total > self._limits.max_total_size:
-                    raise PrivateWorkTooLarge(run_scope.context.request_id)
-                media_type = mimetypes.guess_type(relative_path.name)[0] or "application/octet-stream"
-                files.append(
-                    _AfterFile(
-                        logical_path=logical_path,
-                        virtual_path=entry.path,
-                        kind=kind,
-                        size=entry.size,
-                        media_type=media_type,
+                for entry in entries:
+                    if entry.file_type == "directory":
+                        continue
+                    if entry.file_type != "regular" or not entry.path.startswith(prefix):
+                        raise PrivateWorkInvalid(run_scope.context.request_id)
+                    relative = entry.path[len(prefix) :]
+                    relative_path = PurePosixPath(relative)
+                    if not relative or relative_path.is_absolute() or ".." in relative_path.parts or any(part.startswith(".deerflow") for part in relative_path.parts):
+                        raise PrivateWorkInvalid(run_scope.context.request_id)
+                    logical_path = normalize_private_logical_path(
+                        f"{logical_root}/{relative_path.as_posix()}",
+                        request_id=run_scope.context.request_id,
                     )
-                )
+                    if logical_path in logical_paths:
+                        raise PrivateWorkInvalid(run_scope.context.request_id)
+                    logical_paths.add(logical_path)
+                    count += 1
+                    total += entry.size
+                    if count > self._limits.max_files or entry.size > self._limits.max_file_size or total > self._limits.max_total_size:
+                        raise PrivateWorkTooLarge(run_scope.context.request_id)
+                    media_type = mimetypes.guess_type(relative_path.name)[0] or "application/octet-stream"
+                    files.append(
+                        _AfterFile(
+                            logical_path=logical_path,
+                            virtual_path=entry.path,
+                            kind=kind,
+                            size=entry.size,
+                            media_type=media_type,
+                        )
+                    )
+            except OSError as exc:
+                if exc.errno == errno.EFBIG:
+                    raise PrivateWorkTooLarge(run_scope.context.request_id) from None
+                raise
+            finally:
+                close_entries = getattr(entries, "close", None)
+                if callable(close_entries):
+                    close_entries()
         return tuple(sorted(files, key=lambda item: item.logical_path))
 
     async def _hash_sandbox_file(
@@ -156,6 +174,7 @@ class PrivateFileFinalizer:
         handle = await _joined_to_thread(
             sandbox.open_regular_file,
             after.virtual_path,
+            cancel_cleanup=sandbox.close_regular_file,
         )
         whole = hashlib.sha256()
         total = 0
@@ -206,7 +225,11 @@ class PrivateFileFinalizer:
                 file_id=file_id,
             )
 
-        handle = await _joined_to_thread(sandbox.open_regular_file, after.virtual_path)
+        handle = await _joined_to_thread(
+            sandbox.open_regular_file,
+            after.virtual_path,
+            cancel_cleanup=sandbox.close_regular_file,
+        )
         whole = hashlib.sha256()
         total = 0
         index = 0
@@ -340,7 +363,7 @@ class PrivateFileFinalizer:
             if thread is None:
                 raise PrivateWorkUnavailable(run_scope.context.request_id)
 
-            old_rows = (
+            current_rows = (
                 (
                     await session.execute(
                         select(PrivateFileRow)
@@ -348,7 +371,6 @@ class PrivateFileFinalizer:
                             PrivateFileRow.project_id == run_scope.context.project_id,
                             PrivateFileRow.owner_user_id == str(run_scope.context.user_id),
                             PrivateFileRow.thread_id == run_scope.thread_id,
-                            PrivateFileRow.logical_path.in_(touched_paths),
                             PrivateFileRow.status == "ready",
                         )
                         .order_by(PrivateFileRow.logical_path, PrivateFileRow.id)
@@ -358,6 +380,38 @@ class PrivateFileFinalizer:
                 .scalars()
                 .all()
             )
+            expected_authority = sorted(
+                [
+                    (
+                        entry.file_id,
+                        entry.logical_path,
+                        entry.kind,
+                        entry.media_type,
+                        entry.size,
+                        entry.sha256,
+                        entry.version,
+                    )
+                    for entry in before_manifest.entries
+                ],
+                key=lambda item: (item[1], item[0]),
+            )
+            current_authority = [
+                (
+                    row.id,
+                    row.logical_path,
+                    row.kind,
+                    row.media_type,
+                    row.size,
+                    row.sha256,
+                    row.version,
+                )
+                for row in current_rows
+            ]
+            if len({entry.logical_path for entry in before_manifest.entries}) != len(before_manifest.entries) or current_authority != expected_authority:
+                raise PrivateWorkUnavailable(run_scope.context.request_id)
+
+            current_by_path = {row.logical_path: row for row in current_rows}
+            old_rows = [current_by_path[path] for path in touched_paths if path in current_by_path]
             old_by_path = {row.logical_path: row for row in old_rows}
             deleted_ids: list[uuid.UUID] = []
             for row in old_rows:
@@ -396,19 +450,7 @@ class PrivateFileFinalizer:
 
             after_ready: dict[str, PrivateFileRow] = {row.logical_path: row for row in promoted}
             unchanged_paths = sorted(after_paths - set(changed_by_path))
-            if unchanged_paths:
-                rows = (
-                    await session.execute(
-                        select(PrivateFileRow).where(
-                            PrivateFileRow.project_id == run_scope.context.project_id,
-                            PrivateFileRow.owner_user_id == str(run_scope.context.user_id),
-                            PrivateFileRow.thread_id == run_scope.thread_id,
-                            PrivateFileRow.logical_path.in_(unchanged_paths),
-                            PrivateFileRow.status == "ready",
-                        )
-                    )
-                ).scalars()
-                after_ready.update({row.logical_path: row for row in rows})
+            after_ready.update({path: current_by_path[path] for path in unchanged_paths if path in current_by_path})
 
             artifacts: list[PrivateArtifactRow] = []
             for logical_path in presented_logical_paths:

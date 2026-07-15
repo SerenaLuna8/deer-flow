@@ -24,8 +24,21 @@ import shlex
 import threading
 from typing import TYPE_CHECKING, TypeVar
 
+from deerflow.community.remote_file_authority import (
+    PRIVATE_GUEST_REQUEST_ENV,
+    PRIVATE_GUEST_SCRIPT,
+    RemotePrivateFileAuthority,
+    decode_guest_response,
+    encode_guest_request,
+)
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.exceptions import SandboxRuntimeError
+from deerflow.sandbox.sandbox import (
+    Sandbox,
+    SandboxAtomicWriter,
+    SandboxBinaryReader,
+    _validate_extra_env,
+)
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 if TYPE_CHECKING:
@@ -90,6 +103,10 @@ class BoxliteBox(Sandbox):
         self._on_terminal_failure = on_terminal_failure
         self._lock = threading.Lock()
         self._closed = False
+        self._private_files = RemotePrivateFileAuthority(
+            execute=self._execute_private_guest,
+            resolve_path=self._resolve_path,
+        )
 
     @classmethod
     def _is_terminal_box_failure(cls, error: Exception) -> bool:
@@ -115,7 +132,10 @@ class BoxliteBox(Sandbox):
                 if self._closed:
                     raise RuntimeError("sandbox has been closed")
                 box = self._box
-            return self._run(box.exec(*argv, env=env, timeout=timeout), timeout=timeout)
+            return self._run(
+                box.exec(*argv, env=env, timeout=timeout),
+                timeout=timeout,
+            )
         except Exception as e:
             if self._on_terminal_failure is not None and self._is_terminal_box_failure(e):
                 try:
@@ -130,7 +150,13 @@ class BoxliteBox(Sandbox):
         env: dict[str, str] | None = None,
         timeout: float | None = None,
     ):
-        return self._exec("sh", "-lc", script, env=env, timeout=timeout)
+        return self._exec(
+            "sh",
+            "-lc",
+            script,
+            env=env,
+            timeout=timeout,
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -141,6 +167,17 @@ class BoxliteBox(Sandbox):
             self._run(self._box.stop())
         except Exception as e:
             logger.warning("Error stopping BoxLite box %s: %s", self.id, e)
+
+    def close_private(self) -> None:
+        """Stop a private VM, preserving retryability when stop fails."""
+
+        with self._lock:
+            if self._closed:
+                return
+            box = self._box
+        self._run(box.stop())
+        with self._lock:
+            self._closed = True
 
     @property
     def is_closed(self) -> bool:
@@ -215,6 +252,49 @@ class BoxliteBox(Sandbox):
         if r.exit_code not in (0, None):
             return f"Error: {(r.stderr or '').strip() or 'cannot read file'}"
         return r.stdout or ""
+
+    def _execute_private_guest(
+        self,
+        request: dict[str, object],
+    ) -> dict[str, object]:
+        """Run fixed secure-I/O code through argv, with JSON/base64 in env."""
+
+        encoded = encode_guest_request(request)
+        result = self._exec(
+            "python3",
+            "-c",
+            PRIVATE_GUEST_SCRIPT,
+            env={PRIVATE_GUEST_REQUEST_ENV: encoded},
+        )
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        if result.exit_code not in (0, None) or (stderr and not stdout):
+            raise OSError("BoxLite private file helper returned no result")
+        return decode_guest_response(stdout)
+
+    def list_secure_files(self, root: str, *, max_entries: int):
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.list_secure_files(root, max_entries=max_entries)
+
+    def open_regular_reader(self, path: str) -> SandboxBinaryReader:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.open_regular_reader(path)
+
+    def open_atomic_writer(self, path: str) -> SandboxAtomicWriter:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.open_atomic_writer(path)
+
+    def remove_path(self, path: str) -> None:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        boundary.remove_path(path)
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         self._write_bytes(self._resolve_path(path), content.encode("utf-8"), append=append)

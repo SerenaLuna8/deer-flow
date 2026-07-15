@@ -206,6 +206,146 @@ def test_private_artifact_tombstone_revision_is_alembic_head() -> None:
     assert ScriptDirectory.from_config(cfg).get_current_head() == migration.revision
 
 
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_0011_accepts_manual_shape_and_retries_with_exact_partial_index(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    cfg = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(command.downgrade, cfg, "0010_private_file_source")
+        await engine.dispose()
+        async with engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE artifacts ADD COLUMN deleted_at TIMESTAMPTZ NULL"))
+
+        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await engine.dispose()
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE alembic_version
+                    SET version_num='0010_private_file_source'"""
+                )
+            )
+
+        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await engine.dispose()
+        async with engine.connect() as connection:
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            columns = await connection.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("artifacts")})
+            indexes = await connection.run_sync(lambda sync: inspect(sync).get_indexes("artifacts"))
+        active = next(item for item in indexes if item["name"] == "ix_artifacts_private_active")
+        assert revision == "0011_private_artifact_tombstone"
+        assert "deleted_at" in columns
+        assert active["column_names"] == [
+            "project_id",
+            "owner_user_id",
+            "thread_id",
+            "created_at",
+        ]
+        assert active["unique"] is False
+        assert _normalize_catalog_value(active["dialect_options"]["postgresql_where"]) == "(deleted_at IS NULL)"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_0011_downgrade_is_retry_safe_and_can_upgrade_again(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    cfg = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(command.downgrade, cfg, "0010_private_file_source")
+        await engine.dispose()
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE alembic_version
+                    SET version_num='0011_private_artifact_tombstone'"""
+                )
+            )
+
+        await asyncio.to_thread(command.downgrade, cfg, "0010_private_file_source")
+        await engine.dispose()
+        await asyncio.to_thread(command.upgrade, cfg, "head")
+        await engine.dispose()
+        async with engine.connect() as connection:
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            columns = await connection.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("artifacts")})
+        assert revision == "0011_private_artifact_tombstone"
+        assert "deleted_at" in columns
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_0011_missing_artifacts_table_fails_closed_without_stamping_head(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    cfg = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(command.downgrade, cfg, "0010_private_file_source")
+        await engine.dispose()
+        async with engine.begin() as connection:
+            await connection.execute(text("DROP TABLE artifacts"))
+
+        with pytest.raises(RuntimeError, match="artifacts table is required"):
+            await asyncio.to_thread(command.upgrade, cfg, "head")
+        await engine.dispose()
+        async with engine.connect() as connection:
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            tables = await connection.run_sync(lambda sync: set(inspect(sync).get_table_names()))
+        assert revision == "0010_private_file_source"
+        assert "artifacts" not in tables
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "index_ddl",
+    (
+        """CREATE INDEX ix_artifacts_private_active
+        ON artifacts (project_id,owner_user_id,thread_id)
+        WHERE deleted_at IS NULL""",
+        """CREATE UNIQUE INDEX ix_artifacts_private_active
+        ON artifacts (project_id,owner_user_id,thread_id,created_at)
+        WHERE deleted_at IS NULL""",
+        """CREATE INDEX ix_artifacts_private_active
+        ON artifacts (project_id,owner_user_id,thread_id,created_at)
+        WHERE deleted_at IS NOT NULL""",
+    ),
+    ids=("columns", "unique", "predicate"),
+)
+async def test_0011_rejects_wrong_existing_index_shape_without_stamping_head(
+    migrated_postgres_database_url: str,
+    index_ddl: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    cfg = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(command.downgrade, cfg, "0010_private_file_source")
+        await engine.dispose()
+        async with engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE artifacts ADD COLUMN deleted_at TIMESTAMPTZ NULL"))
+            await connection.execute(text(index_ddl))
+
+        with pytest.raises(RuntimeError, match="ix_artifacts_private_active.*shape"):
+            await asyncio.to_thread(command.upgrade, cfg, "head")
+        await engine.dispose()
+        async with engine.connect() as connection:
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+        assert revision == "0010_private_file_source"
+    finally:
+        await engine.dispose()
+
+
 def test_m4_finalize_validates_prerequisites_before_any_ddl(monkeypatch) -> None:
     migration = importlib.import_module("deerflow.persistence.migrations.versions.0009_project_private_work_finalize")
     mutations: list[str] = []

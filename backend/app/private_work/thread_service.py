@@ -34,6 +34,7 @@ from deerflow.persistence.shared_assets import (
     AgentVersionRow,
     ProjectSystemAgentBindingRow,
 )
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 
@@ -326,13 +327,27 @@ class PrivateThreadService:
                     }
                     if selection.source_visible_tail_message_id is not None:
                         branch_metadata["branch_parent_visible_tail_message_id"] = selection.source_visible_tail_message_id
-                    record = await repository.create(
-                        scope=context.resource_scope,
-                        thread_id=target_thread_id,
-                        agent=agent,
-                        display_name=display_name,
-                        metadata=branch_metadata,
+                    await self._raise_if_branch_target_exists(
+                        session,
+                        context,
+                        target_thread_id,
                     )
+                    try:
+                        async with session.begin_nested():
+                            record = await repository.create(
+                                scope=context.resource_scope,
+                                thread_id=target_thread_id,
+                                agent=agent,
+                                display_name=display_name,
+                                metadata=branch_metadata,
+                            )
+                    except PrivateWorkConflict:
+                        await self._raise_if_branch_target_exists(
+                            session,
+                            context,
+                            target_thread_id,
+                        )
+                        raise
                     if selection.workspace_clone_mode == "current_thread_authority_copy" and self._branch_copy_hook is not None:
                         await self._branch_copy_hook.copy_branch_authority(
                             context.resource_scope,
@@ -368,6 +383,28 @@ class PrivateThreadService:
                 raise
             raise PrivateWorkUnavailable(context.request_id) from None
         return record
+
+    @staticmethod
+    async def _raise_if_branch_target_exists(
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        target_thread_id: str,
+    ) -> None:
+        coordinates = (
+            await session.execute(
+                select(
+                    ThreadMetaRow.project_id,
+                    ThreadMetaRow.owner_user_id,
+                )
+                .where(ThreadMetaRow.thread_id == target_thread_id)
+                .with_for_update(of=ThreadMetaRow)
+            )
+        ).one_or_none()
+        if coordinates is None:
+            return
+        if coordinates == (context.project_id, str(context.user_id)):
+            raise PrivateWorkConflict(context.request_id)
+        raise PrivateWorkNotFound(context.request_id)
 
     @classmethod
     def _classify_branch_checkpoint(

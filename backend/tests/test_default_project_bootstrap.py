@@ -132,7 +132,7 @@ async def test_gateway_bootstrap_does_not_cross_m4_boundary_with_legacy_source(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_gateway_bootstrap_upgrades_empty_0007_database_through_empty_install(
+async def test_gateway_bootstrap_empty_0007_database_requires_explicit_m4_migration(
     postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -143,27 +143,20 @@ async def test_gateway_bootstrap_upgrades_empty_0007_database_through_empty_inst
         cfg = _get_alembic_config(engine)
         await asyncio.to_thread(alembic_command.upgrade, cfg, "0007_project_shared_assets")
 
-        await bootstrap_schema(engine)
+        with pytest.raises(RuntimeError, match="make migrate-private-work"):
+            await bootstrap_schema(engine)
 
         async with engine.connect() as connection:
             revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
             columns = await connection.run_sync(lambda sync_connection: {column["name"] for column in inspect(sync_connection).get_columns("threads_meta")})
-            marker = (
-                await connection.execute(
-                    text(
-                        """SELECT stage,empty_domain_probe_complete,
-                        checkpoint_marker_probe_complete,cutover_at
-                        FROM private_work_cutover_state WHERE id=1"""
-                    )
-                )
-            ).one()
             private_rows = await connection.scalar(text("SELECT count(*) FROM threads_meta"))
-        assert revision == "0011_private_artifact_tombstone"
-        assert {"project_id", "owner_user_id"} <= columns
-        assert marker.stage == "cutover_complete"
-        assert marker.empty_domain_probe_complete is True
-        assert marker.checkpoint_marker_probe_complete is True
-        assert marker.cutover_at is not None
+            migration_runs = await connection.scalar(text("SELECT to_regclass('private_work_migration_runs')"))
+            cutover_state = await connection.scalar(text("SELECT to_regclass('private_work_cutover_state')"))
+        assert revision == "0007_project_shared_assets"
+        assert "project_id" not in columns
+        assert "owner_user_id" not in columns
+        assert migration_runs is None
+        assert cutover_state is None
         assert private_rows == 0
     finally:
         await engine.dispose()
@@ -171,7 +164,7 @@ async def test_gateway_bootstrap_upgrades_empty_0007_database_through_empty_inst
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_gateway_bootstrap_rechecks_filesystem_before_empty_receipt(
+async def test_gateway_bootstrap_never_enters_empty_receipt_state_machine_for_versioned_database(
     postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -182,7 +175,7 @@ async def test_gateway_bootstrap_rechecks_filesystem_before_empty_receipt(
     def filesystem_probe(_home: Path) -> bool:
         nonlocal probes
         probes += 1
-        return probes >= 2
+        return False
 
     monkeypatch.setattr(
         "deerflow.persistence.bootstrap._filesystem_has_legacy_private_source",
@@ -202,12 +195,12 @@ async def test_gateway_bootstrap_rechecks_filesystem_before_empty_receipt(
 
         async with engine.connect() as connection:
             revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-            receipts = await connection.scalar(text("SELECT count(*) FROM private_work_migration_runs"))
-            markers = await connection.scalar(text("SELECT count(*) FROM private_work_cutover_state"))
-        assert probes == 2
-        assert revision == "0008_project_private_work_expand"
-        assert receipts == 0
-        assert markers == 0
+            receipts = await connection.scalar(text("SELECT to_regclass('private_work_migration_runs')"))
+            markers = await connection.scalar(text("SELECT to_regclass('private_work_cutover_state')"))
+        assert probes == 0
+        assert revision == "0007_project_shared_assets"
+        assert receipts is None
+        assert markers is None
     finally:
         await engine.dispose()
 

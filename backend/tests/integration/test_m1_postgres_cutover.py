@@ -10,11 +10,9 @@ import pytest
 from alembic import command
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from deerflow.config.database_config import DatabaseConfig
-from deerflow.persistence.bootstrap import _get_alembic_config, _get_head_revision
-from scripts.check_postgres import check_postgres
+from deerflow.persistence.bootstrap import _get_alembic_config
 from scripts.migrate_sqlite_to_postgres import backup_source, inspect_source, migrate_source
-from scripts.setup_postgres import _asyncpg_url, migrate_postgres
+from scripts.setup_postgres import PostgresSetupError, _asyncpg_url, migrate_postgres
 
 
 def _fingerprint(path: Path) -> tuple[int, str]:
@@ -40,7 +38,7 @@ def _legacy_admin_source(path: Path) -> None:
 @pytest.mark.integration
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_m1_cutover_preserves_source_and_bootstraps_default_project(
+async def test_m1_cutover_preserves_source_and_stops_at_m4_staged_boundary(
     tmp_path: Path,
     postgres_database_url: str,
 ) -> None:
@@ -74,28 +72,19 @@ async def test_m1_cutover_preserves_source_and_bootstraps_default_project(
     assert migrated.verified is True
     assert migrated.tables["users"].inserted == 1
 
-    setup = await migrate_postgres(postgres_database_url)
-    health = await check_postgres(postgres_database_url)
-    assert setup.revision == _get_head_revision()
-    assert health.healthy is True
-    assert DatabaseConfig(url=postgres_database_url).sqlalchemy_url.startswith("postgresql+asyncpg://")
+    with pytest.raises(PostgresSetupError, match="migration 状态"):
+        await migrate_postgres(postgres_database_url)
 
     connection = await asyncpg.connect(_asyncpg_url(postgres_database_url))
     try:
-        project = await connection.fetchrow(
-            """SELECT p.slug,p.created_by_user_id,m.user_id,m.role
-            FROM projects p JOIN project_memberships m ON m.project_id=p.id
-            WHERE p.slug='default-project'"""
-        )
-        assert project is not None
-        assert dict(project) == {
-            "slug": "default-project",
-            "created_by_user_id": "00000000-0000-4000-8000-000000000001",
-            "user_id": "00000000-0000-4000-8000-000000000001",
-            "role": "admin",
-        }
+        assert await connection.fetchval("SELECT version_num FROM alembic_version") == "0007_project_shared_assets"
         assert await connection.fetchval("SELECT system_role FROM users") == "system_admin"
         assert await connection.fetchval("SELECT count(*) FROM migration_ledger") == 1
+        assert await connection.fetchval("SELECT count(*) FROM users") == 1
+        assert await connection.fetchval("SELECT count(*) FROM projects WHERE slug='default-project'") == 0
+        assert await connection.fetchval("SELECT to_regclass('private_work_migration_runs')") is None
+        assert await connection.fetchval("SELECT to_regclass('private_work_migration_ledger')") is None
+        assert await connection.fetchval("SELECT to_regclass('private_work_cutover_state')") is None
     finally:
         await connection.close()
 

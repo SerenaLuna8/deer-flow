@@ -65,6 +65,7 @@ from deerflow.workspace_changes import (
     WORKSPACE_CHANGES_METADATA_KEY,
     capture_workspace_snapshot,
     record_workspace_changes,
+    trusted_workspace_change_result,
 )
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
@@ -76,6 +77,7 @@ logger = logging.getLogger(__name__)
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
+_PRIVATE_CLEANUP_MAX_ATTEMPTS = 3
 
 
 def _repository_trace_user_id(record: RunRecord) -> str:
@@ -422,6 +424,48 @@ async def run_agent(
         if cancellation_pending:
             raise asyncio.CancelledError
 
+    async def _join_private_cleanup(
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        failure_message: str,
+    ) -> bool:
+        """Join and retry one private cleanup despite repeated cancellation."""
+
+        nonlocal private_cleanup_cancellation_pending
+        cancellation_pending = False
+        try:
+            for attempt in range(1, _PRIVATE_CLEANUP_MAX_ATTEMPTS + 1):
+                task = asyncio.create_task(operation())
+                try:
+                    while True:
+                        try:
+                            await asyncio.shield(task)
+                            break
+                        except asyncio.CancelledError:
+                            if task.cancelled():
+                                logger.warning(
+                                    "%s (attempt %d/%d)",
+                                    failure_message,
+                                    attempt,
+                                    _PRIVATE_CLEANUP_MAX_ATTEMPTS,
+                                )
+                                break
+                            cancellation_pending = True
+                    if task.cancelled():
+                        continue
+                    task.result()
+                    return True
+                except Exception:
+                    logger.warning(
+                        "%s (attempt %d/%d)",
+                        failure_message,
+                        attempt,
+                        _PRIVATE_CLEANUP_MAX_ATTEMPTS,
+                    )
+            return False
+        finally:
+            private_cleanup_cancellation_pending |= cancellation_pending
+
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
         logger.info(
@@ -430,6 +474,8 @@ async def run_agent(
         )
 
     try:
+        if ctx.file_authority is not None:
+            await run_manager.set_finalizing(run_id, True)
         await run_manager.wait_for_prior_finalizing(thread_id, run_id)
 
         # Initialize RunJournal + write human_message event.
@@ -818,27 +864,27 @@ async def run_agent(
         )
 
     finally:
-        # Persist any subagent step events still buffered (#3779) — including on
-        # abort/exception paths, where the stream loop broke before its own flush.
-        if subagent_events is not None:
-            await subagent_events.flush()
+        try:
+            # Persist any subagent step events still buffered (#3779) — including on
+            # abort/exception paths, where the stream loop broke before its own flush.
+            if subagent_events is not None:
+                await subagent_events.flush()
 
-        if event_store is not None and ctx.file_authority is not None:
-            changes = getattr(private_finalization_result, "workspace_changes", None)
-            if isinstance(changes, dict) and changes:
-                created = changes.get("created", [])
-                modified = changes.get("modified", [])
-                deleted = changes.get("deleted", [])
-                if all(isinstance(paths, list) and all(type(path) is str for path in paths) for paths in (created, modified, deleted)):
-                    changed_file_count = len(created) + len(modified) + len(deleted)
+            if event_store is not None and ctx.file_authority is not None:
+                changes = getattr(private_finalization_result, "workspace_changes", None)
+                result = trusted_workspace_change_result(changes)
+                if result is not None:
+                    payload = result.to_dict()
+                    summary = result.summary
+                    changed_file_count = summary.created + summary.modified + summary.deleted
                     try:
                         await event_store.put(
                             thread_id=thread_id,
                             run_id=run_id,
                             event_type=WORKSPACE_CHANGES_EVENT_TYPE,
                             category="workspace",
-                            content=f"{changed_file_count} file{'s' if changed_file_count != 1 else ''} changed",
-                            metadata={WORKSPACE_CHANGES_METADATA_KEY: changes},
+                            content=f"{changed_file_count} file{'s' if changed_file_count != 1 else ''} changed +0 -0",
+                            metadata={WORKSPACE_CHANGES_METADATA_KEY: payload},
                             scope=record.scope,
                         )
                     except Exception:
@@ -847,84 +893,123 @@ async def run_agent(
                             run_id,
                             exc_info=True,
                         )
-        elif event_store is not None and pre_run_workspace_snapshot is not None:
-            try:
-                await record_workspace_changes(
-                    event_store,
-                    thread_id,
-                    run_id,
-                    pre_run_workspace_snapshot,
-                    user_id=workspace_changes_user_id,
-                )
-            except Exception:
-                logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
-
-        # Flush any buffered journal events and persist completion data
-        if journal is not None:
-            try:
-                await journal.flush()
-            except Exception:
-                logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
-
-            try:
-                # Persist token usage + convenience fields to RunStore
-                completion = journal.get_completion_data()
-                await run_manager.update_run_completion(run_id, status=record.status.value, **completion)
-            except Exception:
-                logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
-
-        if checkpointer is not None and record.status == RunStatus.interrupted and record.abort_action != "authorization_revoked":
-            try:
-                await run_manager.wait_for_prior_finalizing(thread_id, run_id)
-                if not await run_manager.has_later_started_run(thread_id, run_id):
-                    await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
-            except Exception:
-                logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
-
-        # Sync title from checkpoint to threads_meta.display_name
-        if checkpointer is not None and thread_store is not None:
-            try:
-                ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-                ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
-                if ckpt_tuple is not None:
-                    ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
-                    title = ckpt.get("channel_values", {}).get("title")
-                    if title:
-                        await thread_store.update_display_name(thread_id, title)
-            except Exception:
-                logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
-
-        # Update threads_meta status based on run outcome
-        if thread_store is not None:
-            try:
-                final_status = "idle" if record.status == RunStatus.success else record.status.value
-                await thread_store.update_status(thread_id, final_status)
-            except Exception:
-                logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
-
-        if ctx.on_run_completed is not None:
-            try:
-                await ctx.on_run_completed(record)
-            except Exception:
-                logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
-        if record.finalizing:
-            await run_manager.set_finalizing(run_id, False)
-
-        if ctx.private_agent_runtime is not None:
-            try:
-                await ctx.private_agent_runtime.aclose()
-            except Exception:
-                logger.warning("Private runtime cleanup failed for run %s", run_id)
-
-        if ctx.file_authority is not None:
-            release = getattr(ctx.file_authority, "release", None)
-            if not callable(release):
-                release = getattr(ctx.file_authority, "close", None)
-            if callable(release):
+            elif event_store is not None and pre_run_workspace_snapshot is not None:
                 try:
-                    await release()
+                    await record_workspace_changes(
+                        event_store,
+                        thread_id,
+                        run_id,
+                        pre_run_workspace_snapshot,
+                        user_id=workspace_changes_user_id,
+                    )
                 except Exception:
-                    logger.warning("Private file authority cleanup failed for run %s", run_id)
+                    logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
+
+            # Flush any buffered journal events and persist completion data
+            if journal is not None:
+                try:
+                    await journal.flush()
+                except Exception:
+                    logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
+
+                try:
+                    # Persist token usage + convenience fields to RunStore
+                    completion = journal.get_completion_data()
+                    await run_manager.update_run_completion(run_id, status=record.status.value, **completion)
+                except Exception:
+                    logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
+
+            if checkpointer is not None and record.status == RunStatus.interrupted and record.abort_action != "authorization_revoked":
+                try:
+                    await run_manager.wait_for_prior_finalizing(thread_id, run_id)
+                    if not await run_manager.has_later_started_run(thread_id, run_id):
+                        await _ensure_interrupted_title(
+                            checkpointer=checkpointer,
+                            thread_id=thread_id,
+                            app_config=ctx.app_config,
+                            graph_input=graph_input,
+                        )
+                except Exception:
+                    logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
+
+            # Sync title from checkpoint to threads_meta.display_name
+            if checkpointer is not None and thread_store is not None:
+                try:
+                    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+                    ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
+                    if ckpt_tuple is not None:
+                        ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
+                        title = ckpt.get("channel_values", {}).get("title")
+                        if title:
+                            await thread_store.update_display_name(thread_id, title)
+                except Exception:
+                    logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
+
+            # Update threads_meta status based on run outcome
+            if thread_store is not None:
+                try:
+                    final_status = "idle" if record.status == RunStatus.success else record.status.value
+                    await thread_store.update_status(thread_id, final_status)
+                except Exception:
+                    logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+
+            if ctx.on_run_completed is not None:
+                try:
+                    await ctx.on_run_completed(record)
+                except Exception:
+                    logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+        finally:
+            # A private run owns both the agent runtime and file-authority lease
+            # until every terminal task completes. These cleanup operations are
+            # joined under repeated cancellation before the admission barrier is
+            # cleared, so a replacement cannot observe or reuse live resources.
+            cleanup_succeeded = True
+            if ctx.private_agent_runtime is not None:
+                cleanup_succeeded = (
+                    await _join_private_cleanup(
+                        ctx.private_agent_runtime.aclose,
+                        failure_message=f"Private runtime cleanup failed for run {run_id}",
+                    )
+                    and cleanup_succeeded
+                )
+
+            if ctx.file_authority is not None:
+                release = getattr(ctx.file_authority, "release", None)
+                if not callable(release):
+                    release = getattr(ctx.file_authority, "close", None)
+                if callable(release):
+                    cleanup_succeeded = (
+                        await _join_private_cleanup(
+                            release,
+                            failure_message=f"Private file authority cleanup failed for run {run_id}",
+                        )
+                        and cleanup_succeeded
+                    )
+                else:
+                    cleanup_succeeded = False
+                    logger.warning(
+                        "Private file authority cleanup failed for run %s: release unavailable",
+                        run_id,
+                    )
+
+            if not cleanup_succeeded and record.status is RunStatus.success:
+                await _join_private_cleanup(
+                    lambda: run_manager.set_status(
+                        run_id,
+                        RunStatus.error,
+                        error="Private run cleanup failed",
+                    ),
+                    failure_message=f"Failed to record private cleanup error for run {run_id}",
+                )
+
+            if record.finalizing and cleanup_succeeded:
+                if ctx.file_authority is not None:
+                    await _join_private_cleanup(
+                        lambda: run_manager.set_finalizing(run_id, False),
+                        failure_message=f"Failed to clear finalizing state for run {run_id}",
+                    )
+                else:
+                    await run_manager.set_finalizing(run_id, False)
 
         if run_mount_provider is not None and run_mount_user_id is not None and run_mounts:
             try:

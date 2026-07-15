@@ -38,6 +38,31 @@ async def _chunks(payload: bytes) -> AsyncIterator[bytes]:
         yield payload[offset : offset + 131_071]
 
 
+def _private_file_run_scope():
+    from app.private_work.context import PrivateWorkContext
+    from app.private_work.sandbox_files import PrivateFileRunScope
+    from app.projects.capabilities import capabilities_for
+    from app.projects.context import ProjectContext
+    from app.projects.models import ProjectRole
+
+    context = PrivateWorkContext.from_project(
+        ProjectContext(
+            user_id=uuid.uuid4(),
+            project_id=uuid.uuid4(),
+            membership_id=uuid.uuid4(),
+            role=ProjectRole.ADMIN,
+            capabilities=capabilities_for(ProjectRole.ADMIN),
+            membership_version=1,
+            request_id=f"request-{uuid.uuid4()}",
+        )
+    )
+    return PrivateFileRunScope(
+        context,
+        thread_id=f"thread-{uuid.uuid4()}",
+        run_id=f"run-{uuid.uuid4()}",
+    )
+
+
 class MemoryAtomicSandbox:
     """Contract fake: it enforces bounded writes but never substitutes for provider tests."""
 
@@ -89,6 +114,20 @@ class RevokingPublishSandbox(MemoryAtomicSandbox):
     def publish_atomic_file(self, handle: str) -> None:
         super().publish_atomic_file(handle)
         self._boundary.revoked = True
+
+
+class BlockingBeginSandbox(MemoryAtomicSandbox):
+    def __init__(self) -> None:
+        super().__init__()
+        self.begin_started = threading.Event()
+        self.allow_begin = threading.Event()
+
+    def begin_atomic_file(self, path: str) -> str:
+        handle = super().begin_atomic_file(path)
+        self.begin_started.set()
+        if not self.allow_begin.wait(2):
+            raise TimeoutError("test did not release atomic begin")
+        return handle
 
 
 @pytest_asyncio.fixture()
@@ -202,6 +241,39 @@ async def test_restore_revoked_after_publish_removes_published_file(projection_s
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_restore_cancelled_during_atomic_begin_aborts_returned_handle(
+    projection_seed,
+) -> None:
+    from app.private_work.sandbox_files import (
+        PrivateFileRunScope,
+        PrivateSandboxFileProjection,
+    )
+
+    seed, thread_id, _ready, _payload = projection_seed
+    sandbox = BlockingBeginSandbox()
+    task = asyncio.create_task(
+        PrivateSandboxFileProjection(seed.factory).restore(
+            PrivateFileRunScope(
+                seed.owner_a,
+                thread_id=thread_id,
+                run_id=f"run-{uuid.uuid4()}",
+            ),
+            sandbox,
+        )
+    )
+    assert await asyncio.to_thread(sandbox.begin_started.wait, 2)
+    task.cancel()
+    sandbox.allow_begin.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sandbox._writes == {}
+    assert len(sandbox.aborted) == 1
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_private_authority_finalizer_consumes_only_registered_presented_paths(
     projection_seed,
 ) -> None:
@@ -251,6 +323,101 @@ async def test_private_authority_finalizer_consumes_only_registered_presented_pa
         sandbox,
         presented_paths=("/mnt/user-data/outputs/report.md",),
     )
+
+
+@pytest.mark.anyio
+async def test_private_authority_failed_release_preserves_state_for_retry() -> None:
+    from unittest.mock import AsyncMock
+
+    from app.private_work.sandbox_files import PrivateRunFileAuthority
+    from deerflow.file_authority import AuthorityManifest
+
+    run_scope = _private_file_run_scope()
+    manifest = AuthorityManifest(entries=(), run_id=run_scope.run_id)
+    sandbox = object()
+    lease = SimpleNamespace(sandbox_id="private-release-retry")
+    provider = SimpleNamespace(
+        acquire_private_async=AsyncMock(return_value=lease),
+        get=lambda sandbox_id: sandbox if sandbox_id == lease.sandbox_id else None,
+        release_private_async=AsyncMock(side_effect=[RuntimeError("transient destroy failure"), None]),
+    )
+    projection = SimpleNamespace(restore=AsyncMock(return_value=manifest))
+    finalizer = SimpleNamespace(finalize=AsyncMock(return_value=SimpleNamespace()))
+    authority = PrivateRunFileAuthority(
+        run_scope,
+        projection,
+        finalizer,
+        provider=provider,
+    )
+    await authority.restore()
+    authority.record_presented_paths(("/mnt/user-data/outputs/report.md",))
+
+    with pytest.raises(RuntimeError, match="transient destroy failure"):
+        await authority.release()
+
+    assert authority.sandbox_id == lease.sandbox_id
+    assert authority.manifest is manifest
+    await authority.finalize()
+    finalizer.finalize.assert_awaited_once_with(
+        run_scope,
+        manifest,
+        sandbox,
+        presented_paths=("/mnt/user-data/outputs/report.md",),
+    )
+
+    await authority.release()
+
+    assert authority.sandbox_id is None
+    assert authority.manifest is None
+    assert provider.release_private_async.await_args_list == [
+        ((lease,),),
+        ((lease,),),
+    ]
+
+
+@pytest.mark.anyio
+async def test_private_authority_concurrent_release_destroys_lease_once() -> None:
+    from unittest.mock import AsyncMock
+
+    from app.private_work.sandbox_files import PrivateRunFileAuthority
+    from deerflow.file_authority import AuthorityManifest
+
+    run_scope = _private_file_run_scope()
+    manifest = AuthorityManifest(entries=(), run_id=run_scope.run_id)
+    sandbox = object()
+    lease = SimpleNamespace(sandbox_id="private-release-concurrent")
+    destroy_started = asyncio.Event()
+    allow_destroy = asyncio.Event()
+
+    async def destroy(_lease) -> None:
+        destroy_started.set()
+        await allow_destroy.wait()
+
+    provider = SimpleNamespace(
+        acquire_private_async=AsyncMock(return_value=lease),
+        get=lambda sandbox_id: sandbox if sandbox_id == lease.sandbox_id else None,
+        release_private_async=AsyncMock(side_effect=destroy),
+    )
+    authority = PrivateRunFileAuthority(
+        run_scope,
+        SimpleNamespace(restore=AsyncMock(return_value=manifest)),
+        SimpleNamespace(finalize=AsyncMock()),
+        provider=provider,
+    )
+    await authority.restore()
+
+    first = asyncio.create_task(authority.release())
+    await destroy_started.wait()
+    second = asyncio.create_task(authority.release())
+    await asyncio.sleep(0)
+    assert provider.release_private_async.await_count == 1
+
+    allow_destroy.set()
+    await asyncio.gather(first, second)
+
+    provider.release_private_async.assert_awaited_once_with(lease)
+    assert authority.sandbox_id is None
+    assert authority.manifest is None
 
 
 @pytest.mark.anyio
@@ -315,6 +482,7 @@ async def test_worker_private_recorder_uses_committed_result_without_host_scan(
     from deerflow.runtime.runs import worker as worker_module
     from deerflow.runtime.runs.manager import RunManager
     from deerflow.runtime.runs.worker import RunContext, run_agent
+    from deerflow.workspace_changes.api import get_workspace_changes_response
     from deerflow.workspace_changes.types import (
         WORKSPACE_CHANGES_EVENT_TYPE,
         WORKSPACE_CHANGES_METADATA_KEY,
@@ -327,7 +495,7 @@ async def test_worker_private_recorder_uses_committed_result_without_host_scan(
     workspace_changes = {
         "created": ["outputs/report.txt"],
         "modified": ["workspace/draft.txt"],
-        "deleted": [],
+        "deleted": ["workspace/old.txt"],
     }
     authority = SimpleNamespace(
         restore=AsyncMock(),
@@ -366,7 +534,83 @@ async def test_worker_private_recorder_uses_committed_result_without_host_scan(
     legacy_record.assert_not_awaited()
     events = await event_store.list_events(record.thread_id, record.run_id)
     workspace_event = next(event for event in events if event["event_type"] == WORKSPACE_CHANGES_EVENT_TYPE)
-    assert workspace_event["metadata"][WORKSPACE_CHANGES_METADATA_KEY] == workspace_changes
+    payload = workspace_event["metadata"][WORKSPACE_CHANGES_METADATA_KEY]
+    assert payload["version"] == 1
+    assert payload["summary"] == {
+        "created": 1,
+        "modified": 1,
+        "deleted": 1,
+        "additions": 0,
+        "deletions": 0,
+        "truncated": False,
+    }
+    assert [(item["path"], item["root"], item["status"]) for item in payload["files"]] == [
+        ("/mnt/user-data/outputs/report.txt", "outputs", "created"),
+        ("/mnt/user-data/workspace/draft.txt", "workspace", "modified"),
+        ("/mnt/user-data/workspace/old.txt", "workspace", "deleted"),
+    ]
+    assert payload["limits"]["max_files"] == 200
+
+    response = await get_workspace_changes_response(
+        event_store,
+        record.thread_id,
+        record.run_id,
+    )
+    assert response == {"available": True, **payload}
+
+
+@pytest.mark.anyio
+async def test_worker_private_recorder_does_not_publish_empty_available_event() -> None:
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+    from deerflow.workspace_changes.api import get_workspace_changes_response
+
+    authority = SimpleNamespace(
+        restore=AsyncMock(),
+        finalize=AsyncMock(
+            return_value=SimpleNamespace(
+                workspace_changes={"created": [], "modified": [], "deleted": []},
+            )
+        ),
+        mark_failed=AsyncMock(),
+        release=AsyncMock(),
+    )
+    event_store = MemoryRunEventStore()
+    manager = RunManager()
+    record = await manager.create("thread-private-no-changes")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=event_store,
+            file_authority=authority,
+        ),
+        agent_factory=lambda **_kwargs: Agent(),
+        graph_input={},
+        config={},
+    )
+
+    response = await get_workspace_changes_response(
+        event_store,
+        record.thread_id,
+        record.run_id,
+    )
+    assert response["available"] is False
 
 
 @pytest.mark.postgres
@@ -478,7 +722,15 @@ async def test_local_private_next_run_clears_uncommitted_projection(
         )
         second_sandbox = provider.get(second.sandbox_id)
         assert second_sandbox is not None
-        assert second_sandbox.list_secure_files("/mnt/user-data/outputs") == ()
+        assert (
+            tuple(
+                second_sandbox.list_secure_files(
+                    "/mnt/user-data/outputs",
+                    max_entries=1,
+                )
+            )
+            == ()
+        )
         await provider.release_private_async(second)
     finally:
         provider.reset()
@@ -511,6 +763,56 @@ def test_local_private_rejects_second_active_run_for_same_scope_thread(
                 run_id="run-second",
             )
         provider.release(first.sandbox_id)
+    finally:
+        provider.reset()
+        reset_app_config()
+
+
+@pytest.mark.parametrize("replacement", ["mapping_root", "ancestor_symlink"])
+def test_local_private_lease_rejects_mapping_identity_replacement(
+    replacement: str,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.sandbox.local import LocalSandboxProvider
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
+    provider = LocalSandboxProvider()
+    scope = PrivateResourceScope(str(uuid.uuid4()), str(uuid.uuid4()), 1)
+    lease = provider.acquire_private(
+        "thread-root-swap",
+        scope=scope,
+        user_id=scope.owner_user_id,
+        run_id=f"run-{replacement}",
+    )
+    sandbox = provider.get(lease.sandbox_id)
+    assert sandbox is not None
+    workspace = tmp_path / lease.relative_root / "user-data" / "workspace"
+    outside = tmp_path / "outside" / "threads" / "thread-root-swap" / "user-data" / "workspace"
+    outside.mkdir(parents=True)
+    (outside / "payload.bin").write_bytes(b"outside")
+    try:
+        if replacement == "mapping_root":
+            workspace.rename(workspace.with_name("workspace-original"))
+            workspace.mkdir()
+            (workspace / "payload.bin").write_bytes(b"replacement")
+        else:
+            owner_root = tmp_path / "projects" / scope.project_id / "users" / scope.owner_user_id
+            owner_root.rename(owner_root.with_name(f"{scope.owner_user_id}-original"))
+            os.symlink(tmp_path / "outside", owner_root)
+
+        with pytest.raises(OSError):
+            sandbox.open_regular_file("/mnt/user-data/workspace/payload.bin")
+        with pytest.raises(OSError):
+            sandbox.begin_atomic_file("/mnt/user-data/workspace/new.bin")
+        assert (outside / "payload.bin").read_bytes() == b"outside"
+        assert not (outside / "new.bin").exists()
+
+        provider.release(lease.sandbox_id)
+        with pytest.raises(OSError):
+            tuple(sandbox.list_secure_files("/mnt/user-data/workspace", max_entries=1))
     finally:
         provider.reset()
         reset_app_config()
@@ -790,6 +1092,139 @@ def test_local_atomic_writer_removes_published_target_when_parent_fsync_fails(
     assert not (workspace / "payload.bin").exists()
 
 
+def test_local_atomic_writer_rolls_back_post_publish_close_error_and_retains_handle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    sandbox = _local_workspace_sandbox(workspace)
+    handle = sandbox.begin_atomic_file("/mnt/user-data/workspace/payload.bin")
+    sandbox.append_atomic_file(handle, b"private")
+    writer_fd = sandbox._private_atomic_writers[handle]._fd
+    real_close = os.close
+    failed = False
+
+    def fail_writer_close(fd: int) -> None:
+        nonlocal failed
+        if fd == writer_fd and not failed:
+            failed = True
+            raise OSError("writer close failed")
+        real_close(fd)
+
+    monkeypatch.setattr(os, "close", fail_writer_close)
+    with pytest.raises(OSError, match="writer close failed"):
+        sandbox.publish_atomic_file(handle)
+
+    assert not (workspace / "payload.bin").exists()
+    assert handle in sandbox._private_atomic_writers
+    sandbox.abort_atomic_file(handle)
+    assert sandbox._private_atomic_writers == {}
+
+
+def test_local_atomic_writer_rolls_back_when_root_fd_close_fails_after_publish(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    sandbox = _local_workspace_sandbox(workspace)
+    handle = sandbox.begin_atomic_file("/mnt/user-data/workspace/payload.bin")
+    sandbox.append_atomic_file(handle, b"private")
+    root_fd = sandbox._private_atomic_writers[handle]._root_fd
+    real_close = os.close
+    failed = False
+
+    def fail_root_close(fd: int) -> None:
+        nonlocal failed
+        if fd == root_fd and not failed:
+            failed = True
+            raise OSError("root close failed")
+        real_close(fd)
+
+    monkeypatch.setattr(os, "close", fail_root_close)
+    with pytest.raises(OSError, match="root close failed"):
+        sandbox.publish_atomic_file(handle)
+
+    assert not (workspace / "payload.bin").exists()
+    sandbox.abort_atomic_file(handle)
+
+
+def test_local_atomic_writer_rolls_back_when_replace_publishes_then_raises(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    sandbox = _local_workspace_sandbox(workspace)
+    handle = sandbox.begin_atomic_file("/mnt/user-data/workspace/payload.bin")
+    sandbox.append_atomic_file(handle, b"private")
+    real_replace = os.replace
+
+    def publish_then_fail(*args, **kwargs) -> None:
+        real_replace(*args, **kwargs)
+        raise OSError("replace completion uncertain")
+
+    monkeypatch.setattr(os, "replace", publish_then_fail)
+    with pytest.raises(OSError, match="replace completion uncertain"):
+        sandbox.publish_atomic_file(handle)
+
+    assert not (workspace / "payload.bin").exists()
+    sandbox.abort_atomic_file(handle)
+
+
+def test_local_secure_scan_enforces_primitive_entry_limit_lazily(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    sandbox = _local_workspace_sandbox(workspace)
+    for index in range(4):
+        (workspace / f"{index}.txt").write_text(str(index))
+
+    entries = sandbox.list_secure_files(
+        "/mnt/user-data/workspace",
+        max_entries=2,
+    )
+
+    assert not isinstance(entries, tuple)
+    iterator = iter(entries)
+    first_two = {next(iterator).path, next(iterator).path}
+    assert len(first_two) == 2
+    with pytest.raises(OSError):
+        next(iterator)
+
+
+def test_local_secure_scan_closes_mapping_root_when_subdirectory_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    sandbox = _local_workspace_sandbox(workspace)
+    fd_events: list[tuple[str, int]] = []
+    real_open_root = sandbox._open_private_mapping_root
+    real_close = os.close
+
+    def record_open_root(mapping):
+        fd = real_open_root(mapping)
+        fd_events.append(("open-root", fd))
+        return fd
+
+    def record_close(fd: int) -> None:
+        fd_events.append(("close", fd))
+        real_close(fd)
+
+    monkeypatch.setattr(sandbox, "_open_private_mapping_root", record_open_root)
+    monkeypatch.setattr(os, "close", record_close)
+
+    assert (
+        tuple(
+            sandbox.list_secure_files(
+                "/mnt/user-data/workspace/missing",
+                max_entries=1,
+            )
+        )
+        == ()
+    )
+    root_events = [(index, fd) for index, (event, fd) in enumerate(fd_events) if event == "open-root"]
+    assert root_events
+    assert all(any(event == "close" and closed_fd == fd for event, closed_fd in fd_events[index + 1 :]) for index, fd in root_events)
+
+
 @pytest.mark.parametrize(
     "sandbox_path",
     [
@@ -798,16 +1233,14 @@ def test_local_atomic_writer_removes_published_target_when_parent_fsync_fails(
         "deerflow.community.boxlite.box:BoxliteBox",
     ],
 )
-def test_unimplemented_remote_atomic_writer_fails_closed_before_partial_write(sandbox_path: str) -> None:
-    """A provider without the bounded writer contract must reject before touching storage."""
+def test_remote_atomic_writer_implements_private_boundary(sandbox_path: str) -> None:
+    """Every remote adapter owns the bounded writer boundary."""
 
     from deerflow.reflection import resolve_class
     from deerflow.sandbox.sandbox import Sandbox
 
     sandbox_class = resolve_class(sandbox_path, Sandbox)
-    sandbox = sandbox_class.__new__(sandbox_class)
-    with pytest.raises(SandboxRuntimeError):
-        Sandbox.begin_atomic_file(sandbox, "/mnt/user-data/workspace/probe.bin")
+    assert sandbox_class.open_atomic_writer is not Sandbox.open_atomic_writer
 
 
 @pytest.mark.parametrize(
@@ -818,33 +1251,15 @@ def test_unimplemented_remote_atomic_writer_fails_closed_before_partial_write(sa
         "deerflow.community.boxlite:BoxliteProvider",
     ],
 )
-def test_remote_provider_private_authority_is_explicitly_unsupported_before_legacy_acquire(
+def test_remote_provider_private_authority_uses_fresh_private_hook(
     provider_path: str,
-    monkeypatch,
 ) -> None:
     from deerflow.reflection import resolve_class
     from deerflow.sandbox.sandbox_provider import SandboxProvider
 
     provider_class = resolve_class(provider_path, SandboxProvider)
-    provider = provider_class.__new__(provider_class)
-    legacy_calls: list[str] = []
-
-    def capture(*_args, **_kwargs):
-        legacy_calls.append("called")
-        return "legacy-sandbox"
-
-    monkeypatch.setattr(provider_class, "acquire", capture)
-    monkeypatch.setattr(provider_class, "acquire_with_mounts", capture)
-    owner = str(uuid.uuid4())
-    scope = PrivateResourceScope(str(uuid.uuid4()), owner, 1)
-    with pytest.raises(SandboxRuntimeError, match="unsupported"):
-        provider.acquire_private(
-            "thread",
-            scope=scope,
-            user_id=owner,
-            run_id="run-1",
-        )
-    assert legacy_calls == []
+    assert provider_class._supports_isolated_private_file_authority is True
+    assert provider_class._acquire_private_fresh is not SandboxProvider._acquire_private_fresh
 
 
 @pytest.mark.parametrize(
@@ -864,7 +1279,7 @@ def test_remote_provider_private_authority_is_explicitly_unsupported_before_lega
         ("remove_path", "/mnt/user-data/workspace/output.bin"),
     ],
 )
-def test_remote_sandbox_private_secure_io_contract_fails_closed(
+def test_remote_sandbox_implements_private_secure_io_contract(
     sandbox_path: str,
     method_name: str,
     argument: str,
@@ -873,9 +1288,8 @@ def test_remote_sandbox_private_secure_io_contract_fails_closed(
     from deerflow.sandbox.sandbox import Sandbox
 
     sandbox_class = resolve_class(sandbox_path, Sandbox)
-    sandbox = sandbox_class.__new__(sandbox_class)
-    with pytest.raises(SandboxRuntimeError, match="unsupported"):
-        getattr(sandbox, method_name)(argument)
+    del argument
+    assert getattr(sandbox_class, method_name) is not getattr(Sandbox, method_name)
 
 
 @pytest.mark.anyio
@@ -886,11 +1300,18 @@ async def test_worker_private_authority_owns_restore_finalize_release_order() ->
     from deerflow.runtime.runs.worker import RunContext, run_agent
 
     order: list[str] = []
+
+    async def release() -> None:
+        current = await manager.get(record.run_id)
+        assert current is not None
+        assert current.finalizing is True
+        order.append("release")
+
     authority = SimpleNamespace(
         restore=AsyncMock(side_effect=lambda: order.append("restore")),
         finalize=AsyncMock(side_effect=lambda: order.append("finalize")),
         mark_failed=AsyncMock(side_effect=lambda: order.append("failed")),
-        release=AsyncMock(side_effect=lambda: order.append("release")),
+        release=AsyncMock(side_effect=release),
     )
     manager = RunManager()
     record = await manager.create("thread-lease")
@@ -916,6 +1337,259 @@ async def test_worker_private_authority_owns_restore_finalize_release_order() ->
 
     assert order == ["restore", "graph", "finalize", "release"]
     authority.finalize.assert_awaited_once_with()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure_stage", ["restore", "agent"])
+async def test_worker_private_error_keeps_finalizing_until_authority_release(
+    failure_stage: str,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    manager = RunManager()
+    record = await manager.create(f"thread-private-error-barrier-{failure_stage}")
+    release_observed_finalizing: list[bool] = []
+
+    async def restore() -> None:
+        if failure_stage == "restore":
+            raise RuntimeError("restore failed")
+
+    async def release() -> None:
+        current = await manager.get(record.run_id)
+        assert current is not None
+        release_observed_finalizing.append(current.finalizing)
+
+    authority = SimpleNamespace(
+        restore=AsyncMock(side_effect=restore),
+        finalize=AsyncMock(),
+        mark_failed=AsyncMock(),
+        release=AsyncMock(side_effect=release),
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            raise RuntimeError("agent failed")
+            yield
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, file_authority=authority),
+        agent_factory=lambda **_kwargs: Agent(),
+        graph_input={},
+        config={},
+    )
+
+    assert release_observed_finalizing == [True]
+    persisted = await manager.get(record.run_id)
+    assert persisted is not None
+    assert persisted.finalizing is False
+
+
+@pytest.mark.anyio
+async def test_worker_repeated_cancel_waits_for_private_runtime_and_authority_cleanup() -> None:
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    manager = RunManager()
+    record = await manager.create("thread-private-repeated-cancel")
+    graph_started = asyncio.Event()
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+    cleanup_order: list[str] = []
+
+    async def close_runtime() -> None:
+        current = await manager.get(record.run_id)
+        assert current is not None
+        assert current.finalizing is True
+        cleanup_order.append("runtime")
+
+    async def release_authority() -> None:
+        current = await manager.get(record.run_id)
+        assert current is not None
+        assert current.finalizing is True
+        cleanup_order.append("release-start")
+        release_started.set()
+        await allow_release.wait()
+        cleanup_order.append("release-complete")
+
+    authority = SimpleNamespace(
+        restore=AsyncMock(),
+        finalize=AsyncMock(),
+        mark_failed=AsyncMock(),
+        release=AsyncMock(side_effect=release_authority),
+    )
+    private_runtime = SimpleNamespace(
+        skill_root=Path("/private/skills"),
+        aclose=AsyncMock(side_effect=close_runtime),
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            graph_started.set()
+            await asyncio.Event().wait()
+            yield
+
+    worker = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(
+                checkpointer=None,
+                file_authority=authority,
+                private_agent_runtime=private_runtime,
+            ),
+            agent_factory=lambda *, config, private_runtime: Agent(),
+            graph_input={},
+            config={},
+        )
+    )
+    await graph_started.wait()
+    worker.cancel()
+    await release_started.wait()
+    worker.cancel()
+    await asyncio.sleep(0)
+    assert not worker.done()
+
+    allow_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+
+    assert cleanup_order == ["runtime", "release-start", "release-complete"]
+    persisted = await manager.get(record.run_id)
+    assert persisted is not None
+    assert persisted.finalizing is False
+
+
+@pytest.mark.anyio
+async def test_worker_retries_private_runtime_and_authority_cleanup_without_losing_success() -> None:
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    runtime_attempts = 0
+    release_attempts = 0
+
+    async def close_runtime() -> None:
+        nonlocal runtime_attempts
+        runtime_attempts += 1
+        if runtime_attempts == 1:
+            raise RuntimeError("transient runtime cleanup")
+
+    async def release_authority() -> None:
+        nonlocal release_attempts
+        release_attempts += 1
+        if release_attempts == 1:
+            raise RuntimeError("transient authority cleanup")
+
+    authority = SimpleNamespace(
+        restore=AsyncMock(),
+        finalize=AsyncMock(),
+        mark_failed=AsyncMock(),
+        release=AsyncMock(side_effect=release_authority),
+    )
+    private_runtime = SimpleNamespace(
+        skill_root=Path("/private/skills"),
+        aclose=AsyncMock(side_effect=close_runtime),
+    )
+    manager = RunManager()
+    record = await manager.create("thread-private-cleanup-retry")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            file_authority=authority,
+            private_agent_runtime=private_runtime,
+        ),
+        agent_factory=lambda *, config, private_runtime: Agent(),
+        graph_input={},
+        config={},
+    )
+
+    persisted = await manager.get(record.run_id)
+    assert persisted is not None
+    assert persisted.status is RunStatus.success
+    assert persisted.finalizing is False
+    assert private_runtime.aclose.await_count == 2
+    assert authority.release.await_count == 2
+
+
+@pytest.mark.anyio
+async def test_worker_exhausted_private_cleanup_records_error_and_keeps_barrier(
+    caplog,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    authority = SimpleNamespace(
+        restore=AsyncMock(),
+        finalize=AsyncMock(),
+        mark_failed=AsyncMock(),
+        release=AsyncMock(side_effect=RuntimeError("persistent destroy failure")),
+    )
+    manager = RunManager()
+    record = await manager.create("thread-private-cleanup-exhausted")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, file_authority=authority),
+        agent_factory=lambda **_kwargs: Agent(),
+        graph_input={},
+        config={},
+    )
+
+    persisted = await manager.get(record.run_id)
+    assert persisted is not None
+    assert authority.release.await_count == 3
+    assert persisted.status is RunStatus.error
+    assert persisted.error == "Private run cleanup failed"
+    assert persisted.finalizing is True
+    assert "Private file authority cleanup failed" in caplog.text
 
 
 @pytest.mark.anyio

@@ -413,12 +413,13 @@ class LocalSandboxProvider(SandboxProvider):
                 mappings.append(
                     PathMapping(
                         skills_prefix,
-                        str(Path(mount.host_path).resolve()),
+                        mount.host_path,
                         True,
                     )
                 )
             sandbox_id = f"local-run:{scope_key}:{thread_id}:{run_id}"
             candidate = LocalSandbox(sandbox_id, path_mappings=mappings)
+            candidate.anchor_private_mappings()
             with self._lock:
                 self._run_sandboxes[key] = candidate
                 self._run_sandbox_ids[candidate.id] = key
@@ -566,12 +567,16 @@ class LocalSandboxProvider(SandboxProvider):
     ) -> None:
         effective_user_id = self._effective_acquire_user_id(user_id)
         run_ids = {mount.run_id for mount in mounts}
+        released: list[LocalSandbox] = []
         with self._lock:
             for run_id in run_ids:
                 key = (effective_user_id, thread_id, run_id)
                 sandbox = self._run_sandboxes.pop(key, None)
                 if sandbox is not None:
                     self._run_sandbox_ids.pop(sandbox.id, None)
+                    released.append(sandbox)
+        for sandbox in released:
+            sandbox.close_private_file_authority()
 
     def _evict_until_within_cap_locked(self) -> None:
         """LRU-evict cached thread sandboxes once the cap is exceeded.
@@ -629,13 +634,16 @@ class LocalSandboxProvider(SandboxProvider):
         # Note: This method is intentionally not called by SandboxMiddleware
         # to allow sandbox reuse across multiple turns in a thread.
         if isinstance(sandbox_id, str) and sandbox_id.startswith("local-run:"):
+            sandbox = None
             with self._lock:
                 key = self._run_sandbox_ids.pop(sandbox_id, None)
                 if key is not None:
-                    self._run_sandboxes.pop(key, None)
+                    sandbox = self._run_sandboxes.pop(key, None)
                     active_key = (key[0], key[1])
                     if self._active_private_runs.get(active_key) == key[2]:
                         self._active_private_runs.pop(active_key, None)
+            if sandbox is not None:
+                sandbox.close_private_file_authority()
 
     def reset(self) -> None:
         """Drop all cached LocalSandbox instances.
@@ -646,13 +654,17 @@ class LocalSandboxProvider(SandboxProvider):
         # into it see a fresh state.
         """
         global _singleton
+        run_sandboxes: tuple[LocalSandbox, ...]
         with self._lock:
             self._generic_sandbox = None
             self._thread_sandboxes.clear()
+            run_sandboxes = tuple(dict.fromkeys(self._run_sandboxes.values()))
             self._run_sandboxes.clear()
             self._run_sandbox_ids.clear()
             self._active_private_runs.clear()
             _singleton = None
+        for sandbox in run_sandboxes:
+            sandbox.close_private_file_authority()
 
     def shutdown(self) -> None:
         # LocalSandboxProvider has no extra resources beyond the cached

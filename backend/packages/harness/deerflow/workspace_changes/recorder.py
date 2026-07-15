@@ -4,22 +4,82 @@ import asyncio
 import logging
 import shutil
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from deerflow.config import get_paths
 
 from .diff import compare_snapshots, get_changed_paths
-from .scanner import scan_workspace_roots
+from .scanner import is_sensitive_workspace_path, scan_workspace_roots
 from .types import (
     WORKSPACE_CHANGES_EVENT_TYPE,
     WORKSPACE_CHANGES_METADATA_KEY,
     WorkspaceChangeLimits,
+    WorkspaceChangeResult,
+    WorkspaceChangeSummary,
+    WorkspaceFileChange,
     WorkspaceRoot,
     WorkspaceSnapshot,
 )
 
 logger = logging.getLogger(__name__)
+
+_TRUSTED_CHANGE_STATUSES = ("created", "modified", "deleted")
+_TRUSTED_LOGICAL_ROOTS = {"workspace", "outputs"}
+
+
+def trusted_workspace_change_result(changes: object) -> WorkspaceChangeResult | None:
+    """Adapt the finalizer's trusted logical paths to the public v1 event schema."""
+
+    if not isinstance(changes, dict):
+        return None
+    files: list[WorkspaceFileChange] = []
+    counts: dict[str, int] = {}
+    seen_paths: set[str] = set()
+    for status in _TRUSTED_CHANGE_STATUSES:
+        paths = changes.get(status)
+        if not isinstance(paths, list) or any(type(path) is not str for path in paths):
+            return None
+        counts[status] = len(paths)
+        for logical_path in paths:
+            if "\\" in logical_path:
+                return None
+            path = PurePosixPath(logical_path)
+            if path.is_absolute() or path.as_posix() != logical_path or ".." in path.parts or len(path.parts) < 2:
+                return None
+            root = path.parts[0]
+            if root not in _TRUSTED_LOGICAL_ROOTS or logical_path in seen_paths:
+                return None
+            seen_paths.add(logical_path)
+            virtual_path = f"/mnt/user-data/{logical_path}"
+            sensitive = is_sensitive_workspace_path(virtual_path)
+            files.append(
+                WorkspaceFileChange(
+                    path=virtual_path,
+                    root=root,
+                    status=status,
+                    binary=False,
+                    sensitive=sensitive,
+                    size_before=None,
+                    size_after=None,
+                    sha256_before=None,
+                    sha256_after=None,
+                    diff="",
+                    diff_unavailable_reason=("sensitive" if sensitive else None),
+                )
+            )
+    if not files:
+        return None
+    status_rank = {status: index for index, status in enumerate(_TRUSTED_CHANGE_STATUSES)}
+    files.sort(key=lambda item: (status_rank[item.status], item.path))
+    return WorkspaceChangeResult(
+        summary=WorkspaceChangeSummary(
+            created=counts["created"],
+            modified=counts["modified"],
+            deleted=counts["deleted"],
+        ),
+        files=files,
+    )
 
 
 def build_thread_workspace_roots(thread_id: str, *, user_id: str | None = None) -> list[WorkspaceRoot]:

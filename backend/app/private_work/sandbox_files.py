@@ -74,7 +74,7 @@ def private_projection_root(
     return base / "projects" / scope.project_id / "users" / scope.owner_user_id / "threads" / thread_id / "user-data"
 
 
-async def _joined_to_thread(function, /, *args):
+async def _joined_to_thread(function, /, *args, cancel_cleanup=None):
     task = asyncio.create_task(asyncio.to_thread(function, *args))
     cancelled = False
     while True:
@@ -85,7 +85,22 @@ async def _joined_to_thread(function, /, *args):
             if task.cancelled():
                 raise
             cancelled = True
+        except BaseException:
+            if cancelled:
+                raise asyncio.CancelledError from None
+            raise
     if cancelled:
+        if cancel_cleanup is not None:
+            cleanup_task = asyncio.create_task(asyncio.to_thread(cancel_cleanup, result))
+            while True:
+                try:
+                    await asyncio.shield(cleanup_task)
+                    break
+                except asyncio.CancelledError:
+                    if cleanup_task.cancelled():
+                        break
+                except Exception:
+                    break
         raise asyncio.CancelledError
     return result
 
@@ -176,7 +191,11 @@ class PrivateSandboxFileProjection:
                 virtual_path = self._virtual_path(file, run_scope.context.request_id)
                 if callable(check):
                     await check()
-                handle = await _joined_to_thread(sandbox.begin_atomic_file, virtual_path)
+                handle = await _joined_to_thread(
+                    sandbox.begin_atomic_file,
+                    virtual_path,
+                    cancel_cleanup=sandbox.abort_atomic_file,
+                )
                 whole = hashlib.sha256()
                 total = 0
                 expected_index = 0
@@ -266,6 +285,7 @@ class PrivateRunFileAuthority:
         self._sandbox: Any | None = None
         self._manifest: AuthorityManifest | None = None
         self._presented_paths: list[str] = []
+        self._release_lock = asyncio.Lock()
 
     @property
     def sandbox_id(self) -> str | None:
@@ -315,13 +335,18 @@ class PrivateRunFileAuthority:
         await self._finalizer.mark_failed(self._run_scope)
 
     async def release(self) -> None:
-        lease = self._lease
-        self._lease = None
-        self._sandbox = None
-        self._manifest = None
-        self._presented_paths = []
-        if lease is not None and self._provider is not None:
-            await self._provider.release_private_async(lease)
+        async with self._release_lock:
+            lease = self._lease
+            if lease is None:
+                return
+            provider = self._provider
+            if provider is None:
+                raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+            await provider.release_private_async(lease)
+            self._lease = None
+            self._sandbox = None
+            self._manifest = None
+            self._presented_paths = []
 
     def thread_data_paths(self) -> dict[str, str]:
         if self._manifest is None:

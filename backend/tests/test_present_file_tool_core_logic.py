@@ -4,6 +4,8 @@ import importlib
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 present_file_tool_module = importlib.import_module("deerflow.tools.builtins.present_file_tool")
 
 
@@ -110,6 +112,7 @@ def test_private_present_files_registers_opaque_authority_without_host_resolutio
         },
         context={
             "thread_id": "thread-private",
+            "private_scope": object(),
             "__file_authority": authority,
         },
         config={},
@@ -135,6 +138,7 @@ def test_private_present_files_invalid_batch_registers_nothing(monkeypatch):
         state={"thread_data": {"outputs_path": "/mnt/user-data/outputs"}},
         context={
             "thread_id": "thread-private",
+            "private_scope": object(),
             "__file_authority": authority,
         },
         config={},
@@ -155,3 +159,42 @@ def test_private_present_files_invalid_batch_registers_nothing(monkeypatch):
 
     assert "artifacts" not in result.update
     authority.record_presented_paths.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "private_context",
+    [
+        {"thread_id": "thread-private", "private_scope": object()},
+        {
+            "thread_id": "thread-private",
+            "private_scope": object(),
+            "__file_authority": {},
+        },
+        {
+            "thread_id": "thread-private",
+            "private_scope": object(),
+            "__file_authority": SimpleNamespace(),
+        },
+    ],
+)
+def test_private_present_files_requires_valid_file_authority(
+    private_context,
+    monkeypatch,
+):
+    runtime = SimpleNamespace(
+        state={"thread_data": {"outputs_path": "/host/private/outputs"}},
+        context=private_context,
+        config={},
+    )
+
+    def reject_host_resolution():
+        raise AssertionError("private present_files used legacy host paths")
+
+    monkeypatch.setattr(present_file_tool_module, "get_paths", reject_host_resolution)
+
+    with pytest.raises(RuntimeError, match="Private file authority is unavailable"):
+        present_file_tool_module.present_file_tool.func(
+            runtime=runtime,
+            filepaths=["/mnt/user-data/outputs/report.md"],
+            tool_call_id="tc-private-missing-authority",
+        )
