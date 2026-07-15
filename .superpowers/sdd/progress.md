@@ -10,6 +10,7 @@
 
 - Task 1: complete (atomic with Task 2; commits `d4899e82..d33c45b6`, review clean: 0 Critical/Important/Minor).
 - Task 2: complete (atomic with Task 1; commits `d4899e82..d33c45b6`, review clean: 0 Critical/Important/Minor).
+- Task 3: complete (commits `7b89b56b..1ddddb7f`, review clean after one repair wave: 0 Critical/Important/Minor).
 
 ---
 
