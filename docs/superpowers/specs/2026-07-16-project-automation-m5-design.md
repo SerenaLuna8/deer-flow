@@ -1,8 +1,9 @@
 # M5 项目自动化与持久化调度专项设计
 
 - 日期：2026-07-16
-- 状态：草案，待用户评审
+- 状态：已确认，待实施
 - 对应总体设计：`2026-07-12-project-first-saas-design.md`
+- 对应实施计划：`../plans/2026-07-16-project-automation-m5.md`
 - 前置里程碑：M1、M2、M3、M4 已完成
 - 里程碑：M5 — 自动化项目化与持久化任务
 
@@ -620,8 +621,9 @@ Dry-run：
 6. 对 legacy skipped/pre-admission history中不存在的随机 Thread ID置空；source fingerprint和转换结果 digest写
    ledger，不把随机 ID暴露到报告。
 7. 写 `migration_ready` marker。
-8. 应用 `0013` finalize：在任何 destructive DDL前验证 ledger、row count、scope和 relation probe，然后 rename
-   `user_id -> owner_user_id`、安装 NOT NULL/check/composite FK/index。
+8. 应用 `0013` finalize：在任何 destructive DDL前验证 ledger、row count、scope和 relation probe，然后删除
+   已由 `0012` 新增并完成回填的 legacy `user_id`、固化 `owner_user_id`，安装
+   NOT NULL/check/composite FK/index。
 9. 运行 final probe并写 `cutover_complete`。
 10. 执行 `make check-db`、M1–M5 PostgreSQL gate 和 Frontend isolation smoke后重新开放服务。
 
