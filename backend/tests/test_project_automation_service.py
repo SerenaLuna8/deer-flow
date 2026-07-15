@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from app.automations.errors import (
@@ -29,9 +29,11 @@ from deerflow.persistence.scheduled_tasks import (
     ScheduledTaskRepository,
 )
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.shared_assets import AgentRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 NOW = datetime(2026, 7, 16, 10, 30, tzinfo=UTC)
+MAX_POSTGRES_BIGINT = 2**63 - 1
 
 
 @dataclass
@@ -42,6 +44,15 @@ class MutableClock:
     def __call__(self) -> datetime:
         self.calls += 1
         return self.now
+
+
+@dataclass
+class FailIfCalledSessionFactory:
+    calls: int = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+        raise AssertionError("database session must not be opened")
 
 
 @dataclass(frozen=True)
@@ -231,6 +242,30 @@ async def test_create_requires_server_issued_context_and_executable_exact_agent(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agent_scope", ["project", "system"])
+async def test_create_rejects_archived_agent(
+    automation_service_seed: AutomationServiceSeed,
+    agent_scope: str,
+) -> None:
+    seed = automation_service_seed
+    agent_asset_id = seed.database.project_agent_id if agent_scope == "project" else seed.database.system_agent_id
+    async with seed.factory() as session, session.begin():
+        await session.execute(update(AgentRow).where(AgentRow.id == agent_asset_id).values(status="archived"))
+
+    service = ProjectAutomationService(seed.factory, seed.clock)
+    with pytest.raises(AutomationNotFound) as raised:
+        await service.create(
+            seed.owner_context,
+            seed.create_command(
+                agent_asset_id=agent_asset_id,
+                agent_scope=agent_scope,
+            ),
+        )
+    assert raised.value.request_id == seed.owner_context.request_id
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_reuse_thread_must_match_scope_and_agent(
     automation_service_seed: AutomationServiceSeed,
 ) -> None:
@@ -326,6 +361,82 @@ async def test_update_cancels_queued_and_uses_version_cas(
             task.id,
             AutomationChanges(expected_version=task.version, title="Stale"),
         )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_expected_version_accepts_postgres_bigint_boundaries(
+    automation_service_seed: AutomationServiceSeed,
+) -> None:
+    seed = automation_service_seed
+    service = ProjectAutomationService(seed.factory, seed.clock)
+    task = await seed.create_task()
+    assert task.version == 1
+
+    updated = await service.update(
+        seed.owner_context,
+        task.id,
+        AutomationChanges(expected_version=1, title="Lower boundary"),
+    )
+    assert updated.version == 2
+
+    with pytest.raises(AutomationVersionConflict) as raised:
+        await service.pause(
+            seed.owner_context,
+            task.id,
+            MAX_POSTGRES_BIGINT,
+        )
+    assert raised.value.request_id == seed.owner_context.request_id
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["update", "pause", "resume", "delete"])
+@pytest.mark.parametrize(
+    "expected_version",
+    [0, MAX_POSTGRES_BIGINT + 1],
+    ids=["below-lower-bound", "above-upper-bound"],
+)
+async def test_out_of_range_expected_version_is_invalid_before_database(
+    automation_service_seed: AutomationServiceSeed,
+    operation: str,
+    expected_version: int,
+) -> None:
+    seed = automation_service_seed
+    factory = FailIfCalledSessionFactory()
+    service = ProjectAutomationService(factory, seed.clock)  # type: ignore[arg-type]
+
+    with pytest.raises(AutomationInvalid) as raised:
+        if operation == "update":
+            await service.update(
+                seed.owner_context,
+                "valid-task-id",
+                AutomationChanges(
+                    expected_version=expected_version,
+                    title="Invalid version",
+                ),
+            )
+        elif operation == "pause":
+            await service.pause(
+                seed.owner_context,
+                "valid-task-id",
+                expected_version,
+            )
+        elif operation == "resume":
+            await service.resume(
+                seed.owner_context,
+                "valid-task-id",
+                expected_version,
+            )
+        else:
+            await service.delete(
+                seed.owner_context,
+                "valid-task-id",
+                expected_version,
+            )
+
+    assert raised.value.request_id == seed.owner_context.request_id
+    assert factory.calls == 0
 
 
 @pytest.mark.postgres

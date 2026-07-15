@@ -21,6 +21,7 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
+from app.private_work.executable_agent import require_executable_agent
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.thread_repository import (
     PrivateThreadRecord,
@@ -29,11 +30,6 @@ from app.private_work.thread_repository import (
 )
 from app.projects.capabilities import Capability
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.shared_assets import (
-    AgentRow,
-    AgentVersionRow,
-    ProjectSystemAgentBindingRow,
-)
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -556,44 +552,4 @@ class PrivateThreadService:
         context: PrivateWorkContext,
         agent: ThreadAgentRef,
     ) -> None:
-        if agent.scope == "project":
-            statement = (
-                select(AgentRow.id)
-                .join(
-                    AgentVersionRow,
-                    AgentVersionRow.id == AgentRow.current_published_version_id,
-                )
-                .where(
-                    AgentRow.id == agent.asset_id,
-                    AgentRow.scope == "project",
-                    AgentRow.project_id == context.project_id,
-                    AgentRow.status == "active",
-                    AgentVersionRow.agent_id == AgentRow.id,
-                    AgentVersionRow.workflow_status == "published",
-                )
-            )
-        elif agent.scope == "system":
-            statement = (
-                select(AgentRow.id)
-                .join(
-                    ProjectSystemAgentBindingRow,
-                    ProjectSystemAgentBindingRow.system_agent_id == AgentRow.id,
-                )
-                .join(
-                    AgentVersionRow,
-                    AgentVersionRow.id == ProjectSystemAgentBindingRow.agent_version_id,
-                )
-                .where(
-                    AgentRow.id == agent.asset_id,
-                    AgentRow.scope == "system",
-                    AgentRow.status == "active",
-                    ProjectSystemAgentBindingRow.project_id == context.project_id,
-                    ProjectSystemAgentBindingRow.enabled.is_(True),
-                    AgentVersionRow.agent_id == AgentRow.id,
-                    AgentVersionRow.workflow_status == "published",
-                )
-            )
-        else:
-            raise PrivateWorkNotFound(context.request_id)
-        if (await session.execute(statement)).scalar_one_or_none() is None:
-            raise PrivateWorkNotFound(context.request_id)
+        await require_executable_agent(session, context, agent)

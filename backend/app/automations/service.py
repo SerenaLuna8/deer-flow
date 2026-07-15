@@ -33,8 +33,9 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
+from app.private_work.executable_agent import require_executable_agent
 from app.private_work.revalidation import PrivateWorkRevalidator
-from app.private_work.thread_repository import PrivateThreadRepository
+from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.shared_assets.errors import (
@@ -58,6 +59,7 @@ from deerflow.persistence.scheduled_tasks import (
 from deerflow.scheduler.schedules import next_scheduled_occurrence
 
 _ACTIVE_EXECUTION_STATUSES = frozenset({"launching", "running"})
+_MAX_EXPECTED_VERSION = 2**63 - 1
 
 
 class ProjectAutomationService:
@@ -477,6 +479,11 @@ class ProjectAutomationService:
         else:
             raise AutomationInvalid(context.request_id)
 
+        await require_executable_agent(
+            session,
+            context,
+            ThreadAgentRef(agent_asset_id, agent_scope),
+        )
         resolved = await self._resolver.resolve_project_asset_snapshot_in_session(
             session,
             current,
@@ -661,7 +668,7 @@ class ProjectAutomationService:
 
     @staticmethod
     def _validate_expected_version(request_id: str, expected_version: object) -> None:
-        if type(expected_version) is not int or expected_version < 1:
+        if type(expected_version) is not int or expected_version < 1 or expected_version > _MAX_EXPECTED_VERSION:
             raise AutomationInvalid(request_id)
 
     @staticmethod
