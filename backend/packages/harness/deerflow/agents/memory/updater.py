@@ -26,6 +26,7 @@ from deerflow.agents.memory.storage import (
 )
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
+from deerflow.private_scope import PrivateResourceScope
 from deerflow.trace_context import request_trace_context
 from deerflow.tracing import inject_langfuse_metadata
 
@@ -594,6 +595,94 @@ class MemoryUpdater:
             user_id=user_id,
             deerflow_trace_id=deerflow_trace_id,
         )
+
+    async def aupdate_project_memory(
+        self,
+        *,
+        storage: Any,
+        scope: PrivateResourceScope,
+        namespace: str,
+        messages: tuple[Any, ...] | list[Any],
+        thread_id: str,
+        run_id: str,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+        deerflow_trace_id: str | None = None,
+    ) -> bool:
+        """Update PostgreSQL project memory without consulting user ContextVars."""
+
+        trace_ctx = request_trace_context(deerflow_trace_id) if deerflow_trace_id else nullcontext()
+        with trace_ctx:
+            try:
+                config = get_memory_config()
+                if not config.enabled or not messages:
+                    return False
+                snapshot = await storage.load(scope=scope, namespace=namespace)
+                current_memory = snapshot.memory
+                conversation_text = format_conversation_for_update(list(messages))
+                if not conversation_text.strip():
+                    return False
+
+                correction_hint = self._build_correction_hint(
+                    correction_detected=correction_detected,
+                    reinforcement_detected=reinforcement_detected,
+                )
+                staleness_section = ""
+                if config.staleness_review_enabled:
+                    stale_candidates = _select_stale_candidates(current_memory, config)
+                    if len(stale_candidates) >= config.staleness_min_candidates:
+                        staleness_section = _build_staleness_section(
+                            stale_candidates,
+                            config.staleness_age_days,
+                        )
+                prompt = MEMORY_UPDATE_PROMPT.format(
+                    current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
+                    conversation=conversation_text,
+                    correction_hint=correction_hint,
+                    staleness_review_section=staleness_section,
+                )
+                model_name = self._resolve_model_name()
+                invoke_config: dict[str, Any] = {"run_name": "memory_agent"}
+                inject_langfuse_metadata(
+                    invoke_config,
+                    thread_id=thread_id,
+                    user_id=scope.owner_user_id,
+                    assistant_id="memory_agent",
+                    model_name=model_name,
+                    environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                    deerflow_trace_id=deerflow_trace_id,
+                )
+                response = await asyncio.to_thread(
+                    self._get_model().invoke,
+                    prompt,
+                    config=invoke_config,
+                )
+                update_data = _parse_memory_update_response(response.content)
+                existing_fact_ids = {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+                updated_memory = self._apply_updates(
+                    copy.deepcopy(current_memory),
+                    update_data,
+                    thread_id,
+                )
+                for fact in updated_memory.get("facts", []):
+                    if not isinstance(fact, dict) or fact.get("id") in existing_fact_ids:
+                        continue
+                    fact["sourceThreadId"] = thread_id
+                    fact["sourceRunId"] = run_id
+                updated_memory = _strip_upload_mentions_from_memory(updated_memory)
+                await storage.save(
+                    updated_memory,
+                    scope=scope,
+                    namespace=namespace,
+                    expected_version=snapshot.version,
+                )
+                return True
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse LLM response for project memory update: %s", exc)
+                return False
+            except Exception as exc:
+                logger.exception("Project memory update failed: %s", exc)
+                return False
 
     def _do_update_memory_sync(
         self,

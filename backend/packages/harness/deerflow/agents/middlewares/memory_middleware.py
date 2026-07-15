@@ -9,8 +9,9 @@ from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
-from deerflow.agents.memory.queue import get_memory_queue
+from deerflow.agents.memory.queue import get_memory_queue, get_project_memory_queue
 from deerflow.config.memory_config import get_memory_config
+from deerflow.private_scope import PrivateResourceScope
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 
@@ -61,6 +62,14 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         Returns:
             None (no state changes needed from this middleware).
         """
+        runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
+        if isinstance(runtime_context.get("private_scope"), PrivateResourceScope):
+            # Private runs use ``aafter_agent`` so PostgreSQL work stays on the
+            # runtime event loop. A sync-only invocation must never leak into
+            # the legacy per-user file store.
+            logger.debug("Private memory updates require the async middleware hook")
+            return None
+
         config = self._memory_config or get_memory_config()
         if not config.enabled:
             return None
@@ -120,4 +129,59 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             reinforcement_detected=reinforcement_detected,
         )
 
+        return None
+
+    @override
+    async def aafter_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
+        """Use the asyncio project queue for admitted private runs.
+
+        Non-project executions retain the original synchronous file-memory
+        queue path through :meth:`after_agent`.
+        """
+
+        runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
+        private_scope = runtime_context.get("private_scope")
+        if not isinstance(private_scope, PrivateResourceScope):
+            return self.after_agent(state, runtime)
+
+        config = self._memory_config or get_memory_config()
+        if not config.enabled:
+            return None
+        thread_id = runtime_context.get("thread_id")
+        run_id = runtime_context.get("run_id")
+        if not isinstance(thread_id, str) or not thread_id or not isinstance(run_id, str) or not run_id:
+            logger.debug("Private memory update requires thread_id and run_id")
+            return None
+
+        messages = state.get("messages", [])
+        if not messages:
+            return None
+        filtered_messages = filter_messages_for_memory(messages)
+        if not any(getattr(message, "type", None) == "human" for message in filtered_messages) or not any(getattr(message, "type", None) == "ai" for message in filtered_messages):
+            return None
+
+        correction_detected = detect_correction(filtered_messages)
+        reinforcement_detected = not correction_detected and detect_reinforcement(filtered_messages)
+        deerflow_trace_id = normalize_trace_id(runtime_context.get(DEERFLOW_TRACE_METADATA_KEY))
+        if deerflow_trace_id is None:
+            try:
+                config_data = get_config()
+            except RuntimeError:
+                config_data = {}
+            metadata = config_data.get("metadata", {}) if isinstance(config_data.get("metadata"), dict) else {}
+            deerflow_trace_id = normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY))
+        if deerflow_trace_id is None:
+            deerflow_trace_id = get_current_trace_id()
+
+        namespace = "default" if self._agent_name is None else f"agent:{self._agent_name}"
+        get_project_memory_queue().enqueue(
+            scope=private_scope,
+            thread_id=thread_id,
+            run_id=run_id,
+            namespace=namespace,
+            messages=filtered_messages,
+            correction_detected=correction_detected,
+            reinforcement_detected=reinforcement_detected,
+            deerflow_trace_id=deerflow_trace_id,
+        )
         return None

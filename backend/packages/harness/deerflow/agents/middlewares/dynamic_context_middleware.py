@@ -33,14 +33,16 @@ import logging
 import re
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, Protocol, override
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 if TYPE_CHECKING:
+    from deerflow.agents.memory.storage import ProjectMemoryStorage
     from deerflow.config.app_config import AppConfig
+    from deerflow.private_scope import PrivateResourceScope
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,11 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
 _SUMMARY_MESSAGE_NAME = "summary"
+_LEGACY_MEMORY = object()
+
+
+class ProjectMemoryRevalidator(Protocol):
+    async def is_active(self, scope: PrivateResourceScope) -> bool: ...
 
 
 def _extract_date(content: str) -> str | None:
@@ -140,10 +147,19 @@ class DynamicContextMiddleware(AgentMiddleware):
     day see the corrected date in history and skip re-injection.
     """
 
-    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None):
+    def __init__(
+        self,
+        agent_name: str | None = None,
+        *,
+        app_config: AppConfig | None = None,
+        project_memory_storage: ProjectMemoryStorage | None = None,
+        project_memory_revalidator: ProjectMemoryRevalidator | None = None,
+    ):
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
+        self._project_memory_storage = project_memory_storage
+        self._project_memory_revalidator = project_memory_revalidator
 
     def _build_full_reminder(self) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
@@ -236,7 +252,12 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
         return messages
 
-    def _inject(self, state) -> dict | None:
+    def _inject(
+        self,
+        state,
+        *,
+        memory_block_override: str | None | object = _LEGACY_MEMORY,
+    ) -> dict | None:
         messages = list(state.get("messages", []))
         if not messages:
             return None
@@ -255,7 +276,11 @@ class DynamicContextMiddleware(AgentMiddleware):
             first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
             if first_idx is None:
                 return None
-            date_reminder, memory_block = self._build_full_reminder()
+            if memory_block_override is _LEGACY_MEMORY:
+                date_reminder, memory_block = self._build_full_reminder()
+            else:
+                date_reminder = self._build_date_update_reminder()
+                memory_block = memory_block_override
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into first HumanMessage id=%r",
                 memory_block is not None,
@@ -279,10 +304,98 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
+        runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
+        if "private_scope" in runtime_context:
+            # Project Memory requires async PostgreSQL access. The synchronous
+            # compatibility hook must never fall back to legacy file storage.
+            return self._inject(state, memory_block_override=None)
         return self._inject(state)
+
+    def _resolve_project_memory_dependencies(
+        self,
+    ) -> tuple[ProjectMemoryStorage, ProjectMemoryRevalidator]:
+        if self._project_memory_storage is None or self._project_memory_revalidator is None:
+            from deerflow.agents.memory.queue import ProjectMemoryMembershipRevalidator
+            from deerflow.agents.memory.storage import ProjectMemoryStorage
+            from deerflow.persistence import get_session_factory
+
+            session_factory = get_session_factory()
+            self._project_memory_storage = ProjectMemoryStorage(session_factory)
+            self._project_memory_revalidator = ProjectMemoryMembershipRevalidator(session_factory)
+        return self._project_memory_storage, self._project_memory_revalidator
+
+    def _project_memory_namespace(self) -> str:
+        return f"agent:{self._agent_name}" if self._agent_name else "default"
+
+    def _format_project_memory(self, memory_data: dict[str, Any]) -> str | None:
+        from deerflow.agents.memory import format_memory_for_injection
+        from deerflow.config.memory_config import get_memory_config
+
+        config = self._app_config.memory if self._app_config else get_memory_config()
+        if not config.enabled or not config.injection_enabled:
+            return None
+        memory_content = format_memory_for_injection(
+            memory_data,
+            max_tokens=config.max_injection_tokens,
+            use_tiktoken=(config.token_counting == "tiktoken"),
+            guaranteed_categories=getattr(config, "guaranteed_categories", None),
+            guaranteed_token_budget=getattr(config, "guaranteed_token_budget", 500),
+        )
+        if not memory_content.strip():
+            return None
+        return f"<memory>\n{memory_content}\n</memory>"
+
+    async def _inject_private(
+        self,
+        state,
+        scope: object,
+    ) -> dict | None:
+        from deerflow.private_scope import PrivateResourceScope
+
+        messages = list(state.get("messages", []))
+        if not messages:
+            return None
+        if _last_injected_date(messages) is not None:
+            return self._inject(state, memory_block_override=None)
+        if type(scope) is not PrivateResourceScope:
+            return self._inject(state, memory_block_override=None)
+
+        config = self._app_config.memory if self._app_config else None
+        if config is not None and (not config.enabled or not config.injection_enabled):
+            return self._inject(state, memory_block_override=None)
+
+        try:
+            storage, revalidator = self._resolve_project_memory_dependencies()
+            if not await revalidator.is_active(scope):
+                return self._inject(state, memory_block_override=None)
+            snapshot = await storage.load(
+                scope=scope,
+                namespace=self._project_memory_namespace(),
+            )
+            memory_block = await asyncio.to_thread(
+                self._format_project_memory,
+                snapshot.memory,
+            )
+            return self._inject(state, memory_block_override=memory_block)
+        except Exception:
+            logger.exception("DynamicContextMiddleware: failed to load project memory; injecting date only")
+            return self._inject(state, memory_block_override=None)
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
+        runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
+        if "private_scope" in runtime_context:
+            try:
+                return await asyncio.wait_for(
+                    self._inject_private(state, runtime_context.get("private_scope")),
+                    timeout=_INJECT_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "DynamicContextMiddleware: project memory injection timed out (%.1fs); injecting date only",
+                    _INJECT_TIMEOUT_SECONDS,
+                )
+                return self._inject(state, memory_block_override=None)
         # _inject() performs synchronous file I/O (memory JSON loading) and
         # potentially blocking network calls (tiktoken encoding download on
         # first use).  Offload to a thread so the event loop is never blocked

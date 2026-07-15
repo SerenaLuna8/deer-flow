@@ -572,10 +572,17 @@ The same cached bucket is sent out-of-band on every channel run create/wait/stre
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 
 **Components**:
-- `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), and atomic file I/O
-- `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time); captures `user_id` at enqueue time so it survives the `threading.Timer` boundary
+- `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication, and both legacy file and project PostgreSQL save paths
+- `queue.py` - Legacy `threading.Timer` queue plus an asyncio-debounced project queue; project items freeze project, owner, Thread, Run, namespace, and membership version at enqueue time
 - `prompt.py` - Prompt templates for memory updates
-- `storage.py` - File-based storage with per-user isolation; cache keyed by `(user_id, agent_name)` tuple
+- `storage.py` - Legacy file storage with per-user isolation plus async `ProjectMemoryStorage`, keyed by `(project_id, owner_user_id, namespace)` and protected by optimistic versions
+
+**Project-private path (M4)**:
+- A runtime carrying `private_scope` uses PostgreSQL `user_project_memories` and `user_project_memory_facts`; it never falls back to the legacy user file
+- The project queue stays on the asyncio event loop, revalidates the captured membership before writing, and passes the captured scope directly to the updater
+- Project prompt injection asynchronously reads only the runtime scope and namespace while preserving the existing token budget and reminder format
+- `app/private_work/memory_service.py` provides callable project Memory status/list/reload/import/export/update/delete operations; project HTTP routing and legacy cutover guards are mounted in later M4 tasks
+- The file-backed workflow below remains the explicit non-project compatibility path
 
 **Per-User Isolation**:
 - Memory is stored per-user at `{base_dir}/users/{user_id}/memory.json`
@@ -593,10 +600,10 @@ The same cached bucket is sent out-of-band on every channel run create/wait/stre
 - **Facts**: Discrete facts with `id`, `content`, `category` (preference/knowledge/context/behavior/goal), `confidence` (0-1), `createdAt`, `source`
 
 **Workflow**:
-1. `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `get_effective_user_id()`, and queues conversation with the captured `user_id`
-2. Queue debounces (30s default), batches updates, deduplicates per-thread
-3. Background thread invokes LLM to extract context updates and facts, using the stored `user_id` (not the contextvar, which is unavailable on timer threads)
-4. Applies updates atomically (temp file + rename) with cache invalidation, skipping duplicate fact content before append
+1. `MemoryMiddleware` filters messages (user inputs + final AI responses). Project runs enqueue an immutable private item; non-project runs capture `user_id` via `get_effective_user_id()` for the legacy queue
+2. The project queue debounces with an asyncio task and revalidates membership; the legacy queue debounces with a `threading.Timer`
+3. The updater invokes the LLM to extract context updates and facts. Project updates load/save the same scope and optimistic version; legacy updates use the captured `user_id`
+4. Project data is committed transactionally to PostgreSQL; legacy data is published atomically with temp-file rename and cache invalidation
 5. **Staleness pass** (same LLM invocation as step 3, no extra API call): when `staleness_review_enabled` is `true` and at least `staleness_min_candidates` aged facts exist, `_select_stale_candidates` selects facts older than `staleness_age_days` that are not in `staleness_protected_categories` (default: `correction`), surfaces them in the prompt, and the LLM judges each as KEEP or REMOVE. `_apply_updates` enforces the guardrail unconditionally at apply time: it intersects the LLM-returned removal set with `_select_stale_candidates` output before applying the per-cycle cap (`staleness_max_removals_per_cycle`), so protected and non-aged facts can never be deleted regardless of model behavior or the feature flag setting.
 6. Next interaction injects top 15 facts + context into `<memory>` tags in system prompt
 
