@@ -30,11 +30,31 @@ def test_all_public_repository_methods_start_with_scope() -> None:
     for repository, methods in (
         (
             ScheduledTaskRepository,
-            ("create", "get", "list", "list_by_thread", "lock_active", "update", "soft_delete"),
+            (
+                "create",
+                "get",
+                "list",
+                "list_by_thread",
+                "lock_active",
+                "advance_after_reservation",
+                "update",
+                "soft_delete",
+            ),
         ),
         (
             ScheduledTaskRunRepository,
-            ("create", "get", "get_by_agent_run_id", "list_by_task", "has_active", "finish", "cancel_queued"),
+            (
+                "create",
+                "get",
+                "get_by_agent_run_id",
+                "get_by_manual_idempotency",
+                "list_by_task",
+                "has_active",
+                "lock_active_by_task",
+                "claim",
+                "finish",
+                "cancel_queued",
+            ),
         ),
     ):
         for method_name in methods:

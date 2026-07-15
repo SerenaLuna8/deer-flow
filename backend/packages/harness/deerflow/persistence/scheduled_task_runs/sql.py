@@ -24,6 +24,10 @@ class ScheduledTaskRunCreate:
     scheduled_for: datetime
     trigger: str
     status: str
+    error_code: str | None = None
+    error_message: str | None = None
+    finished_at: datetime | None = None
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +117,7 @@ class ScheduledTaskRunRepository:
         request: ScheduledTaskRunCreate,
     ) -> ScheduledTaskRunRecord:
         project_id, owner_user_id = self.coordinates(scope)
-        now = datetime.now(UTC)
+        now = request.created_at or datetime.now(UTC)
         row = ScheduledTaskRunRow(
             id=request.occurrence_id,
             project_id=project_id,
@@ -125,8 +129,11 @@ class ScheduledTaskRunRepository:
             scheduled_for=request.scheduled_for,
             trigger=request.trigger,
             status=request.status,
-            resolved_membership_version=scope.membership_version,
+            resolved_membership_version=None,
             launch_attempt_count=0,
+            error_code=request.error_code,
+            error_message=request.error_message,
+            finished_at=request.finished_at,
             created_at=now,
             updated_at=now,
         )
@@ -164,6 +171,24 @@ class ScheduledTaskRunRepository:
         if lock:
             statement = statement.with_for_update(of=ScheduledTaskRunRow)
         row = (await self.session.execute(statement)).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def get_by_manual_idempotency(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+        manual_idempotency_hash: str,
+    ) -> ScheduledTaskRunRecord | None:
+        row = (
+            await self.session.execute(
+                sa.select(ScheduledTaskRunRow).where(
+                    ScheduledTaskRunRow.task_id == task_id,
+                    ScheduledTaskRunRow.trigger == "manual",
+                    ScheduledTaskRunRow.manual_idempotency_hash == manual_idempotency_hash,
+                    *self.predicates(scope),
+                )
+            )
+        ).scalar_one_or_none()
         return None if row is None else self.record(row)
 
     async def list_by_task(
@@ -234,6 +259,44 @@ class ScheduledTaskRunRepository:
             )
         ).scalars()
         return tuple(self.record(row) for row in rows)
+
+    async def claim(
+        self,
+        scope: PrivateResourceScope,
+        occurrence_id: str,
+        *,
+        now: datetime,
+        lease_owner: str,
+        lease_expires_at: datetime,
+    ) -> ScheduledTaskRunRecord | None:
+        claimable = (
+            ScheduledTaskRunRow.id == occurrence_id,
+            ScheduledTaskRunRow.status == "queued",
+            sa.or_(
+                ScheduledTaskRunRow.next_attempt_at.is_(None),
+                ScheduledTaskRunRow.next_attempt_at <= now,
+            ),
+            *self.predicates(scope),
+        )
+        locked_id = await self.session.scalar(sa.select(ScheduledTaskRunRow.id).where(*claimable).with_for_update(of=ScheduledTaskRunRow, skip_locked=True))
+        if locked_id is None:
+            return None
+        row = (
+            await self.session.execute(
+                sa.update(ScheduledTaskRunRow)
+                .where(*claimable)
+                .values(
+                    status="launching",
+                    lease_owner=lease_owner,
+                    lease_expires_at=lease_expires_at,
+                    launch_attempt_count=ScheduledTaskRunRow.launch_attempt_count + 1,
+                    started_at=sa.func.coalesce(ScheduledTaskRunRow.started_at, now),
+                    updated_at=now,
+                )
+                .returning(ScheduledTaskRunRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
 
     async def finish(
         self,

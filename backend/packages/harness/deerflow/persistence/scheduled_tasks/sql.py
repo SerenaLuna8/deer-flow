@@ -194,6 +194,34 @@ class ScheduledTaskRepository:
         ).scalar_one_or_none()
         return None if row is None else self.record(row)
 
+    async def advance_after_reservation(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+        *,
+        expected_next_run_at: datetime,
+        next_run_at: datetime | None,
+        updated_at: datetime,
+    ) -> ScheduledTaskRecord | None:
+        """Advance scheduler authority without changing the user CAS version."""
+
+        row = (
+            await self.session.execute(
+                sa.update(ScheduledTaskRow)
+                .where(
+                    ScheduledTaskRow.id == task_id,
+                    ScheduledTaskRow.status == "enabled",
+                    ScheduledTaskRow.next_run_at == expected_next_run_at,
+                    ScheduledTaskRow.frozen_at.is_(None),
+                    ScheduledTaskRow.deleted_at.is_(None),
+                    *self.predicates(scope),
+                )
+                .values(next_run_at=next_run_at, updated_at=updated_at)
+                .returning(ScheduledTaskRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
     async def list(
         self,
         scope: PrivateResourceScope,
