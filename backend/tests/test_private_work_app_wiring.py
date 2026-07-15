@@ -11,6 +11,7 @@ from support.m4_private_threads import seed_m4_thread_database
 from app.gateway.app import create_app
 from app.gateway.deps import langgraph_runtime
 from app.private_work.connection_service import ProjectConnectionService
+from app.private_work.cutover import PrivateWorkCutoverGuard
 from app.private_work.file_service import PrivateFileService
 from app.private_work.file_streaming import PrivateFileStreamer
 from app.private_work.memory_service import PrivateMemoryService
@@ -83,6 +84,10 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
         ),
     ):
         async with langgraph_runtime(app, config):
+            assert isinstance(
+                app.state.private_work_cutover_guard,
+                PrivateWorkCutoverGuard,
+            )
             assert isinstance(app.state.private_thread_service, PrivateThreadService)
             assert app.state.private_thread_service._session_factory is session_factory
             assert app.state.private_thread_service._project_scoped_checkpointer is app.state.project_scoped_checkpointer

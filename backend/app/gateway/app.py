@@ -159,6 +159,23 @@ async def _ensure_admin_user(app: FastAPI) -> None:
 
     admin_id = str(row.id)
 
+    # The legacy store rewrite is an upgrade-only compatibility path. Once
+    # the authoritative private-work marker is complete, project rows are the
+    # only writable authority and ordinary startup must not repair unscoped
+    # owner metadata behind the cutover boundary.
+    cutover_guard = getattr(app.state, "private_work_cutover_guard", None)
+    if cutover_guard is not None:
+        from app.private_work.errors import PrivateWorkCutover, PrivateWorkError
+
+        try:
+            await cutover_guard.require_legacy_open()
+        except PrivateWorkCutover:
+            logger.info("Private-work cutover complete; skipping orphan thread migration")
+            return
+        except PrivateWorkError:
+            logger.warning("Private-work cutover state unavailable; skipping orphan thread migration")
+            return
+
     # LangGraph store orphan migration — non-fatal.
     # This covers the "no-auth → with-auth" upgrade path for users
     # whose existing LangGraph thread metadata has no user_id set.

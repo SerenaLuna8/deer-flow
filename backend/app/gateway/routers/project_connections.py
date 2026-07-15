@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from app.gateway.deps import private_work_context
+from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.private_work_schemas import PrivateWorkRoute, StrictPrivateWorkRequest
 from app.gateway.routers.channel_connections import (
     _PROVIDER_META,
@@ -32,6 +32,7 @@ router = APIRouter(
     prefix="/api/projects/{project_id}/connections",
     tags=["project-connections"],
     route_class=PrivateWorkRoute,
+    dependencies=[Depends(require_project_private_open)],
 )
 
 

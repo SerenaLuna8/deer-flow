@@ -7,7 +7,11 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, HTTPException, Request
-from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
+from support.m4_private_threads import (
+    M4ThreadSeed,
+    install_open_project_cutover_guard,
+    seed_m4_thread_database,
+)
 
 from app.gateway.deps import private_work_context
 from app.gateway.routers import private_work as private_work_router
@@ -70,6 +74,7 @@ class _Harness:
 @pytest_asyncio.fixture()
 async def harness(seed: M4ThreadSeed) -> _Harness:
     app = FastAPI()
+    install_open_project_cutover_guard(app)
     app.include_router(private_work_router.router)
     event_store = DbRunEventStore(seed.factory)
     run_store = RunRepository(seed.factory)

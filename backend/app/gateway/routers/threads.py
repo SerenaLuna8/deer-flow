@@ -19,12 +19,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_run_manager
+from app.gateway.deps import get_checkpointer, get_run_manager, require_legacy_private_open
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from app.private_work.error_mapping import private_work_http_exception
@@ -53,7 +53,11 @@ from deerflow.utils.file_io import run_file_io
 from deerflow.utils.time import coerce_iso, now_iso
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/threads", tags=["threads"])
+router = APIRouter(
+    prefix="/api/threads",
+    tags=["threads"],
+    dependencies=[Depends(require_legacy_private_open)],
+)
 
 
 def _private_work_http_error(error_type: type[PrivateWorkCutover | PrivateWorkUnavailable]) -> HTTPException:

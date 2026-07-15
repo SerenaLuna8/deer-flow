@@ -49,6 +49,11 @@ THREAD_SHARED = "thread-shared-null-owner"
 INVALID_MODEL = "definitely-not-allowed"
 
 
+class _OpenLegacyGuard:
+    async def require_legacy_open(self) -> None:
+        return None
+
+
 @pytest.fixture(autouse=True)
 def _stub_app_config():
     """Inject a minimal AppConfig so the allowed path (which builds a
@@ -80,6 +85,7 @@ def _client(user):
     """
     app = make_authed_test_app(user_factory=lambda: user)
     app.include_router(runs.router)
+    app.state.private_work_cutover_guard = _OpenLegacyGuard()
     app.state.thread_store = _make_thread_store()
     app.state.stream_bridge = MagicMock()
     app.state.checkpointer = MagicMock()
@@ -113,6 +119,7 @@ def _invalid_model_client(user):
     app = make_authed_test_app(user_factory=lambda: user)
     app.include_router(runs.router)
     app.include_router(thread_runs.router)
+    app.state.private_work_cutover_guard = _OpenLegacyGuard()
 
     thread_store = _make_thread_store()
     thread_status = AsyncMock(wraps=thread_store.update_status)

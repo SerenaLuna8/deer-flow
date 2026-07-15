@@ -80,6 +80,13 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class _OpenLegacyCutoverGuard:
+    """Keep pre-cutover router unit tests on their explicit legacy path."""
+
+    async def require_legacy_open(self) -> None:
+        return None
+
+
 def make_authed_test_app(
     *,
     user_factory: Callable[[], User] | None = None,
@@ -108,6 +115,7 @@ def make_authed_test_app(
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)
     app.state.thread_store = repo
+    app.state.private_work_cutover_guard = _OpenLegacyCutoverGuard()
 
     return app
 

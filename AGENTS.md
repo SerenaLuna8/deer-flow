@@ -75,8 +75,10 @@ operations。登录后 `/workspace` 是没有项目级侧栏的多项目卡片�
 project private-work、Memory 和 connection backend API，覆盖 Thread、run/stream/feed、file/artifact、
 项目 Memory 管理和 IM connection/OAuth/inbound 文本执行链，并保持项目与 owner 双重隔离。项目
 run/feed 的消息与事件固定写入 PostgreSQL，不受 legacy `run_events.backend=memory` 配置影响；legacy
-cutover/migration、frontend 接入和 automation 项目化尚未完成，因此当前仍不能作为完整多用户
-SaaS 发布。
+数据 migration、frontend 接入和 automation 项目化尚未完成。M4 Task 12 已接入 singleton
+`private_work_cutover_state` guard：final schema 且 marker 完成后开放 project private API，同时关闭
+legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run`；因此当前仍不能
+作为完整多用户 SaaS 发布。
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.

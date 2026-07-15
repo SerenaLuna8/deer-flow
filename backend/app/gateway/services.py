@@ -780,6 +780,13 @@ async def start_run(
     """
     sanitized_config, checkpoint_control = _normalize_run_checkpoint_inputs(body, thread_id)
 
+    from app.gateway.deps import get_private_work_cutover_guard
+
+    try:
+        await get_private_work_cutover_guard(request).require_legacy_open()
+    except PrivateWorkError as exc:
+        raise private_work_http_exception(exc) from None
+
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)

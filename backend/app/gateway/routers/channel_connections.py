@@ -8,7 +8,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from app.channels.runtime_config_store import (
@@ -16,12 +16,16 @@ from app.channels.runtime_config_store import (
     apply_runtime_connection_config,
     merge_runtime_channel_configs,
 )
-from app.gateway.deps import require_admin_user
+from app.gateway.deps import require_admin_user, require_legacy_private_open
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
 from deerflow.persistence.engine import get_session_factory
 
-router = APIRouter(prefix="/api/channels", tags=["channel-connections"])
+router = APIRouter(
+    prefix="/api/channels",
+    tags=["channel-connections"],
+    dependencies=[Depends(require_legacy_private_open)],
+)
 logger = logging.getLogger(__name__)
 
 _STATE_TTL_SECONDS = 600

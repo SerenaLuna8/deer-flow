@@ -38,6 +38,20 @@ class M4ThreadSeed:
         return self.project_b_owner_a.resource_scope
 
 
+class OpenProjectCutoverGuard:
+    """Explicit project-open guard for isolated Task 11 FastAPI fixtures."""
+
+    async def require_legacy_open(self) -> None:
+        return None
+
+    async def require_project_open(self) -> None:
+        return None
+
+
+def install_open_project_cutover_guard(app) -> None:
+    app.state.private_work_cutover_guard = OpenProjectCutoverGuard()
+
+
 def _project_context(
     *,
     user_id: uuid.UUID,

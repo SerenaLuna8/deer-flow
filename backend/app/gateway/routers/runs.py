@@ -10,18 +10,22 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge, require_legacy_private_open
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.routers.thread_runs import RunCreateRequest
 from app.gateway.services import preflight_run_create, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import serialize_channel_values_for_api
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/runs", tags=["runs"])
+router = APIRouter(
+    prefix="/api/runs",
+    tags=["runs"],
+    dependencies=[Depends(require_legacy_private_open)],
+)
 
 
 def _resolve_thread_id(body: RunCreateRequest) -> str:

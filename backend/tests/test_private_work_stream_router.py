@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi import FastAPI
+from support.m4_private_threads import install_open_project_cutover_guard
 
 from app.gateway.deps import private_work_context
 from app.gateway.routers import private_work as private_work_router
@@ -19,6 +20,7 @@ def context() -> SimpleNamespace:
 @pytest.fixture()
 def app(context: SimpleNamespace) -> FastAPI:
     value = FastAPI()
+    install_open_project_cutover_guard(value)
     value.include_router(private_work_router.router)
     value.dependency_overrides[private_work_context] = lambda: context
     return value

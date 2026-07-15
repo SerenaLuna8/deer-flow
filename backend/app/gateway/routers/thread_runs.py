@@ -15,13 +15,13 @@ import asyncio
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge, require_legacy_private_open
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import preflight_run_create, preflight_run_create_route, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
@@ -29,7 +29,11 @@ from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user
 from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/threads", tags=["runs"])
+router = APIRouter(
+    prefix="/api/threads",
+    tags=["runs"],
+    dependencies=[Depends(require_legacy_private_open)],
+)
 REGENERATE_HISTORY_SCAN_LIMIT = 200
 
 

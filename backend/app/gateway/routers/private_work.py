@@ -10,7 +10,7 @@ from pydantic import ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
-from app.gateway.deps import private_work_context, project_session
+from app.gateway.deps import private_work_context, project_session, require_project_private_open
 from app.gateway.private_work_schemas import (
     PrivateWorkRoute,
     StrictPrivateWorkRequest,
@@ -59,6 +59,7 @@ router = APIRouter(
     prefix="/api/projects/{project_id}/private-work",
     tags=["project-private-work"],
     route_class=PrivateWorkRoute,
+    dependencies=[Depends(require_project_private_open)],
 )
 
 

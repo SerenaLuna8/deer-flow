@@ -344,8 +344,11 @@ M3 的兼容运行不会构造项目运行身份：credential materialization �
 `/api/projects/{project_id}/memory`。这些接口复用 Gateway 的 run lifecycle，并按项目与 owner
 双重隔离；项目 run/feed 的消息与事件始终使用 PostgreSQL，因此 Gateway 重启后仍可读取，即使
 legacy `run_events.backend` 保持默认 `memory`。legacy cutover/migration、frontend 接入和
-automation 项目化仍未完成，因此这还不是
-完整的多用户 SaaS 发布。
+automation 项目化仍未完成。M4 Task 12 已加入运行期 cutover guard：只有 final schema 与
+`private_work_cutover_state.stage=cutover_complete` 同时满足时项目私有 API 才开放；marker 完成后，
+旧 Thread/run/Memory/channel connection/upload/artifact HTTP 入口与 shared `start_run` 会统一返回
+`409 PRIVATE_WORK_CUTOVER`。旧数据 migration、frontend 与 automation 仍待完成，因此这还不是完整的
+多用户 SaaS 发布。
 
 #### M3 共享资产迁移与 credential 轮换
 

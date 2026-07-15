@@ -1,8 +1,9 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.deps import require_legacy_private_open
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.agents.memory.updater import (
     clear_memory_data,
@@ -17,7 +18,11 @@ from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
 
-router = APIRouter(prefix="/api", tags=["memory"])
+router = APIRouter(
+    prefix="/api",
+    tags=["memory"],
+    dependencies=[Depends(require_legacy_private_open)],
+)
 
 
 def _resolve_memory_user_id(request: Request) -> str:

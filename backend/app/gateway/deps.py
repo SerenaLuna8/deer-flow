@@ -30,6 +30,7 @@ from langgraph.types import Checkpointer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.context import PrivateWorkContext
+from app.private_work.cutover import PrivateWorkCutoverGuard
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import (
     PrivateWorkError,
@@ -270,6 +271,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         sf = get_session_factory()
         from app.private_work.checkpointer import ProjectScopedCheckpointer
 
+        app.state.private_work_cutover_guard = PrivateWorkCutoverGuard(sf)
         app.state.project_scoped_checkpointer = ProjectScopedCheckpointer(
             app.state._raw_checkpointer,
             sf,
@@ -389,6 +391,16 @@ get_private_run_event_store: Callable[[Request], RunEventStore] = _require(
 )
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
+
+
+def get_private_work_cutover_guard(request: Request) -> PrivateWorkCutoverGuard:
+    value = getattr(request.app.state, "private_work_cutover_guard", None)
+    if not isinstance(value, PrivateWorkCutoverGuard) and not hasattr(
+        value,
+        "require_legacy_open",
+    ):
+        raise HTTPException(status_code=503, detail="Private work cutover guard not available")
+    return cast(PrivateWorkCutoverGuard, value)
 
 
 def get_checkpointer(request: Request) -> Checkpointer:
@@ -577,6 +589,35 @@ async def private_work_context(
         raise private_work_http_exception(PrivateWorkNotFound(request_id)) from None
     except ProjectDatabaseUnavailable:
         raise private_work_http_exception(PrivateWorkUnavailable(request_id)) from None
+    except PrivateWorkError as exc:
+        raise private_work_http_exception(exc) from None
+
+
+async def require_legacy_private_open(
+    request: Request,
+) -> None:
+    """Stop legacy routes after the global auth middleware has run."""
+
+    try:
+        await get_private_work_cutover_guard(request).require_legacy_open()
+    except PrivateWorkError as exc:
+        raise private_work_http_exception(exc) from None
+
+
+async def require_project_private_open(
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> None:
+    """Open project private routes only on the final cutover schema."""
+
+    # Readiness is the operator-visible probe for an incomplete or unavailable
+    # marker. It is read-only and must remain callable to explain why the
+    # project data routes are closed.
+    if request.url.path.endswith("/private-work/readiness"):
+        return
+
+    try:
+        await get_private_work_cutover_guard(request).require_project_open()
     except PrivateWorkError as exc:
         raise private_work_http_exception(exc) from None
 

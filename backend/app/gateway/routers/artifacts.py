@@ -4,10 +4,11 @@ import mimetypes
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app.gateway.authz import require_permission
+from app.gateway.deps import require_legacy_private_open
 from app.gateway.path_utils import resolve_thread_virtual_path
 from app.private_work.file_streaming import (
     ACTIVE_CONTENT_MIME_TYPES,
@@ -16,7 +17,11 @@ from app.private_work.file_streaming import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["artifacts"])
+router = APIRouter(
+    prefix="/api",
+    tags=["artifacts"],
+    dependencies=[Depends(require_legacy_private_open)],
+)
 
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024

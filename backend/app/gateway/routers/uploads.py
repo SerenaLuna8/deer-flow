@@ -11,7 +11,7 @@ from typing import BinaryIO
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_config
+from app.gateway.deps import get_config, require_legacy_private_open
 from app.upload_contracts import (
     LEGACY_UPLOAD_DEFAULTS,
     UploadLimits,
@@ -48,7 +48,11 @@ from deerflow.utils.file_io import run_file_io
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
+router = APIRouter(
+    prefix="/api/threads/{thread_id}/uploads",
+    tags=["uploads"],
+    dependencies=[Depends(require_legacy_private_open)],
+)
 
 UPLOAD_CHUNK_SIZE = 8192
 DEFAULT_MAX_FILES = LEGACY_UPLOAD_DEFAULTS.max_files

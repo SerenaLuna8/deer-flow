@@ -5,7 +5,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import Field
 
-from app.gateway.deps import private_work_context
+from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.private_work_schemas import (
     PrivateWorkRoute,
     StrictPrivateWorkRequest,
@@ -22,6 +22,7 @@ router = APIRouter(
     prefix="/api/projects/{project_id}/memory",
     tags=["project-memory"],
     route_class=PrivateWorkRoute,
+    dependencies=[Depends(require_project_private_open)],
 )
 
 Namespace = Annotated[str, Query(min_length=1, max_length=128)]
