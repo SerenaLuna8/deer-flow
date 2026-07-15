@@ -6,10 +6,14 @@ import socket
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Literal
 
 from app.automations.errors import AutomationError
+from app.automations.ownership import AutomationSchedulerOwnership
 
 logger = logging.getLogger(__name__)
+
+SchedulerRuntimeStatus = Literal["stopped", "running", "ownership_lost"]
 
 
 class ScheduledTaskService:
@@ -25,6 +29,7 @@ class ScheduledTaskService:
         poll_interval_seconds: float,
         lease_seconds: int,
         max_concurrent_runs: int,
+        ownership: AutomationSchedulerOwnership | None = None,
         clock: Callable[[], datetime] | None = None,
         lease_owner: str | None = None,
     ) -> None:
@@ -41,6 +46,7 @@ class ScheduledTaskService:
         self._poll_interval_seconds = float(poll_interval_seconds)
         self._lease_seconds = lease_seconds
         self._max_concurrent_runs = max_concurrent_runs
+        self._ownership = ownership
         self._clock = clock or (lambda: datetime.now(UTC))
         self._lease_owner = lease_owner or f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task[None] | None = None
@@ -50,7 +56,17 @@ class ScheduledTaskService:
     def task(self) -> asyncio.Task[None] | None:
         return self._task
 
+    @property
+    def status(self) -> SchedulerRuntimeStatus:
+        if self._ownership is not None and self._ownership.is_lost:
+            return "ownership_lost"
+        if self._task is not None and not self._task.done():
+            return "running"
+        return "stopped"
+
     async def run_once(self, *, now: datetime) -> None:
+        if self._ownership is not None:
+            await self._ownership.verify()
         await self._occurrences.reserve_due(
             now=now,
             limit=self._max_concurrent_runs,
@@ -76,6 +92,8 @@ class ScheduledTaskService:
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
+        if self._ownership is not None:
+            await self._ownership.verify()
         await self._reconciler.reconcile_restart(self._clock())
         self._stop.clear()
         self._task = asyncio.create_task(
@@ -102,6 +120,17 @@ class ScheduledTaskService:
                 await self.run_once(now=self._clock())
             except asyncio.CancelledError:
                 raise
+            except AutomationError as error:
+                if self._ownership is not None and self._ownership.is_lost:
+                    logger.error(
+                        "Automation scheduler ownership lost; polling stopped: code=%s",
+                        error.code,
+                    )
+                    return
+                logger.error(
+                    "Automation scheduler poll failed: code=%s",
+                    error.code,
+                )
             except Exception as error:  # noqa: BLE001 - loop remains available
                 logger.error(
                     "Automation scheduler poll failed: error_type=%s",
@@ -113,4 +142,4 @@ class ScheduledTaskService:
                 pass
 
 
-__all__ = ["ScheduledTaskService"]
+__all__ = ["ScheduledTaskService", "SchedulerRuntimeStatus"]

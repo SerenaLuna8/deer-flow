@@ -91,7 +91,7 @@ M8 发布验收尚未完成，因此当前仍不能作为完整多用户 SaaS �
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
-- When enabled, the background scheduler requires `GATEWAY_WORKERS=1` and one process-lifetime PostgreSQL session advisory lock held on a dedicated connection before reconciliation or polling. A competing Gateway fails startup closed. Disabled scheduler mode takes no lock and leaves manual Automation APIs available.
+- Project Automation restart reconciliation is independent of automatic polling: once the final M5 schema/cutover is open it always settles admitted manual/automatic runs before generic M4 orphan recovery. When enabled, the background scheduler requires `GATEWAY_WORKERS=1` and one process-lifetime PostgreSQL session advisory lock held on a dedicated connection before reconciliation or polling. Every poll verifies on that same physical PostgreSQL backend that the original session still owns the lock without reacquiring it; session/PID/lock loss permanently fail-stops that poller and is exposed as `ownership_lost`. A competing Gateway may take over only after PostgreSQL releases the old session lock. Disabled scheduler mode takes no lock or poll monitor, but keeps manual Automation APIs and restart reconciliation available.
 
 ## Commands: Root vs. Module
 

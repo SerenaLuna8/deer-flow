@@ -1497,7 +1497,10 @@ run_events:
 # dedicated checked-out connection. A competing Gateway fails startup closed;
 # task leases still protect crash recovery but do not replace singleton owner
 # election. Size database.pool_size/max_overflow with this reserved connection
-# in mind. scheduler.enabled=false acquires no ownership lock.
+# in mind. The owner verifies its original backend session and existing lock
+# before every poll without reacquiring; loss permanently stops that poller.
+# scheduler.enabled=false acquires no lock or monitor, but restart reconciliation
+# still settles admitted manual Automation runs before generic orphan recovery.
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller

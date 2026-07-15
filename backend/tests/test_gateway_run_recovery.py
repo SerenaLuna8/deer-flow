@@ -2,21 +2,40 @@
 
 from __future__ import annotations
 
+import hashlib
+import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import anyio
 import pytest
 from fastapi import FastAPI
+from support.m4_private_threads import seed_m4_thread_database
 
 import deerflow.runtime as runtime_module
 from app.automations.errors import AutomationUnavailable
+from app.automations.occurrences import deterministic_run_id, deterministic_thread_id
 from app.gateway import deps as gateway_deps
+from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
+from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from deerflow.config.app_config import AppConfig
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.persistence import engine as engine_module
 from deerflow.persistence import thread_meta as thread_meta_module
+from deerflow.persistence.scheduled_task_runs import (
+    ScheduledTaskRunCreate,
+    ScheduledTaskRunRepository,
+)
+from deerflow.persistence.scheduled_tasks import (
+    ScheduledTaskCreate,
+    ScheduledTaskRepository,
+)
 from deerflow.runtime.checkpointer import async_provider as checkpointer_module
 from deerflow.runtime.events import store as event_store_module
+
+NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
 
 
 @asynccontextmanager
@@ -99,12 +118,6 @@ async def test_postgres_runtime_reconciles_orphaned_runs_on_startup(monkeypatch)
         database=SimpleNamespace(),
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
-        scheduler=SimpleNamespace(
-            enabled=False,
-            poll_interval_seconds=5,
-            lease_seconds=120,
-            max_concurrent_runs=3,
-        ),
     )
     thread_store = _FakeThreadStore()
     stream_bridge = _FakeStreamBridge(existing_streams={"run-1"})
@@ -203,6 +216,158 @@ async def test_postgres_runtime_does_not_mark_thread_error_when_newer_run_is_suc
     assert thread_store.status_updates == []
     assert stream_bridge.publish_end_calls == ["old-running"]
     assert stream_bridge.cleanup_calls == [("old-running", 60.0)]
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_disabled_scheduler_reconciles_manual_run_before_generic_recovery(
+    monkeypatch,
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    occurrence_id = str(uuid.uuid4())
+    task_id = f"task-{uuid.uuid4().hex[:20]}"
+    thread_id = deterministic_thread_id(occurrence_id)
+    run_id = deterministic_run_id(occurrence_id)
+    manual_hash = hashlib.sha256(f"manual:{occurrence_id}".encode()).hexdigest()
+    try:
+        async with seed.factory() as session, session.begin():
+            task = await ScheduledTaskRepository(session).create(
+                seed.owner_a.resource_scope,
+                ScheduledTaskCreate(
+                    task_id=task_id,
+                    thread_id=None,
+                    context_mode="fresh_thread_per_run",
+                    agent_asset_id=seed.system_agent_id,
+                    agent_scope="system",
+                    title="Manual crash recovery",
+                    prompt="Recover this admitted manual run.",
+                    schedule_type="once",
+                    schedule_spec={"run_at": NOW.isoformat()},
+                    timezone="UTC",
+                    next_run_at=None,
+                ),
+            )
+            occurrences = ScheduledTaskRunRepository(session)
+            await occurrences.create(
+                seed.owner_a.resource_scope,
+                ScheduledTaskRunCreate(
+                    occurrence_id=occurrence_id,
+                    task_id=task.id,
+                    task_version=task.version,
+                    occurrence_key=hashlib.sha256(occurrence_id.encode()).hexdigest(),
+                    manual_idempotency_hash=manual_hash,
+                    scheduled_for=NOW,
+                    trigger="manual",
+                    status="queued",
+                    created_at=NOW,
+                ),
+            )
+            claimed = await occurrences.claim(
+                seed.owner_a.resource_scope,
+                occurrence_id,
+                now=NOW,
+                lease_owner="crashed-gateway",
+                lease_expires_at=NOW,
+            )
+            assert claimed is not None
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.system_agent_id, "system"),
+                metadata={"scheduled_task_run_id": occurrence_id},
+            )
+            await PrivateRunRepository(session).create(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                request=PrivateRunCreate(
+                    run_id=run_id,
+                    status="pending",
+                    metadata={
+                        "scheduled_task_id": task_id,
+                        "scheduled_task_run_id": occurrence_id,
+                        "scheduled_trigger": "manual",
+                    },
+                ),
+            )
+            running = await occurrences.mark_running(
+                seed.owner_a.resource_scope,
+                occurrence_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                started_at=NOW,
+                updated_at=NOW,
+            )
+            assert running is not None
+
+        app = FastAPI()
+        config = AppConfig(
+            database={"url": migrated_postgres_database_url},
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            scheduler={"enabled": False},
+        )
+        stream_bridge = _FakeStreamBridge(existing_streams={run_id})
+        thread_store = _FakeThreadStore()
+        close_engine = AsyncMock()
+        monkeypatch.setenv("GATEWAY_WORKERS", "1")
+        monkeypatch.setattr(engine_module, "init_engine_from_config", AsyncMock())
+        monkeypatch.setattr(engine_module, "get_session_factory", lambda: seed.factory)
+        monkeypatch.setattr(engine_module, "get_engine", lambda: seed.engine)
+        monkeypatch.setattr(engine_module, "close_engine", close_engine)
+        monkeypatch.setattr(
+            runtime_module,
+            "make_stream_bridge",
+            lambda _config: _fake_context(stream_bridge),
+        )
+        monkeypatch.setattr(
+            checkpointer_module,
+            "make_checkpointer",
+            lambda _config: _fake_context(object()),
+        )
+        monkeypatch.setattr(
+            runtime_module,
+            "make_store",
+            lambda _config: _fake_context(object()),
+        )
+        monkeypatch.setattr(
+            thread_meta_module,
+            "make_thread_store",
+            lambda _sf: thread_store,
+        )
+        monkeypatch.setattr(
+            event_store_module,
+            "make_run_event_store",
+            lambda _config: object(),
+        )
+
+        async with gateway_deps.langgraph_runtime(app, config):
+            assert app.state.automation_scheduler_ownership.is_acquired is False
+            assert app.state.scheduled_task_service.task is None
+
+        async with seed.factory() as session:
+            private_run = await PrivateRunRepository(session).get(
+                scope=seed.owner_a.resource_scope,
+                run_id=run_id,
+            )
+            occurrence = await ScheduledTaskRunRepository(session).get(
+                seed.owner_a.resource_scope,
+                occurrence_id,
+            )
+            parent = await ScheduledTaskRepository(session).get(
+                seed.owner_a.resource_scope,
+                task_id,
+            )
+
+        assert private_run is not None and private_run.status == "interrupted"
+        assert occurrence is not None and occurrence.status == "interrupted"
+        assert occurrence.error_code == "AUTOMATION_GATEWAY_RESTARTED"
+        assert parent is not None and parent.status == "cancelled"
+        assert parent.last_outcome == "interrupted"
+        assert parent.run_count == 1
+        assert stream_bridge.publish_end_calls == []
+        close_engine.assert_awaited_once_with()
+    finally:
+        await seed.engine.dispose()
 
 
 @pytest.mark.anyio

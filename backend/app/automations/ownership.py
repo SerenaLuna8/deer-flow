@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import sqlalchemy as sa
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.automations.errors import AutomationUnavailable
@@ -20,6 +19,27 @@ logger = logging.getLogger(__name__)
 # transaction-level admission lock used by AutomationOccurrenceService.
 AUTOMATION_SCHEDULER_OWNERSHIP_LOCK_KEY = 0x0DEE_12F1_0A55_0007
 _OWNERSHIP_REQUEST_ID = "automation-scheduler-ownership"
+_ACQUIRE_SQL = sa.text(
+    """SELECT pg_backend_pid() AS backend_pid,
+              pg_try_advisory_lock(:lock_key) AS acquired"""
+)
+_VERIFY_SQL = sa.text(
+    """SELECT pg_backend_pid() AS backend_pid,
+              EXISTS (
+                  SELECT 1
+                  FROM pg_locks
+                  WHERE locktype = 'advisory'
+                    AND pid = pg_backend_pid()
+                    AND granted
+                    AND classid = (
+                        (CAST(:lock_key AS bigint) >> 32) & 4294967295
+                    )::oid
+                    AND objid = (
+                        CAST(:lock_key AS bigint) & 4294967295
+                    )::oid
+                    AND objsubid = 1
+              ) AS owns_lock"""
+)
 
 
 class AutomationSchedulerOwnership:
@@ -34,36 +54,48 @@ class AutomationSchedulerOwnership:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
         self._connection: AsyncConnection | None = None
+        self._backend_pid: int | None = None
+        self._lost = False
         self._operation_lock = asyncio.Lock()
 
     @property
     def is_acquired(self) -> bool:
-        return self._connection is not None
+        return self._connection is not None and not self._lost
+
+    @property
+    def is_lost(self) -> bool:
+        return self._lost
+
+    @property
+    def backend_pid(self) -> int | None:
+        return self._backend_pid
 
     async def acquire(self) -> None:
         """Acquire exclusive scheduler ownership or fail closed."""
         async with self._operation_lock:
+            if self._lost:
+                raise AutomationUnavailable(_OWNERSHIP_REQUEST_ID)
             if self._connection is not None:
                 return
 
             connection: AsyncConnection | None = None
-            lock_may_be_held = False
             try:
                 connection = await self._engine.connect()
-                acquired = await connection.scalar(
-                    sa.text("SELECT pg_try_advisory_lock(:lock_key)"),
+                result = await connection.execute(
+                    _ACQUIRE_SQL,
                     {"lock_key": AUTOMATION_SCHEDULER_OWNERSHIP_LOCK_KEY},
                 )
-                lock_may_be_held = bool(acquired)
+                backend_pid, acquired = result.one()
                 # End the implicit transaction while retaining the session lock.
                 await connection.commit()
-                if not lock_may_be_held:
+                if not acquired:
                     await connection.close()
                     raise AutomationUnavailable(_OWNERSHIP_REQUEST_ID)
                 self._connection = connection
+                self._backend_pid = int(backend_pid)
             except AutomationUnavailable:
                 raise
-            except SQLAlchemyError as error:
+            except Exception as error:  # noqa: BLE001 - driver failures may bypass SQLAlchemy wrappers
                 if connection is not None:
                     await self._cleanup_failed_acquire(connection)
                 raise AutomationUnavailable(_OWNERSHIP_REQUEST_ID) from error
@@ -72,6 +104,32 @@ class AutomationSchedulerOwnership:
                     await self._cleanup_failed_acquire(connection)
                 raise
 
+    async def verify(self) -> None:
+        """Verify the original physical session still owns the lock.
+
+        This query observes ``pg_locks`` and never calls an advisory-lock
+        acquisition function, so a heartbeat cannot increase the session lock
+        count. Any uncertainty permanently loses ownership for this object.
+        """
+        async with self._operation_lock:
+            connection = self._connection
+            backend_pid = self._backend_pid
+            if self._lost or connection is None or backend_pid is None:
+                raise AutomationUnavailable(_OWNERSHIP_REQUEST_ID)
+            try:
+                result = await connection.execute(
+                    _VERIFY_SQL,
+                    {"lock_key": AUTOMATION_SCHEDULER_OWNERSHIP_LOCK_KEY},
+                )
+                current_pid, owns_lock = result.one()
+                await connection.commit()
+            except Exception as error:  # noqa: BLE001 - driver disconnects may bypass SQLAlchemy wrappers
+                await self._mark_lost(connection)
+                raise AutomationUnavailable(_OWNERSHIP_REQUEST_ID) from error
+            if int(current_pid) != backend_pid or not owns_lock:
+                await self._mark_lost(connection)
+                raise AutomationUnavailable(_OWNERSHIP_REQUEST_ID)
+
     async def release(self) -> None:
         """Release scheduler ownership before the engine pool is disposed."""
         async with self._operation_lock:
@@ -79,6 +137,8 @@ class AutomationSchedulerOwnership:
             self._connection = None
             if connection is None:
                 return
+            if not self._lost:
+                self._backend_pid = None
 
             cleanup = asyncio.create_task(self._unlock_and_close(connection))
             try:
@@ -115,6 +175,33 @@ class AutomationSchedulerOwnership:
             await asyncio.shield(cleanup)
             raise
 
+    async def _mark_lost(self, connection: AsyncConnection) -> None:
+        self._lost = True
+        self._connection = None
+        cleanup = asyncio.create_task(self._invalidate_and_close(connection))
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await asyncio.shield(cleanup)
+            raise
+
+    @staticmethod
+    async def _invalidate_and_close(connection: AsyncConnection) -> None:
+        try:
+            await connection.invalidate()
+        except Exception as error:  # noqa: BLE001 - cleanup must contain driver failures
+            logger.error(
+                "Automation scheduler lost-ownership connection invalidation failed: error_type=%s",
+                type(error).__name__,
+            )
+        try:
+            await connection.close()
+        except Exception as error:  # noqa: BLE001 - cleanup must contain driver failures
+            logger.error(
+                "Automation scheduler lost-ownership connection close failed: error_type=%s",
+                type(error).__name__,
+            )
+
     @staticmethod
     async def _unlock_and_close(connection: AsyncConnection) -> None:
         try:
@@ -125,16 +212,28 @@ class AutomationSchedulerOwnership:
             await connection.commit()
             if not released:
                 logger.warning("Automation scheduler ownership was already absent during release")
-        except SQLAlchemyError:
+        except Exception as error:  # noqa: BLE001 - cleanup must contain driver failures
             # Never return an uncertain physical session to the pool: invalidating
             # it makes PostgreSQL release any remaining session lock on disconnect.
-            logger.exception("Automation scheduler ownership release failed")
+            logger.error(
+                "Automation scheduler ownership release failed: error_type=%s",
+                type(error).__name__,
+            )
             try:
                 await connection.invalidate()
-            except SQLAlchemyError:
-                logger.exception("Automation scheduler ownership connection invalidation failed")
+            except Exception as invalidate_error:  # noqa: BLE001 - cleanup containment
+                logger.error(
+                    "Automation scheduler ownership connection invalidation failed: error_type=%s",
+                    type(invalidate_error).__name__,
+                )
         finally:
-            await connection.close()
+            try:
+                await connection.close()
+            except Exception as close_error:  # noqa: BLE001 - cleanup containment
+                logger.error(
+                    "Automation scheduler ownership connection close failed: error_type=%s",
+                    type(close_error).__name__,
+                )
 
 
 __all__ = [

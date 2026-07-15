@@ -46,6 +46,7 @@ def _service(
     reconciler=None,
     poll_interval_seconds: float = 60,
     max_concurrent_runs: int = 3,
+    ownership=None,
 ) -> ScheduledTaskService:
     return ScheduledTaskService(
         app=SimpleNamespace(state=SimpleNamespace()),
@@ -55,6 +56,7 @@ def _service(
         poll_interval_seconds=poll_interval_seconds,
         lease_seconds=120,
         max_concurrent_runs=max_concurrent_runs,
+        ownership=ownership,
         clock=lambda: NOW,
         lease_owner="scheduler-test",
     )
@@ -141,6 +143,60 @@ async def test_reconciliation_failure_prevents_poll_task_start() -> None:
         await service.start()
 
     assert service.task is None
+
+
+@pytest.mark.asyncio
+async def test_run_once_verifies_ownership_before_reserving() -> None:
+    occurrences = FakeOccurrences(("must-not-claim",))
+    dispatcher = FakeDispatcher()
+    ownership = SimpleNamespace(
+        verify=AsyncMock(side_effect=AutomationUnavailable("ownership-lost")),
+        is_lost=True,
+    )
+    service = _service(
+        occurrences=occurrences,
+        dispatcher=dispatcher,
+        ownership=ownership,
+    )
+
+    with pytest.raises(AutomationUnavailable):
+        await service.run_once(now=NOW)
+
+    ownership.verify.assert_awaited_once_with()
+    occurrences.reserve_due.assert_not_awaited()
+    assert occurrences.claim_calls == []
+    assert dispatcher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_background_loop_fail_stops_after_ownership_loss() -> None:
+    occurrences = FakeOccurrences(("must-not-claim",))
+    dispatcher = FakeDispatcher()
+    ownership = SimpleNamespace(
+        verify=AsyncMock(
+            side_effect=[
+                None,
+                AutomationUnavailable("ownership-lost"),
+            ]
+        ),
+        is_lost=True,
+    )
+    service = _service(
+        occurrences=occurrences,
+        dispatcher=dispatcher,
+        ownership=ownership,
+        poll_interval_seconds=0.01,
+    )
+
+    await service.start()
+    assert service.task is not None
+    await asyncio.wait_for(service.task, timeout=1)
+
+    assert service.status == "ownership_lost"
+    assert ownership.verify.await_count == 2
+    occurrences.reserve_due.assert_not_awaited()
+    assert occurrences.claim_calls == []
+    assert dispatcher.calls == []
 
 
 @pytest.mark.asyncio

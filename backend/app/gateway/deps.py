@@ -339,7 +339,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         else:
             app.state.automation_scheduler_ownership = AutomationSchedulerOwnership(persistence_engine)
         app.state.automation_cutover_guard = AutomationCutoverGuard(sf)
-        app.state.automation_readiness_service = AutomationReadinessService()
+        app.state.automation_readiness_service = AutomationReadinessService(scheduler_status_provider=lambda: app.state.scheduled_task_service.status)
         app.state.automation_occurrence_service = AutomationOccurrenceService(
             sf,
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
@@ -357,6 +357,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             poll_interval_seconds=effective_scheduler_config.poll_interval_seconds,
             lease_seconds=effective_scheduler_config.lease_seconds,
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
+            ownership=app.state.automation_scheduler_ownership,
         )
 
         # GATEWAY_WORKERS remains a cheap local topology guard. The dedicated
@@ -392,9 +393,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             # Automation owns its admitted M4 Runs. Reconcile those first so
             # generic orphan recovery cannot erase the distinct interrupted
-            # occurrence outcome. Disabled scheduler configs take no ownership
-            # lock and retain the historic generic-recovery behavior only.
-            if effective_scheduler_config.enabled:
+            # occurrence outcome. A production AppConfig always carries the
+            # scheduler section: disabled controls polling/ownership only, not
+            # recovery for manual project Automation runs. Minimal legacy test
+            # embeddings with no scheduler section retain generic-only recovery.
+            if scheduler_config is not None:
                 from datetime import UTC, datetime
 
                 from app.automations.errors import AutomationCutover
