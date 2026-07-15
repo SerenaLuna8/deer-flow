@@ -343,12 +343,26 @@ M3 的兼容运行不会构造项目运行身份：credential materialization �
 （messages/events/token usage/feedback）、file 和 artifact 接口；项目 Memory 管理位于
 `/api/projects/{project_id}/memory`。这些接口复用 Gateway 的 run lifecycle，并按项目与 owner
 双重隔离；项目 run/feed 的消息与事件始终使用 PostgreSQL，因此 Gateway 重启后仍可读取，即使
-legacy `run_events.backend` 保持默认 `memory`。legacy cutover/migration、frontend 接入和
-automation 项目化仍未完成。M4 Task 12 已加入运行期 cutover guard：只有 final schema 与
+legacy `run_events.backend` 保持默认 `memory`。M4 Task 13 提供 runnable-first 显式迁移命令，首版覆盖
+PostgreSQL legacy Thread/run/event/feedback 与 checkpoint scope marker；要求每个 legacy owner UUID
+显式映射到 active project UUID，不推断 default/recent/unique project。M4 Task 12 已加入运行期 cutover guard：只有 final schema 与
 `private_work_cutover_state.stage=cutover_complete` 同时满足时项目私有 API 才开放；marker 完成后，
 旧 Thread/run/Memory/channel connection/upload/artifact HTTP 入口与 shared `start_run` 会统一返回
-`409 PRIVATE_WORK_CUTOVER`。旧数据 migration、frontend 与 automation 仍待完成，因此这还不是完整的
-多用户 SaaS 发布。
+`409 PRIVATE_WORK_CUTOVER`。非空 legacy filesystem、Memory 或 connection source 当前会在 execute 前
+安全拒绝；frontend 与 automation 也仍待完成，因此这还不是完整的多用户 SaaS 发布。
+
+进入维护窗口并先完成外部 PostgreSQL 备份。owner map 是一个只包含 UUID→UUID 的 JSON object；
+`--backup-dir` 是当前 CLI 的保留运维参数，首版不会在其中写文件：
+
+```bash
+export DATABASE_URL='postgresql+asyncpg://...'
+make migrate-private-work ARGS="--dry-run --owner-map /secure/private-work-owner-map.json --backup-dir /secure/backups"
+make migrate-private-work ARGS="--execute --owner-map /secure/private-work-owner-map.json --backup-dir /secure/backups"
+```
+
+dry-run 只输出脱敏 counts 与稳定 source hash，不升级 schema、不写 ledger/marker，也不创建 backup
+目录。execute 固定按 0008 expand、分域 ledger、0009 finalize、0010/0011、最后
+`cutover_complete` marker 的顺序执行；同一已完成 cutover 再执行会直接 no-op。
 
 #### M3 共享资产迁移与 credential 轮换
 

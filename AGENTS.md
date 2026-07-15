@@ -74,8 +74,11 @@ operations。登录后 `/workspace` 是没有项目级侧栏的多项目卡片�
 邮件；成员退出/移除和项目删除只记录 30 天窗口，不物理清除私有或项目数据。M4 Task 11 已挂载
 project private-work、Memory 和 connection backend API，覆盖 Thread、run/stream/feed、file/artifact、
 项目 Memory 管理和 IM connection/OAuth/inbound 文本执行链，并保持项目与 owner 双重隔离。项目
-run/feed 的消息与事件固定写入 PostgreSQL，不受 legacy `run_events.backend=memory` 配置影响；legacy
-数据 migration、frontend 接入和 automation 项目化尚未完成。M4 Task 12 已接入 singleton
+run/feed 的消息与事件固定写入 PostgreSQL，不受 legacy `run_events.backend=memory` 配置影响。M4 Task 13
+提供 runnable-first 的显式 private-work migration：可 dry-run，并把 PostgreSQL legacy
+Thread/run/event/feedback 与 checkpoint metadata marker 迁入显式 owner→active project scope；非空 legacy
+filesystem、Memory 或 connection source 当前会安全拒绝，留待后续迁移。frontend 接入和 automation
+项目化尚未完成。M4 Task 12 已接入 singleton
 `private_work_cutover_state` guard：final schema 且 marker 完成后开放 project private API，同时关闭
 legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run`；因此当前仍不能
 作为完整多用户 SaaS 发布。
@@ -99,6 +102,7 @@ make setup-db    # 显式创建并完整初始化 PostgreSQL 目标库
 make migrate-db  # 升级已存在 PostgreSQL 目标库
 make migrate-sqlite ARGS="..."  # 只读预检、备份并迁移 legacy SQLite
 make migrate-assets ARGS="--dry-run ..."  # 脱敏 inventory；execute 前必须先 dry-run
+make migrate-private-work ARGS="--dry-run ..."  # 显式 owner map 的 M4 private-work staged migration
 make rotate-credentials ARGS="--dry-run --key-id m3-next"  # 分批轮换 credential envelope
 make check-db    # 只读检查连接、Alembic head 与必需表
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)

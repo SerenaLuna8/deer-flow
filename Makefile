@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup setup-db migrate-db migrate-sqlite migrate-assets rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.PHONY: help config config-upgrade check install setup setup-db migrate-db migrate-sqlite migrate-assets migrate-private-work rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -28,6 +28,7 @@ help:
 	@echo "  make migrate-db      - 仅升级已存在 PostgreSQL 数据库"
 	@echo "  make migrate-sqlite  - 只读预检/备份并迁移 legacy SQLite（参数通过 ARGS 传入）"
 	@echo "  make migrate-assets  - 显式预检/备份并迁移 legacy shared assets（参数通过 ARGS 传入）"
+	@echo "  make migrate-private-work - 显式 dry-run/execute 迁移 legacy private work（参数通过 ARGS 传入）"
 	@echo "  make rotate-credentials - 分批轮换 credential envelopes（参数通过 ARGS 传入）"
 	@echo "  make check-db        - 只读检查 PostgreSQL 数据库状态"
 	@echo "  make detect-thread-boundaries - Inventory async/thread boundary points"
@@ -73,6 +74,9 @@ migrate-sqlite:
 
 migrate-assets:
 	@$(MAKE) -C backend migrate-assets ARGS="$(ARGS)"
+
+migrate-private-work:
+	@$(MAKE) -C backend migrate-private-work ARGS="$(ARGS)"
 
 rotate-credentials:
 	@$(MAKE) -C backend rotate-credentials ARGS="$(ARGS)"

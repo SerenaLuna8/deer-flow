@@ -37,6 +37,9 @@ migrate-sqlite:
 migrate-assets:
 	PYTHONPATH=. uv run python scripts/migrate_assets.py $(ARGS)
 
+migrate-private-work:
+	PYTHONPATH=. uv run python scripts/migrate_private_work.py $(ARGS)
+
 rotate-credentials:
 	PYTHONPATH=. uv run python scripts/rotate_credentials.py $(ARGS)
 
