@@ -298,6 +298,144 @@ class ScheduledTaskRunRepository:
         ).scalar_one_or_none()
         return None if row is None else self.record(row)
 
+    async def record_resolution(
+        self,
+        scope: PrivateResourceScope,
+        occurrence_id: str,
+        *,
+        membership_id: uuid.UUID,
+        membership_version: int,
+        updated_at: datetime,
+    ) -> ScheduledTaskRunRecord | None:
+        row = (
+            await self.session.execute(
+                sa.update(ScheduledTaskRunRow)
+                .where(
+                    ScheduledTaskRunRow.id == occurrence_id,
+                    ScheduledTaskRunRow.status == "launching",
+                    ScheduledTaskRunRow.thread_id.is_(None),
+                    ScheduledTaskRunRow.run_id.is_(None),
+                    *self.predicates(scope),
+                )
+                .values(
+                    resolved_membership_id=membership_id,
+                    resolved_membership_version=membership_version,
+                    updated_at=updated_at,
+                )
+                .returning(ScheduledTaskRunRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def mark_running(
+        self,
+        scope: PrivateResourceScope,
+        occurrence_id: str,
+        *,
+        thread_id: str,
+        run_id: str,
+        started_at: datetime,
+        updated_at: datetime,
+    ) -> ScheduledTaskRunRecord | None:
+        row = (
+            await self.session.execute(
+                sa.update(ScheduledTaskRunRow)
+                .where(
+                    ScheduledTaskRunRow.id == occurrence_id,
+                    ScheduledTaskRunRow.status == "launching",
+                    ScheduledTaskRunRow.thread_id.is_(None),
+                    ScheduledTaskRunRow.run_id.is_(None),
+                    *self.predicates(scope),
+                )
+                .values(
+                    status="running",
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    started_at=started_at,
+                    next_attempt_at=None,
+                    error_code=None,
+                    error_message=None,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=updated_at,
+                )
+                .returning(ScheduledTaskRunRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def requeue_launch(
+        self,
+        scope: PrivateResourceScope,
+        occurrence_id: str,
+        *,
+        next_attempt_at: datetime,
+        error_code: str,
+        updated_at: datetime,
+    ) -> ScheduledTaskRunRecord | None:
+        row = (
+            await self.session.execute(
+                sa.update(ScheduledTaskRunRow)
+                .where(
+                    ScheduledTaskRunRow.id == occurrence_id,
+                    ScheduledTaskRunRow.status == "launching",
+                    ScheduledTaskRunRow.thread_id.is_(None),
+                    ScheduledTaskRunRow.run_id.is_(None),
+                    *self.predicates(scope),
+                )
+                .values(
+                    status="queued",
+                    next_attempt_at=next_attempt_at,
+                    error_code=error_code,
+                    error_message=None,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=updated_at,
+                )
+                .returning(ScheduledTaskRunRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def reject_launch(
+        self,
+        scope: PrivateResourceScope,
+        occurrence_id: str,
+        *,
+        error_code: str,
+        finished_at: datetime,
+        thread_id: str | None = None,
+        run_id: str | None = None,
+    ) -> ScheduledTaskRunRecord | None:
+        if (thread_id is None) != (run_id is None):
+            raise ValueError("thread_id and run_id must be supplied together")
+        row = (
+            await self.session.execute(
+                sa.update(ScheduledTaskRunRow)
+                .where(
+                    ScheduledTaskRunRow.id == occurrence_id,
+                    ScheduledTaskRunRow.status == "launching",
+                    ScheduledTaskRunRow.thread_id.is_(None),
+                    ScheduledTaskRunRow.run_id.is_(None),
+                    *self.predicates(scope),
+                )
+                .values(
+                    status="rejected",
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    next_attempt_at=None,
+                    error_code=error_code,
+                    error_message=None,
+                    finished_at=finished_at,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=finished_at,
+                )
+                .returning(ScheduledTaskRunRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
     async def finish(
         self,
         scope: PrivateResourceScope,

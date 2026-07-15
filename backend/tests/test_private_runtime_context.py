@@ -907,6 +907,9 @@ async def test_start_private_run_uses_shared_launch_once_after_snapshot(monkeypa
             assert thread_id == "private-thread"
             assert request.status == "pending"
             assert request.assistant_id is None
+            assert request.run_id == "deterministic-run-id"
+            assert request.kwargs["config"]["context"]["non_interactive"] is True
+            assert "project_id" not in request.kwargs["config"]["context"]
             assert "forged-project-agent" not in json.dumps(
                 {"metadata": request.metadata, "kwargs": request.kwargs},
                 default=str,
@@ -996,6 +999,11 @@ async def test_start_private_run_uses_shared_launch_once_after_snapshot(monkeypa
         "private-thread",
         request,
         context,
+        run_id="deterministic-run-id",
+        server_context={
+            "non_interactive": True,
+            "project_id": "forged-server-project",
+        },
         admission_service=Admission(),
         asset_runtime=Materializer(),
     )

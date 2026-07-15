@@ -10,6 +10,7 @@ from app.automations.error_mapping import automation_http_exception
 from app.automations.errors import (
     AutomationActiveRun,
     AutomationConcurrencyLimit,
+    AutomationConflict,
     AutomationCutover,
     AutomationError,
     AutomationForbidden,
@@ -31,6 +32,7 @@ from app.automations.models import (
     [
         (AutomationNotFound("req"), 404, "AUTOMATION_NOT_FOUND"),
         (AutomationForbidden("req"), 403, "AUTOMATION_FORBIDDEN"),
+        (AutomationConflict("req"), 409, "AUTOMATION_CONFLICT"),
         (AutomationVersionConflict("req"), 409, "AUTOMATION_VERSION_CONFLICT"),
         (AutomationActiveRun("req"), 409, "AUTOMATION_ACTIVE_RUN"),
         (AutomationOnceExpired("req"), 409, "AUTOMATION_ONCE_EXPIRED"),

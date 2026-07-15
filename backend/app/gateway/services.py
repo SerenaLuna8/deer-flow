@@ -13,6 +13,7 @@ import inspect
 import json
 import logging
 import re
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -34,9 +35,7 @@ from app.gateway.deps import (
     get_stream_bridge,
 )
 from app.gateway.internal_auth import (
-    INTERNAL_OWNER_USER_ID_HEADER_NAME,
     INTERNAL_SYSTEM_ROLE,
-    get_internal_user,
     get_trusted_internal_owner_user_id,
     get_trusted_internal_runtime_user_id,
 )
@@ -105,12 +104,14 @@ _RUNTIME_SELECTION_CLIENT_FIELDS = frozenset({"agent_name", "model_name"})
 
 def _strip_runtime_client_fields(
     fields: Mapping[str, object],
+    *,
+    internal: bool = False,
 ) -> dict[str, object]:
     """Keep legacy runtime selection inputs while removing private authority."""
 
     return strip_private_client_fields(
         fields,
-        preserve_fields=_RUNTIME_SELECTION_CLIENT_FIELDS,
+        preserve_fields=(_RUNTIME_SELECTION_CLIENT_FIELDS | (_CONTEXT_INTERNAL_CALLER_KEYS if internal else frozenset())),
     )
 
 
@@ -441,7 +442,7 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     """
     if not context:
         return
-    context = _strip_runtime_client_fields(context)
+    context = _strip_runtime_client_fields(context, internal=internal)
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
     keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
@@ -791,10 +792,18 @@ async def start_run(
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)
 
+    is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
     raw_metadata = getattr(body, "metadata", None)
     sanitized_metadata = strip_private_client_fields(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
     raw_body_context = getattr(body, "context", None)
-    sanitized_body_context = _strip_runtime_client_fields(raw_body_context) if isinstance(raw_body_context, Mapping) else {}
+    sanitized_body_context = (
+        _strip_runtime_client_fields(
+            raw_body_context,
+            internal=is_internal_caller,
+        )
+        if isinstance(raw_body_context, Mapping)
+        else {}
+    )
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
@@ -856,7 +865,6 @@ async def start_run(
     # The ``context`` field is a custom extension for the langgraph-compat layer
     # that carries agent configuration (model_name, thinking_enabled, etc.).
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-    is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
     merge_run_context_overrides(config, sanitized_body_context, internal=is_internal_caller)
     if not is_internal_caller:
         # ``body.config`` is free-form and copied verbatim by
@@ -1011,6 +1019,8 @@ async def start_private_run(
     request: Request,
     context: PrivateWorkContext,
     *,
+    run_id: str | None = None,
+    server_context: Mapping[str, object] | None = None,
     admission_service: PrivateRunAdmissionService | None = None,
     asset_runtime: PrivateAssetRuntime | None = None,
 ) -> RunRecord:
@@ -1035,6 +1045,13 @@ async def start_private_run(
         metadata=raw_metadata if isinstance(raw_metadata, Mapping) else None,
         body_context=raw_body_context if isinstance(raw_body_context, Mapping) else None,
     )
+    trusted_server_context = strip_private_client_fields(server_context) if isinstance(server_context, Mapping) else {}
+    if isinstance(server_context, Mapping) and server_context.get("non_interactive") is True:
+        trusted_server_context["non_interactive"] = True
+    config["context"] = {
+        **dict(config.get("context", {})),
+        **trusted_server_context,
+    }
     scoped_checkpointer = get_project_checkpointer(request, context)
     async with session_factory() as session, session.begin():
         await PrivateWorkRevalidator().require(
@@ -1064,6 +1081,7 @@ async def start_private_run(
     }
     disconnect = DisconnectMode.cancel if getattr(body, "on_disconnect", "cancel") == "cancel" else DisconnectMode.continue_
     create_request = PrivateRunCreate(
+        run_id=run_id or str(uuid.uuid4()),
         assistant_id=None,
         metadata=dict(config.get("metadata", {})),
         kwargs={
@@ -1196,6 +1214,47 @@ async def start_private_run(
         raise PrivateWorkUnavailable(context.request_id) from None
 
 
+async def start_scheduled_private_run(
+    *,
+    app: Any,
+    context: PrivateWorkContext,
+    thread_id: str,
+    run_id: str,
+    prompt: str,
+    metadata: Mapping[str, object],
+) -> RunRecord:
+    request = SimpleNamespace(
+        app=app,
+        state=SimpleNamespace(),
+        headers={},
+        cookies={},
+    )
+    body = SimpleNamespace(
+        assistant_id=None,
+        input={"messages": [{"role": "user", "content": prompt}]},
+        command=None,
+        metadata=dict(metadata),
+        config=None,
+        context={},
+        checkpoint_id=None,
+        checkpoint=None,
+        interrupt_before=None,
+        interrupt_after=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        on_disconnect="continue",
+        multitask_strategy="reject",
+    )
+    return await start_private_run(
+        body,
+        thread_id,
+        request,
+        context,
+        run_id=run_id,
+        server_context={"non_interactive": True},
+    )
+
+
 async def launch_scheduled_thread_run(
     *,
     thread_id: str,
@@ -1206,49 +1265,10 @@ async def launch_scheduled_thread_run(
     owner_user_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if request is None:
-        if app is None:
-            raise ValueError("launch_scheduled_thread_run requires request or app")
-        request = SimpleNamespace(
-            app=app,
-            headers=({INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id} if owner_user_id else {}),
-            state=SimpleNamespace(
-                user=get_internal_user(),
-                auth_source=AUTH_SOURCE_INTERNAL,
-            ),
-            cookies={},
-        )
-    # SimpleNamespace stands in for the Pydantic run-request body that the
-    # HTTP path parses. If start_run gains a new body.* attribute that it reads
-    # directly, add the matching field here so the scheduler path stays in sync.
-    body = SimpleNamespace(
-        assistant_id=assistant_id,
-        input={"messages": [{"role": "user", "content": prompt}]},
-        command=None,
-        metadata=metadata or {},
-        config=None,
-        # ``user_id`` mirrors what IM channels put in ``body.context`` so
-        # runtime-context consumers without a ContextVar fallback (e.g.
-        # user-scoped GuardrailMiddleware providers) see the owning user;
-        # ``inject_authenticated_user_context`` skips the internal user.
-        context=({"non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"non_interactive": True}),
-        webhook=None,
-        checkpoint_id=None,
-        checkpoint=None,
-        interrupt_before=None,
-        interrupt_after=None,
-        stream_mode=None,
-        stream_subgraphs=False,
-        stream_resumable=None,
-        on_disconnect="continue",
-        on_completion="keep",
-        multitask_strategy="reject",
-        after_seconds=None,
-        if_not_exists="reject",
-        feedback_keys=None,
-    )
-    record = await start_run(body, thread_id, request)
-    return {"run_id": record.run_id, "thread_id": record.thread_id}
+    del thread_id, assistant_id, prompt, request, app, owner_user_id, metadata
+    from app.automations.errors import AutomationCutover
+
+    raise AutomationCutover(get_current_trace_id() or "scheduler")
 
 
 async def sse_consumer(

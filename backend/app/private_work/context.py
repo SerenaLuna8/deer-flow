@@ -30,6 +30,7 @@ _CLIENT_AUTHORITY_FIELDS = frozenset(
         "mcps",
         "model",
         "model_name",
+        "non_interactive",
         "owner",
         "owner_id",
         "owner_user_id",

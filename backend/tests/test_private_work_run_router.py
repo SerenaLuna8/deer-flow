@@ -165,6 +165,25 @@ def test_private_work_router_exposes_minimum_run_lifecycle() -> None:
     assert ("/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{run_id}", "DELETE") in routes
 
 
+def test_public_private_run_strips_non_interactive() -> None:
+    request = private_work_router.PrivateRunCreateRequest(
+        input={"messages": [{"role": "user", "content": "hello"}]},
+        context={
+            "non_interactive": True,
+            "project_id": str(uuid.uuid4()),
+        },
+        config={
+            "context": {
+                "non_interactive": True,
+                "thinking_enabled": True,
+            }
+        },
+    )
+
+    assert request.context == {}
+    assert request.config == {"context": {"thinking_enabled": True}}
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_start_run_strips_nested_authority_and_serializes_no_private_coordinates(

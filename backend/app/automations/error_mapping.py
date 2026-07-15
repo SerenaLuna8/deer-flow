@@ -6,6 +6,7 @@ from app.automations.errors import (
     AUTOMATION_ERROR_STATUS,
     AutomationActiveRun,
     AutomationConcurrencyLimit,
+    AutomationConflict,
     AutomationCutover,
     AutomationError,
     AutomationForbidden,
@@ -19,6 +20,7 @@ from app.automations.errors import (
 _AUTOMATION_ERROR_TYPES = (
     AutomationNotFound,
     AutomationForbidden,
+    AutomationConflict,
     AutomationInvalid,
     AutomationVersionConflict,
     AutomationActiveRun,

@@ -2048,39 +2048,89 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
     assert context["non_interactive"] is True
 
 
-def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
+def test_start_scheduled_private_run_uses_server_only_context_and_deterministic_run_id(
+    _stub_app_config,
+):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
 
-    from app.gateway.services import launch_scheduled_thread_run
+    from app.gateway.services import start_scheduled_private_run
+
+    context = SimpleNamespace(request_id="scheduler-private")
+    app = SimpleNamespace(state=SimpleNamespace())
 
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request):
+        async def fake_start_private_run(
+            body,
+            thread_id,
+            request,
+            passed_context,
+            **kwargs,
+        ):
             captured["thread_id"] = thread_id
+            captured["app"] = request.app
             captured["context"] = body.context
             captured["metadata"] = body.metadata
+            captured["passed_context"] = passed_context
+            captured.update(kwargs)
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)
 
-        with patch("app.gateway.services.start_run", side_effect=fake_start_run):
-            result = await launch_scheduled_thread_run(
+        with (
+            patch(
+                "app.gateway.services.start_private_run",
+                side_effect=fake_start_private_run,
+            ),
+            patch("app.gateway.services.start_run") as legacy_start,
+        ):
+            result = await start_scheduled_private_run(
+                app=app,
+                context=context,
                 thread_id="thread-scheduled",
-                assistant_id="lead_agent",
+                run_id="run-deterministic",
                 prompt="Run in background",
-                app=SimpleNamespace(state=SimpleNamespace()),
-                owner_user_id="user-1",
                 metadata={"scheduled_task_id": "task-1"},
             )
-        return captured, result
+        return captured, result, legacy_start
 
-    captured, result = asyncio.run(_scenario())
+    captured, result, legacy_start = asyncio.run(_scenario())
 
     assert captured["thread_id"] == "thread-scheduled"
-    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    assert captured["app"] is app
+    assert captured["context"] == {}
     assert captured["metadata"] == {"scheduled_task_id": "task-1"}
-    assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
+    assert captured["passed_context"] is context
+    assert captured["run_id"] == "run-deterministic"
+    assert captured["server_context"] == {"non_interactive": True}
+    assert result.run_id == "run-1"
+    legacy_start.assert_not_called()
+
+
+def test_legacy_scheduled_launcher_fails_closed_without_shared_start_run(
+    _stub_app_config,
+):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.automations.errors import AutomationCutover
+    from app.gateway.services import launch_scheduled_thread_run
+
+    async def _scenario():
+        with patch("app.gateway.services.start_run") as legacy_start:
+            with pytest.raises(AutomationCutover):
+                await launch_scheduled_thread_run(
+                    thread_id="legacy-thread",
+                    assistant_id="lead_agent",
+                    prompt="must not launch",
+                    app=SimpleNamespace(state=SimpleNamespace()),
+                )
+        return legacy_start
+
+    legacy_start = asyncio.run(_scenario())
+    legacy_start.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
