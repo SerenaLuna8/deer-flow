@@ -430,8 +430,14 @@ function ToolCall({
   tokenDebugStep?: TokenDebugStep;
 }) {
   const { t } = useI18n();
-  const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
-    useArtifacts();
+  const {
+    enabled: artifactsEnabled,
+    setOpen,
+    autoOpen,
+    autoSelect,
+    selectedArtifact,
+    select,
+  } = useArtifacts();
   const tokenLabel = tokenDebugStep
     ? formatDebugToken(tokenDebugStep, t)
     : null;
@@ -590,7 +596,15 @@ function ToolCall({
       description = t.toolCalls.writeFile;
     }
     const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
+    if (
+      artifactsEnabled &&
+      isLoading &&
+      isLast &&
+      autoOpen &&
+      autoSelect &&
+      path &&
+      !result
+    ) {
       setTimeout(() => {
         const url = new URL(
           `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
@@ -606,17 +620,21 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
+        className={cn(artifactsEnabled && "cursor-pointer")}
         label={resolveLabel(description)}
         icon={NotebookPenIcon}
-        onClick={() => {
-          select(
-            new URL(
-              `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-            ).toString(),
-          );
-          setOpen(true);
-        }}
+        onClick={
+          artifactsEnabled
+            ? () => {
+                select(
+                  new URL(
+                    `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
+                  ).toString(),
+                );
+                setOpen(true);
+              }
+            : undefined
+        }
       >
         {path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">

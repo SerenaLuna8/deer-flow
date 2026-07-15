@@ -49,6 +49,7 @@ describe("project chat route", () => {
     expect(scope.regenerateVisible).toBe(false);
     expect(scope.sidecarVisible).toBe(false);
     expect(scope.artifactsVisible).toBe(false);
+    expect(scope.followupSuggestionsEnabled).toBe(false);
   });
 
   test("viewer sees read-only guidance and never gets a create control", () => {
@@ -80,22 +81,30 @@ describe("project chat route", () => {
   });
 
   test("same-project other-owner and cross-project metadata misses share not-found", () => {
-    for (const result of [
+    expect(
       projectThreadAvailability({
         data: null,
         error: null,
         isLoading: false,
         isFetching: false,
       }),
+    ).toBe("not-found");
+    expect(
       projectThreadAvailability({
         data: undefined,
-        error: new Error("THREAD_NOT_FOUND"),
+        error: new Error("NETWORK_FAILURE"),
         isLoading: false,
         isFetching: false,
       }),
-    ]) {
-      expect(result).toBe("not-found");
-    }
+    ).toBe("error");
+    expect(
+      projectThreadAvailability({
+        data: null,
+        error: new Error("REFETCH_FAILURE"),
+        isLoading: false,
+        isFetching: false,
+      }),
+    ).toBe("error");
     const html = renderToStaticMarkup(<ProjectChatNotFound />);
     expect(html).toContain("找不到这个对话");
     expect(html).not.toMatch(/owner|project|跨项目|其他用户/iu);
@@ -139,6 +148,7 @@ describe("project chat route", () => {
       "utf8",
     );
     expect(projectProviders).toContain("StandaloneArtifactsProvider");
+    expect(projectProviders).toContain("enabled={false}");
     expect(projectProviders).not.toMatch(/<ArtifactsProvider>/u);
     expect(shared).toContain("useThreadStream");
     expect(shared).toContain("handleStop");
@@ -150,8 +160,23 @@ describe("project chat route", () => {
     expect(shared).toContain("scope.sidecarVisible");
     expect(shared).toContain("scope.artifactsVisible");
     expect(shared).toContain("scope.sidebarTriggerVisible");
+    expect(shared).toContain("scope.followupSuggestionsEnabled");
     expect(shared).toContain("enabled={scope.sidecarVisible !== false}");
     expect(projectPage).toContain("sidebarTriggerVisible: false");
     expect(projectPage).toContain("sidecarVisible: false");
+  });
+
+  test("project list uses the scoped delete hook without nesting actions in links", () => {
+    const source = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/projects/private-work/project-chats-page.tsx",
+      ),
+      "utf8",
+    );
+    expect(source).toContain("usePrivateWorkAccess");
+    expect(source).toContain("useDeleteThread(privateWork)");
+    expect(source).toContain("aria-label={`删除 ${titleOfThread(thread)}`}");
+    expect(source).toMatch(/<\/Link>\s*\{canDelete && \(/u);
   });
 });

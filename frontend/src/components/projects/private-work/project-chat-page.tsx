@@ -33,6 +33,7 @@ export function projectChatRouteScope(project: Project): ProjectChatRouteScope {
     sidecarVisible: false,
     artifactsVisible: false,
     sidebarTriggerVisible: false,
+    followupSuggestionsEnabled: false,
   };
 }
 
@@ -45,9 +46,11 @@ export type ProjectThreadMetadataState = {
 
 export function projectThreadAvailability(
   state: ProjectThreadMetadataState,
-): "loading" | "available" | "not-found" {
+): "loading" | "available" | "not-found" | "error" {
   if (state.isLoading || state.isFetching) return "loading";
-  if (state.error || state.data == null) return "not-found";
+  if (state.error) return "error";
+  if (state.data === null) return "not-found";
+  if (state.data === undefined) return "loading";
   return "available";
 }
 

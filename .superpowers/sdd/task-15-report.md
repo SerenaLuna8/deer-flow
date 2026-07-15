@@ -39,3 +39,30 @@ Status: **DONE**
 
 - Task 16 owns project Memory and connections.
 - Task 17 may enable `PROJECT_PRIVATE_WORKSPACE` after cutover; readiness and capability checks must remain in place.
+
+## Repair Wave: Project Chat Scope Boundaries
+
+Baseline commit: `f938f66f` (`feat: add project private chat experience`).
+Repair commit: the single commit containing this report; its final SHA is recorded in the Task 15 handoff because a commit cannot embed its own SHA.
+
+### RED
+
+- Focused project-chat unit: **1 file / 6 tests, 4 failed / 2 passed**. Missing contracts were the suggestion gate, metadata error state, disabled artifact provider, and scoped viewer delete.
+- Task 15 Playwright: **6 tests, 5 failed / 1 passed**. It observed a legacy suggestion POST, an artifact surface, no viewer delete, and both metadata-5xx state failures.
+- Project thread adapter regression: **1 file / 7 tests, 1 failed / 6 passed** because project HTTP errors discarded status.
+- Cached-null metadata regression: **1 file / 6 tests, 1 failed / 5 passed** because a refetch error could lose precedence to stale `data=null`.
+
+### GREEN
+
+- Project routes independently disable follow-up suggestion POSTs while workspace defaults remain enabled.
+- Project artifacts are provider-disabled: state setters no-op, tool calls cannot auto-open/select, present-files stays hidden, ChatBox renders no artifact panel, and E2E observes zero legacy artifact requests.
+- `private_work.read_own` viewers can delete their owner-scoped threads using the project client without gaining create, run, upload, or branch actions; the row action is not nested inside its link.
+- Project HTTP errors retain status. Only normalized missing metadata plus settled empty history/messages shows not-found; metadata errors keep usable history or render a retryable error, with errors taking precedence over cached null data.
+
+### Final Verification
+
+- Task 15 focused unit gate: **19 files / 154 tests passed**.
+- `pnpm exec playwright test tests/e2e/project-private-chat.spec.ts`: **6 passed**.
+- `pnpm test -- --run`: **108 files / 806 tests passed**.
+- `pnpm check`: ESLint and TypeScript passed.
+- `git diff --check`: passed.

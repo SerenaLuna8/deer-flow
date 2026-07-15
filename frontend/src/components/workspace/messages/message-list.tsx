@@ -68,6 +68,7 @@ import {
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
+import { useArtifacts } from "../artifacts";
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { useMaybeSidecar } from "../sidecar/context";
@@ -258,6 +259,7 @@ export function MessageList({
   resizeScroll?: ConversationProps["resize"];
 }) {
   const { t } = useI18n();
+  const { enabled: artifactsEnabled } = useArtifacts();
   const sidecar = useMaybeSidecar();
   const [selectionToolbar, setSelectionToolbar] =
     useState<SelectionToolbarState | null>(null);
@@ -863,7 +865,9 @@ export function MessageList({
                       className="mb-4"
                     />
                   )}
-                  <ArtifactFileList files={files} threadId={threadId} />
+                  {artifactsEnabled && (
+                    <ArtifactFileList files={files} threadId={threadId} />
+                  )}
                   {renderTokenUsage({
                     messages: group.messages,
                     turnUsageMessages,

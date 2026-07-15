@@ -46,6 +46,17 @@ const privateThreadStateSchema = z
 
 type PrivateThread = z.infer<typeof privateThreadSchema>;
 
+class ProjectResponseError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly response: Response,
+  ) {
+    super(message);
+    this.name = "ProjectResponseError";
+  }
+}
+
 export type CreateProjectThreadInput = {
   threadId: string;
   agentAssetId: string;
@@ -72,9 +83,7 @@ function versionCache(scope: ProjectClientScope): Map<string, number> {
 
 function privateThreadTimestamp(metadata: Record<string, unknown>): string {
   const timestamp = metadata.updated_at ?? metadata.created_at;
-  return typeof timestamp === "string"
-    ? timestamp
-    : "1970-01-01T00:00:00.000Z";
+  return typeof timestamp === "string" ? timestamp : "1970-01-01T00:00:00.000Z";
 }
 
 function mapPrivateThread(
@@ -142,8 +151,10 @@ async function readProjectResponse<T>(
 ): Promise<T> {
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: fallback }));
-    throw new Error(
+    throw new ProjectResponseError(
       typeof error.detail === "string" ? error.detail : fallback,
+      response.status,
+      response,
     );
   }
   return schema.parse(await response.json());
@@ -238,7 +249,11 @@ function installProjectThreadAdapter(
   }) as typeof client.threads.search;
 
   client.threads.get = ((threadId, options) =>
-    getPrivateThread(scope, threadId, options?.signal)) as typeof client.threads.get;
+    getPrivateThread(
+      scope,
+      threadId,
+      options?.signal,
+    )) as typeof client.threads.get;
 
   client.threads.getHistory = (async (threadId, options) => {
     const parsedThreadId = z.string().uuid().parse(threadId);
@@ -280,12 +295,7 @@ function installProjectThreadAdapter(
     const displayName = payload?.metadata?.display_name;
     const title = payload?.metadata?.title;
     if (typeof displayName === "string" || displayName === null) {
-      return renamePrivateThread(
-        scope,
-        threadId,
-        displayName,
-        payload?.signal,
-      );
+      return renamePrivateThread(scope, threadId, displayName, payload?.signal);
     }
     if (typeof title === "string") {
       return renamePrivateThread(scope, threadId, title, payload?.signal);

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
@@ -76,6 +77,7 @@ export type ScopedChatRouteScope = ChatRouteScope & {
   sidecarVisible?: boolean;
   artifactsVisible?: boolean;
   sidebarTriggerVisible?: boolean;
+  followupSuggestionsEnabled?: boolean;
 };
 
 export function workspaceChatRouteScope(
@@ -97,6 +99,7 @@ export function workspaceChatRouteScope(
     sidecarVisible: true,
     artifactsVisible: true,
     sidebarTriggerVisible: true,
+    followupSuggestionsEnabled: true,
   };
 }
 
@@ -214,16 +217,25 @@ export function ScopedChatPage({
   });
 
   const hasThreadMessages = thread.messages.length > 0;
+  const metadataSettled =
+    !threadMetadata.isLoading && !threadMetadata.isFetching;
+  const historySettled = !isHistoryLoading && !hasMoreHistory;
+  const hasUsableThreadState = hasThreadMessages || hasMoreHistory;
   const threadMissing =
     !isNewThread &&
     !isMock &&
-    (Boolean(threadMetadata.error) ||
-      (threadMetadata.data === null &&
-        !threadMetadata.isLoading &&
-        !threadMetadata.isFetching &&
-        !isHistoryLoading &&
-        !hasMoreHistory &&
-        !hasThreadMessages));
+    threadMetadata.data === null &&
+    !threadMetadata.error &&
+    metadataSettled &&
+    historySettled &&
+    !hasUsableThreadState;
+  const threadMetadataFailed =
+    !isNewThread &&
+    !isMock &&
+    Boolean(threadMetadata.error) &&
+    metadataSettled &&
+    historySettled &&
+    !hasUsableThreadState;
 
   useEffect(() => {
     if (threadMissing && missingThreadFallback == null) {
@@ -325,6 +337,24 @@ export function ScopedChatPage({
 
   if (threadMissing && missingThreadFallback != null) {
     return missingThreadFallback;
+  }
+
+  if (threadMetadataFailed) {
+    return (
+      <main className="flex min-h-[50vh] flex-col items-center justify-center px-6 text-center">
+        <h1 className="text-2xl font-semibold">无法加载这个对话</h1>
+        <p className="text-muted-foreground mt-3 text-sm">
+          服务暂时不可用，请稍后重试。
+        </p>
+        <Button
+          type="button"
+          className="mt-6"
+          onClick={() => void threadMetadata.refetch()}
+        >
+          重试
+        </Button>
+      </main>
+    );
   }
 
   return (
@@ -497,6 +527,9 @@ export function ScopedChatPage({
                       goalCommandsEnabled={scope.goalVisible !== false}
                       compactCommandEnabled={scope.compactVisible !== false}
                       uploadsEnabled={scope.canUpload}
+                      followupSuggestionsEnabled={
+                        scope.followupSuggestionsEnabled !== false
+                      }
                       onGoalChange={
                         scope.goalVisible !== false ? setLocalGoal : undefined
                       }

@@ -264,6 +264,7 @@ export function InputBox({
   goalCommandsEnabled = true,
   compactCommandEnabled = true,
   uploadsEnabled = true,
+  followupSuggestionsEnabled = true,
   onSubmit,
   onStop,
   ...props
@@ -301,6 +302,7 @@ export function InputBox({
   goalCommandsEnabled?: boolean;
   compactCommandEnabled?: boolean;
   uploadsEnabled?: boolean;
+  followupSuggestionsEnabled?: boolean;
   onSubmit?: (
     message: PromptInputMessage,
     options?: InputBoxSubmitOptions,
@@ -1434,6 +1436,12 @@ export function InputBox({
       return;
     }
 
+    if (!followupSuggestionsEnabled) {
+      setFollowups([]);
+      setFollowupsLoading(false);
+      return;
+    }
+
     if (disabled || isMock) {
       return;
     }
@@ -1509,6 +1517,7 @@ export function InputBox({
   }, [
     context.model_name,
     disabled,
+    followupSuggestionsEnabled,
     isMock,
     status,
     suggestionsConfigLoaded,

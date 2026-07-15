@@ -1,10 +1,12 @@
 "use client";
 
+import { Trash2Icon } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
   projectPrivateWorkEntryEnabled,
   useProjectPrivateWorkReadiness,
@@ -12,7 +14,7 @@ import {
 import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
-import { useInfiniteThreads } from "@/core/threads/hooks";
+import { useDeleteThread, useInfiniteThreads } from "@/core/threads/hooks";
 import { titleOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
@@ -21,6 +23,8 @@ import { ProjectAgentSelectorDialog } from "./agent-selector-dialog";
 export function ProjectChatsPage({ project }: { project: Project }) {
   const [search, setSearch] = useState("");
   const [selectorOpen, setSelectorOpen] = useState(false);
+  const privateWork = usePrivateWorkAccess();
+  const deleteThread = useDeleteThread(privateWork);
   const threadsQuery = useInfiniteThreads();
   const threads = useMemo(
     () => threadsQuery.data?.pages.flat() ?? [],
@@ -46,6 +50,7 @@ export function ProjectChatsPage({ project }: { project: Project }) {
     canCreate,
     readiness.data?.status,
   );
+  const canDelete = project.capabilities.includes("private_work.read_own");
 
   if (staticWebsiteOnly) return null;
   return (
@@ -86,18 +91,36 @@ export function ProjectChatsPage({ project }: { project: Project }) {
           </p>
         ) : (
           filtered.map((thread) => (
-            <Link
+            <div
               key={thread.thread_id}
-              href={`/projects/${encodeURIComponent(project.slug)}/chats/${encodeURIComponent(thread.thread_id)}`}
-              className="flex items-center justify-between gap-4 py-4 hover:underline"
+              className="flex items-center gap-2 py-2"
             >
-              <span className="truncate">{titleOfThread(thread)}</span>
-              {thread.updated_at && (
-                <span className="text-muted-foreground shrink-0 text-xs">
-                  {formatTimeAgo(thread.updated_at)}
-                </span>
+              <Link
+                href={`/projects/${encodeURIComponent(project.slug)}/chats/${encodeURIComponent(thread.thread_id)}`}
+                className="flex min-w-0 flex-1 items-center justify-between gap-4 py-2 hover:underline"
+              >
+                <span className="truncate">{titleOfThread(thread)}</span>
+                {thread.updated_at && (
+                  <span className="text-muted-foreground shrink-0 text-xs">
+                    {formatTimeAgo(thread.updated_at)}
+                  </span>
+                )}
+              </Link>
+              {canDelete && (
+                <Button
+                  type="button"
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label={`删除 ${titleOfThread(thread)}`}
+                  disabled={deleteThread.isPending}
+                  onClick={() =>
+                    deleteThread.mutate({ threadId: thread.thread_id })
+                  }
+                >
+                  <Trash2Icon aria-hidden className="size-4" />
+                </Button>
               )}
-            </Link>
+            </div>
           ))
         )}
       </section>

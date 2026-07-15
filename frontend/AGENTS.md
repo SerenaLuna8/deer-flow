@@ -126,8 +126,12 @@ cache、响应或错误；用户在 password control 中输入的值提交后必
 M3 的前端资产交付到此为止：`/admin/assets`、四类项目资产页和旧入口只读 catalog 已接入。
 M4 Task 14 只补齐 account/project-scoped LangGraph client、cache ownership 与 Thread/upload 底层
 注入。M4 Task 15 的项目 chats 列表和详情复用 `ScopedChatPage`，但通过项目 route scope 关闭
-goal、compact、branch、regenerate、sidecar、artifact 和 scheduled-task 入口；项目 route 只使用
-`ProjectPrivateWorkProvider` client，不能回退到 legacy `/api/threads/*`。新建入口必须同时满足
+goal、compact、branch、regenerate、sidecar、artifact、follow-up suggestions 和 scheduled-task；
+artifact provider 在项目 route 中必须整体禁用，tool call 不得自动打开或请求 legacy artifact API。
+项目 route 只使用 `ProjectPrivateWorkProvider` client，不能回退到 legacy `/api/threads/*`；
+`private_work.read_own` 允许删除自己的对话，但不隐含 create/run/upload/branch 权限。Thread metadata
+只有规范化 404/403 且 history/messages 为空时才显示公共 not-found，5xx 必须保留可用历史或显示可重试错误。
+新建入口必须同时满足
 编译期 feature flag、服务端 readiness=ready、`private_work.create` 和 `shared_assets.execute`；
 Memory、connections 与 automation 页面仍未接入，不能把当前界面描述为完整多用户 SaaS。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示

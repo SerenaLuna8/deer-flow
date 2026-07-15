@@ -88,6 +88,7 @@ export type MockAPIOptions = {
     max_file_size: number;
     max_total_size: number;
   };
+  suggestionsEnabled?: boolean;
   runStreamHandler?: (route: Route) => unknown;
 };
 
@@ -339,7 +340,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ enabled: false }),
+        body: JSON.stringify({ enabled: options?.suggestionsEnabled ?? false }),
       });
     }
     return route.fallback();

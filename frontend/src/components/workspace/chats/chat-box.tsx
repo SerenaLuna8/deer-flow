@@ -37,6 +37,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   const threadIdRef = useRef(threadId);
 
   const {
+    enabled: artifactsEnabled,
     artifacts,
     open: artifactsOpen,
     setOpen: setArtifactsOpen,
@@ -93,6 +94,9 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   ]);
 
   const artifactPanelOpen = useMemo(() => {
+    if (!artifactsEnabled) {
+      return false;
+    }
     if (sidecarOpen) {
       return false;
     }
@@ -100,7 +104,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       return artifactsOpen && artifacts?.length > 0;
     }
     return artifactsOpen;
-  }, [artifactsOpen, artifacts, sidecarOpen]);
+  }, [artifactsEnabled, artifactsOpen, artifacts, sidecarOpen]);
 
   const activeRightPanel: RightPanelKind | null = sidecarOpen
     ? "sidecar"
@@ -140,7 +144,11 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     if (renderedRightPanel === "sidecar") {
       return <SidecarPanel />;
     }
-    if (renderedRightPanel === "artifacts" && selectedArtifact) {
+    if (
+      artifactsEnabled &&
+      renderedRightPanel === "artifacts" &&
+      selectedArtifact
+    ) {
       return (
         <ArtifactFileDetail
           className="size-full"
@@ -149,7 +157,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
         />
       );
     }
-    if (renderedRightPanel === "artifacts") {
+    if (artifactsEnabled && renderedRightPanel === "artifacts") {
       return (
         <div className="relative flex size-full justify-center">
           <div className="absolute top-1 right-1 z-30">
@@ -189,11 +197,16 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     return null;
   }, [
     renderedRightPanel,
+    artifactsEnabled,
     selectedArtifact,
     threadId,
     artifacts,
     setArtifactsOpen,
   ]);
+
+  if (!artifactsEnabled && sidecar == null) {
+    return <div className="relative size-full min-w-0">{children}</div>;
+  }
 
   if (isMobile) {
     return (

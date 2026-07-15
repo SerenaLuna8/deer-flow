@@ -10,6 +10,7 @@ import { useSidebar } from "@/components/ui/sidebar";
 import { env } from "@/env";
 
 export interface ArtifactsContextType {
+  enabled: boolean;
   artifacts: string[];
   setArtifacts: (artifacts: string[]) => void;
 
@@ -29,10 +30,12 @@ const ArtifactsContext = createContext<ArtifactsContextType | undefined>(
 
 interface ArtifactsProviderProps {
   children: ReactNode;
+  enabled?: boolean;
 }
 
 function ArtifactsStateProvider({
   children,
+  enabled = true,
   setSidebarOpen,
 }: ArtifactsProviderProps & {
   setSidebarOpen: (open: boolean) => void;
@@ -45,8 +48,16 @@ function ArtifactsStateProvider({
   );
   const [autoOpen, setAutoOpen] = useState(true);
 
+  const updateArtifacts = useCallback(
+    (nextArtifacts: string[]) => {
+      if (enabled) setArtifacts(nextArtifacts);
+    },
+    [enabled],
+  );
+
   const select = useCallback(
     (artifact: string, autoSelect = false) => {
+      if (!enabled) return;
       setSelectedArtifact(artifact);
       if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true") {
         setSidebarOpen(false);
@@ -55,23 +66,26 @@ function ArtifactsStateProvider({
         setAutoSelect(false);
       }
     },
-    [setSidebarOpen, setSelectedArtifact, setAutoSelect],
+    [enabled, setSidebarOpen, setSelectedArtifact, setAutoSelect],
   );
 
   const deselect = useCallback(() => {
+    if (!enabled) return;
     setSelectedArtifact(null);
     setAutoSelect(true);
     setOpen(false);
-  }, []);
+  }, [enabled]);
 
   const value: ArtifactsContextType = {
-    artifacts,
-    setArtifacts,
+    enabled,
+    artifacts: enabled ? artifacts : [],
+    setArtifacts: updateArtifacts,
 
-    open,
-    autoOpen,
-    autoSelect,
+    open: enabled && open,
+    autoOpen: enabled && autoOpen,
+    autoSelect: enabled && autoSelect,
     setOpen: (isOpen: boolean) => {
+      if (!enabled) return;
       if (!isOpen && autoOpen) {
         setAutoOpen(false);
         setAutoSelect(false);
@@ -79,7 +93,7 @@ function ArtifactsStateProvider({
       setOpen(isOpen);
     },
 
-    selectedArtifact,
+    selectedArtifact: enabled ? selectedArtifact : null,
     select,
     deselect,
   };
@@ -91,10 +105,13 @@ function ArtifactsStateProvider({
   );
 }
 
-export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
+export function ArtifactsProvider({
+  children,
+  enabled = true,
+}: ArtifactsProviderProps) {
   const { setOpen: setSidebarOpen } = useSidebar();
   return (
-    <ArtifactsStateProvider setSidebarOpen={setSidebarOpen}>
+    <ArtifactsStateProvider enabled={enabled} setSidebarOpen={setSidebarOpen}>
       {children}
     </ArtifactsStateProvider>
   );
@@ -102,9 +119,10 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
 
 export function StandaloneArtifactsProvider({
   children,
+  enabled = true,
 }: ArtifactsProviderProps) {
   return (
-    <ArtifactsStateProvider setSidebarOpen={() => undefined}>
+    <ArtifactsStateProvider enabled={enabled} setSidebarOpen={() => undefined}>
       {children}
     </ArtifactsStateProvider>
   );

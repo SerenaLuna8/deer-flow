@@ -46,9 +46,8 @@ afterEach(() => {
 
 describe("project thread adapter", () => {
   test("maps strict search requests and wrapped responses to SDK threads", async () => {
-    const fetcher = rs.fn(
-      async (_input: string, _init?: RequestInit) =>
-        jsonResponse({ items: [privateThread(3)] }),
+    const fetcher = rs.fn(async (_input: string, _init?: RequestInit) =>
+      jsonResponse({ items: [privateThread(3)] }),
     );
     rs.stubGlobal("fetch", fetcher);
     const client = getProjectAPIClient(scope);
@@ -76,10 +75,28 @@ describe("project thread adapter", () => {
     expect(jsonRequestBody(init)).toEqual({ limit: 20, offset: 5 });
   });
 
+  test("preserves project thread HTTP status for missing and retryable metadata failures", async () => {
+    const fetcher = rs
+      .fn(async (_input: string, _init?: RequestInit) =>
+        jsonResponse({ detail: "temporarily unavailable" }, 503),
+      )
+      .mockResolvedValueOnce(jsonResponse({ detail: "not found" }, 404));
+    rs.stubGlobal("fetch", fetcher);
+    const client = getProjectAPIClient(scope);
+
+    await expect(client.threads.get(threadId)).rejects.toMatchObject({
+      message: "not found",
+      status: 404,
+    });
+    await expect(client.threads.get(threadId)).rejects.toMatchObject({
+      message: "temporarily unavailable",
+      status: 503,
+    });
+  });
+
   test("creates only through the explicit agent-bound helper", async () => {
-    const fetcher = rs.fn(
-      async (_input: string, _init?: RequestInit) =>
-        jsonResponse(privateThread(1), 201),
+    const fetcher = rs.fn(async (_input: string, _init?: RequestInit) =>
+      jsonResponse(privateThread(1), 201),
     );
     rs.stubGlobal("fetch", fetcher);
 
@@ -148,21 +165,20 @@ describe("project thread adapter", () => {
   });
 
   test("maps project state to the single history entry useStream expects", async () => {
-    const fetcher = rs.fn(
-      async (_input: string, _init?: RequestInit) =>
-        jsonResponse({
-          values: { messages: [{ id: "message-1", content: "hello" }] },
-          next: [],
-          metadata: { source: "checkpoint" },
-          checkpoint: {
-            id: "66666666-6666-4666-8666-666666666666",
-            ts: "2026-07-15T00:00:00Z",
-          },
-          checkpoint_id: "66666666-6666-4666-8666-666666666666",
-          parent_checkpoint_id: null,
-          created_at: "2026-07-15T00:00:00Z",
-          tasks: [],
-        }),
+    const fetcher = rs.fn(async (_input: string, _init?: RequestInit) =>
+      jsonResponse({
+        values: { messages: [{ id: "message-1", content: "hello" }] },
+        next: [],
+        metadata: { source: "checkpoint" },
+        checkpoint: {
+          id: "66666666-6666-4666-8666-666666666666",
+          ts: "2026-07-15T00:00:00Z",
+        },
+        checkpoint_id: "66666666-6666-4666-8666-666666666666",
+        parent_checkpoint_id: null,
+        created_at: "2026-07-15T00:00:00Z",
+        tasks: [],
+      }),
     );
     rs.stubGlobal("fetch", fetcher);
 
@@ -171,9 +187,7 @@ describe("project thread adapter", () => {
       { limit: 1 },
     );
 
-    expect(fetcher.mock.calls[0]![0]).toContain(
-      `/threads/${threadId}/state`,
-    );
+    expect(fetcher.mock.calls[0]![0]).toContain(`/threads/${threadId}/state`);
     expect(history).toMatchObject([
       {
         values: { messages: [{ id: "message-1", content: "hello" }] },
@@ -186,9 +200,8 @@ describe("project thread adapter", () => {
   });
 
   test("maps a missing project state to empty history", async () => {
-    const fetcher = rs.fn(
-      async (_input: string, _init?: RequestInit) =>
-        jsonResponse({ detail: "Not found" }, 404),
+    const fetcher = rs.fn(async (_input: string, _init?: RequestInit) =>
+      jsonResponse({ detail: "Not found" }, 404),
     );
     rs.stubGlobal("fetch", fetcher);
 
