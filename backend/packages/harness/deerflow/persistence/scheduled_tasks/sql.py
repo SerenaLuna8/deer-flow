@@ -292,6 +292,8 @@ class ScheduledTaskRepository:
             )
             .values(
                 deleted_at=deleted_at,
+                status="paused",
+                next_run_at=None,
                 version=ScheduledTaskRow.version + 1,
                 updated_at=deleted_at,
             )

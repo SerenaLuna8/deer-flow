@@ -8,6 +8,7 @@ AUTOMATION_ERROR_STATUS = {
     "AUTOMATION_INVALID": 422,
     "AUTOMATION_VERSION_CONFLICT": 409,
     "AUTOMATION_ACTIVE_RUN": 409,
+    "AUTOMATION_ONCE_EXPIRED": 409,
     "AUTOMATION_CUTOVER": 409,
     "AUTOMATION_CONCURRENCY_LIMIT": 429,
     "AUTOMATION_UNAVAILABLE": 503,
@@ -48,6 +49,11 @@ class AutomationActiveRun(AutomationError):
     public_message = "Automation has an active run."
 
 
+class AutomationOnceExpired(AutomationError):
+    code = "AUTOMATION_ONCE_EXPIRED"
+    public_message = "Automation one-time schedule has expired."
+
+
 class AutomationCutover(AutomationError):
     code = "AUTOMATION_CUTOVER"
     public_message = "Automation cutover is not complete."
@@ -72,6 +78,7 @@ __all__ = [
     "AutomationForbidden",
     "AutomationInvalid",
     "AutomationNotFound",
+    "AutomationOnceExpired",
     "AutomationUnavailable",
     "AutomationVersionConflict",
 ]

@@ -14,6 +14,7 @@ from app.automations.errors import (
     AutomationError,
     AutomationForbidden,
     AutomationNotFound,
+    AutomationOnceExpired,
     AutomationUnavailable,
     AutomationVersionConflict,
 )
@@ -32,6 +33,7 @@ from app.automations.models import (
         (AutomationForbidden("req"), 403, "AUTOMATION_FORBIDDEN"),
         (AutomationVersionConflict("req"), 409, "AUTOMATION_VERSION_CONFLICT"),
         (AutomationActiveRun("req"), 409, "AUTOMATION_ACTIVE_RUN"),
+        (AutomationOnceExpired("req"), 409, "AUTOMATION_ONCE_EXPIRED"),
         (AutomationCutover("req"), 409, "AUTOMATION_CUTOVER"),
         (AutomationConcurrencyLimit("req"), 429, "AUTOMATION_CONCURRENCY_LIMIT"),
         (AutomationUnavailable("req"), 503, "AUTOMATION_UNAVAILABLE"),

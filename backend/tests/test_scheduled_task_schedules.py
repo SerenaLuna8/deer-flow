@@ -4,6 +4,7 @@ import pytest
 
 from deerflow.scheduler.schedules import (
     next_run_at,
+    next_scheduled_occurrence,
     normalize_cron_expression,
     validate_timezone,
 )
@@ -47,3 +48,70 @@ def test_next_run_at_for_cron_uses_timezone():
         now=now,
     )
     assert result == datetime(2026, 7, 1, 1, 0, tzinfo=UTC)
+
+
+def test_cron_misfire_coalesces_to_one_future_tick():
+    now = datetime(2026, 7, 16, 10, 30, tzinfo=UTC)
+    result = next_scheduled_occurrence(
+        "cron",
+        {"cron": "0 * * * *"},
+        "UTC",
+        now=now,
+        coalesce=True,
+    )
+    assert result == datetime(2026, 7, 16, 11, 0, tzinfo=UTC)
+
+
+def test_cron_tick_is_strictly_later_than_exact_boundary():
+    now = datetime(2026, 7, 16, 11, 0, tzinfo=UTC)
+    result = next_scheduled_occurrence(
+        "cron",
+        {"cron": "0 * * * *"},
+        "UTC",
+        now=now,
+    )
+    assert result == datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+    assert result > now
+
+
+def test_next_scheduled_occurrence_accepts_contract_timezone_keyword():
+    result = next_scheduled_occurrence(
+        "cron",
+        {"cron": "0 * * * *"},
+        timezone="UTC",
+        now=datetime(2026, 7, 16, 11, 0, tzinfo=UTC),
+    )
+    assert result == datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("schedule_type", "schedule_spec", "timezone_name"),
+    [
+        ("cron", {"cron": "invalid"}, "UTC"),
+        ("cron", {"cron": "0 * * * *"}, "Mars/Base"),
+        ("once", {"run_at": "not-a-date"}, "UTC"),
+        ("interval", {}, "UTC"),
+    ],
+)
+def test_next_scheduled_occurrence_rejects_invalid_input(
+    schedule_type,
+    schedule_spec,
+    timezone_name,
+):
+    with pytest.raises(ValueError):
+        next_scheduled_occurrence(
+            schedule_type,
+            schedule_spec,
+            timezone_name,
+            now=datetime(2026, 7, 16, 10, 30, tzinfo=UTC),
+        )
+
+
+def test_next_scheduled_occurrence_rejects_naive_now():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        next_scheduled_occurrence(
+            "cron",
+            {"cron": "0 * * * *"},
+            "UTC",
+            now=datetime(2026, 7, 16, 10, 30),
+        )

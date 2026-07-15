@@ -12,6 +12,7 @@ from app.automations.errors import (
     AutomationForbidden,
     AutomationInvalid,
     AutomationNotFound,
+    AutomationOnceExpired,
     AutomationUnavailable,
     AutomationVersionConflict,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "AutomationForbidden",
     "AutomationInvalid",
     "AutomationNotFound",
+    "AutomationOnceExpired",
     "AutomationReadiness",
     "AutomationReadinessService",
     "AutomationRunView",

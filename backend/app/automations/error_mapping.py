@@ -11,6 +11,7 @@ from app.automations.errors import (
     AutomationForbidden,
     AutomationInvalid,
     AutomationNotFound,
+    AutomationOnceExpired,
     AutomationUnavailable,
     AutomationVersionConflict,
 )
@@ -21,6 +22,7 @@ _AUTOMATION_ERROR_TYPES = (
     AutomationInvalid,
     AutomationVersionConflict,
     AutomationActiveRun,
+    AutomationOnceExpired,
     AutomationCutover,
     AutomationConcurrencyLimit,
     AutomationUnavailable,

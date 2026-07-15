@@ -210,6 +210,31 @@ class ScheduledTaskRunRepository:
         ).scalar_one_or_none()
         return row is not None
 
+    async def lock_active_by_task(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+    ) -> tuple[ScheduledTaskRunRecord, ...]:
+        """Lock active occurrences before a definition mutation.
+
+        Locking queued rows as well as launching/running rows serializes the
+        definition mutation with a concurrent occurrence claim.
+        """
+
+        rows = (
+            await self.session.execute(
+                sa.select(ScheduledTaskRunRow)
+                .where(
+                    ScheduledTaskRunRow.task_id == task_id,
+                    ScheduledTaskRunRow.status.in_(ACTIVE_OCCURRENCE_STATUSES),
+                    *self.predicates(scope),
+                )
+                .order_by(ScheduledTaskRunRow.id)
+                .with_for_update(of=ScheduledTaskRunRow)
+            )
+        ).scalars()
+        return tuple(self.record(row) for row in rows)
+
     async def finish(
         self,
         scope: PrivateResourceScope,
