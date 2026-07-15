@@ -1,6 +1,9 @@
 import { expect, rs, test } from "@rstest/core";
 
-import { findSidecarThreadIdsForParent } from "@/core/threads/hooks";
+import {
+  deleteThreadEverywhere,
+  findSidecarThreadIdsForParent,
+} from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
 
 function makeThread(
@@ -52,4 +55,28 @@ test("finds only sidecar threads attached to the deleted parent thread", async (
     sortOrder: "desc",
     select: ["thread_id", "metadata"],
   });
+});
+
+test("project delete does not issue the legacy second DELETE", async () => {
+  const deleteThread = rs.fn().mockResolvedValue(undefined);
+  const fetcher = rs.fn();
+  rs.stubGlobal("fetch", fetcher);
+  const privateWork = {
+    scope: {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      projectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    },
+    apiBaseURL:
+      "http://localhost:2026/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work",
+  };
+
+  await deleteThreadEverywhere(
+    { threads: { delete: deleteThread, search: rs.fn() } },
+    "33333333-3333-4333-8333-333333333333",
+    privateWork as never,
+  );
+
+  expect(deleteThread).toHaveBeenCalledTimes(1);
+  expect(fetcher).not.toHaveBeenCalled();
+  rs.unstubAllGlobals();
 });

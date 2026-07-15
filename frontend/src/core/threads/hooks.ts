@@ -2243,13 +2243,15 @@ async function deleteLocalThreadData(
   }
 }
 
-async function deleteThreadEverywhere(
+export async function deleteThreadEverywhere(
   apiClient: ThreadDeleteClient,
   threadId: string,
   privateWork: PrivateWorkAccess,
 ) {
   await apiClient.threads.delete(threadId);
-  await deleteLocalThreadData(threadId, privateWork);
+  if (privateWork.scope === null) {
+    await deleteLocalThreadData(threadId, privateWork);
+  }
 }
 
 export async function findSidecarThreadIdsForParent(
@@ -2355,9 +2357,8 @@ export function useDeleteThread(explicitPrivateWork?: PrivateWorkAccess) {
         threadId,
         privateWork,
       );
-      await apiClient.threads.delete(threadId);
+      await deleteThreadEverywhere(apiClient, threadId, privateWork);
       onRemoteDeleted?.();
-      await deleteLocalThreadData(threadId, privateWork);
       return deletedSidecarThreadIds;
     },
     onSuccess(deletedSidecarThreadIds, { threadId }) {

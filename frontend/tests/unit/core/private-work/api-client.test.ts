@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, rs } from "@rstest/core";
 
 import {
+  createProjectThread,
   disposeProjectAPIClient,
   getProjectAPIClient,
   projectPrivateWorkBaseURL,
@@ -48,16 +49,30 @@ describe("project private-work API client", () => {
   test("keeps the existing CSRF request wrapper", async () => {
     const fetcher = rs.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) => {
-        return new Response(JSON.stringify({ thread_id: P1 }), {
-          status: 200,
-        });
+        return new Response(
+          JSON.stringify({
+            thread_id: P1,
+            agent_asset_id: P2,
+            agent_scope: "project",
+            display_name: "CSRF thread",
+            status: "idle",
+            metadata: {},
+            version: 1,
+          }),
+          {
+            status: 201,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
       },
     );
     rs.stubGlobal("document", { cookie: "csrf_token=project-token" });
     rs.stubGlobal("fetch", fetcher);
 
-    const client = getProjectAPIClient({ accountId: A, projectId: P1 });
-    await client.threads.create();
+    await createProjectThread(
+      { accountId: A, projectId: P1 },
+      { threadId: P1, agentAssetId: P2 },
+    );
 
     const init = fetcher.mock.calls[0]![1]!;
     expect(new Headers(init.headers).get("X-CSRF-Token")).toBe("project-token");

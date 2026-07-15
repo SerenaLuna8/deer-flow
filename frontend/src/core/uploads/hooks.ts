@@ -13,6 +13,7 @@ import {
   deleteUploadedFile,
   getUploadLimits,
   listUploadedFiles,
+  supportsUploadLimits,
   uploadFiles,
   type UploadedFileInfo,
   type UploadResponse,
@@ -35,7 +36,7 @@ export function useUploadLimits(
       threadId,
     ),
     queryFn: () => getUploadLimits(threadId, privateWork),
-    enabled: !!threadId,
+    enabled: !!threadId && supportsUploadLimits(privateWork),
     retry: false,
     staleTime: 60_000,
   });
