@@ -333,6 +333,8 @@ async def test_retention_freeze_and_restore_are_scope_bound_and_non_destructive(
     session.execute.side_effect = [
         _ScalarResult(("thread-1",)),
         _ScalarResult(("connection-1",)),
+        _ScalarResult(("automation-1",)),
+        _ScalarResult(("occurrence-1",)),
         _ScalarResult(("thread-1",)),
         _ScalarResult(
             (
@@ -346,6 +348,7 @@ async def test_retention_freeze_and_restore_are_scope_bound_and_non_destructive(
         ),
         _ScalarResult(),
         _ScalarResult(("connection-1",)),
+        _ScalarResult(("automation-1",)),
     ]
     project_id = uuid.uuid4()
     owner_user_id = str(uuid.uuid4())
@@ -365,8 +368,12 @@ async def test_retention_freeze_and_restore_are_scope_bound_and_non_destructive(
 
     assert frozen.thread_ids == ("thread-1",)
     assert frozen.connection_ids == ("connection-1",)
+    assert frozen.automation_ids == ("automation-1",)
+    assert frozen.occurrence_ids == ("occurrence-1",)
     assert restored.thread_ids == ("thread-1",)
     assert restored.connection_ids == ("connection-1",)
+    assert restored.automation_ids == ("automation-1",)
+    assert restored.occurrence_ids == ()
     statements = [str(call.args[0]) for call in session.execute.await_args_list]
     scoped_statements = [statement for statement in statements if "pg_advisory_xact_lock" not in statement]
     assert all("project_id" in statement and "owner_user_id" in statement for statement in scoped_statements)

@@ -16,6 +16,8 @@ from app.projects.membership_repository import MembershipRepository
 from app.projects.membership_service import MembershipService
 from app.projects.models import ProjectRole
 
+NOW = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+
 
 def _context(role: ProjectRole = ProjectRole.ADMIN) -> ProjectContext:
     return ProjectContext(
@@ -182,6 +184,12 @@ async def test_remove_and_leave_record_distinct_end_metadata() -> None:
     )
 
     await service.remove(context, target.id, expected_version=1)
+    retention.freeze_owner.assert_awaited_once_with(
+        repository.session,
+        project_id=project.id,
+        owner_user_id=target.user_id,
+        now=now,
+    )
     repository.end_membership.assert_awaited_once_with(
         project,
         target,
@@ -192,10 +200,17 @@ async def test_remove_and_leave_record_distinct_end_metadata() -> None:
     )
 
     repository.reset_mock()
+    retention.reset_mock()
     leaving = _member(role=ProjectRole.VIEWER)
     leaving.id = context.membership_id
     repository.lock_project_and_member.return_value = (project, leaving)
     await service.leave(context, expected_version=1)
+    retention.freeze_owner.assert_awaited_once_with(
+        repository.session,
+        project_id=project.id,
+        owner_user_id=leaving.user_id,
+        now=now,
+    )
     repository.end_membership.assert_awaited_once_with(
         project,
         leaving,
@@ -270,11 +285,17 @@ async def test_viewer_downgrade_marks_runs_in_transaction_then_notifies_after_co
     authorization.mark_revoked.return_value = ("run-1",)
     retention = AsyncMock()
 
+    async def freeze_owner(*_args, **_kwargs):
+        events.append("retention-freeze")
+
+    retention.freeze_owner.side_effect = freeze_owner
+
     async def notify(run_ids, reason):
         events.append(f"notify:{run_ids}:{reason}")
 
     await MembershipService(
         repository,
+        clock=lambda: NOW,
         authorization=authorization,
         retention=retention,
         notify_local_cancellation=notify,
@@ -282,11 +303,50 @@ async def test_viewer_downgrade_marks_runs_in_transaction_then_notifies_after_co
 
     assert events == [
         "transaction-enter",
+        "retention-freeze",
         "transaction-commit",
         "notify:('run-1',):authorization_revoked",
     ]
     authorization.mark_revoked.assert_awaited_once()
-    retention.freeze_owner.assert_not_awaited()
+    retention.freeze_owner.assert_awaited_once_with(
+        repository.session,
+        project_id=context.project_id,
+        owner_user_id=target.user_id,
+        now=NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_viewer_downgrade_retention_failure_prevents_role_change_and_notification() -> None:
+    repository = _repository()
+    context = _context()
+    target = _member(role=ProjectRole.RUNNER)
+    repository.lock_project_and_member.return_value = (
+        SimpleNamespace(id=context.project_id),
+        target,
+    )
+    authorization = AsyncMock()
+    authorization.mark_revoked.return_value = ("run-1",)
+    retention = AsyncMock()
+    retention.freeze_owner.side_effect = RuntimeError("retention unavailable")
+    notifier = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="retention unavailable"):
+        await MembershipService(
+            repository,
+            clock=lambda: NOW,
+            authorization=authorization,
+            retention=retention,
+            notify_local_cancellation=notifier,
+        ).change_role(
+            context,
+            target.id,
+            ProjectRole.VIEWER,
+            expected_version=1,
+        )
+
+    repository.set_role.assert_not_awaited()
+    notifier.assert_not_awaited()
 
 
 @pytest.mark.asyncio

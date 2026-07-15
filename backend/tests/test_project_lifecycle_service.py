@@ -167,3 +167,94 @@ async def test_restore_only_restores_active_members_of_same_project() -> None:
     kwargs = retention.restore_owners.await_args.kwargs
     assert kwargs["project_id"] == project_id
     assert kwargs["owner_user_ids"] == (member.user_id,)
+
+
+@pytest.mark.asyncio
+async def test_suspend_freezes_all_active_members_before_project_mutation() -> None:
+    events: list[str] = []
+    repository = AsyncMock()
+
+    @asynccontextmanager
+    async def transaction():
+        events.append("transaction-enter")
+        yield
+        events.append("transaction-commit")
+
+    repository.transaction = transaction
+    context = _context()
+    project = SimpleNamespace(id=context.project_id)
+    actor = SimpleNamespace()
+    members = (
+        SimpleNamespace(user_id=str(uuid.uuid4())),
+        SimpleNamespace(user_id=str(uuid.uuid4())),
+    )
+    repository.lock_suspend.return_value = (project, actor)
+    repository.lock_active_members.return_value = members
+    repository.suspend_locked.return_value = object()
+    authorization = AsyncMock()
+    authorization.mark_revoked.side_effect = [("run-1",), ("run-2",)]
+    retention = AsyncMock()
+
+    async def freeze_owner(*_args, **_kwargs):
+        events.append("retention-freeze")
+
+    retention.freeze_owner.side_effect = freeze_owner
+
+    await ProjectLifecycleService(
+        repository,
+        authorization=authorization,
+        retention=retention,
+    ).suspend(context, NOW)
+
+    assert events == [
+        "transaction-enter",
+        "retention-freeze",
+        "retention-freeze",
+        "transaction-commit",
+    ]
+    assert authorization.mark_revoked.await_count == 2
+    assert retention.freeze_owner.await_count == 2
+    repository.suspend_locked.assert_awaited_once_with(
+        project,
+        actor,
+        request_id=context.request_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_only_active_members_without_auto_resume_hook() -> None:
+    repository = AsyncMock()
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    repository.transaction = transaction
+    project_id = uuid.uuid4()
+    members = (
+        SimpleNamespace(user_id=str(uuid.uuid4())),
+        SimpleNamespace(user_id=str(uuid.uuid4())),
+    )
+    project = SimpleNamespace(id=project_id)
+    actor = SimpleNamespace()
+    repository.lock_resume.return_value = (project, actor)
+    repository.lock_active_members.return_value = members
+    repository.resume_locked.return_value = object()
+    retention = AsyncMock()
+
+    await ProjectLifecycleService(
+        repository,
+        retention=retention,
+    ).resume(uuid.uuid4(), project_id, "req-resume", NOW)
+
+    repository.resume_locked.assert_awaited_once_with(
+        project,
+        actor,
+        request_id="req-resume",
+    )
+    retention.restore_owners.assert_awaited_once_with(
+        repository.session,
+        project_id=project_id,
+        owner_user_ids=tuple(member.user_id for member in members),
+        now=NOW,
+    )
