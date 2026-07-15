@@ -74,7 +74,7 @@ async def harness(seed: M4ThreadSeed) -> _Harness:
     event_store = DbRunEventStore(seed.factory)
     run_store = RunRepository(seed.factory)
     app.state.private_run_service = PrivateRunService(seed.factory)
-    app.state.run_event_store = event_store
+    app.state.private_run_event_store = event_store
     app.state.run_store = run_store
     app.state.feedback_repo = FeedbackRepository(seed.factory)
 

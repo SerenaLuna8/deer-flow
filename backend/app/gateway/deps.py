@@ -310,13 +310,25 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
         app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
 
-        # Run event store. The store and the matching ``run_events_config`` are
-        # both frozen at startup so ``get_run_context`` does not combine a
-        # freshly-reloaded ``AppConfig.run_events`` with a store still bound to
-        # the previous backend.
+        # Legacy run event store. The store and the matching
+        # ``run_events_config`` are both frozen at startup so
+        # ``get_run_context`` does not combine a freshly-reloaded
+        # ``AppConfig.run_events`` with a store still bound to the previous
+        # backend.
         run_events_config = getattr(config, "run_events", None)
         app.state.run_events_config = run_events_config
         app.state.run_event_store = make_run_event_store(run_events_config)
+
+        # Project-private chat history must survive gateway restarts even when
+        # the legacy/default run-event backend is configured as in-memory.
+        # Keep the legacy store configurable while binding the project API to
+        # the same PostgreSQL session factory as the rest of private work.
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        app.state.private_run_event_store = DbRunEventStore(
+            sf,
+            max_trace_content=getattr(run_events_config, "max_trace_content", 10240),
+        )
 
         # RunManager with store backing for persistence
         app.state.run_manager = RunManager(store=app.state.run_store)
@@ -371,6 +383,10 @@ def _require(attr: str, label: str) -> Callable[[Request], T]:
 get_stream_bridge: Callable[[Request], StreamBridge] = _require("stream_bridge", "Stream bridge")
 get_run_manager: Callable[[Request], RunManager] = _require("run_manager", "Run manager")
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
+get_private_run_event_store: Callable[[Request], RunEventStore] = _require(
+    "private_run_event_store",
+    "Private run event store",
+)
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 

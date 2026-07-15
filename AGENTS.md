@@ -73,7 +73,8 @@ operations。登录后 `/workspace` 是没有项目级侧栏的多项目卡片�
 `/projects/{project_slug}` 后才显示项目菜单。M2 邀请只生成一次性 fragment 链接，不发送
 邮件；成员退出/移除和项目删除只记录 30 天窗口，不物理清除私有或项目数据。M4 Task 11 已挂载
 project private-work、Memory 和 connection backend API，覆盖 Thread、run/stream/feed、file/artifact、
-项目 Memory 管理和 IM connection/OAuth/inbound 文本执行链，并保持项目与 owner 双重隔离；legacy
+项目 Memory 管理和 IM connection/OAuth/inbound 文本执行链，并保持项目与 owner 双重隔离。项目
+run/feed 的消息与事件固定写入 PostgreSQL，不受 legacy `run_events.backend=memory` 配置影响；legacy
 cutover/migration、frontend 接入和 automation 项目化尚未完成，因此当前仍不能作为完整多用户
 SaaS 发布。
 

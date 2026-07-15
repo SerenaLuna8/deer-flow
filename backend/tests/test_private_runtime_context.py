@@ -956,6 +956,7 @@ async def test_start_private_run_uses_shared_launch_once_after_snapshot(monkeypa
             )
 
     manager = Manager()
+    private_event_store = object()
     run_context = RunContext(
         checkpointer=object(),
         app_config=SimpleNamespace(get_model_config=lambda name: object() if name == "exact-model" else None),
@@ -964,12 +965,18 @@ async def test_start_private_run_uses_shared_launch_once_after_snapshot(monkeypa
     monkeypatch.setattr(services, "PrivateWorkRevalidator", Revalidator)
     monkeypatch.setattr(services, "get_project_checkpointer", lambda *_args: object())
     monkeypatch.setattr(services, "get_run_context", lambda _request: run_context)
+    monkeypatch.setattr(
+        services,
+        "get_private_run_event_store",
+        lambda _request: private_event_store,
+    )
     monkeypatch.setattr(services, "get_run_manager", lambda _request: manager)
     monkeypatch.setattr(services, "get_stream_bridge", lambda _request: object())
 
     def launch(**kwargs):
         events.append("launch")
         assert kwargs["run_context"].private_agent_runtime is not None
+        assert kwargs["run_context"].event_store is private_event_store
         assert kwargs["run_context"].file_authority is not None
         assert kwargs["run_context"].file_authority._run_scope.context is context
         assert kwargs["run_context"].file_authority._run_scope.thread_id == persisted.thread_id

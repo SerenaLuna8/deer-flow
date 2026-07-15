@@ -295,7 +295,7 @@ def _run_service(request: Request, request_id: str) -> PrivateRunService:
 
 
 def _run_event_store(request: Request, request_id: str) -> RunEventStore:
-    store = getattr(request.app.state, "run_event_store", None)
+    store = getattr(request.app.state, "private_run_event_store", None)
     if not isinstance(store, RunEventStore):
         raise PrivateWorkUnavailable(request_id)
     return store

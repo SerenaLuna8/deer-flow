@@ -24,7 +24,15 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
-from app.gateway.deps import get_checkpointer, get_local_provider, get_project_checkpointer, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import (
+    get_checkpointer,
+    get_local_provider,
+    get_private_run_event_store,
+    get_project_checkpointer,
+    get_run_context,
+    get_run_manager,
+    get_stream_bridge,
+)
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
     INTERNAL_SYSTEM_ROLE,
@@ -1129,6 +1137,7 @@ async def start_private_run(
         private_run_context = replace(
             base_run_context,
             checkpointer=scoped_checkpointer,
+            event_store=get_private_run_event_store(request),
             thread_store=None,
             private_scope=admitted.opaque_runtime_scope,
             authorization_boundary=authorization_boundary,

@@ -342,7 +342,9 @@ M3 的兼容运行不会构造项目运行身份：credential materialization �
 `/api/projects/{project_id}/private-work` 提供 readiness、Thread、run/stream/wait、feed
 （messages/events/token usage/feedback）、file 和 artifact 接口；项目 Memory 管理位于
 `/api/projects/{project_id}/memory`。这些接口复用 Gateway 的 run lifecycle，并按项目与 owner
-双重隔离。legacy cutover/migration、frontend 接入和 automation 项目化仍未完成，因此这还不是
+双重隔离；项目 run/feed 的消息与事件始终使用 PostgreSQL，因此 Gateway 重启后仍可读取，即使
+legacy `run_events.backend` 保持默认 `memory`。legacy cutover/migration、frontend 接入和
+automation 项目化仍未完成，因此这还不是
 完整的多用户 SaaS 发布。
 
 #### M3 共享资产迁移与 credential 轮换
