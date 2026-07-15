@@ -337,6 +337,19 @@ class LocalContainerBackend(SandboxBackend):
         stop_target = info.container_id or info.container_name
         if stop_target:
             self._stop_container(stop_target)
+        self._release_sandbox_port(info)
+
+    def destroy_private(self, info: SandboxInfo) -> None:
+        """Strictly destroy a private container or keep its lease retryable."""
+
+        stop_target = info.container_id or info.container_name
+        if not stop_target:
+            raise RuntimeError("Private container identity is unavailable")
+        self._stop_private_container(stop_target)
+        self._release_sandbox_port(info)
+
+    @staticmethod
+    def _release_sandbox_port(info: SandboxInfo) -> None:
         # Extract port from sandbox_url for release
         try:
             from urllib.parse import urlparse
@@ -614,6 +627,26 @@ class LocalContainerBackend(SandboxBackend):
             logger.info(f"Stopped container {container_id} using {self._runtime}")
         except subprocess.CalledProcessError as e:
             logger.warning(f"Failed to stop container {container_id}: {e.stderr}")
+
+    def _stop_private_container(self, container_id: str) -> None:
+        """Stop one private container, reporting unconfirmed destruction."""
+
+        try:
+            subprocess.run(
+                [self._runtime, "stop", container_id],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            )
+            logger.info(f"Stopped private container {container_id} using {self._runtime}")
+        except subprocess.CalledProcessError as exc:
+            if _is_no_such_container_error(exc.stderr or "", container_id):
+                logger.info(f"Private container {container_id} was already absent")
+                return
+            raise RuntimeError("Failed to destroy private container") from exc
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("Failed to destroy private container") from exc
 
     def _is_container_running(self, container_name: str) -> bool:
         """Check if a named container is currently running.

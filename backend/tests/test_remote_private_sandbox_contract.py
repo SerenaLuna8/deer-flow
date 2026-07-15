@@ -565,6 +565,98 @@ def test_aio_private_destroy_failure_retains_tracking_and_lease_for_retry() -> N
     assert closed == ["private-a"]
 
 
+def test_aio_local_private_destroy_failure_is_reported_for_exact_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
+    from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+
+    backend = LocalContainerBackend.__new__(LocalContainerBackend)
+    backend._runtime = "docker"
+    attempts: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs):
+        attempts.append(command)
+        if len(attempts) == 1:
+            raise subprocess.CalledProcessError(
+                1,
+                command,
+                stderr="container daemon unavailable",
+            )
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    released_ports: list[int] = []
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend.subprocess.run",
+        run,
+    )
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend.release_port",
+        released_ports.append,
+    )
+    info = SandboxInfo(
+        sandbox_id="private-a",
+        sandbox_url="http://localhost:43123",
+        container_id="container-private-a",
+    )
+
+    with pytest.raises(RuntimeError, match="private container"):
+        backend.destroy_private(info)
+    assert released_ports == []
+
+    backend.destroy_private(info)
+    assert len(attempts) == 2
+    assert released_ports == [43123]
+
+
+def test_e2b_private_destroy_failure_retains_tracking_and_lease_for_retry() -> None:
+    from deerflow.community.e2b_sandbox.e2b_sandbox_provider import (
+        E2BSandboxProvider,
+    )
+
+    kill_attempts = 0
+    closed: list[str] = []
+
+    class Client:
+        def kill(self) -> None:
+            nonlocal kill_attempts
+            kill_attempts += 1
+            if kill_attempts == 1:
+                raise RuntimeError("e2b control plane unavailable")
+
+    sandbox = SimpleNamespace(
+        id="e2b-private-a",
+        _client=Client(),
+        close=lambda: closed.append("e2b-private-a"),
+    )
+    provider = E2BSandboxProvider.__new__(E2BSandboxProvider)
+    provider._lock = threading.Lock()
+    provider._sandboxes = {sandbox.id: sandbox}
+    provider._warm_pool = {}
+    provider._thread_sandboxes = {("owner-a", "thread-a"): sandbox.id}
+    lease = PrivateSandboxLease(
+        sandbox_id=sandbox.id,
+        run_id="run-a",
+        relative_root="projects/project-a/users/owner-a/threads/thread-a",
+    )
+    provider._private_leases = {sandbox.id: lease}
+    provider._private_lease_lock = threading.RLock()
+
+    with pytest.raises(SandboxRuntimeError, match="destroy"):
+        provider.release_private(lease)
+    assert provider._sandboxes == {sandbox.id: sandbox}
+    assert provider._thread_sandboxes == {("owner-a", "thread-a"): sandbox.id}
+    assert provider._private_leases == {sandbox.id: lease}
+    assert closed == []
+
+    provider.release_private(lease)
+    assert kill_attempts == 2
+    assert provider._sandboxes == {}
+    assert provider._thread_sandboxes == {}
+    assert provider._private_leases == {}
+    assert closed == [sandbox.id]
+
+
 def test_remote_backend_private_destroy_accepts_delete_404(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

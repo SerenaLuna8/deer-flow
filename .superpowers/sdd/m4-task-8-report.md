@@ -89,7 +89,8 @@ Critical/Important list is closed.
   held. Active or finalizing source Runs are rejected.
 - Historical or ambiguous lookup records `historical_skip` and copies no
   authority. Current visible turns copy verified ready file/chunk authority
-  server-side with new IDs; Python never materializes chunk payloads.
+  server-side with new IDs; Python streams at most one verified, bounded
+  1 MiB chunk at a time and never materializes a whole file.
 - Branch artifacts are deliberately not copied: artifacts remain Run-owned and
   their source Run foreign key cannot validly cross to a new Thread. A later Run
   may create new artifacts from explicitly presented, verified files.

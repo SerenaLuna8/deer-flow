@@ -457,12 +457,37 @@ class E2BSandboxProvider(SandboxProvider):
 
     def _destroy_private_sandbox(self, sandbox_id: str) -> None:
         with self._lock:
-            sandbox = self._sandboxes.pop(sandbox_id, None)
+            sandbox = self._sandboxes.get(sandbox_id)
+        if sandbox is None:
+            raise SandboxRuntimeError("Private e2b sandbox is not tracked")
+
+        # Kill the cloud VM before mutating tracking.  A transient control-plane
+        # failure leaves the exact sandbox and lease available for retry.
+        self._kill_private_and_close(sandbox)
+
+        with self._lock:
+            if self._sandboxes.get(sandbox_id) is not sandbox:
+                raise SandboxRuntimeError("Private e2b sandbox tracking changed during destroy")
+            self._sandboxes.pop(sandbox_id, None)
             self._warm_pool.pop(sandbox_id, None)
             for key in [key for key, registered in self._thread_sandboxes.items() if registered == sandbox_id]:
                 self._thread_sandboxes.pop(key, None)
-        if sandbox is not None:
-            self._kill_and_close(sandbox)
+
+    @staticmethod
+    def _kill_private_and_close(sandbox: E2BSandbox) -> None:
+        client = getattr(sandbox, "_client", None)
+        kill = getattr(client, "kill", None)
+        if not callable(kill):
+            raise SandboxRuntimeError("Private e2b sandbox destroy is unavailable")
+        try:
+            kill()
+        except Exception as exc:
+            if not _is_sandbox_gone_error(exc):
+                raise SandboxRuntimeError("Private e2b sandbox destroy failed") from exc
+        try:
+            sandbox.close()
+        except Exception as exc:  # pragma: no cover - adapter close is best effort
+            logger.warning("Failed to close private e2b client %s: %s", sandbox.id, exc)
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)
