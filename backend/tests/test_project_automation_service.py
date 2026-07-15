@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,9 @@ from app.automations.errors import (
 from app.automations.models import AutomationChanges, AutomationCreate
 from app.automations.service import ProjectAutomationService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.shared_assets.agent_repository import AgentRepository
+from app.shared_assets.agent_service import AgentService
+from app.shared_assets.contexts import SystemAssetGovernanceContext
 from deerflow.persistence.scheduled_task_runs import (
     ScheduledTaskRunCreate,
     ScheduledTaskRunRepository,
@@ -262,6 +266,160 @@ async def test_create_rejects_archived_agent(
             ),
         )
     assert raised.value.request_id == seed.owner_context.request_id
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_system_agent_archive_waits_for_create_target_validation(
+    automation_service_seed: AutomationServiceSeed,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = automation_service_seed
+    service = ProjectAutomationService(seed.factory, seed.clock)
+    archive_service = AgentService(seed.factory)
+    system_admin = SystemAssetGovernanceContext(
+        user_id=seed.owner_context.user_id,
+        request_id="req-system-archive",
+    )
+    active_checked = asyncio.Event()
+    archive_lock_attempted = asyncio.Event()
+    release_resolution = asyncio.Event()
+    completion_order: list[str] = []
+    resolve = service._resolver.resolve_project_asset_snapshot_in_session
+    get_system_asset = AgentRepository.get_system_asset
+
+    async def pause_after_active_check(session, context, selection):
+        active_checked.set()
+        await release_resolution.wait()
+        return await resolve(session, context, selection)
+
+    async def observe_archive_lock(
+        repository,
+        context,
+        asset_id,
+        *,
+        for_update=False,
+    ):
+        if for_update:
+            archive_lock_attempted.set()
+        return await get_system_asset(
+            repository,
+            context,
+            asset_id,
+            for_update=for_update,
+        )
+
+    monkeypatch.setattr(
+        service._resolver,
+        "resolve_project_asset_snapshot_in_session",
+        pause_after_active_check,
+    )
+    monkeypatch.setattr(
+        AgentRepository,
+        "get_system_asset",
+        observe_archive_lock,
+    )
+
+    async def create_automation():
+        created = await service.create(
+            seed.owner_context,
+            seed.create_command(
+                agent_asset_id=seed.database.system_agent_id,
+                agent_scope="system",
+            ),
+        )
+        completion_order.append("create")
+        return created
+
+    async def archive_agent():
+        archived = await archive_service.archive(
+            system_admin,
+            seed.database.system_agent_id,
+            expected_asset_version=1,
+        )
+        completion_order.append("archive")
+        return archived
+
+    create_task = asyncio.create_task(create_automation())
+    await asyncio.wait_for(active_checked.wait(), timeout=5)
+    archive_task = asyncio.create_task(archive_agent())
+    await asyncio.wait_for(archive_lock_attempted.wait(), timeout=5)
+    archive_completed_while_validation_paused = False
+    try:
+        await asyncio.wait_for(asyncio.shield(archive_task), timeout=0.2)
+        archive_completed_while_validation_paused = True
+    except TimeoutError:
+        pass
+    finally:
+        release_resolution.set()
+
+    created, archived = await asyncio.wait_for(
+        asyncio.gather(create_task, archive_task),
+        timeout=5,
+    )
+    assert created.agent_asset_id == seed.database.system_agent_id
+    assert archived.status == "archived"
+    assert archive_completed_while_validation_paused is False
+    assert completion_order == ["create", "archive"]
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_system_agent_archive_wins_before_create_active_lock(
+    automation_service_seed: AutomationServiceSeed,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.automations.service as automation_service_module
+
+    seed = automation_service_seed
+    service = ProjectAutomationService(seed.factory, seed.clock)
+    archive_updated = asyncio.Event()
+    release_archive = asyncio.Event()
+    active_lock_attempted = asyncio.Event()
+    require_executable = automation_service_module.require_executable_agent
+
+    async def observe_active_lock(session, context, agent):
+        active_lock_attempted.set()
+        await require_executable(session, context, agent)
+
+    monkeypatch.setattr(
+        automation_service_module,
+        "require_executable_agent",
+        observe_active_lock,
+    )
+
+    async def hold_archived_agent_write_lock() -> None:
+        async with seed.factory() as session, session.begin():
+            agent = (await session.execute(select(AgentRow).where(AgentRow.id == seed.database.system_agent_id).with_for_update(of=AgentRow))).scalar_one()
+            agent.status = "archived"
+            agent.version += 1
+            await session.flush()
+            archive_updated.set()
+            await release_archive.wait()
+
+    archive_task = asyncio.create_task(hold_archived_agent_write_lock())
+    await asyncio.wait_for(archive_updated.wait(), timeout=5)
+    create_task = asyncio.create_task(
+        service.create(
+            seed.owner_context,
+            seed.create_command(
+                agent_asset_id=seed.database.system_agent_id,
+                agent_scope="system",
+            ),
+        )
+    )
+    try:
+        await asyncio.wait_for(active_lock_attempted.wait(), timeout=5)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(create_task), timeout=0.2)
+    finally:
+        release_archive.set()
+        await asyncio.wait_for(archive_task, timeout=5)
+
+    with pytest.raises(AutomationNotFound) as raised:
+        await asyncio.wait_for(create_task, timeout=5)
+    assert raised.value.request_id == seed.owner_context.request_id
+    assert await service.list(seed.owner_context, limit=50, offset=0) == ()
 
 
 @pytest.mark.postgres

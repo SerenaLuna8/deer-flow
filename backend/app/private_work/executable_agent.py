@@ -21,45 +21,65 @@ async def require_executable_agent(
     """Require the active published Agent target used by private execution."""
 
     if agent.scope == "project":
-        statement = (
-            select(AgentRow.id)
-            .join(
-                AgentVersionRow,
-                AgentVersionRow.id == AgentRow.current_published_version_id,
+        asset = (
+            await session.execute(
+                select(AgentRow)
+                .where(
+                    AgentRow.id == agent.asset_id,
+                    AgentRow.scope == "project",
+                    AgentRow.project_id == context.project_id,
+                    AgentRow.status == "active",
+                )
+                .with_for_update(read=True, of=AgentRow)
             )
-            .where(
-                AgentRow.id == agent.asset_id,
-                AgentRow.scope == "project",
-                AgentRow.project_id == context.project_id,
-                AgentRow.status == "active",
-                AgentVersionRow.agent_id == AgentRow.id,
-                AgentVersionRow.workflow_status == "published",
-            )
-        )
+        ).scalar_one_or_none()
+        if asset is None or asset.current_published_version_id is None:
+            raise PrivateWorkNotFound(context.request_id)
+        version_id = asset.current_published_version_id
     elif agent.scope == "system":
-        statement = (
-            select(AgentRow.id)
-            .join(
-                ProjectSystemAgentBindingRow,
-                ProjectSystemAgentBindingRow.system_agent_id == AgentRow.id,
+        binding = (
+            await session.execute(
+                select(ProjectSystemAgentBindingRow)
+                .where(
+                    ProjectSystemAgentBindingRow.system_agent_id == agent.asset_id,
+                    ProjectSystemAgentBindingRow.project_id == context.project_id,
+                    ProjectSystemAgentBindingRow.enabled.is_(True),
+                )
+                .with_for_update(read=True, of=ProjectSystemAgentBindingRow)
             )
-            .join(
-                AgentVersionRow,
-                AgentVersionRow.id == ProjectSystemAgentBindingRow.agent_version_id,
+        ).scalar_one_or_none()
+        if binding is None:
+            raise PrivateWorkNotFound(context.request_id)
+        asset = (
+            await session.execute(
+                select(AgentRow)
+                .where(
+                    AgentRow.id == agent.asset_id,
+                    AgentRow.scope == "system",
+                    AgentRow.project_id.is_(None),
+                    AgentRow.status == "active",
+                )
+                .with_for_update(read=True, of=AgentRow)
             )
-            .where(
-                AgentRow.id == agent.asset_id,
-                AgentRow.scope == "system",
-                AgentRow.status == "active",
-                ProjectSystemAgentBindingRow.project_id == context.project_id,
-                ProjectSystemAgentBindingRow.enabled.is_(True),
-                AgentVersionRow.agent_id == AgentRow.id,
-                AgentVersionRow.workflow_status == "published",
-            )
-        )
+        ).scalar_one_or_none()
+        if asset is None:
+            raise PrivateWorkNotFound(context.request_id)
+        version_id = binding.agent_version_id
     else:
         raise PrivateWorkNotFound(context.request_id)
-    if (await session.execute(statement)).scalar_one_or_none() is None:
+
+    version = (
+        await session.execute(
+            select(AgentVersionRow.id)
+            .where(
+                AgentVersionRow.id == version_id,
+                AgentVersionRow.agent_id == agent.asset_id,
+                AgentVersionRow.workflow_status == "published",
+            )
+            .with_for_update(read=True, of=AgentVersionRow)
+        )
+    ).scalar_one_or_none()
+    if version is None:
         raise PrivateWorkNotFound(context.request_id)
 
 
