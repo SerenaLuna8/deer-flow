@@ -4,6 +4,8 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -14,12 +16,14 @@ from app.automations.occurrences import deterministic_run_id, deterministic_thre
 from app.automations.reconciliation import AutomationReconciler
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from deerflow.persistence.run import RunRepository
 from deerflow.persistence.scheduled_task_runs import (
     ScheduledTaskRunCreate,
     ScheduledTaskRunRepository,
 )
 from deerflow.persistence.scheduled_tasks import ScheduledTaskCreate, ScheduledTaskRepository
-from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
+from deerflow.runtime import DisconnectMode, RunManager, RunRecord, RunStatus
+from deerflow.runtime.runs.worker import RunContext, run_agent
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
 
@@ -354,3 +358,145 @@ async def test_restart_reconciliation_recovers_lease_and_never_replays_admitted_
 
     again = await AutomationReconciler(seed.factory).reconcile_restart(NOW)
     assert again.requeued == again.interrupted == again.failed == 0
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_worker_cleanup_exhaustion_settles_automation_from_final_run_error(
+    reconciliation_seed: M4ThreadSeed,
+) -> None:
+    seed = reconciliation_seed
+    scenario = await _create_scenario(seed, schedule_type="once")
+    reconciler = AutomationReconciler(seed.factory, clock=lambda: NOW)
+    manager = RunManager(store=RunRepository(seed.factory))
+    record = await manager.register_persisted(
+        run_id=scenario.run_id,
+        thread_id=scenario.thread_id,
+        assistant_id=None,
+        metadata={
+            "scheduled_task_id": scenario.task_id,
+            "scheduled_task_run_id": scenario.occurrence_id,
+            "scheduled_trigger": "scheduled",
+        },
+        scope=seed.owner_a.resource_scope,
+    )
+    authority = SimpleNamespace(
+        restore=AsyncMock(),
+        finalize=AsyncMock(),
+        mark_failed=AsyncMock(),
+        release=AsyncMock(side_effect=RuntimeError("persistent cleanup failure")),
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            file_authority=authority,
+            on_run_completed=reconciler.handle_run_completion,
+        ),
+        agent_factory=lambda **_kwargs: Agent(),
+        graph_input={},
+        config={},
+    )
+
+    async with seed.factory() as session:
+        private_run = await PrivateRunRepository(session).get(
+            scope=seed.owner_a.resource_scope,
+            run_id=scenario.run_id,
+        )
+        occurrence = await ScheduledTaskRunRepository(session).get(
+            seed.owner_a.resource_scope,
+            scenario.occurrence_id,
+        )
+        task = await ScheduledTaskRepository(session).get(
+            seed.owner_a.resource_scope,
+            scenario.task_id,
+        )
+
+    assert authority.release.await_count == 3
+    assert private_run is not None and private_run.status == "error"
+    assert occurrence is not None and occurrence.status == "failed"
+    assert occurrence.error_code == "AUTOMATION_RUN_FAILED"
+    assert task is not None and task.status == "failed"
+    assert task.last_outcome == "failed"
+    assert task.run_count == 1
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_worker_normal_success_calls_completion_once_after_cleanup(
+    reconciliation_seed: M4ThreadSeed,
+) -> None:
+    seed = reconciliation_seed
+    scenario = await _create_scenario(seed, schedule_type="once")
+    reconciler = AutomationReconciler(seed.factory, clock=lambda: NOW)
+    completion_hook = AsyncMock(side_effect=reconciler.handle_run_completion)
+    manager = RunManager(store=RunRepository(seed.factory))
+    record = await manager.register_persisted(
+        run_id=scenario.run_id,
+        thread_id=scenario.thread_id,
+        assistant_id=None,
+        metadata={
+            "scheduled_task_id": scenario.task_id,
+            "scheduled_task_run_id": scenario.occurrence_id,
+            "scheduled_trigger": "scheduled",
+        },
+        scope=seed.owner_a.resource_scope,
+    )
+    authority = SimpleNamespace(
+        restore=AsyncMock(),
+        finalize=AsyncMock(),
+        mark_failed=AsyncMock(),
+        release=AsyncMock(),
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            file_authority=authority,
+            on_run_completed=completion_hook,
+        ),
+        agent_factory=lambda **_kwargs: Agent(),
+        graph_input={},
+        config={},
+    )
+
+    async with seed.factory() as session:
+        occurrence = await ScheduledTaskRunRepository(session).get(
+            seed.owner_a.resource_scope,
+            scenario.occurrence_id,
+        )
+        task = await ScheduledTaskRepository(session).get(
+            seed.owner_a.resource_scope,
+            scenario.task_id,
+        )
+
+    completion_hook.assert_awaited_once_with(record)
+    authority.release.assert_awaited_once_with()
+    assert record.status is RunStatus.success
+    assert occurrence is not None and occurrence.status == "success"
+    assert task is not None and task.status == "completed"
+    assert task.run_count == 1

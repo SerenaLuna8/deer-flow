@@ -65,6 +65,7 @@ async def test_scheduler_start_fails_closed_when_cutover_is_incomplete() -> None
         state=SimpleNamespace(
             scheduled_task_service=service,
             automation_cutover_guard=guard,
+            automation_scheduler_ownership=SimpleNamespace(is_acquired=True),
         )
     )
 
@@ -89,6 +90,7 @@ async def test_scheduler_start_checks_cutover_before_reconciliation_and_poll() -
         state=SimpleNamespace(
             scheduled_task_service=SimpleNamespace(start=start),
             automation_cutover_guard=SimpleNamespace(require_project_open=require_project_open),
+            automation_scheduler_ownership=SimpleNamespace(is_acquired=True),
         )
     )
 
@@ -107,6 +109,24 @@ async def test_scheduler_does_not_start_in_unsupported_multi_worker_mode(
         state=SimpleNamespace(
             scheduled_task_service=service,
             automation_cutover_guard=guard,
+            automation_scheduler_ownership=SimpleNamespace(is_acquired=True),
+        )
+    )
+
+    assert await _start_scheduled_task_service(app, enabled=True) is False
+    guard.require_project_open.assert_not_awaited()
+    service.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_start_requires_database_lifetime_ownership() -> None:
+    service = SimpleNamespace(start=AsyncMock())
+    guard = SimpleNamespace(require_project_open=AsyncMock())
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            scheduled_task_service=service,
+            automation_cutover_guard=guard,
+            automation_scheduler_ownership=SimpleNamespace(is_acquired=False),
         )
     )
 

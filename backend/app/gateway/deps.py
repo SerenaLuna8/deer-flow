@@ -251,7 +251,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         async with langgraph_runtime(app, startup_config):
             yield
     """
-    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+    from deerflow.persistence.engine import (
+        close_engine,
+        get_engine,
+        get_session_factory,
+        init_engine_from_config,
+    )
     from deerflow.runtime import make_store, make_stream_bridge
     from deerflow.runtime.checkpointer.async_provider import make_checkpointer
     from deerflow.runtime.events.store import make_run_event_store
@@ -263,6 +268,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # Initialize and probe PostgreSQL before opening checkpointer/store pools.
         await init_engine_from_config(config.database)
+        stack.push_async_callback(close_engine)
 
         app.state._raw_checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
@@ -314,6 +320,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from app.automations.cutover import AutomationCutoverGuard
         from app.automations.dispatcher import AutomationDispatcher
         from app.automations.occurrences import AutomationOccurrenceService
+        from app.automations.ownership import AutomationSchedulerOwnership
         from app.automations.readiness import AutomationReadinessService
         from app.automations.reconciliation import AutomationReconciler
         from app.scheduler import ScheduledTaskService
@@ -321,6 +328,16 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         scheduler_config = getattr(config, "scheduler", None)
         effective_scheduler_config = scheduler_config or SchedulerConfig()
+        persistence_engine = get_engine()
+        scheduler_ownership_required = effective_scheduler_config.enabled and _should_reconcile_orphaned_runs()
+        if persistence_engine is None:
+            if scheduler_ownership_required:
+                from app.automations.errors import AutomationUnavailable
+
+                raise AutomationUnavailable("automation-scheduler-ownership")
+            app.state.automation_scheduler_ownership = None
+        else:
+            app.state.automation_scheduler_ownership = AutomationSchedulerOwnership(persistence_engine)
         app.state.automation_cutover_guard = AutomationCutoverGuard(sf)
         app.state.automation_readiness_service = AutomationReadinessService()
         app.state.automation_occurrence_service = AutomationOccurrenceService(
@@ -341,6 +358,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             lease_seconds=effective_scheduler_config.lease_seconds,
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
         )
+
+        # GATEWAY_WORKERS remains a cheap local topology guard. The dedicated
+        # PostgreSQL session lock is the authoritative cross-process owner and
+        # must be held before any automation reconciliation or polling begins.
+        if scheduler_ownership_required:
+            await stack.enter_async_context(app.state.automation_scheduler_ownership.hold())
 
         # Legacy run event store. The store and the matching
         # ``run_events_config`` are both frozen at startup so
@@ -369,17 +392,17 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             # Automation owns its admitted M4 Runs. Reconcile those first so
             # generic orphan recovery cannot erase the distinct interrupted
-            # occurrence outcome. Partial test configs without an explicit
-            # scheduler retain the historic generic-recovery behavior.
-            if scheduler_config is not None:
+            # occurrence outcome. Disabled scheduler configs take no ownership
+            # lock and retain the historic generic-recovery behavior only.
+            if effective_scheduler_config.enabled:
                 from datetime import UTC, datetime
 
-                from app.automations.errors import AutomationError
+                from app.automations.errors import AutomationCutover
 
                 try:
                     await app.state.automation_cutover_guard.require_project_open()
                     await app.state.automation_reconciler.reconcile_restart(datetime.now(UTC))
-                except AutomationError as error:
+                except AutomationCutover as error:
                     logger.warning(
                         "Automation startup reconciliation skipped: code=%s",
                         error.code,
@@ -409,7 +432,6 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             run_manager = getattr(app.state, "run_manager", None)
             if run_manager is not None:
                 await _drain_inflight_runs(run_manager)
-            await close_engine()
 
 
 # ---------------------------------------------------------------------------

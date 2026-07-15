@@ -945,19 +945,6 @@ async def run_agent(
                 except Exception:
                     logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
 
-            # Update threads_meta status based on run outcome
-            if thread_store is not None:
-                try:
-                    final_status = "idle" if record.status == RunStatus.success else record.status.value
-                    await thread_store.update_status(thread_id, final_status)
-                except Exception:
-                    logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
-
-            if ctx.on_run_completed is not None:
-                try:
-                    await ctx.on_run_completed(record)
-                except Exception:
-                    logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
         finally:
             # A private run owns both the agent runtime and file-authority lease
             # until every terminal task completes. These cleanup operations are
@@ -1010,6 +997,22 @@ async def run_agent(
                     )
                 else:
                     await run_manager.set_finalizing(run_id, False)
+
+        # Cleanup is allowed to downgrade a provisional success to the final
+        # authoritative error status. Terminal observers must run only after
+        # those retries finish so every consumer sees the same durable result.
+        if thread_store is not None:
+            try:
+                final_status = "idle" if record.status == RunStatus.success else record.status.value
+                await thread_store.update_status(thread_id, final_status)
+            except Exception:
+                logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+
+        if ctx.on_run_completed is not None:
+            try:
+                await ctx.on_run_completed(record)
+            except Exception:
+                logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
 
         if run_mount_provider is not None and run_mount_user_id is not None and run_mounts:
             try:

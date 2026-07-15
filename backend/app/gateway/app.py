@@ -233,13 +233,17 @@ async def _start_scheduled_task_service(app: FastAPI, *, enabled: bool) -> bool:
         return False
     service = getattr(app.state, "scheduled_task_service", None)
     guard = getattr(app.state, "automation_cutover_guard", None)
-    if service is None or guard is None:
+    ownership = getattr(app.state, "automation_scheduler_ownership", None)
+    if service is None or guard is None or ownership is None:
         logger.warning("Automation scheduler unavailable: code=AUTOMATION_UNAVAILABLE")
         return False
     from app.gateway.deps import _should_reconcile_orphaned_runs
 
     if not _should_reconcile_orphaned_runs():
         logger.warning("Automation scheduler not started: code=AUTOMATION_UNAVAILABLE")
+        return False
+    if not ownership.is_acquired:
+        logger.warning("Automation scheduler ownership unavailable: code=AUTOMATION_UNAVAILABLE")
         return False
     from app.automations.errors import AutomationError
 
@@ -341,7 +345,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         await _start_scheduled_task_service(
             app,
-            enabled=startup_config.scheduler.enabled,
+            enabled=getattr(
+                getattr(startup_config, "scheduler", None),
+                "enabled",
+                False,
+            ),
         )
 
         # Start IM channel service if any channels are configured
