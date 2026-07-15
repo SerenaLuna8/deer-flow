@@ -132,10 +132,10 @@ def sse_event_shapes(resp) -> list[dict]:
 
 
 def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
-    """Register -> create thread -> POST /runs/stream; return SSE event shapes.
+    """Register -> create project Agent/thread -> stream a private run.
 
-    This is the exact wire path the React frontend uses (LangGraph SDK), driven
-    in-process via Starlette's TestClient with the real auth flow.
+    This is the final M4 project-private wire path, driven in-process via
+    Starlette's TestClient with the real auth and asset-authoring flows.
     """
     from starlette.testclient import TestClient
 
@@ -147,10 +147,58 @@ def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
         assert reg.status_code == 201, reg.text
         csrf = client.cookies.get("csrf_token")
         assert csrf, "register must set csrf_token cookie"
+        headers = {"X-CSRF-Token": csrf}
+
+        suffix = uuid.uuid4().hex[:10]
+        project = client.post(
+            "/api/projects",
+            json={"slug": f"replay-{suffix}", "display_name": "Replay project"},
+            headers=headers,
+        )
+        assert project.status_code == 201, project.text
+        project_id = project.json()["id"]
+
+        asset = client.post(
+            f"/api/projects/{project_id}/agents",
+            json={"slug": f"replay-agent-{suffix}", "display_name": "Replay Agent"},
+            headers=headers,
+        )
+        assert asset.status_code == 201, asset.text
+        asset_id = asset.json()["item"]["id"]
+        version = client.post(
+            f"/api/projects/{project_id}/agents/{asset_id}/versions",
+            json={
+                "description": "Deterministic gateway replay",
+                "soul": "Use the exact project tools to complete the request.",
+                "model_ref": "scenario-model",
+                "tool_groups": ["file:read", "file:write"],
+                "skill_version_ids": [],
+                "mcp_version_ids": [],
+                "expected_asset_version": 1,
+            },
+            headers=headers,
+        )
+        assert version.status_code == 201, version.text
+        version_id = version.json()["data"]["id"]
+        published = client.post(
+            f"/api/projects/{project_id}/agents/{asset_id}/versions/{version_id}/publish",
+            json={"expected_asset_version": 2},
+            headers=headers,
+        )
+        assert published.status_code == 200, published.text
 
         thread_id = str(uuid.uuid4())
-        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}}, headers={"X-CSRF-Token": csrf})
-        assert created.status_code == 200, created.text
+        created = client.post(
+            f"/api/projects/{project_id}/private-work/threads",
+            json={
+                "thread_id": thread_id,
+                "agent_asset_id": asset_id,
+                "agent_scope": "project",
+                "metadata": {},
+            },
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
 
         body = {
             "assistant_id": "lead_agent",
@@ -159,6 +207,11 @@ def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
             "context": context,
             "stream_mode": ["values"],
         }
-        with client.stream("POST", f"/api/threads/{thread_id}/runs/stream", json=body, headers={"X-CSRF-Token": csrf}) as resp:
+        with client.stream(
+            "POST",
+            f"/api/projects/{project_id}/private-work/threads/{thread_id}/runs/stream",
+            json=body,
+            headers=headers,
+        ) as resp:
             assert resp.status_code == 200, resp.read().decode()
             return sse_event_shapes(resp)

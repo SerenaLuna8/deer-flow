@@ -18,7 +18,6 @@ from app.gateway.services import start_run
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime import RunManager, RunStatus
-from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.user_context import AUTO, DEFAULT_USER_ID, get_current_user, get_effective_user_id, reset_current_user, resolve_user_id, set_current_user
@@ -63,16 +62,20 @@ class _RepositoryCapturingEventStore(MemoryRunEventStore):
         self.write_owners: list[str | None] = []
 
     async def put(self, **kwargs: Any) -> dict:
-        self.write_owners.append(DbRunEventStore._user_id_from_context())
+        current = get_current_user()
+        self.write_owners.append(str(current.id) if current is not None else None)
         return await super().put(**kwargs)
 
     async def put_batch(self, events: list[dict]) -> list[dict]:
-        self.write_owners.append(DbRunEventStore._user_id_from_context())
+        current = get_current_user()
+        self.write_owners.append(str(current.id) if current is not None else None)
         return await super().put_batch(events)
 
 
 class _RealWorkerHarness:
     def __init__(self) -> None:
+        from support.m4_private_threads import OpenProjectCutoverGuard
+
         self.bridge = _CapturingBridge()
         self.run_store = _RepositoryCapturingRunStore()
         self.run_manager = RunManager(store=self.run_store)
@@ -90,6 +93,7 @@ class _RealWorkerHarness:
                 run_event_store=self.event_store,
                 run_events_config=None,
                 thread_store=self.thread_store,
+                private_work_cutover_guard=OpenProjectCutoverGuard(),
             )
         )
 

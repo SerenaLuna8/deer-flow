@@ -1,5 +1,6 @@
 from typing import Annotated
 
+import pytest
 from _agent_e2e_helpers import FakeToolCallingModel
 from langchain.agents import create_agent
 from langchain.tools import InjectedToolCallId
@@ -429,7 +430,8 @@ class TestSkillContextCapture:
 
 
 class TestSkillContextInjection:
-    def test_skill_reference_injected_not_body(self):
+    @pytest.mark.asyncio
+    async def test_skill_reference_injected_not_body(self):
         model = RecordingFakeModel(
             responses=[
                 AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": "/mnt/skills/public/data-analysis/SKILL.md"}, "id": "r1", "type": "tool_call"}]),
@@ -443,7 +445,7 @@ class TestSkillContextInjection:
             state_schema=ThreadState,
         )
 
-        result = agent.invoke({"messages": [HumanMessage(content="load the analysis skill")]})
+        result = await agent.ainvoke({"messages": [HumanMessage(content="load the analysis skill")]})
 
         assert [e["path"] for e in result["skill_context"]] == ["/mnt/skills/public/data-analysis/SKILL.md"]
         assert "ALWAYS_USE_PANDAS_SENTINEL" not in repr(result["skill_context"])
@@ -454,7 +456,8 @@ class TestSkillContextInjection:
         assert "/mnt/skills/public/data-analysis/SKILL.md" in injected[0].content
         assert "ALWAYS_USE_PANDAS_SENTINEL" not in injected[0].content
 
-    def test_skill_reference_survives_summarization_and_stays_injected(self):
+    @pytest.mark.asyncio
+    async def test_skill_reference_survives_summarization_and_stays_injected(self):
         model = RecordingFakeModel(
             responses=[
                 AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": "/mnt/skills/public/data-analysis/SKILL.md"}, "id": "r1", "type": "tool_call"}]),
@@ -476,10 +479,10 @@ class TestSkillContextInjection:
         )
         config = {"configurable": {"thread_id": "skill-context-summary-test"}}
 
-        first = agent.invoke({"messages": [HumanMessage(content="load the analysis skill")]}, config)
+        first = await agent.ainvoke({"messages": [HumanMessage(content="load the analysis skill")]}, config)
         assert [e["path"] for e in first["skill_context"]] == ["/mnt/skills/public/data-analysis/SKILL.md"]
 
-        second = agent.invoke({"messages": [HumanMessage(content="continue applying it")]}, config)
+        second = await agent.ainvoke({"messages": [HumanMessage(content="continue applying it")]}, config)
 
         assert [e["path"] for e in second["skill_context"]] == ["/mnt/skills/public/data-analysis/SKILL.md"]
         compacted_ids = {m.tool_call_id for m in second["messages"] if isinstance(m, ToolMessage)}

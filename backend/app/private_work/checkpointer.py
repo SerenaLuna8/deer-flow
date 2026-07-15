@@ -316,9 +316,10 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         ):
             try:
                 item = await self._raw.aget_tuple(clean_config)
-                if item is None:
-                    raise PrivateWorkNotFound(self._context.request_id)
-                self._validate_marker(item, thread_id=thread_id)
+                if item is not None:
+                    self._validate_marker(item, thread_id=thread_id)
+                # Pending writes are a first-class saver operation: LangGraph
+                # may emit them before the matching checkpoint row exists.
                 await self._raw.aput_writes(
                     clean_config,
                     writes,

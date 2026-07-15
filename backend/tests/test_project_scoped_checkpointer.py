@@ -78,11 +78,17 @@ async def test_scoped_checkpointer_rejects_missing_or_mismatched_marker(
 
     await _create_thread(seed)
     raw = InMemorySaver()
-    await _raw_checkpoint(raw, "checkpoint-thread", marker)
+    raw_config = await _raw_checkpoint(raw, "checkpoint-thread", marker)
     wrapper = ProjectScopedCheckpointer(raw, seed.factory).for_context(seed.owner_a)
 
     with pytest.raises(PrivateWorkNotFound):
         await wrapper.aget_tuple(_config("checkpoint-thread"))
+    with pytest.raises(PrivateWorkNotFound):
+        await wrapper.aput_writes(
+            raw_config,
+            [("messages", "must not cross marker boundary")],
+            "rejected-task",
+        )
 
 
 @pytest.mark.asyncio
@@ -259,6 +265,62 @@ class _PauseableSaver(InMemorySaver):
     async def adelete_thread(self, thread_id: str) -> None:
         self.delete_entered.set()
         await super().adelete_thread(thread_id)
+
+
+class _MissingCheckpointBarrierSaver(InMemorySaver):
+    """Expose LangGraph's valid pending-writes-before-checkpoint ordering."""
+
+    def __init__(self, checkpoint_id: str) -> None:
+        super().__init__()
+        self._checkpoint_id = checkpoint_id
+        self.missing_read = asyncio.Event()
+        self.release_missing_read = asyncio.Event()
+
+    async def aget_tuple(self, config, *args, **kwargs):
+        item = await super().aget_tuple(config, *args, **kwargs)
+        configurable = config.get("configurable", {})
+        if item is None and configurable.get("checkpoint_id") == self._checkpoint_id:
+            self.missing_read.set()
+            await self.release_missing_read.wait()
+        return item
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_scoped_put_writes_allows_pending_writes_before_checkpoint_put(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.checkpointer import ProjectScopedCheckpointer
+
+    record = await _create_thread(seed, "checkpoint-handoff-thread")
+    checkpoint = empty_checkpoint()
+    checkpoint_id = checkpoint["id"]
+    raw = _MissingCheckpointBarrierSaver(checkpoint_id)
+    wrapper = ProjectScopedCheckpointer(raw, seed.factory).for_context(seed.owner_a)
+    pending_config = _config(record.thread_id, checkpoint_id=checkpoint_id)
+
+    writes_task = asyncio.create_task(
+        wrapper.aput_writes(
+            pending_config,
+            [("messages", "concurrent")],
+            "concurrent-task",
+        )
+    )
+    await asyncio.wait_for(raw.missing_read.wait(), timeout=2)
+    put_task = asyncio.create_task(
+        wrapper.aput(
+            _config(record.thread_id),
+            checkpoint,
+            {"source": "loop", "step": 0, "parents": {}},
+            {},
+        )
+    )
+    await asyncio.sleep(0)
+    raw.release_missing_read.set()
+
+    written = await asyncio.wait_for(put_task, timeout=2)
+    await asyncio.wait_for(writes_task, timeout=2)
+    assert await raw.aget_tuple(written) is not None
 
 
 @pytest.mark.asyncio

@@ -1237,7 +1237,7 @@ class TestSkillAllowedTools:
         assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
 
     @pytest.mark.anyio
-    async def test_empty_allowed_tools_contributes_no_tools(self, classes, base_config, mock_agent, msg, caplog):
+    async def test_empty_allowed_tools_contributes_no_tools(self, classes, base_config, mock_agent, msg):
         SubagentExecutor = classes["SubagentExecutor"]
 
         final_state = {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
@@ -1248,12 +1248,16 @@ class TestSkillAllowedTools:
         async def load_skills():
             return [_skill("empty", []), _skill("reader", ["read_file"])]
 
-        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock, caplog.at_level("INFO"):
+        with (
+            patch.object(executor, "_load_skills", load_skills),
+            patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock,
+            patch("deerflow.skills.tool_policy.logger.info") as log_info,
+        ):
             await executor._aexecute("Task")
 
         assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["read_file"]
         assert [tool.name for tool in executor.tools] == ["bash", "read_file", "web_search"]
-        assert "declared empty allowed-tools" in caplog.text
+        log_info.assert_any_call("Skill %s declared empty allowed-tools", "empty")
 
     @pytest.mark.anyio
     async def test_skill_load_failure_fails_without_creating_agent(self, classes, base_config, mock_agent):

@@ -782,6 +782,27 @@ def test_private_skill_root_creation_failure_is_stable_and_path_free(monkeypatch
     assert "private-host-path-sentinel" not in str(captured.value)
 
 
+def test_private_skill_root_canonicalizes_temp_directory_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.private_work import asset_runtime as runtime_module
+
+    canonical_parent = tmp_path / "canonical"
+    canonical_parent.mkdir()
+    created = canonical_parent / "deerflow-private-run-1"
+    created.mkdir()
+    alias_parent = tmp_path / "alias"
+    alias_parent.symlink_to(canonical_parent, target_is_directory=True)
+    aliased = alias_parent / created.name
+    monkeypatch.setattr(runtime_module.tempfile, "mkdtemp", lambda **_kwargs: str(aliased))
+
+    root = runtime_module._create_private_skill_root("run-1", "req-canonical")
+
+    assert root == created.resolve()
+    assert not root.is_symlink()
+
+
 @pytest.mark.postgres
 @pytest.mark.anyio
 async def test_materialization_preserves_stable_error_when_temp_cleanup_persists(

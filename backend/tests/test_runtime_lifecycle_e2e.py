@@ -132,8 +132,8 @@ class _ScriptedAgent:
 
 
 def _make_agent_factory(controller: _RunController, **agent_kwargs):
-    def factory(*, config):
-        del config
+    def factory(*, config, private_runtime=None):
+        del config, private_runtime
         agent = _ScriptedAgent(controller, **agent_kwargs)
         controller.instances.append(agent)
         return agent
@@ -310,15 +310,76 @@ def _register_user(client, *, email: str = "runtime-e2e@example.com") -> str:
     return csrf_token
 
 
-def _create_thread(client, csrf_token: str) -> str:
+def _assert_legacy_thread_create_closed(client, csrf_token: str) -> None:
     thread_id = str(uuid.uuid4())
     response = client.post(
         "/api/threads",
         json={"thread_id": thread_id, "metadata": {"purpose": "runtime-lifecycle-e2e"}},
         headers={"X-CSRF-Token": csrf_token},
     )
-    assert response.status_code == 200, response.text
-    return thread_id
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "PRIVATE_WORK_CUTOVER"
+
+
+def _create_private_project_agent_thread(
+    client,
+    csrf_token: str,
+    *,
+    slug: str,
+) -> tuple[str, str]:
+    headers = {"X-CSRF-Token": csrf_token}
+    project = client.post(
+        "/api/projects",
+        json={"slug": slug, "display_name": slug.replace("-", " ").title()},
+        headers=headers,
+    )
+    assert project.status_code == 201, project.text
+    project_id = project.json()["id"]
+
+    asset = client.post(
+        f"/api/projects/{project_id}/agents",
+        json={"slug": f"{slug}-agent", "display_name": "Runtime lifecycle agent"},
+        headers=headers,
+    )
+    assert asset.status_code == 201, asset.text
+    asset_id = asset.json()["item"]["id"]
+
+    version = client.post(
+        f"/api/projects/{project_id}/agents/{asset_id}/versions",
+        json={
+            "description": "Runtime lifecycle E2E",
+            "soul": "Run the deterministic lifecycle test.",
+            "model_ref": "fake-test-model",
+            "tool_groups": [],
+            "skill_version_ids": [],
+            "mcp_version_ids": [],
+            "expected_asset_version": 1,
+        },
+        headers=headers,
+    )
+    assert version.status_code == 201, version.text
+    version_id = version.json()["data"]["id"]
+
+    published = client.post(
+        f"/api/projects/{project_id}/agents/{asset_id}/versions/{version_id}/publish",
+        json={"expected_asset_version": 2},
+        headers=headers,
+    )
+    assert published.status_code == 200, published.text
+
+    thread_id = str(uuid.uuid4())
+    thread = client.post(
+        f"/api/projects/{project_id}/private-work/threads",
+        json={
+            "thread_id": thread_id,
+            "agent_asset_id": asset_id,
+            "agent_scope": "project",
+            "metadata": {"purpose": "runtime-lifecycle-e2e"},
+        },
+        headers=headers,
+    )
+    assert thread.status_code == 201, thread.text
+    return project_id, thread_id
 
 
 def _run_body(**overrides) -> dict[str, Any]:
@@ -503,11 +564,16 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
         TestClient(isolated_app) as client,
     ):
         csrf_token = _register_user(client)
-        thread_id = _create_thread(client, csrf_token)
+        project_id, thread_id = _create_private_project_agent_thread(
+            client,
+            csrf_token,
+            slug="runtime-lifecycle",
+        )
+        prefix = f"/api/projects/{project_id}/private-work/threads/{thread_id}"
 
         with client.stream(
             "POST",
-            f"/api/threads/{thread_id}/runs/stream",
+            f"{prefix}/runs/stream",
             json=_run_body(),
             headers={"X-CSRF-Token": csrf_token},
         ) as response:
@@ -521,18 +587,21 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
         assert events[1]["data"]["title"] == "Lifecycle E2E"
         assert events[1]["data"]["messages"][-1]["content"] == "Lifecycle complete."
 
-        run = client.get(f"/api/threads/{thread_id}/runs/{run_id}")
+        run = client.get(f"{prefix}/runs/{run_id}")
         assert run.status_code == 200, run.text
         assert run.json()["status"] == "success"
 
-        thread = client.get(f"/api/threads/{thread_id}")
+        thread = client.get(prefix)
         assert thread.status_code == 200, thread.text
         assert thread.json()["status"] == "idle"
-        assert thread.json()["values"]["title"] == "Lifecycle E2E"
 
-        messages = client.get(f"/api/threads/{thread_id}/runs/{run_id}/messages")
+        state = client.get(f"{prefix}/state")
+        assert state.status_code == 200, state.text
+        assert state.json()["values"]["title"] == "Lifecycle E2E"
+
+        messages = client.get(f"{prefix}/messages")
         assert messages.status_code == 200, messages.text
-        message_events = messages.json()["data"]
+        message_events = messages.json()
         event_types = [row["event_type"] for row in message_events]
         assert "llm.human.input" in event_types
         assert "llm.ai.response" in event_types
@@ -540,200 +609,33 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
         assert any(row["content"]["content"] == "Lifecycle complete." for row in message_events if row["event_type"] == "llm.ai.response")
 
 
-def test_stream_run_executes_real_lead_agent_setup_agent_business_path(isolated_app, isolated_deer_flow_home: Path):
-    """A runtime stream should execute real lead-agent business code and tools."""
+def test_legacy_runtime_mutation_routes_are_closed_after_private_cutover(isolated_app):
+    """Fresh M4 installs must not revive the unscoped lifecycle API."""
     from starlette.testclient import TestClient
 
-    agent_name = "runtime-business-agent"
-
-    with (
-        patch(
-            "deerflow.agents.lead_agent.agent.create_chat_model",
-            new=_build_fake_setup_agent_model(agent_name),
-        ),
-        TestClient(isolated_app) as client,
-    ):
-        csrf_token = _register_user(client, email="business-e2e@example.com")
-        auth_user_id = client.get("/api/v1/auth/me").json()["id"]
-        thread_id = _create_thread(client, csrf_token)
-
-        body = _run_body(
-            input={
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": f"Create a custom agent named {agent_name}.",
-                    }
-                ]
-            },
-            context={
-                "agent_name": agent_name,
-                "is_bootstrap": True,
-                "thinking_enabled": False,
-                "is_plan_mode": False,
-                "subagent_enabled": False,
-            },
+    with TestClient(isolated_app) as client:
+        csrf_token = _register_user(client, email="legacy-runtime-closed@example.com")
+        headers = {"X-CSRF-Token": csrf_token}
+        thread_id = str(uuid.uuid4())
+        run_id = str(uuid.uuid4())
+        requests = (
+            client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}}, headers=headers),
+            client.post("/api/threads/search", json={"limit": 20}, headers=headers),
+            client.post(f"/api/threads/{thread_id}/runs", json=_run_body(), headers=headers),
+            client.post(
+                f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=interrupt",
+                headers=headers,
+            ),
+            client.post(
+                f"/api/threads/{thread_id}/state",
+                json={"values": {"title": "must not persist"}},
+                headers=headers,
+            ),
         )
 
-        with client.stream(
-            "POST",
-            f"/api/threads/{thread_id}/runs/stream",
-            json=body,
-            headers={"X-CSRF-Token": csrf_token},
-        ) as response:
-            assert response.status_code == 200, response.read().decode()
-            run_id = _run_id_from_response(response)
-            transcript = _drain_stream(response, timeout=20.0)
-
-        events = _parse_sse(transcript)
-        event_names = [event["event"] for event in events]
-        assert "metadata" in event_names
-        assert "error" not in event_names, transcript
-        assert event_names[-1] == "end"
-
-        run = _wait_for_status(client, thread_id, run_id, "success", timeout=10.0)
-        assert run["assistant_id"] == "lead_agent"
-
-        expected_soul = isolated_deer_flow_home / "users" / auth_user_id / "agents" / agent_name / "SOUL.md"
-        assert expected_soul.exists(), f"setup_agent did not write SOUL.md. tmp tree: {sorted(str(p.relative_to(isolated_deer_flow_home)) for p in isolated_deer_flow_home.rglob('SOUL.md'))}"
-        assert f"Agent name: {agent_name}" in expected_soul.read_text(encoding="utf-8")
-        assert not (isolated_deer_flow_home / "users" / "default" / "agents" / agent_name).exists()
-
-
-def test_cancel_interrupt_stops_running_background_run(isolated_app):
-    """HTTP cancel?action=interrupt should stop the worker and persist interruption."""
-    from starlette.testclient import TestClient
-
-    controller = _RunController()
-    factory = _make_agent_factory(
-        controller,
-        title="Interrupt candidate",
-        answer="This run should be interrupted.",
-        block_after_first_chunk=True,
-    )
-
-    with (
-        patch("app.gateway.services.resolve_agent_factory", return_value=factory),
-        TestClient(isolated_app) as client,
-    ):
-        csrf_token = _register_user(client, email="interrupt-e2e@example.com")
-        thread_id = _create_thread(client, csrf_token)
-
-        created = client.post(
-            f"/api/threads/{thread_id}/runs",
-            json=_run_body(),
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert created.status_code == 200, created.text
-        run_id = created.json()["run_id"]
-        assert controller.started.wait(5), "fake agent never started"
-
-        cancelled = client.post(
-            f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=interrupt",
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert cancelled.status_code == 204, cancelled.text
-        assert controller.cancelled.wait(5), "fake agent task was not cancelled"
-
-        run = _wait_for_status(client, thread_id, run_id, "interrupted")
-        assert run["status"] == "interrupted"
-
-        thread = client.get(f"/api/threads/{thread_id}")
-        assert thread.status_code == 200, thread.text
-        assert thread.json()["status"] == "idle"
-
-
-def test_cancel_interrupt_generates_missing_title_from_checkpoint(isolated_app_with_title):
-    """Interrupted first-turn runs should still persist an automatic thread title."""
-    from starlette.testclient import TestClient
-
-    controller = _RunController()
-    factory = _make_agent_factory(
-        controller,
-        title="",
-        answer="This run should be interrupted before a title is written.",
-        block_after_first_chunk=True,
-        write_title=False,
-    )
-
-    with (
-        patch("app.gateway.services.resolve_agent_factory", return_value=factory),
-        TestClient(isolated_app_with_title) as client,
-    ):
-        csrf_token = _register_user(client, email="interrupt-title-e2e@example.com")
-        thread_id = _create_thread(client, csrf_token)
-
-        created = client.post(
-            f"/api/threads/{thread_id}/runs",
-            json=_run_body(),
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert created.status_code == 200, created.text
-        run_id = created.json()["run_id"]
-        assert controller.checkpoint_written.wait(5), "fake agent never wrote checkpoint"
-
-        cancelled = client.post(
-            f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=interrupt",
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert cancelled.status_code == 204, cancelled.text
-
-        thread = client.get(f"/api/threads/{thread_id}")
-        assert thread.status_code == 200, thread.text
-        assert thread.json()["values"]["title"] == "Run lifecycle E2E prompt"
-
-        search = client.post("/api/threads/search", json={"limit": 20}, headers={"X-CSRF-Token": csrf_token})
-        assert search.status_code == 200, search.text
-        matching = [item for item in search.json() if item["thread_id"] == thread_id]
-        assert matching[0]["values"]["title"] == "Run lifecycle E2E prompt"
-
-
-def test_cancel_wait_false_generates_title_from_graph_input_before_checkpoint(isolated_app_with_title):
-    """Fire-and-forget cancel should title early interruptions before checkpoint."""
-    from starlette.testclient import TestClient
-
-    controller = _RunController()
-    factory = _make_agent_factory(
-        controller,
-        title="",
-        answer="This answer should never be checkpointed.",
-        block_before_checkpoint=True,
-        write_title=False,
-    )
-
-    with (
-        patch("app.gateway.services.resolve_agent_factory", return_value=factory),
-        TestClient(isolated_app_with_title) as client,
-    ):
-        csrf_token = _register_user(client, email="interrupt-title-early-e2e@example.com")
-        thread_id = _create_thread(client, csrf_token)
-
-        created = client.post(
-            f"/api/threads/{thread_id}/runs",
-            json=_run_body(),
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert created.status_code == 200, created.text
-        run_id = created.json()["run_id"]
-        assert controller.started.wait(5), "fake agent never started"
-        assert not controller.checkpoint_written.is_set()
-
-        cancelled = client.post(
-            f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=false&action=interrupt",
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert cancelled.status_code == 202, cancelled.text
-        assert controller.cancelled.wait(5), "fake agent task was not cancelled"
-        assert not controller.checkpoint_written.is_set()
-
-        run = _wait_for_status(client, thread_id, run_id, "interrupted")
-        assert run["status"] == "interrupted"
-
-        thread = _wait_for_thread_title(client, thread_id, "Run lifecycle E2E prompt")
-        assert thread["values"]["title"] == "Run lifecycle E2E prompt"
-
-        matching = _wait_for_search_title(client, csrf_token, thread_id, "Run lifecycle E2E prompt")
-        assert matching["values"]["title"] == "Run lifecycle E2E prompt"
+        for response in requests:
+            assert response.status_code == 409, response.text
+            assert response.json()["detail"]["code"] == "PRIVATE_WORK_CUTOVER"
 
 
 @pytest.mark.anyio
@@ -782,74 +684,3 @@ async def test_sse_consumer_disconnect_cancels_inflight_run():
             record.task.cancel()
             with suppress(asyncio.CancelledError):
                 await record.task
-
-
-def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
-    """HTTP cancel?action=rollback should restore the checkpoint captured before run start."""
-    from starlette.testclient import TestClient
-
-    controller = _RunController()
-    factory = _make_agent_factory(
-        controller,
-        title="During rollback run",
-        answer="This answer should be rolled back.",
-        block_after_first_chunk=True,
-    )
-
-    with (
-        patch("app.gateway.services.resolve_agent_factory", return_value=factory),
-        TestClient(isolated_app) as client,
-    ):
-        csrf_token = _register_user(client, email="rollback-e2e@example.com")
-        thread_id = _create_thread(client, csrf_token)
-
-        before = client.post(
-            f"/api/threads/{thread_id}/state",
-            json={
-                "values": {
-                    "title": "Before rollback",
-                    "messages": [
-                        HumanMessage(
-                            content="Human message before rollback",
-                            id="pre-run-human-message",
-                        ).model_dump(),
-                    ],
-                },
-                "as_node": "test_seed",
-            },
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert before.status_code == 200, before.text
-        assert before.json()["values"]["title"] == "Before rollback"
-        seeded = client.get(f"/api/threads/{thread_id}/state")
-        assert seeded.status_code == 200, seeded.text
-        assert seeded.json()["values"]["messages"] == before.json()["values"]["messages"]
-        assert seeded.json()["values"]["messages"][0]["content"] == "Human message before rollback"
-
-        created = client.post(
-            f"/api/threads/{thread_id}/runs",
-            json=_run_body(),
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert created.status_code == 200, created.text
-        run_id = created.json()["run_id"]
-        assert controller.checkpoint_written.wait(5), "fake agent did not write in-run checkpoint"
-
-        during = client.get(f"/api/threads/{thread_id}/state")
-        assert during.status_code == 200, during.text
-        assert during.json()["values"]["title"] == "During rollback run"
-
-        rolled_back = client.post(
-            f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=rollback",
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert rolled_back.status_code == 204, rolled_back.text
-        assert controller.cancelled.wait(5), "rollback did not cancel the worker task"
-
-        run = _wait_for_status(client, thread_id, run_id, "error")
-        assert run["status"] == "error"
-
-        after = client.get(f"/api/threads/{thread_id}/state")
-        assert after.status_code == 200, after.text
-        assert after.json()["values"]["title"] == "Before rollback"
-        assert after.json()["values"]["messages"] == seeded.json()["values"]["messages"]

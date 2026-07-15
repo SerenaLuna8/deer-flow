@@ -89,7 +89,9 @@ export type MockAPIOptions = {
     max_total_size: number;
   };
   suggestionsEnabled?: boolean;
-  runStreamHandler?: (route: Route) => unknown;
+  runStreamHandler?: (route: Route) => {
+    values: Record<string, unknown>;
+  };
 };
 
 const DEFAULT_SKILLS: MockSkill[] = [
@@ -255,6 +257,42 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       thread,
       ...threads.filter((existing) => existing.thread_id !== thread.thread_id),
     ];
+  };
+
+  const applyRunStreamValues = (
+    route: Route,
+    values: Record<string, unknown>,
+  ) => {
+    const threadId = runStreamThreadId(route);
+    const existingThread = threads.find(
+      (thread) => thread.thread_id === threadId,
+    );
+    const nextThread: MockThread = {
+      ...(existingThread ?? {
+        thread_id: threadId,
+        title: threadId === MOCK_SIDECAR_THREAD_ID ? "Side chat" : "New Chat",
+      }),
+      thread_id: threadId,
+      updated_at: new Date().toISOString(),
+    };
+    if (Array.isArray(values.messages)) {
+      nextThread.messages = values.messages;
+    }
+    if (Array.isArray(values.artifacts)) {
+      nextThread.artifacts = values.artifacts.filter(
+        (artifact): artifact is string => typeof artifact === "string",
+      );
+    }
+    if (typeof values.title === "string") {
+      nextThread.title = values.title;
+    }
+    if (
+      values.goal === null ||
+      (typeof values.goal === "object" && values.goal !== null)
+    ) {
+      nextThread.goal = values.goal as Record<string, unknown> | null;
+    }
+    upsertThread(nextThread);
   };
 
   const threadSearchResult = (thread: MockThread) => ({
@@ -999,7 +1037,9 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // Run stream — returns a minimal SSE response with an AI message
   const handleMockRunStream = (route: Route) => {
     if (options?.runStreamHandler) {
-      return options.runStreamHandler(route);
+      const result = options.runStreamHandler(route);
+      applyRunStreamValues(route, result.values);
+      return fulfillRunStreamValues(route, result.values);
     }
     const threadId = runStreamThreadId(route);
     const existingThread = threads.find(
@@ -1007,15 +1047,9 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     );
     const fallbackGoal = threads.find((thread) => thread.goal)?.goal ?? null;
     const goal = existingThread?.goal ?? fallbackGoal;
-    upsertThread({
-      thread_id: threadId,
-      title: threadId === MOCK_SIDECAR_THREAD_ID ? "Side chat" : "New Chat",
-      updated_at: new Date().toISOString(),
-      goal,
-      metadata: existingThread?.metadata,
-      messages: mockStreamMessages(route),
-    });
-    return handleRunStream(route, { goal });
+    const values = { goal, messages: mockStreamMessages(route) };
+    applyRunStreamValues(route, values);
+    return fulfillRunStreamValues(route, values);
   };
 
   void page.route("**/api/langgraph/runs/stream", handleMockRunStream);
@@ -1161,6 +1195,13 @@ export function handleRunStream(
   values: Record<string, unknown> = {},
   inputMessages?: unknown[],
 ) {
+  return fulfillRunStreamValues(route, {
+    ...values,
+    messages: mockStreamMessages(route, inputMessages),
+  });
+}
+
+function fulfillRunStreamValues(route: Route, values: Record<string, unknown>) {
   const threadId = runStreamThreadId(route);
   const events = [
     {
@@ -1169,10 +1210,7 @@ export function handleRunStream(
     },
     {
       event: "values",
-      data: {
-        ...values,
-        messages: mockStreamMessages(route, inputMessages),
-      },
+      data: values,
     },
     { event: "end", data: {} },
   ];

@@ -33,8 +33,14 @@ RUNTIME_USER_ID_HEADER_NAME = "X-DeerFlow-Runtime-User-Id"
 
 
 @pytest.fixture(autouse=True)
-def _stub_app_config():
+def _stub_app_config(monkeypatch):
+    from support.m4_private_threads import OpenProjectCutoverGuard
+
     set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
+    monkeypatch.setattr(
+        "app.gateway.deps.get_private_work_cutover_guard",
+        lambda _request: OpenProjectCutoverGuard(),
+    )
     yield
     reset_app_config()
 

@@ -9,6 +9,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from support.m4_private_threads import OpenProjectCutoverGuard
+
+from app.private_work.errors import PrivateWorkCutover
+
+
+class _RejectingLegacyCutoverGuard:
+    async def require_legacy_open(self) -> None:
+        raise PrivateWorkCutover("req-legacy-system-asset")
 
 
 def _legacy_run_body() -> SimpleNamespace:
@@ -68,6 +76,11 @@ async def test_legacy_start_rejects_project_agent_before_checkpoint_or_run_launc
     request = SimpleNamespace(
         state=SimpleNamespace(user=None, auth_source=None),
         headers={},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                private_work_cutover_guard=_RejectingLegacyCutoverGuard(),
+            )
+        ),
     )
 
     with pytest.raises(HTTPException) as captured:
@@ -117,6 +130,11 @@ async def test_legacy_start_preserves_system_agent_runtime(
     request = SimpleNamespace(
         state=SimpleNamespace(user=None, auth_source=None),
         headers={},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                private_work_cutover_guard=OpenProjectCutoverGuard(),
+            )
+        ),
     )
 
     result = await services.start_run(_legacy_run_body(), "system-thread", request)

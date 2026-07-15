@@ -451,6 +451,22 @@ def test_explicit_user_reconciliation_builds_one_ordered_absorption(tmp_path: Pa
     assert len(plan.per_source_reconciliations[1].absorbed_users) == 1
 
 
+@pytest.mark.asyncio
+async def test_legacy_private_rows_refuse_direct_final_schema_target_before_write(tmp_path: Path) -> None:
+    source = tmp_path / "legacy-private.db"
+    _add_later_user_business_rows(source, "legacy-owner")
+
+    with pytest.raises(MigrationError, match="pre-M4 PostgreSQL target"):
+        await _migrate_business_table(
+            object(),
+            source,
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+            "threads_meta",
+            dry_run=True,
+            union_reference_keys=frozenset(),
+        )
+
+
 @pytest.mark.parametrize("failure", ["fingerprint", "count", "canonical-role", "later-role"])
 def test_user_reconciliation_gates_fail_closed(tmp_path: Path, failure: str) -> None:
     first = tmp_path / "first.db"
@@ -1222,6 +1238,7 @@ def test_real_two_source_preflight_conflict_reaches_cli_as_safe_fields(tmp_path:
 def test_channel_active_identity_partial_unique_ignores_revoked_only() -> None:
     base = {
         "id": "c",
+        "project_id": "p",
         "owner_user_id": "u",
         "provider": "slack",
         "external_account_id": "a",
@@ -1254,7 +1271,6 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
     _add_scheduled_task(sources[0], "task-first", "canonical-user")
     _user_source_with_role(sources[1], "legacy-admin", "same@example.invalid", "admin")
     _add_scheduled_task(sources[1], "task-second", "legacy-admin")
-    _add_later_user_business_rows(sources[1], "legacy-admin")
     request = _reconciliation_request(sources)
     plan = _preflight_cross_source(sources, request)
 
@@ -1284,9 +1300,6 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
         assert await connection.fetchval("SELECT system_role FROM users") == "system_admin"
         assert await connection.fetchval("SELECT COUNT(*) FROM scheduled_tasks") == 2
         assert await connection.fetchval("SELECT COUNT(DISTINCT user_id) FROM scheduled_tasks") == 1
-        for table in ("threads_meta", "runs", "run_events", "feedback"):
-            assert await connection.fetchval(f'SELECT COUNT(*) FROM "{table}"') == 1
-            assert await connection.fetchval(f'SELECT COUNT(*) FROM "{table}" WHERE user_id=$1', "canonical-user") == 1
         second_sha = hashlib.sha256(sources[1].read_bytes()).hexdigest()
         absorbed_key = plan.per_source_reconciliations[1].absorbed_users[0].source_key
         ledger = await connection.fetchrow(
@@ -1297,7 +1310,7 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
         assert ledger is not None
         assert ledger["status"] == "reconciled"
         assert ledger["target_key"] == plan.per_source_reconciliations[1].absorbed_users[0].target_key
-        for table in ("threads_meta", "runs", "run_events", "feedback", "scheduled_tasks"):
+        for table in ("scheduled_tasks",):
             source_rows = normalize_business_rows(sources[1], table)
             remapped = _apply_user_reconciliation(table, source_rows, plan.per_source_reconciliations[1])
             assert len(remapped) == 1
@@ -1314,10 +1327,6 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
         before_replay = (
             await connection.fetchval("SELECT COUNT(*) FROM users"),
             await connection.fetchval("SELECT COUNT(*) FROM scheduled_tasks"),
-            await connection.fetchval("SELECT COUNT(*) FROM threads_meta"),
-            await connection.fetchval("SELECT COUNT(*) FROM runs"),
-            await connection.fetchval("SELECT COUNT(*) FROM run_events"),
-            await connection.fetchval("SELECT COUNT(*) FROM feedback"),
             await connection.fetchval("SELECT COUNT(*) FROM migration_ledger"),
         )
     finally:
@@ -1329,10 +1338,6 @@ async def test_real_postgres_two_source_user_reconciliation_and_ledger_replay(
         after_replay = (
             await connection.fetchval("SELECT COUNT(*) FROM users"),
             await connection.fetchval("SELECT COUNT(*) FROM scheduled_tasks"),
-            await connection.fetchval("SELECT COUNT(*) FROM threads_meta"),
-            await connection.fetchval("SELECT COUNT(*) FROM runs"),
-            await connection.fetchval("SELECT COUNT(*) FROM run_events"),
-            await connection.fetchval("SELECT COUNT(*) FROM feedback"),
             await connection.fetchval("SELECT COUNT(*) FROM migration_ledger"),
         )
         assert after_replay == before_replay

@@ -7,8 +7,11 @@ Run from repo root:
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import doctor
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # ---------------------------------------------------------------------------
 # check_python
@@ -41,6 +44,28 @@ class TestCheckConfigExists:
 
 
 class TestCheckPostgres:
+    def test_root_make_doctor_exposes_backend_scripts(self):
+        makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+
+        assert "cd backend && PYTHONPATH=. uv run python ../scripts/doctor.py" in makefile
+
+    def test_backend_postgres_check_preserves_computed_health(self, tmp_path, monkeypatch):
+        from scripts import check_postgres
+
+        result = check_postgres.PostgresCheckResult(
+            host="db.internal",
+            port=5432,
+            database="deerflow",
+            current_revision="0011_private_artifact_tombstone",
+            head_revision="0011_private_artifact_tombstone",
+            revision_matches=True,
+        )
+        monkeypatch.setattr(check_postgres, "run_check", lambda _url: result)
+
+        payload = doctor._run_postgres_check(tmp_path, "postgresql://db.internal/deerflow")
+
+        assert payload["healthy"] is True
+
     def test_database_url_is_required(self, tmp_path, monkeypatch):
         monkeypatch.delenv("DATABASE_URL", raising=False)
         result = doctor.check_postgres(tmp_path)

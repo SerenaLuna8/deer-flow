@@ -15,6 +15,7 @@ from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.file_authority import require_private_file_authority
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
@@ -1468,6 +1469,15 @@ def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
         runtime: Tool runtime containing state and context.
     """
     if runtime is None:
+        return
+
+    # Project-private runs restore their sandbox projection before the agent
+    # starts.  Their thread-data paths intentionally remain container paths
+    # (``/mnt/user-data/...``), even for LocalSandboxProvider, because the
+    # provider owns the host mapping.  Creating those paths on the gateway
+    # host would bypass that mapping and fails on hosts where ``/mnt`` is
+    # read-only (for example macOS).
+    if require_private_file_authority(runtime.context or {}) is not None:
         return
 
     # Only create directories for local sandbox

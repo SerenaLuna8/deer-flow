@@ -79,7 +79,7 @@ def _remove_private_skill_tree(root: Path) -> None:
 def _create_private_skill_root(run_id: str, request_id: str) -> Path:
     safe_run_id = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)[:80]
     try:
-        return Path(tempfile.mkdtemp(prefix=f"deerflow-private-{safe_run_id}-"))
+        return Path(tempfile.mkdtemp(prefix=f"deerflow-private-{safe_run_id}-")).resolve()
     except OSError:
         raise PrivateWorkUnavailable(request_id) from None
 

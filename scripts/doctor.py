@@ -682,7 +682,8 @@ def _run_postgres_check(_project_root: Path, database_url: str) -> dict:
     """Delegate all database SQL/revision checks to the backend read-only checker."""
     from scripts.check_postgres import run_check
 
-    return asdict(run_check(database_url))
+    result = run_check(database_url)
+    return {**asdict(result), "healthy": result.healthy}
 
 
 def check_postgres(project_root: Path) -> CheckResult:

@@ -22,7 +22,7 @@ from typing import Any
 
 import asyncpg
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-from sqlalchemy import JSON, Boolean, DateTime, LargeBinary
+from sqlalchemy import JSON, Boolean, DateTime, LargeBinary, Uuid
 
 try:
     from scripts.sqlite_inventory import SQLiteInventory, inspect_sqlite, open_read_only
@@ -154,6 +154,12 @@ USER_REFERENCE_ALLOWLIST = frozenset(
         ("channel_conversations", "owner_user_id"),
     }
 )
+_SOURCE_TYPE_COLUMN_ALIASES = {
+    ("threads_meta", "user_id"): "owner_user_id",
+    ("runs", "user_id"): "owner_user_id",
+    ("run_events", "user_id"): "owner_user_id",
+    ("feedback", "user_id"): "owner_user_id",
+}
 
 
 class MigrationErrorCode(StrEnum):
@@ -354,13 +360,6 @@ class UnionPlan:
     per_source_reconciliations: tuple[SourceReconciliation, ...] = ()
 
 
-def _known_orm_columns() -> dict[str, frozenset[str]]:
-    import deerflow.persistence.models  # noqa: F401
-    from deerflow.persistence.base import Base
-
-    return {table: frozenset(column.name for column in Base.metadata.tables[table].columns) for table in ORM_TABLE_ORDER}
-
-
 def inspect_source(source: Path) -> SourceInspection:
     try:
         inventory = inspect_sqlite(source)
@@ -374,7 +373,6 @@ def inspect_source(source: Path) -> SourceInspection:
                 code=MigrationErrorCode.FINGERPRINT,
                 source_sha256=inventory.sha256,
             )
-    known_columns = _known_orm_columns()
     deferred = []
 
     def schema_error(message: str, table_name: str) -> MigrationError:
@@ -403,8 +401,8 @@ def inspect_source(source: Path) -> SourceInspection:
                     source_sha256=inventory.sha256,
                 )
             deferred.append(table.name)
-        if table.name in known_columns:
-            unknown = sorted(set(table.columns) - known_columns[table.name])
+        if table.name in SOURCE_SCHEMA_SIGNATURES:
+            unknown = sorted(set(table.columns) - SOURCE_SCHEMA_SIGNATURES[table.name])
             if unknown:
                 raise schema_error(f"{table.name} has unknown columns: {', '.join(unknown)}", table.name)
             if frozenset(table.columns) != SOURCE_SCHEMA_SIGNATURES[table.name]:
@@ -549,6 +547,11 @@ def _normalize_value(value: object, column: Any, *, table: str) -> object:
         return bool(value)
     if isinstance(column.type, DateTime):
         return _parse_datetime(value, table=table, column=column.name)
+    if isinstance(column.type, Uuid):
+        try:
+            return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise MigrationError(f"invalid UUID in {table}.{column.name}") from exc
     if isinstance(column.type, LargeBinary):
         if not isinstance(value, (bytes, bytearray, memoryview)):
             raise MigrationError(f"invalid binary value in {table}.{column.name}")
@@ -559,6 +562,8 @@ def _normalize_value(value: object, column: Any, *, table: str) -> object:
 def _canonical(value: object) -> object:
     if isinstance(value, datetime):
         return {"$datetime": value.astimezone(UTC).isoformat()}
+    if isinstance(value, uuid.UUID):
+        return {"$uuid": str(value)}
     if isinstance(value, bytes):
         return {"$bytes_sha256": hashlib.sha256(value).hexdigest(), "$size": len(value)}
     if isinstance(value, dict):
@@ -608,7 +613,14 @@ def normalize_business_rows(source: Path, table: str) -> list[NormalizedRow]:
             source_key=boundary_key,
             code=MigrationErrorCode.DECODE,
         ):
-            values = {name: _normalize_value(row[name], target.c[name], table=table) for name in row.keys()}
+            values = {
+                name: _normalize_value(
+                    row[name],
+                    target.c[_SOURCE_TYPE_COLUMN_ALIASES.get((table, name), name)],
+                    table=table,
+                )
+                for name in row.keys()
+            }
             source_key = _json_canonical([values[name] for name in source_pk])
             if source_key in seen:
                 raise MigrationError(f"duplicate source key in {table}")
@@ -800,7 +812,6 @@ async def _insert_business_target(connection: Any, target: Any, row: NormalizedR
 async def _preflight_target_uniques(connection: Any, target: Any, row: NormalizedRow) -> None:
     primary_key = tuple(column.name for column in target.primary_key.columns)
     for unique_name, unique_key in _business_unique_keys(target.name, row.values):
-        values = json.loads(unique_key)
         matching_columns = None
         for constraint in list(target.constraints) + list(target.indexes):
             if getattr(constraint, "name", None) != unique_name:
@@ -813,6 +824,7 @@ async def _preflight_target_uniques(connection: Any, target: Any, row: Normalize
                 break
         if not matching_columns:
             continue
+        values = [row.values[column] for column in matching_columns]
         where = " AND ".join(f'"{column}" IS NOT DISTINCT FROM ${idx}' for idx, column in enumerate(matching_columns, 1))
         if unique_name == "uq_channel_connection_active_identity":
             where += " AND status != 'revoked'"
@@ -832,6 +844,8 @@ async def _preflight_foreign_keys(
 ) -> None:
     for constraint in target.foreign_key_constraints:
         local_columns = tuple(element.parent.name for element in constraint.elements)
+        if any(column not in row.values for column in local_columns):
+            continue
         remote_table = constraint.elements[0].column.table.name
         remote_columns = tuple(element.column.name for element in constraint.elements)
         values = [row.values[column] for column in local_columns]
@@ -860,6 +874,9 @@ async def _migrate_business_table(
 
     target = Base.metadata.tables[table]
     source_rows = normalize_business_rows(source, table)
+    target_columns = {column.name for column in target.columns}
+    if source_rows and any(set(row.values) != target_columns for row in source_rows):
+        raise MigrationError("legacy private SQLite rows require a pre-M4 PostgreSQL target; complete SQLite cutover before migrate-private-work")
     rows = _apply_user_reconciliation(table, source_rows, reconciliation)
     inserted = adopted = already = planned = 0
     transaction = connection.transaction()
@@ -1980,7 +1997,12 @@ def _preflight_cross_source(
                     tuple(element.column.name for element in constraint.elements),
                 )
             )
-    reference_keys = {(table, columns, _json_canonical([row.values[column] for column in columns])) for table, row in business_rows for referenced_table, columns in referenced_specs if table == referenced_table}
+    reference_keys = {
+        (table, columns, _json_canonical([row.values[column] for column in columns]))
+        for table, row in business_rows
+        for referenced_table, columns in referenced_specs
+        if table == referenced_table and all(column in row.values for column in columns)
+    }
     accumulated_refs: set[tuple[str, tuple[str, ...], str]] = set()
     accumulated_checkpoints: set[tuple[str, str, str]] = set()
     per_source_refs = []
@@ -1993,7 +2015,7 @@ def _preflight_cross_source(
                 continue
             for row in _apply_user_reconciliation(table, normalize_business_rows(source, table), reconciliation):
                 for referenced_table, columns in referenced_specs:
-                    if table == referenced_table:
+                    if table == referenced_table and all(column in row.values for column in columns):
                         accumulated_refs.add((table, columns, _json_canonical([row.values[column] for column in columns])))
         checkpoints, _writes = decode_checkpoint_rows(source)
         per_source_refs.append(frozenset(accumulated_refs))
@@ -2018,6 +2040,8 @@ def _business_unique_keys(table_name: str, values: dict[str, Any]) -> list[tuple
         if constraint.__class__.__name__ != "UniqueConstraint":
             continue
         columns = tuple(column.name for column in constraint.columns)
+        if any(column not in values for column in columns):
+            continue
         if any(values[column] is None for column in columns):
             continue
         results.append((constraint.name or "+".join(columns), _json_canonical([values[column] for column in columns])))
@@ -2025,6 +2049,8 @@ def _business_unique_keys(table_name: str, values: dict[str, Any]) -> list[tuple
         if not index.unique:
             continue
         columns = tuple(column.name for column in index.columns)
+        if any(column not in values for column in columns):
+            continue
         if any(values[column] is None for column in columns):
             continue
         if index.name == "uq_channel_connection_active_identity" and values.get("status") == "revoked":

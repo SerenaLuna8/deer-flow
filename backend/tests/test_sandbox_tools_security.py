@@ -20,6 +20,7 @@ from deerflow.sandbox.tools import (
     _resolve_and_validate_user_data_path,
     _resolve_skills_path,
     bash_tool,
+    ensure_thread_directories_exist,
     mask_local_paths_in_output,
     read_file_tool,
     replace_virtual_path,
@@ -35,6 +36,29 @@ _THREAD_DATA = {
     "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
     "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
 }
+
+
+def test_private_local_sandbox_does_not_create_virtual_mnt_directories() -> None:
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": "local-run:owner:thread-1:run-1"},
+            "thread_data": {
+                "workspace_path": "/mnt/user-data/workspace",
+                "uploads_path": "/mnt/user-data/uploads",
+                "outputs_path": "/mnt/user-data/outputs",
+            },
+        },
+        context={
+            "private_scope": object(),
+            "__file_authority": SimpleNamespace(),
+        },
+        config={},
+    )
+
+    with patch("os.makedirs") as makedirs:
+        ensure_thread_directories_exist(runtime)
+
+    makedirs.assert_not_called()
 
 
 # ---------- replace_virtual_path ----------

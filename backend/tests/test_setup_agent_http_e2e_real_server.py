@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 from _agent_e2e_helpers import FakeToolCallingModel, build_single_tool_call_model
@@ -211,53 +210,23 @@ def _wait_for_file(path: Path, *, timeout: float = 10.0) -> bool:
 
 
 @pytest.mark.no_auto_user
-def test_real_http_create_agent_lands_in_authenticated_user_dir(
+def test_real_http_legacy_setup_agent_entry_is_closed_after_private_cutover(
     isolated_app: Any,
     isolated_deer_flow_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    """The full real-server contract test.
-
-    1. Register a real user via POST /api/v1/auth/register (also auto-logs in)
-    2. POST to /api/threads/{tid}/runs/stream with the **exact** body shape the
-       frontend (LangGraph SDK) sends during the bootstrap flow.
-    3. Wait for the background run to finish.
-    4. Assert SOUL.md exists under users/<authenticated_uid>/agents/<name>/.
-    5. Assert NOTHING exists under users/default/agents/<name>/.
-    """
-    # ``deerflow.agents.lead_agent.agent`` imports ``create_chat_model`` with
-    # ``from deerflow.models import create_chat_model`` at module load time,
-    # rebinding the symbol into its own namespace. So the only patch that
-    # intercepts the call is the bound name on ``lead_agent.agent`` — patching
-    # ``deerflow.models.create_chat_model`` would be too late.
-    agent_name = "real-http-agent"
-
+    """M4 asset authoring must not be reachable through the legacy run API."""
     from starlette.testclient import TestClient
 
-    with (
-        patch(
-            "deerflow.agents.lead_agent.agent.create_chat_model",
-            new=_build_fake_create_chat_model(agent_name),
-        ),
-        TestClient(isolated_app) as client,
-    ):
-        # --- 1. Register & auto-login ---
+    with TestClient(isolated_app) as client:
         register = client.post(
             "/api/v1/auth/register",
             json={"email": "e2e-user@example.com", "password": "very-strong-password-123"},
         )
         assert register.status_code == 201, register.text
-        registered = register.json()
-        auth_uid = registered["id"]
-        # The endpoint sets both access_token (auth) and csrf_token (CSRF Double
-        # Submit Cookie) cookies; the TestClient cookie jar propagates them.
         assert client.cookies.get("access_token"), "register endpoint must set session cookie"
         csrf_token = client.cookies.get("csrf_token")
         assert csrf_token, "register endpoint must set csrf_token cookie"
 
-        # --- 2. Create a thread (require_existing=True on /runs/stream means
-        # we must call POST /api/threads first; the React frontend does the
-        # same via the LangGraph SDK's threads.create) ---
         import uuid as _uuid
 
         thread_id = str(_uuid.uuid4())
@@ -266,64 +235,6 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
             json={"thread_id": thread_id, "metadata": {}},
             headers={"X-CSRF-Token": csrf_token},
         )
-        assert created.status_code == 200, created.text
-
-        # --- 3. POST /runs/stream with the bootstrap wire format ---
-        # This is the EXACT shape the React frontend sends after PR #2784:
-        #   thread.submit(input, {config, context}) ->
-        #   POST /api/threads/{id}/runs/stream body =
-        #     {assistant_id, input, config, context}
-        body = {
-            "assistant_id": "lead_agent",
-            "input": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": (f"The new custom agent name is {agent_name}. Help me design its SOUL.md before saving it."),
-                    }
-                ]
-            },
-            "config": {"recursion_limit": 50},
-            "context": {
-                "agent_name": agent_name,
-                "is_bootstrap": True,
-                "mode": "flash",
-                "thinking_enabled": False,
-                "is_plan_mode": False,
-                "subagent_enabled": False,
-            },
-            "stream_mode": ["values"],
-        }
-        # The /stream endpoint returns SSE; we drain it so the server-side
-        # background task (run_agent) gets to completion before we look at disk.
-        with client.stream(
-            "POST",
-            f"/api/threads/{thread_id}/runs/stream",
-            json=body,
-            headers={"X-CSRF-Token": csrf_token},
-        ) as resp:
-            assert resp.status_code == 200, resp.read().decode()
-            transcript = _drain_stream(resp)
-
-        # Sanity: the stream should have produced at least one event
-        assert "event:" in transcript, f"no SSE events in response: {transcript[:500]!r}"
-
-        # --- 4. Verify filesystem outcome ---
-        expected_dir = isolated_deer_flow_home / "users" / auth_uid / "agents" / agent_name
-        default_dir = isolated_deer_flow_home / "users" / "default" / "agents" / agent_name
-
-        # The setup_agent tool runs inside the background asyncio task spawned
-        # by start_run; SSE-drain typically waits for it, but we add a bounded
-        # poll to be robust against scheduler jitter.
-        assert _wait_for_file(expected_dir / "SOUL.md", timeout=15.0), (
-            "SOUL.md did not appear under users/<auth_uid>/agents/. "
-            f"Expected: {expected_dir / 'SOUL.md'}. "
-            f"tmp tree: {sorted(str(p.relative_to(isolated_deer_flow_home)) for p in isolated_deer_flow_home.rglob('SOUL.md'))}. "
-            f"SSE transcript tail: {transcript[-1000:]!r}"
-        )
-
-        soul_text = (expected_dir / "SOUL.md").read_text()
-        assert agent_name in soul_text, f"unexpected SOUL content: {soul_text!r}"
-
-        # The smoking-gun assertion: the agent must NOT have landed in default/
-        assert not default_dir.exists(), f"REGRESSION: agent landed under users/default/{agent_name} instead of the authenticated user. Default-dir contents: {list(default_dir.rglob('*')) if default_dir.exists() else 'n/a'}"
+        assert created.status_code == 409, created.text
+        assert created.json()["detail"]["code"] == "PRIVATE_WORK_CUTOVER"
+        assert not list(isolated_deer_flow_home.rglob("SOUL.md"))

@@ -61,7 +61,7 @@ setup:
 	@$(BACKEND_UV_RUN) python ../scripts/setup_wizard.py
 
 doctor:
-	@$(BACKEND_UV_RUN) python ../scripts/doctor.py
+	@cd backend && PYTHONPATH=. uv run python ../scripts/doctor.py
 
 setup-db:
 	@$(MAKE) -C backend setup-db

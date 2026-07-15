@@ -21,6 +21,7 @@ from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
+from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from app.gateway.routers import console
 from deerflow.persistence.base import Base
@@ -53,16 +54,45 @@ class _FrozenDatetime(datetime):
         return cls._frozen if tz is None else cls._frozen.astimezone(tz)
 
 
-def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
+_USER_A_ID: str | None = None
+
+
+def _seed_rows(seed: M4ThreadSeed) -> tuple[list[ThreadMetaRow], list[RunRow]]:
+    project_id = seed.owner_a.project_id
+    owner_a = str(seed.owner_a.user_id)
+    owner_b = str(seed.owner_b.user_id)
     threads = [
-        ThreadMetaRow(thread_id="t1", user_id="user-a", display_name="调研鹿角再生"),
-        ThreadMetaRow(thread_id="t2", user_id="user-a", display_name="Card assistant chat"),
+        ThreadMetaRow(
+            thread_id="t1",
+            user_id=owner_a,
+            project_id=project_id,
+            agent_asset_id=seed.project_agent_id,
+            agent_scope="project",
+            display_name="调研鹿角再生",
+        ),
+        ThreadMetaRow(
+            thread_id="t2",
+            user_id=owner_a,
+            project_id=project_id,
+            agent_asset_id=seed.project_agent_id,
+            agent_scope="project",
+            display_name="Card assistant chat",
+        ),
+        ThreadMetaRow(
+            thread_id="t3",
+            user_id=owner_b,
+            project_id=project_id,
+            agent_asset_id=seed.project_agent_id,
+            agent_scope="project",
+            display_name=None,
+        ),
     ]
     runs = [
         RunRow(
             run_id="r1",
             thread_id="t1",
-            user_id="user-a",
+            user_id=owner_a,
+            project_id=project_id,
             status="success",
             model_name="minimax-m2",
             total_tokens=1200,
@@ -76,7 +106,8 @@ def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
         RunRow(
             run_id="r2",
             thread_id="t1",
-            user_id="user-a",
+            user_id=owner_a,
+            project_id=project_id,
             status="running",
             model_name="minimax-m2",
             total_tokens=300,
@@ -90,7 +121,8 @@ def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
         RunRow(
             run_id="r3",
             thread_id="t2",
-            user_id="user-a",
+            user_id=owner_a,
+            project_id=project_id,
             status="error",
             model_name="gpt-x",
             error="Boom: provider exploded",
@@ -105,7 +137,8 @@ def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
         RunRow(
             run_id="r4",
             thread_id="t2",
-            user_id="user-a",
+            user_id=owner_a,
+            project_id=project_id,
             status="success",
             model_name="minimax-m2",
             total_tokens=999,
@@ -115,8 +148,9 @@ def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
         ),
         RunRow(
             run_id="r5",
-            thread_id="t3",  # no threads_meta row → exercises the outer join
-            user_id="user-b",
+            thread_id="t3",
+            user_id=owner_b,
+            project_id=project_id,
             status="success",
             model_name="qwen",
             total_tokens=70,
@@ -132,21 +166,33 @@ def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
 
 @pytest.fixture()
 def session_factory(migrated_postgres_database_url):
+    global _USER_A_ID
+
+    async def _seed() -> M4ThreadSeed:
+        value = await seed_m4_thread_database(migrated_postgres_database_url)
+        await value.engine.dispose()
+        return value
+
+    seed = asyncio.run(_seed())
+    _USER_A_ID = str(seed.owner_a.user_id)
     engine = create_async_engine(migrated_postgres_database_url, poolclass=NullPool)
     sf = async_sessionmaker(engine, expire_on_commit=False)
 
     async def _setup() -> None:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        threads, runs = _seed_rows()
+        threads, runs = _seed_rows(seed)
         async with sf() as session:
             session.add_all(threads)
+            await session.commit()
+        async with sf() as session:
             session.add_all(runs)
             await session.commit()
 
     asyncio.run(_setup())
     yield sf
     asyncio.run(engine.dispose())
+    _USER_A_ID = None
 
 
 @pytest.fixture()
@@ -173,7 +219,7 @@ class TestConsoleStats:
         assert data["total_runs"] == 5
         assert data["active_runs"] == 1  # r2 running
         assert data["failed_runs"] == 1  # r3 error
-        assert data["total_threads"] == 2
+        assert data["total_threads"] == 3
         assert data["total_agents"] == 2
         assert data["total_tokens"] == 1200 + 300 + 50 + 999 + 70
 
@@ -293,7 +339,8 @@ class TestPricing:
 
 class TestUserScoping:
     def test_rows_filtered_by_resolved_user(self, client, monkeypatch):
-        monkeypatch.setattr(console, "get_current_user", AsyncMock(return_value="user-a"))
+        assert _USER_A_ID is not None
+        monkeypatch.setattr(console, "get_current_user", AsyncMock(return_value=_USER_A_ID))
         stats = client.get("/api/console/stats").json()
         assert stats["total_runs"] == 4  # r5 (user-b) excluded
         assert stats["total_tokens"] == 1200 + 300 + 50 + 999

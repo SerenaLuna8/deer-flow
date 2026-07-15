@@ -18,6 +18,17 @@ def _stub_app_config():
     reset_app_config()
 
 
+@pytest.fixture(autouse=True)
+def _open_legacy_private_work_for_service_units(monkeypatch):
+    """Bind the explicit pre-cutover guard used by isolated service units."""
+    from support.m4_private_threads import OpenProjectCutoverGuard
+
+    monkeypatch.setattr(
+        "app.gateway.deps.get_private_work_cutover_guard",
+        lambda _request: OpenProjectCutoverGuard(),
+    )
+
+
 def test_format_sse_basic():
     from app.gateway.services import format_sse
 
