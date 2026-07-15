@@ -3,13 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.context import PrivateWorkContext
+from app.private_work.cutover import PrivateWorkCutoverGuard
 from app.private_work.errors import PrivateWorkCutover, PrivateWorkUnavailable
-from deerflow.persistence.private_work.model import PrivateWorkCutoverStateRow
 
 PRIVATE_WORK_READY = "PRIVATE_WORK_READY"
 
@@ -30,23 +28,26 @@ class PrivateWorkReadinessService:
         context: PrivateWorkContext,
     ) -> PrivateWorkReadiness:
         try:
-            stage = await session.scalar(select(PrivateWorkCutoverStateRow.stage).where(PrivateWorkCutoverStateRow.id == 1))
-        except SQLAlchemyError:
+            await PrivateWorkCutoverGuard.for_session(
+                session,
+                request_id=context.request_id,
+            ).require_project_open()
+        except PrivateWorkCutover:
+            return PrivateWorkReadiness(
+                status="migration_required",
+                code=PrivateWorkCutover.code,
+                request_id=context.request_id,
+            )
+        except PrivateWorkUnavailable:
             return PrivateWorkReadiness(
                 status="unavailable",
                 code=PrivateWorkUnavailable.code,
                 request_id=context.request_id,
             )
 
-        if stage == "cutover_complete":
-            return PrivateWorkReadiness(
-                status="ready",
-                code=PRIVATE_WORK_READY,
-                request_id=context.request_id,
-            )
         return PrivateWorkReadiness(
-            status="migration_required",
-            code=PrivateWorkCutover.code,
+            status="ready",
+            code=PRIVATE_WORK_READY,
             request_id=context.request_id,
         )
 

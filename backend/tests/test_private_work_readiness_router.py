@@ -113,6 +113,27 @@ async def test_readiness_reports_ready_incomplete_and_missing_marker(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_readiness_requires_final_schema_even_with_complete_marker(
+    seed: M4ThreadSeed,
+) -> None:
+    app = _app(seed)
+    async with seed.engine.begin() as connection:
+        await connection.execute(
+            text(
+                """UPDATE alembic_version
+                SET version_num='0010_private_file_source'"""
+            )
+        )
+
+    _assert_public_response(
+        await _get(app, seed),
+        status="migration_required",
+        code="PRIVATE_WORK_CUTOVER",
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_readiness_reports_database_unavailable_without_leaking_scope(
     seed: M4ThreadSeed,
 ) -> None:
