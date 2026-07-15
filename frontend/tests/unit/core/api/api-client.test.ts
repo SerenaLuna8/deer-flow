@@ -24,6 +24,12 @@ afterEach(() => {
   rs.unstubAllGlobals();
 });
 
+test("keeps the default and mock compatibility clients in separate registries", () => {
+  expect(getAPIClient()).toBe(getAPIClient());
+  expect(getAPIClient(true)).toBe(getAPIClient(true));
+  expect(getAPIClient()).not.toBe(getAPIClient(true));
+});
+
 test("identifies inactive run stream errors", () => {
   const error = Object.assign(
     new Error(

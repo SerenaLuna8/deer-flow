@@ -14,12 +14,16 @@ import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
-import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
-import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
+import { usePrivateWorkAccess } from "../private-work/provider";
+import { scopedPrivateWorkQueryKey } from "../private-work/query-keys";
+import type {
+  PrivateWorkAccess,
+  ProjectClientScope,
+} from "../private-work/types";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useUpdateSubtask } from "../tasks/context";
@@ -52,11 +56,19 @@ export type ThreadStreamOptions = {
   displayThreadId?: string | null | undefined;
   context: LocalSettings["context"];
   isMock?: boolean;
+  privateWork?: PrivateWorkAccess;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
   onToolEnd?: (event: ToolEndEvent) => void;
 };
+
+function scopedThreadQueryKey(
+  scope: ProjectClientScope | null,
+  ...segments: readonly unknown[]
+) {
+  return scopedPrivateWorkQueryKey(scope, ...segments);
+}
 
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
@@ -343,9 +355,14 @@ export function buildRunMessagesUrl(
   beforeSeq?: number,
 ) {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
-  const path = `/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`;
+  const apiBaseUrl =
+    normalizedBaseUrl.endsWith("/api") ||
+    normalizedBaseUrl.endsWith("/private-work")
+      ? normalizedBaseUrl
+      : `${normalizedBaseUrl}/api`;
+  const path = `${apiBaseUrl}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`;
   const url = new URL(
-    `${normalizedBaseUrl}${path}`,
+    path,
     typeof window !== "undefined" ? window.location.origin : "http://localhost",
   );
   if (beforeSeq !== undefined) {
@@ -576,10 +593,11 @@ export function getSummarizationMiddlewareMessages(
 export function upsertThreadInSearchCache(
   queryClient: QueryClient,
   thread: AgentThread,
+  scope: ProjectClientScope | null = null,
 ) {
   queryClient.setQueriesData(
     {
-      queryKey: ["threads", "search"],
+      queryKey: scopedThreadQueryKey(scope, "threads", "search"),
       exact: false,
     },
     (oldData: Array<AgentThread> | undefined) => {
@@ -618,10 +636,14 @@ export function upsertThreadInSearchCache(
 export function upsertThreadInInfiniteCache(
   queryClient: QueryClient,
   thread: AgentThread,
+  scope: ProjectClientScope | null = null,
 ) {
   queryClient.setQueriesData(
     {
-      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      queryKey: scopedThreadQueryKey(
+        scope,
+        ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+      ),
       exact: false,
     },
     (oldData: InfiniteData<AgentThread[]> | undefined) => {
@@ -669,22 +691,36 @@ export function invalidateStoppedThreadCaches(
   queryClient: QueryClient,
   threadId: string | null | undefined,
   isMock = false,
+  scope: ProjectClientScope | null = null,
 ) {
-  void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
   void queryClient.invalidateQueries({
-    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+    queryKey: scopedThreadQueryKey(scope, "threads", "search"),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: scopedThreadQueryKey(scope, ...INFINITE_THREADS_QUERY_KEY_PREFIX),
   });
 
   if (!threadId || isMock) {
     return;
   }
 
-  void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
   void queryClient.invalidateQueries({
-    queryKey: ["thread", "metadata", threadId, isMock],
+    queryKey: scopedThreadQueryKey(scope, "thread", threadId),
   });
   void queryClient.invalidateQueries({
-    queryKey: threadTokenUsageQueryKey(threadId),
+    queryKey: scopedThreadQueryKey(
+      scope,
+      "thread",
+      "metadata",
+      threadId,
+      isMock,
+    ),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: scopedThreadQueryKey(
+      scope,
+      ...threadTokenUsageQueryKey(threadId),
+    ),
   });
 }
 
@@ -694,12 +730,13 @@ function scheduleStoppedThreadFinalizationRefetch(
   queryClient: QueryClient,
   threadId: string | null | undefined,
   isMock = false,
+  scope: ProjectClientScope | null = null,
 ) {
   if (isMock) {
     return;
   }
   globalThis.setTimeout(() => {
-    invalidateStoppedThreadCaches(queryClient, threadId, isMock);
+    invalidateStoppedThreadCaches(queryClient, threadId, isMock, scope);
   }, STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS);
 }
 
@@ -708,12 +745,18 @@ export async function stopThreadAndInvalidateCaches(
   stop: () => Promise<void> | void,
   threadId: string | null | undefined,
   isMock = false,
+  scope: ProjectClientScope | null = null,
 ) {
   try {
     await stop();
   } finally {
-    invalidateStoppedThreadCaches(queryClient, threadId, isMock);
-    scheduleStoppedThreadFinalizationRefetch(queryClient, threadId, isMock);
+    invalidateStoppedThreadCaches(queryClient, threadId, isMock, scope);
+    scheduleStoppedThreadFinalizationRefetch(
+      queryClient,
+      threadId,
+      isMock,
+      scope,
+    );
   }
 }
 
@@ -788,11 +831,16 @@ export function useThreadStream({
   displayThreadId,
   context,
   isMock,
+  privateWork: explicitPrivateWork,
   onSend,
   onStart,
   onFinish,
   onToolEnd,
 }: ThreadStreamOptions) {
+  const privateWork = usePrivateWorkAccess(
+    explicitPrivateWork,
+    Boolean(isMock),
+  );
   const { t } = useI18n();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
@@ -834,6 +882,7 @@ export function useThreadStream({
   } = useThreadHistory(onStreamThreadId ?? "", {
     enabled: !isMock,
     pendingSupersededRunIds,
+    privateWork,
   });
 
   // Keep listeners ref updated with latest callbacks
@@ -888,43 +937,55 @@ export function useThreadStream({
   const updateSubtask = useUpdateSubtask();
 
   const thread = useStream<AgentThreadState>({
-    client: getAPIClient(isMock),
+    client: privateWork.client,
     assistantId: "lead_agent",
     threadId: onStreamThreadId,
-    reconnectOnMount: true,
+    reconnectOnMount: privateWork.reconnectOnMount,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
-      upsertThreadInSearchCache(queryClient, {
-        thread_id: meta.thread_id,
-        created_at: now,
-        updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
-        status: "busy",
-        values: {
-          title: t.pages.newChat,
-          messages: [],
-          artifacts: [],
+      upsertThreadInSearchCache(
+        queryClient,
+        {
+          thread_id: meta.thread_id,
+          created_at: now,
+          updated_at: now,
+          metadata: context.agent_name
+            ? { agent_name: context.agent_name }
+            : {},
+          status: "busy",
+          values: {
+            title: t.pages.newChat,
+            messages: [],
+            artifacts: [],
+          },
+          interrupts: {},
         },
-        interrupts: {},
-      });
-      upsertThreadInInfiniteCache(queryClient, {
-        thread_id: meta.thread_id,
-        created_at: now,
-        updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
-        status: "busy",
-        values: {
-          title: t.pages.newChat,
-          messages: [],
-          artifacts: [],
+        privateWork.scope,
+      );
+      upsertThreadInInfiniteCache(
+        queryClient,
+        {
+          thread_id: meta.thread_id,
+          created_at: now,
+          updated_at: now,
+          metadata: context.agent_name
+            ? { agent_name: context.agent_name }
+            : {},
+          status: "busy",
+          values: {
+            title: t.pages.newChat,
+            messages: [],
+            artifacts: [],
+          },
+          interrupts: {},
         },
-        interrupts: {},
-      });
+        privateWork.scope,
+      );
       if (context.agent_name && !isMock) {
-        void getAPIClient()
-          .threads.update(meta.thread_id, {
+        void privateWork.client.threads
+          .update(meta.thread_id, {
             metadata: { agent_name: context.agent_name },
           })
           .catch(() => ({}));
@@ -973,7 +1034,11 @@ export function useThreadStream({
         if (update && "title" in update && update.title) {
           void queryClient.setQueriesData(
             {
-              queryKey: ["threads", "search"],
+              queryKey: scopedThreadQueryKey(
+                privateWork.scope,
+                "threads",
+                "search",
+              ),
               exact: false,
             },
             (oldData: Array<AgentThread> | undefined) => {
@@ -994,7 +1059,10 @@ export function useThreadStream({
           const nextTitle: string = update.title;
           void queryClient.setQueriesData(
             {
-              queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+              queryKey: scopedThreadQueryKey(
+                privateWork.scope,
+                ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+              ),
               exact: false,
             },
             (oldData: InfiniteData<AgentThread[]> | undefined) =>
@@ -1066,7 +1134,10 @@ export function useThreadStream({
       );
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...threadTokenUsageQueryKey(threadIdRef.current),
+          ),
         });
       }
     },
@@ -1077,7 +1148,12 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
+      invalidateStoppedThreadCaches(
+        queryClient,
+        threadIdRef.current,
+        isMock,
+        privateWork.scope,
+      );
     },
   });
 
@@ -1089,8 +1165,16 @@ export function useThreadStream({
       () => thread.stop(),
       stoppedThreadId,
       isMock,
+      privateWork.scope,
     );
-  }, [displayThreadId, isMock, queryClient, thread, threadId]);
+  }, [
+    displayThreadId,
+    isMock,
+    privateWork.scope,
+    queryClient,
+    thread,
+    threadId,
+  ]);
 
   const hasVisibleStreamState =
     Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
@@ -1300,7 +1384,11 @@ export function useThreadStream({
             }
 
             if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
+              const uploadResponse = await uploadFiles(
+                threadId,
+                files,
+                privateWork,
+              );
               uploadedFileInfo = uploadResponse.files;
 
               // Update optimistic human message with uploaded status + paths
@@ -1386,9 +1474,18 @@ export function useThreadStream({
             },
           },
         );
-        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            "threads",
+            "search",
+          ),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+          ),
         });
       } catch (error) {
         setOptimisticMessages([]);
@@ -1407,6 +1504,7 @@ export function useThreadStream({
       queryClient,
       humanMessageCount,
       persistedMessages,
+      privateWork,
     ],
   );
 
@@ -1433,7 +1531,7 @@ export function useThreadStream({
 
       try {
         const response = await fetch(
-          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+          `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
             threadId,
           )}/runs/regenerate/prepare`,
           {
@@ -1490,13 +1588,27 @@ export function useThreadStream({
             thread_id: threadId,
           },
         });
-        void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
-        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+          queryKey: scopedThreadQueryKey(privateWork.scope, "thread", threadId),
         });
         void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadId),
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            "threads",
+            "search",
+          ),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+          ),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...threadTokenUsageQueryKey(threadId),
+          ),
         });
       } catch (error) {
         setLiveMessagesThreadId(null);
@@ -1514,7 +1626,14 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [context, humanMessageCount, persistedMessages, queryClient, thread],
+    [
+      context,
+      humanMessageCount,
+      persistedMessages,
+      privateWork,
+      queryClient,
+      thread,
+    ],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
@@ -1575,13 +1694,19 @@ export function useThreadStream({
 type ThreadHistoryOptions = {
   enabled?: boolean;
   pendingSupersededRunIds?: ReadonlySet<string>;
+  privateWork?: PrivateWorkAccess;
 };
 
 export function useThreadHistory(
   threadId: string,
-  { enabled = true, pendingSupersededRunIds }: ThreadHistoryOptions = {},
+  {
+    enabled = true,
+    pendingSupersededRunIds,
+    privateWork: explicitPrivateWork,
+  }: ThreadHistoryOptions = {},
 ) {
-  const runs = useThreadRuns(threadId, { enabled });
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
+  const runs = useThreadRuns(threadId, { enabled }, privateWork);
   const threadIdRef = useRef(threadId);
   const runsRef = useRef(runs.data ?? []);
   const indexRef = useRef(-1);
@@ -1651,7 +1776,7 @@ export function useThreadHistory(
         loadingRunIdRef.current = run.run_id;
         const beforeSeq = runBeforeSeqRef.current.get(run.run_id);
         const url = buildRunMessagesUrl(
-          getBackendBaseURL(),
+          privateWork.apiBaseURL,
           requestThreadId,
           run.run_id,
           beforeSeq,
@@ -1714,7 +1839,7 @@ export function useThreadHistory(
         setLoading(false);
       }
     }
-  }, [enabled]);
+  }, [enabled, privateWork.apiBaseURL]);
   useEffect(() => {
     const threadChanged = threadIdRef.current !== threadId;
     threadIdRef.current = threadId;
@@ -1778,10 +1903,13 @@ export function useThreadHistory(
 
 export function useThreads(
   params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
+  explicitPrivateWork?: PrivateWorkAccess,
 ) {
-  const apiClient = getAPIClient();
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
+  const options = buildThreadsSearchQueryOptions(privateWork.client, params);
   return useQuery<AgentThread[]>({
-    ...buildThreadsSearchQueryOptions(apiClient, params),
+    ...options,
+    queryKey: scopedThreadQueryKey(privateWork.scope, ...options.queryKey),
   });
 }
 
@@ -1904,8 +2032,9 @@ export function useInfiniteThreads(
     sortOrder: "desc",
     select: ["thread_id", "updated_at", "values", "metadata"],
   },
+  explicitPrivateWork?: PrivateWorkAccess,
 ) {
-  const apiClient = getAPIClient();
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useInfiniteQuery<
     AgentThread[],
     Error,
@@ -1913,11 +2042,15 @@ export function useInfiniteThreads(
     readonly unknown[],
     number
   >({
-    queryKey: [...INFINITE_THREADS_QUERY_KEY_PREFIX, params],
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+      params,
+    ),
     initialPageParam: 0,
     queryFn: async ({ pageParam }) =>
       fetchInfiniteThreadsPage(
-        apiClient,
+        privateWork.client,
         params,
         pageParam,
         INFINITE_THREADS_PAGE_SIZE,
@@ -1931,15 +2064,16 @@ export function useInfiniteThreads(
 export function useThreadRuns(
   threadId?: string,
   { enabled = true }: { enabled?: boolean } = {},
+  explicitPrivateWork?: PrivateWorkAccess,
 ) {
-  const apiClient = getAPIClient();
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<Run[]>({
-    queryKey: ["thread", threadId],
+    queryKey: scopedThreadQueryKey(privateWork.scope, "thread", threadId),
     queryFn: async () => {
       if (!threadId) {
         return [];
       }
-      const response = await apiClient.runs.list(threadId);
+      const response = await privateWork.client.runs.list(threadId);
       return response;
     },
     enabled: enabled && Boolean(threadId),
@@ -1952,17 +2086,28 @@ export function useThreadMetadata(
   {
     enabled = true,
     isMock = false,
-  }: { enabled?: boolean; isMock?: boolean } = {},
+    privateWork: explicitPrivateWork,
+  }: {
+    enabled?: boolean;
+    isMock?: boolean;
+    privateWork?: PrivateWorkAccess;
+  } = {},
 ) {
-  const apiClient = getAPIClient(isMock);
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork, isMock);
   return useQuery<AgentThread | null>({
-    queryKey: ["thread", "metadata", threadId, isMock],
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      "thread",
+      "metadata",
+      threadId,
+      isMock,
+    ),
     queryFn: async () => {
       if (!threadId) {
         return null;
       }
       try {
-        const response = await apiClient.threads.get(threadId);
+        const response = await privateWork.client.threads.get(threadId);
         return response as AgentThread;
       } catch (error) {
         if (isThreadMissingError(error)) {
@@ -1979,15 +2124,22 @@ export function useThreadMetadata(
 
 export function useThreadTokenUsage(
   threadId?: string | null,
-  { enabled = true }: { enabled?: boolean } = {},
+  {
+    enabled = true,
+    privateWork: explicitPrivateWork,
+  }: { enabled?: boolean; privateWork?: PrivateWorkAccess } = {},
 ) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<ThreadTokenUsageResponse | null>({
-    queryKey: threadTokenUsageQueryKey(threadId),
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      ...threadTokenUsageQueryKey(threadId),
+    ),
     queryFn: async () => {
       if (!threadId) {
         return null;
       }
-      return fetchThreadTokenUsage(threadId);
+      return fetchThreadTokenUsage(threadId, privateWork);
     },
     enabled: enabled && Boolean(threadId),
     retry: false,
@@ -1995,7 +2147,8 @@ export function useThreadTokenUsage(
   });
 }
 
-export function useBranchThread() {
+export function useBranchThread(explicitPrivateWork?: PrivateWorkAccess) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
@@ -2008,37 +2161,70 @@ export function useBranchThread() {
       messageId: string;
       messageIds?: string[];
       title?: string;
-    }) => branchThreadFromTurn(threadId, { messageId, messageIds, title }),
+    }) =>
+      branchThreadFromTurn(
+        threadId,
+        { messageId, messageIds, title },
+        privateWork,
+      ),
     onSuccess(response, { threadId }) {
       void queryClient.invalidateQueries({
-        queryKey: ["thread", "metadata", response.thread_id],
+        queryKey: scopedThreadQueryKey(
+          privateWork.scope,
+          "thread",
+          "metadata",
+          response.thread_id,
+        ),
       });
       void queryClient.invalidateQueries({
-        queryKey: ["thread", "metadata", threadId],
+        queryKey: scopedThreadQueryKey(
+          privateWork.scope,
+          "thread",
+          "metadata",
+          threadId,
+        ),
       });
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+        queryKey: scopedThreadQueryKey(privateWork.scope, "threads", "search"),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: scopedThreadQueryKey(
+          privateWork.scope,
+          ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+        ),
       });
     },
   });
 }
 
-export function useRunDetail(threadId: string, runId: string) {
-  const apiClient = getAPIClient();
+export function useRunDetail(
+  threadId: string,
+  runId: string,
+  explicitPrivateWork?: PrivateWorkAccess,
+) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<Run>({
-    queryKey: ["thread", threadId, "run", runId],
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      "thread",
+      threadId,
+      "run",
+      runId,
+    ),
     queryFn: async () => {
-      const response = await apiClient.runs.get(threadId, runId);
+      const response = await privateWork.client.runs.get(threadId, runId);
       return response;
     },
     refetchOnWindowFocus: false,
   });
 }
 
-async function deleteLocalThreadData(threadId: string) {
+async function deleteLocalThreadData(
+  threadId: string,
+  privateWork: PrivateWorkAccess,
+) {
   const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
+    `${privateWork.apiBaseURL}/threads/${encodeURIComponent(threadId)}`,
     {
       method: "DELETE",
     },
@@ -2060,9 +2246,10 @@ async function deleteLocalThreadData(threadId: string) {
 async function deleteThreadEverywhere(
   apiClient: ThreadDeleteClient,
   threadId: string,
+  privateWork: PrivateWorkAccess,
 ) {
   await apiClient.threads.delete(threadId);
-  await deleteLocalThreadData(threadId);
+  await deleteLocalThreadData(threadId, privateWork);
 }
 
 export async function findSidecarThreadIdsForParent(
@@ -2107,6 +2294,7 @@ export async function findSidecarThreadIdsForParent(
 async function deleteSidecarThreadsForParent(
   apiClient: ThreadDeleteClient,
   parentThreadId: string,
+  privateWork: PrivateWorkAccess,
 ) {
   let sidecarThreadIds: string[];
   try {
@@ -2124,7 +2312,7 @@ async function deleteSidecarThreadsForParent(
 
   const results = await Promise.allSettled(
     sidecarThreadIds.map((threadId) =>
-      deleteThreadEverywhere(apiClient, threadId),
+      deleteThreadEverywhere(apiClient, threadId, privateWork),
     ),
   );
 
@@ -2150,9 +2338,10 @@ async function deleteSidecarThreadsForParent(
   });
 }
 
-export function useDeleteThread() {
+export function useDeleteThread(explicitPrivateWork?: PrivateWorkAccess) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
-  const apiClient = getAPIClient() as ThreadDeleteClient;
+  const apiClient = privateWork.client as ThreadDeleteClient;
   return useMutation({
     mutationFn: async ({
       threadId,
@@ -2164,17 +2353,22 @@ export function useDeleteThread() {
       const deletedSidecarThreadIds = await deleteSidecarThreadsForParent(
         apiClient,
         threadId,
+        privateWork,
       );
       await apiClient.threads.delete(threadId);
       onRemoteDeleted?.();
-      await deleteLocalThreadData(threadId);
+      await deleteLocalThreadData(threadId, privateWork);
       return deletedSidecarThreadIds;
     },
     onSuccess(deletedSidecarThreadIds, { threadId }) {
       const deletedThreadIds = new Set([threadId, ...deletedSidecarThreadIds]);
       queryClient.setQueriesData(
         {
-          queryKey: ["threads", "search"],
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            "threads",
+            "search",
+          ),
           exact: false,
         },
         (oldData: Array<AgentThread> | undefined) => {
@@ -2186,7 +2380,10 @@ export function useDeleteThread() {
       );
       queryClient.setQueriesData(
         {
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+          ),
           exact: false,
         },
         (oldData: InfiniteData<AgentThread[]> | undefined) =>
@@ -2198,17 +2395,23 @@ export function useDeleteThread() {
     },
 
     onSettled() {
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+        queryKey: scopedThreadQueryKey(privateWork.scope, "threads", "search"),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: scopedThreadQueryKey(
+          privateWork.scope,
+          ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+        ),
       });
     },
   });
 }
 
-export function useRenameThread() {
+export function useRenameThread(explicitPrivateWork?: PrivateWorkAccess) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
-  const apiClient = getAPIClient();
+  const apiClient = privateWork.client;
   return useMutation({
     mutationFn: async ({
       threadId,
@@ -2224,7 +2427,11 @@ export function useRenameThread() {
     onSuccess(_, { threadId, title }) {
       queryClient.setQueriesData(
         {
-          queryKey: ["threads", "search"],
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            "threads",
+            "search",
+          ),
           exact: false,
         },
         (oldData: Array<AgentThread>) => {
@@ -2244,7 +2451,10 @@ export function useRenameThread() {
       );
       queryClient.setQueriesData(
         {
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+          ),
           exact: false,
         },
         (oldData: InfiniteData<AgentThread[]> | undefined) =>

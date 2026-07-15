@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { ProjectPrivateWorkProvider } from "@/core/private-work/provider";
 import { useEnterProject, useProjectBySlug } from "@/core/projects/hooks";
 import type { Project } from "@/core/projects/types";
 
@@ -183,13 +184,18 @@ export function ProjectContextProvider({
 
   return (
     <CurrentProjectContext.Provider value={entry.project}>
-      <ProjectShell
-        project={entry.project}
-        accountEmail={user.email}
-        onLogout={logout}
+      <ProjectPrivateWorkProvider
+        accountId={user.id}
+        projectId={entry.project.id}
       >
-        {children}
-      </ProjectShell>
+        <ProjectShell
+          project={entry.project}
+          accountEmail={user.email}
+          onLogout={logout}
+        >
+          {children}
+        </ProjectShell>
+      </ProjectPrivateWorkProvider>
     </CurrentProjectContext.Provider>
   );
 }

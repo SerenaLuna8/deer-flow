@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, test } from "@rstest/core";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -14,5 +17,16 @@ describe("project context owner", () => {
     expect(() => renderToStaticMarkup(createElement(ProjectConsumer))).toThrow(
       "useCurrentProject must be used within a ProjectContextProvider",
     );
+  });
+
+  test("mounts private work scope from the authenticated account and entered project", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/components/projects/project-context.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("ProjectPrivateWorkProvider");
+    expect(source).toContain("accountId={user.id}");
+    expect(source).toContain("projectId={entry.project.id}");
   });
 });

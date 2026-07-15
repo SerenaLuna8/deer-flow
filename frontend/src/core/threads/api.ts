@@ -1,5 +1,6 @@
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import type { PrivateWorkAccess } from "@/core/private-work/types";
 
 import type { ThreadTokenUsageResponse } from "./types";
 
@@ -17,7 +18,16 @@ export type ThreadCompactResponse = {
 export type CompactThreadContextOptions = {
   signal?: AbortSignal;
   agentName?: string | null;
+  apiBaseURL?: string;
 };
+
+export type PrivateWorkRequestOptions = Partial<
+  Pick<PrivateWorkAccess, "apiBaseURL">
+>;
+
+function threadAPIBaseURL(options?: PrivateWorkRequestOptions): string {
+  return options?.apiBaseURL ?? `${getBackendBaseURL()}/api`;
+}
 
 export type ThreadBranchResponse = {
   thread_id: string;
@@ -50,9 +60,10 @@ async function readThreadAPIError(
 
 export async function fetchThreadTokenUsage(
   threadId: string,
+  options?: PrivateWorkRequestOptions,
 ): Promise<ThreadTokenUsageResponse | null> {
   const response = await fetchWithAuth(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/token-usage`,
+    `${threadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/token-usage`,
     {
       method: "GET",
     },
@@ -71,9 +82,10 @@ export async function fetchThreadTokenUsage(
 export async function branchThreadFromTurn(
   threadId: string,
   input: BranchThreadFromTurnInput,
+  options?: PrivateWorkRequestOptions,
 ): Promise<ThreadBranchResponse> {
   const response = await fetchWithAuth(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/branches`,
+    `${threadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/branches`,
     {
       method: "POST",
       headers: {
@@ -101,7 +113,7 @@ export async function compactThreadContext(
   options: CompactThreadContextOptions = {},
 ): Promise<ThreadCompactResponse> {
   const response = await fetchWithAuth(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/compact`,
+    `${threadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/compact`,
     {
       method: "POST",
       headers: {

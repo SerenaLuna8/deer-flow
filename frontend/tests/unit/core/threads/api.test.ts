@@ -54,6 +54,31 @@ test("fetchThreadTokenUsage returns null for unavailable token usage", async () 
   await expect(fetchThreadTokenUsage("thread-1")).resolves.toBeNull();
 });
 
+test("fetchThreadTokenUsage accepts the project private-work REST base", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      thread_id: "thread-1",
+      total_input_tokens: 0,
+      total_output_tokens: 0,
+      total_tokens: 0,
+      total_runs: 0,
+      by_model: {},
+      by_caller: { lead_agent: 0, subagent: 0, middleware: 0 },
+    }),
+  });
+  const apiBaseURL =
+    "http://localhost:2026/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work";
+  const { fetchThreadTokenUsage } = await import("@/core/threads/api");
+
+  await fetchThreadTokenUsage("thread/1", { apiBaseURL });
+
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    `${apiBaseURL}/threads/thread%2F1/token-usage`,
+    { method: "GET" },
+  );
+});
+
 test("branchThreadFromTurn posts the selected turn ids to the gateway", async () => {
   fetchWithAuth.mockResolvedValue({
     ok: true,

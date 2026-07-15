@@ -150,15 +150,18 @@ async function shouldSkipReconnect(
   }
 }
 
+type RunMetadataStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
 export function clearReconnectRun(
   threadId: string | null | undefined,
   runId: string,
+  storageOverride?: RunMetadataStorage,
 ): void {
   if (typeof window === "undefined" || !threadId) return;
 
   const key = `lg:stream:${threadId}`;
   try {
-    const storage = window.sessionStorage;
+    const storage = storageOverride ?? window.sessionStorage;
     if (storage.getItem(key) === runId) {
       storage.removeItem(key);
     }
@@ -167,12 +170,22 @@ export function clearReconnectRun(
   }
 }
 
-function createCompatibleClient(isMock?: boolean): LangGraphClient {
-  if (isStaticWebsiteOnly() && !isMock) {
+export type CompatibleClientOptions = {
+  apiUrl?: string;
+  isMock?: boolean;
+  runMetadataStorage?: RunMetadataStorage;
+};
+
+export function createCompatibleClient({
+  apiUrl: configuredApiUrl,
+  isMock,
+  runMetadataStorage,
+}: CompatibleClientOptions = {}): LangGraphClient {
+  if (isStaticWebsiteOnly() && !isMock && !configuredApiUrl) {
     return createStaticClient();
   }
 
-  const apiUrl = getLangGraphBaseURL(isMock);
+  const apiUrl = configuredApiUrl ?? getLangGraphBaseURL(isMock);
   console.log(`Creating API client with base URL: ${apiUrl}`);
   const client = new LangGraphClient({
     apiUrl,
@@ -199,7 +212,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
         // doesn't surface as an unhandled rejection, and clear the now-stale
         // reconnect key. clearReconnectRun only removes the key when it still
         // matches this runId, so a newer run's key is never touched.
-        clearReconnectRun(threadId, runId);
+        clearReconnectRun(threadId, runId, runMetadataStorage);
         return;
       }
       throw error;
@@ -213,7 +226,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
     // drained condition variable, pinning ``isLoading`` true so the first
     // post-reload message is routed to ``stop`` instead of ``submit``.
     if (threadId && (await shouldSkipReconnect(client, threadId, runId))) {
-      clearReconnectRun(threadId, runId);
+      clearReconnectRun(threadId, runId, runMetadataStorage);
       return;
     }
     try {
@@ -224,7 +237,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       );
     } catch (error) {
       if (isInactiveRunStreamError(error)) {
-        clearReconnectRun(threadId, runId);
+        clearReconnectRun(threadId, runId, runMetadataStorage);
         return;
       }
       throw error;
@@ -278,7 +291,7 @@ export function getAPIClient(isMock?: boolean): LangGraphClient {
   let client = _clients.get(cacheKey);
 
   if (!client) {
-    client = createCompatibleClient(isMock);
+    client = createCompatibleClient({ isMock });
     _clients.set(cacheKey, client);
   }
 

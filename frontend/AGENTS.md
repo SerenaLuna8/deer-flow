@@ -81,6 +81,16 @@ module-level QueryClient singleton or mount a new AuthProvider without that oute
 Auth refreshes use a generation plus one AbortController per request: newer refreshes,
 external identity application, logout, and unmount invalidate older generations, and both
 query-cache transition and identity commit must recheck the same generation.
+M4 project private work uses a separate LangGraph registry keyed by both authenticated account
+UUID and entered project UUID. `ProjectContextProvider` remains the only slug-resolution/enter
+owner and mounts `ProjectPrivateWorkProvider` only after both identities are known. Project
+clients use the strict `/api/projects/{project_id}/private-work` base, every project private-work
+query/mutation key starts with `['account', accountId, 'project', projectId, 'private-work']`, and
+SDK reconnect metadata is stored under the same account/project scope. Scope cleanup must call
+TanStack cancellation before removing queries, mutations, reconnect metadata, or the client.
+Thread and upload hooks consume `usePrivateWorkAccess()` or an explicitly supplied access value;
+do not reintroduce direct module-global `getAPIClient()` calls inside those hooks. The default
+workspace client and its legacy keys remain compatible until the later UI cutover.
 The M1 `PROJECT_PRIVATE_WORKSPACE` feature constant is hard-disabled and must not be made
 environment- or user-configurable before the later private-work milestone.
 M1 仍保留旧版私有对话兼容路径，但 Thread、run、file、memory、automation 尚未完成项目与
@@ -113,9 +123,10 @@ M3 不提供运行或开始对话入口。旧 `/workspace/{agents,skills,tools}`
 的 loading/error 必须与空列表区分，并提供安全错误文案和重试。secret-bearing 字段不得进入 TanStack
 cache、响应或错误；用户在 password control 中输入的值提交后必须立即清空，不得继续在 DOM 中
 残留或被 UI 回显。
-M3 的前端交付到此为止：`/admin/assets`、四类项目资产页和旧入口只读 catalog 已接入，但
-项目 Thread、run、file、Memory、automation 仍没有项目与 owner 双重隔离；不得从这些页面增加
-运行入口或把当前界面描述为完整多用户 SaaS。
+M3 的前端资产交付到此为止：`/admin/assets`、四类项目资产页和旧入口只读 catalog 已接入。
+M4 Task 14 只补齐 account/project-scoped LangGraph client、cache ownership 与 Thread/upload 底层
+注入；项目 chats、Memory、connections 与 automation 页面仍未接入，因此现有资产页不得自行增加
+运行入口，也不能把当前界面描述为完整多用户 SaaS。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie
@@ -135,7 +146,8 @@ automation 尚未完成项目与 owner 双重隔离，因此 M2 仍不能作为�
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
 2. Stream events update thread state (messages, artifacts, todos, goal)
 3. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
-4. TanStack Query manages server state; localStorage stores user settings
+4. TanStack Query manages server state; project private-work keys and reconnect metadata include
+   both account and project identity, while localStorage stores user settings
 5. Components subscribe to thread state and render updates
 
 `/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until the next stream `values` update arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight.
@@ -146,7 +158,9 @@ Human input requests are a structured message protocol layered on normal chat hi
 
 - **Server Components by default**, `"use client"` only for interactive components
 - **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
-- **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
+- **LangGraph client** — legacy workspace uses the `getAPIClient()` default/mock registry;
+  project pages use `ProjectPrivateWorkProvider` and the separate account/project registry in
+  `core/private-work/`
 - **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
 - **Subtask step history** (`core/tasks/`) — the subtask card shows a subagent's full step timeline (#3779): its assistant reasoning turns interleaved with the tools it ran. `Subtask.steps[]` is accumulated live from `task_running` events (appended via `mergeSteps`, not overwritten) and backfilled on expand for historical runs by `fetchSubtaskSteps`, which pages the events endpoint scoped to one task (GET `/runs/{runId}/events?event_types=subagent.step&task_id=…&after_seq=…`) until a short page, so the run-wide limit can't truncate the timeline. `core/tasks/steps.ts` is the pure model: `messageToStep` (live), `eventsToSteps` (reload), `mergeSteps` (dedup by `message_index`), and `stepsForDisplay` (what the card renders — keeps tool steps + AI steps with text, drops the trailing final-answer AI step when completed since it's shown as `result`). `core/tasks/subtask-update.ts::computeNextSubtask` is the pure per-subtask state transition (merge step deltas, keep terminal status stable); `core/tasks/context.tsx`'s `useUpdateSubtask` applies it against a `tasksRef` mirroring the latest state (not a closure snapshot), so a late-resolving `fetchSubtaskSteps` backfill merges into current state instead of clobbering SSE steps or sibling subtasks that arrived meanwhile. The owning `run_id` is carried onto history content messages in `buildVisibleHistoryMessages` so the card can resolve the events endpoint.
 

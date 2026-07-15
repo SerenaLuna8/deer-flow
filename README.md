@@ -349,7 +349,12 @@ PostgreSQL legacy Thread/run/event/feedback 与 checkpoint scope marker；要求
 `private_work_cutover_state.stage=cutover_complete` 同时满足时项目私有 API 才开放；marker 完成后，
 旧 Thread/run/Memory/channel connection/upload/artifact HTTP 入口与 shared `start_run` 会统一返回
 `409 PRIVATE_WORK_CUTOVER`。非空 legacy filesystem、Memory 或 connection source 当前会在 execute 前
-安全拒绝；frontend 与 automation 也仍待完成，因此这还不是完整的多用户 SaaS 发布。
+安全拒绝。M4 Task 14 已建立前端 project-private client 基础：LangGraph client 按 authenticated
+account UUID 与 project UUID 双键隔离，严格连接
+`/api/projects/{project_id}/private-work`，Thread/upload hook 和 TanStack key 复用同一 project scope，
+项目或账号离开时先取消该 scope 的查询，再清理 reconnect state 与 client registry。默认 workspace
+client 仍保持原有兼容路径，CSRF 与 stream/cancel wrapper 不变。项目 chats 页面、Memory/connections
+页面、automation 和最终 cutover UI 仍待后续 Task 接入，因此这还不是完整的多用户 SaaS 发布。
 
 进入维护窗口并先完成外部 PostgreSQL 备份。owner map 是一个只包含 UUID→UUID 的 JSON object；
 `--backup-dir` 是当前 CLI 的保留运维参数，首版不会在其中写文件：

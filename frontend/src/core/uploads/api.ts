@@ -4,6 +4,7 @@
 
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
+import type { PrivateWorkAccess } from "../private-work/types";
 
 export interface UploadedFileInfo {
   filename: string;
@@ -37,6 +38,12 @@ export interface UploadLimits {
   max_total_size: number;
 }
 
+export type UploadRequestOptions = Pick<PrivateWorkAccess, "apiBaseURL">;
+
+function uploadAPIBaseURL(options?: UploadRequestOptions): string {
+  return options?.apiBaseURL ?? `${getBackendBaseURL()}/api`;
+}
+
 async function readErrorDetail(
   response: Response,
   fallback: string,
@@ -51,6 +58,7 @@ async function readErrorDetail(
 export async function uploadFiles(
   threadId: string,
   files: File[],
+  options?: UploadRequestOptions,
 ): Promise<UploadResponse> {
   const formData = new FormData();
 
@@ -59,7 +67,7 @@ export async function uploadFiles(
   });
 
   const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads`,
+    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads`,
     {
       method: "POST",
       body: formData,
@@ -76,9 +84,12 @@ export async function uploadFiles(
 /**
  * Load the upload limits enforced by the gateway for a thread
  */
-export async function getUploadLimits(threadId: string): Promise<UploadLimits> {
+export async function getUploadLimits(
+  threadId: string,
+  options?: UploadRequestOptions,
+): Promise<UploadLimits> {
   const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads/limits`,
+    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads/limits`,
   );
 
   if (!response.ok) {
@@ -95,9 +106,10 @@ export async function getUploadLimits(threadId: string): Promise<UploadLimits> {
  */
 export async function listUploadedFiles(
   threadId: string,
+  options?: UploadRequestOptions,
 ): Promise<ListFilesResponse> {
   const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads/list`,
+    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads/list`,
   );
 
   if (!response.ok) {
@@ -115,9 +127,10 @@ export async function listUploadedFiles(
 export async function deleteUploadedFile(
   threadId: string,
   filename: string,
+  options?: UploadRequestOptions,
 ): Promise<{ success: boolean; message: string }> {
   const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${threadId}/uploads/${filename}`,
+    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads/${encodeURIComponent(filename)}`,
     {
       method: "DELETE",
     },

@@ -11,6 +11,10 @@ describe("account query client", () => {
     async (nextUserId) => {
       const client = createAccountQueryClient();
       client.setQueryData(["account", "u1", "projects"], ["private-u1"]);
+      client.setQueryData(
+        ["account", "u1", "project", "p1", "private-work", "threads"],
+        ["thread-u1-p1"],
+      );
       let capturedSignal: AbortSignal | undefined;
       const pending = client
         .fetchQuery({
@@ -27,6 +31,16 @@ describe("account query client", () => {
       expect(capturedSignal?.aborted).toBe(true);
       expect(
         client.getQueryData(["account", "u1", "projects"]),
+      ).toBeUndefined();
+      expect(
+        client.getQueryData([
+          "account",
+          "u1",
+          "project",
+          "p1",
+          "private-work",
+          "threads",
+        ]),
       ).toBeUndefined();
       await pending;
     },
