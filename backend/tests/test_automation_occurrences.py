@@ -325,6 +325,52 @@ async def test_manual_replay_precedes_active_and_global_cap_checks(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_manual_replay_survives_soft_delete_and_terminal_history(
+    occurrence_seed: OccurrenceSeed,
+) -> None:
+    seed = occurrence_seed
+    task = await seed.create_task(next_run_at=NOW + timedelta(hours=1))
+    key = uuid.UUID("33333333-3333-4333-8333-333333333333")
+    service = AutomationOccurrenceService(seed.factory, max_concurrent_runs=1)
+    first = await service.reserve_manual(seed.context, task.id, key, now=NOW)
+    await ProjectAutomationService(seed.factory, clock=lambda: NOW).delete(
+        seed.context,
+        task.id,
+        task.version,
+    )
+
+    replay = await service.reserve_manual(seed.context, task.id, key, now=NOW)
+
+    assert replay.occurrence.id == first.occurrence.id
+    assert replay.occurrence.status == "cancelled"
+    assert replay.created is False
+    with pytest.raises(AutomationNotFound):
+        await service.reserve_manual(seed.context, task.id, uuid.uuid4(), now=NOW)
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_manual_replay_survives_frozen_definition(
+    occurrence_seed: OccurrenceSeed,
+) -> None:
+    seed = occurrence_seed
+    task = await seed.create_task(next_run_at=NOW + timedelta(hours=1))
+    key = uuid.UUID("44444444-4444-4444-8444-444444444444")
+    service = AutomationOccurrenceService(seed.factory, max_concurrent_runs=1)
+    first = await service.reserve_manual(seed.context, task.id, key, now=NOW)
+    async with seed.factory() as session, session.begin():
+        await session.execute(ScheduledTaskRow.__table__.update().where(ScheduledTaskRow.id == task.id).values(frozen_at=NOW))
+
+    replay = await service.reserve_manual(seed.context, task.id, key, now=NOW)
+
+    assert replay.occurrence.id == first.occurrence.id
+    assert replay.created is False
+    with pytest.raises(AutomationNotFound):
+        await service.reserve_manual(seed.context, task.id, uuid.uuid4(), now=NOW)
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_manual_different_key_rejects_active_occurrence_without_skipped_history(
     occurrence_seed: OccurrenceSeed,
 ) -> None:
@@ -469,17 +515,29 @@ async def test_two_claimers_claim_one_queued_occurrence_once(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_claim_skips_occurrence_locked_by_another_transaction(
+async def test_claim_scans_past_locked_oldest_then_claims_it_after_release(
     occurrence_seed: OccurrenceSeed,
 ) -> None:
     seed = occurrence_seed
-    await seed.create_task()
+    oldest_task = await seed.create_task(next_run_at=NOW + timedelta(hours=1))
+    next_task = await seed.create_task(next_run_at=NOW + timedelta(hours=1))
     service = AutomationOccurrenceService(seed.factory, max_concurrent_runs=2)
-    (queued,) = await service.reserve_due(now=NOW, limit=10)
+    oldest = await seed.create_occurrence(
+        oldest_task,
+        status="queued",
+        scheduled_for=DUE_AT - timedelta(minutes=1),
+        suffix="oldest",
+    )
+    next_eligible = await seed.create_occurrence(
+        next_task,
+        status="queued",
+        scheduled_for=DUE_AT,
+        suffix="next",
+    )
 
     async with seed.factory() as lock_session, lock_session.begin():
-        await lock_session.execute(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == queued.id).with_for_update(of=ScheduledTaskRunRow))
-        claimed = await asyncio.wait_for(
+        await lock_session.execute(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == oldest.id).with_for_update(of=ScheduledTaskRunRow))
+        claimed_next = await asyncio.wait_for(
             service.claim_next(
                 now=NOW,
                 lease_owner="scheduler-skip-locked",
@@ -487,10 +545,29 @@ async def test_claim_skips_occurrence_locked_by_another_transaction(
             ),
             timeout=1,
         )
+        assert claimed_next is not None
+        assert claimed_next.id == next_eligible.id
 
-    assert claimed is None
-    rows = await seed.occurrences(queued.task_id)
-    assert len(rows) == 1 and rows[0].status == "queued"
+    claimed_oldest = await service.claim_next(
+        now=NOW,
+        lease_owner="scheduler-after-release",
+        lease_seconds=60,
+    )
+
+    assert claimed_oldest is not None
+    assert claimed_oldest.id == oldest.id
+    assert (
+        await service.claim_next(
+            now=NOW,
+            lease_owner="scheduler-no-duplicate",
+            lease_seconds=60,
+        )
+        is None
+    )
+    rows = await seed.occurrences()
+    assert {row.id for row in rows} == {oldest.id, next_eligible.id}
+    assert all(row.status == "launching" for row in rows)
+    assert all(row.launch_attempt_count == 1 for row in rows)
 
 
 @pytest.mark.postgres

@@ -217,6 +217,15 @@ class AutomationOccurrenceService:
                     lock=True,
                 )
                 await self._acquire_admission_lock(session)
+                occurrences = ScheduledTaskRunRepository(session)
+                existing = await occurrences.get_by_manual_idempotency(
+                    context.resource_scope,
+                    task_id,
+                    idempotency_hash,
+                )
+                if existing is not None:
+                    return ManualReservation(existing, False)
+
                 task = await ScheduledTaskRepository(session).lock_active(
                     context.resource_scope,
                     task_id,
@@ -224,14 +233,6 @@ class AutomationOccurrenceService:
                 if task is None or task.status not in {"enabled", "paused"}:
                     raise AutomationNotFound(context.request_id)
 
-                occurrences = ScheduledTaskRunRepository(session)
-                existing = await occurrences.get_by_manual_idempotency(
-                    context.resource_scope,
-                    task.id,
-                    idempotency_hash,
-                )
-                if existing is not None:
-                    return ManualReservation(existing, False)
                 if await occurrences.has_active(context.resource_scope, task.id):
                     raise AutomationActiveRun(context.request_id)
                 if await self._active_count(session) >= self._max_concurrent_runs:
@@ -269,68 +270,92 @@ class AutomationOccurrenceService:
             raise ValueError("lease_seconds must be positive")
         try:
             async with self._session_factory() as session, session.begin():
-                candidate = (
-                    await session.execute(
-                        sa.select(
-                            ScheduledTaskRunRow.id,
-                            ScheduledTaskRow,
-                            ProjectMembershipRow.version,
-                        )
-                        .join(
-                            ScheduledTaskRow,
-                            sa.and_(
-                                ScheduledTaskRow.project_id == ScheduledTaskRunRow.project_id,
-                                ScheduledTaskRow.owner_user_id == ScheduledTaskRunRow.owner_user_id,
-                                ScheduledTaskRow.id == ScheduledTaskRunRow.task_id,
-                            ),
-                        )
-                        .join(
-                            ProjectMembershipRow,
-                            sa.and_(
-                                ProjectMembershipRow.project_id == ScheduledTaskRow.project_id,
-                                ProjectMembershipRow.user_id == ScheduledTaskRow.owner_user_id,
-                            ),
-                        )
-                        .join(ProjectRow, ProjectRow.id == ScheduledTaskRow.project_id)
-                        .where(
-                            ScheduledTaskRunRow.status == "queued",
-                            sa.or_(
-                                ScheduledTaskRunRow.next_attempt_at.is_(None),
-                                ScheduledTaskRunRow.next_attempt_at <= now,
-                            ),
-                            ScheduledTaskRow.frozen_at.is_(None),
-                            ScheduledTaskRow.deleted_at.is_(None),
-                            sa.or_(
-                                ScheduledTaskRow.status == "enabled",
-                                sa.and_(
-                                    ScheduledTaskRunRow.trigger == "manual",
-                                    ScheduledTaskRow.status == "paused",
-                                ),
-                            ),
-                            ProjectMembershipRow.status == "active",
-                            ProjectMembershipRow.role.in_(("admin", "editor", "runner")),
-                            ProjectRow.status == "active",
-                            ProjectRow.is_suspended.is_(False),
-                        )
-                        .order_by(ScheduledTaskRunRow.scheduled_for, ScheduledTaskRunRow.id)
-                        .limit(1)
-                        .with_for_update(of=ScheduledTaskRow, skip_locked=True)
+                candidate_query = (
+                    sa.select(
+                        ScheduledTaskRunRow.id,
+                        ScheduledTaskRunRow.scheduled_for,
+                        ScheduledTaskRow,
+                        ProjectMembershipRow.version,
                     )
-                ).one_or_none()
-                if candidate is None:
-                    return None
-                occurrence_id, task_row, membership_version = candidate
-                scope = self._scope(task_row, membership_version)
-                # Claiming intentionally leaves thread_id/run_id unchanged. Their
-                # immediate final-schema FKs require Task 6 to create the real
-                # parent rows before atomically backfilling these pointers.
-                return await ScheduledTaskRunRepository(session).claim(
-                    scope,
-                    occurrence_id,
-                    now=now,
-                    lease_owner=lease_owner,
-                    lease_expires_at=now + timedelta(seconds=lease_seconds),
+                    .join(
+                        ScheduledTaskRow,
+                        sa.and_(
+                            ScheduledTaskRow.project_id == ScheduledTaskRunRow.project_id,
+                            ScheduledTaskRow.owner_user_id == ScheduledTaskRunRow.owner_user_id,
+                            ScheduledTaskRow.id == ScheduledTaskRunRow.task_id,
+                        ),
+                    )
+                    .join(
+                        ProjectMembershipRow,
+                        sa.and_(
+                            ProjectMembershipRow.project_id == ScheduledTaskRow.project_id,
+                            ProjectMembershipRow.user_id == ScheduledTaskRow.owner_user_id,
+                        ),
+                    )
+                    .join(ProjectRow, ProjectRow.id == ScheduledTaskRow.project_id)
+                    .where(
+                        ScheduledTaskRunRow.status == "queued",
+                        sa.or_(
+                            ScheduledTaskRunRow.next_attempt_at.is_(None),
+                            ScheduledTaskRunRow.next_attempt_at <= now,
+                        ),
+                        ScheduledTaskRow.frozen_at.is_(None),
+                        ScheduledTaskRow.deleted_at.is_(None),
+                        sa.or_(
+                            ScheduledTaskRow.status == "enabled",
+                            sa.and_(
+                                ScheduledTaskRunRow.trigger == "manual",
+                                ScheduledTaskRow.status == "paused",
+                            ),
+                        ),
+                        ProjectMembershipRow.status == "active",
+                        ProjectMembershipRow.role.in_(("admin", "editor", "runner")),
+                        ProjectRow.status == "active",
+                        ProjectRow.is_suspended.is_(False),
+                    )
                 )
+                cursor: tuple[datetime, str] | None = None
+                occurrences = ScheduledTaskRunRepository(session)
+                while True:
+                    query = candidate_query
+                    if cursor is not None:
+                        scheduled_for, occurrence_id = cursor
+                        query = query.where(
+                            sa.or_(
+                                ScheduledTaskRunRow.scheduled_for > scheduled_for,
+                                sa.and_(
+                                    ScheduledTaskRunRow.scheduled_for == scheduled_for,
+                                    ScheduledTaskRunRow.id > occurrence_id,
+                                ),
+                            )
+                        )
+                    candidate = (
+                        await session.execute(
+                            query.order_by(
+                                ScheduledTaskRunRow.scheduled_for,
+                                ScheduledTaskRunRow.id,
+                            )
+                            .limit(1)
+                            .with_for_update(of=ScheduledTaskRow, skip_locked=True)
+                        )
+                    ).one_or_none()
+                    if candidate is None:
+                        return None
+                    occurrence_id, scheduled_for, task_row, membership_version = candidate
+                    cursor = (scheduled_for, occurrence_id)
+                    scope = self._scope(task_row, membership_version)
+                    # Claiming intentionally leaves thread_id/run_id unchanged. Their
+                    # immediate final-schema FKs require Task 6 to create the real
+                    # parent rows before atomically backfilling these pointers.
+                    claimed = await occurrences.claim(
+                        scope,
+                        occurrence_id,
+                        now=now,
+                        lease_owner=lease_owner,
+                        lease_expires_at=now + timedelta(seconds=lease_seconds),
+                    )
+                    if claimed is not None:
+                        return claimed
         except Exception as error:
             self._raise_mapped(error, "scheduler")
 
