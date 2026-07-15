@@ -101,6 +101,9 @@ type MockPrivateWorkOptions = {
   stateMessages?: unknown[];
   stateArtifacts?: string[];
   artifactFileStatus?: number;
+  runBodies?: unknown[];
+  streamGate?: Promise<void>;
+  uploadRequests?: string[];
 };
 
 async function json(route: Route, body: unknown, status = 200) {
@@ -136,123 +139,146 @@ async function mockPrivateWork(
   const requests: string[] = [];
   let threadExists = includeThread;
   let hasStreamed = false;
-  await page.route(`**/api/projects/${PROJECT_ID}/private-work/**`, (route) => {
-    const request = route.request();
-    const path = new URL(request.url()).pathname;
-    requests.push(`${request.method()} ${path}`);
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/private-work/**`,
+    async (route) => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname;
+      requests.push(`${request.method()} ${path}`);
 
-    if (path.endsWith("/readiness")) {
-      return json(route, {
-        status: "ready",
-        code: "PRIVATE_WORK_READY",
-        request_id: "req-ready",
-      });
-    }
-    if (path.endsWith("/threads/search")) {
-      return json(route, { items: threadExists ? [privateThread] : [] });
-    }
-    if (path.endsWith(`/threads/${THREAD_ID}/state`)) {
-      if (!threadExists) return json(route, { detail: "not found" }, 404);
-      return json(route, {
-        values: {
-          title: "Owner research",
-          messages: options.stateMessages ?? [
-            {
-              type: "human",
-              id: "msg-project-history",
-              content: [{ type: "text", text: "Previous project question" }],
-            },
-            ...(hasStreamed
-              ? [
-                  {
-                    type: "human",
-                    id: "msg-project-submitted",
-                    content: [{ type: "text", text: "Hello from project" }],
-                  },
-                  {
-                    type: "ai",
-                    id: "msg-ai-1",
-                    content: "Hello from DeerFlow!",
-                  },
-                ]
-              : []),
-          ],
-          artifacts: options.stateArtifacts ?? [],
-          todos: [],
-        },
-        next: [],
-        metadata: {},
-        checkpoint: {},
-        checkpoint_id: null,
-        parent_checkpoint_id: null,
-        created_at: "2026-07-15T01:00:00Z",
-        tasks: [],
-      });
-    }
-    if (path.endsWith(`/threads/${THREAD_ID}/token-usage`)) {
-      return json(route, {
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_tokens: 0,
-      });
-    }
-    if (
-      request.method() === "GET" &&
-      path.endsWith(`/threads/${THREAD_ID}/uploads`)
-    ) {
-      return json(route, [
-        {
-          id: PROJECT_FILE_ID,
-          logical_path: "outputs/presented-report.md",
-          display_name: "presented-report.md",
-          kind: "artifact",
-          media_type: "text/markdown",
-          size: 26,
-          sha256: "project-file-sha",
+      if (path.endsWith("/readiness")) {
+        return json(route, {
+          status: "ready",
+          code: "PRIVATE_WORK_READY",
+          request_id: "req-ready",
+        });
+      }
+      if (path.endsWith("/threads/search")) {
+        return json(route, { items: threadExists ? [privateThread] : [] });
+      }
+      if (path.endsWith(`/threads/${THREAD_ID}/state`)) {
+        if (!threadExists) return json(route, { detail: "not found" }, 404);
+        return json(route, {
+          values: {
+            title: "Owner research",
+            messages: options.stateMessages ?? [
+              {
+                type: "human",
+                id: "msg-project-history",
+                content: [{ type: "text", text: "Previous project question" }],
+              },
+              ...(hasStreamed
+                ? [
+                    {
+                      type: "human",
+                      id: "msg-project-submitted",
+                      content: [{ type: "text", text: "Hello from project" }],
+                    },
+                    {
+                      type: "ai",
+                      id: "msg-ai-1",
+                      content: "Hello from DeerFlow!",
+                    },
+                  ]
+                : []),
+            ],
+            artifacts: options.stateArtifacts ?? [],
+            todos: [],
+          },
+          next: [],
+          metadata: {},
+          checkpoint: {},
+          checkpoint_id: null,
+          parent_checkpoint_id: null,
+          created_at: "2026-07-15T01:00:00Z",
+          tasks: [],
+        });
+      }
+      if (path.endsWith(`/threads/${THREAD_ID}/token-usage`)) {
+        return json(route, {
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          total_tokens: 0,
+        });
+      }
+      if (
+        request.method() === "POST" &&
+        path.endsWith(`/threads/${THREAD_ID}/uploads`)
+      ) {
+        options.uploadRequests?.push(`${request.method()} ${path}`);
+        return json(route, {
+          id: "40000000-0000-4000-8000-000000000002",
+          logical_path: "uploads/release.txt",
+          display_name: "release.txt",
+          kind: "upload",
+          media_type: "text/plain",
+          size: 15,
+          sha256: "release-upload-sha",
           status: "ready",
           created_at: "2026-07-15T00:00:00Z",
           updated_at: "2026-07-15T00:00:00Z",
-        },
-      ]);
-    }
-    if (path.endsWith(`/threads/${THREAD_ID}/files/${PROJECT_FILE_ID}`)) {
-      if (options.artifactFileStatus) {
-        return json(
-          route,
-          { detail: "private artifact storage failure" },
-          options.artifactFileStatus,
-        );
+        });
       }
-      return route.fulfill({
-        status: 200,
-        contentType: "text/markdown",
-        body: "# Presented project report",
-      });
-    }
-    if (path.endsWith(`/threads/${THREAD_ID}`)) {
-      if (request.method() === "DELETE") {
-        threadExists = false;
-        return route.fulfill({ status: 204 });
+      if (
+        request.method() === "GET" &&
+        path.endsWith(`/threads/${THREAD_ID}/uploads`)
+      ) {
+        return json(route, [
+          {
+            id: PROJECT_FILE_ID,
+            logical_path: "outputs/presented-report.md",
+            display_name: "presented-report.md",
+            kind: "artifact",
+            media_type: "text/markdown",
+            size: 26,
+            sha256: "project-file-sha",
+            status: "ready",
+            created_at: "2026-07-15T00:00:00Z",
+            updated_at: "2026-07-15T00:00:00Z",
+          },
+        ]);
       }
-      if (!threadExists) return json(route, { detail: "not found" }, 404);
-      if (options.metadataStatus && options.metadataStatus !== 200) {
-        return json(
-          route,
-          { detail: "temporarily unavailable" },
-          options.metadataStatus,
-        );
+      if (path.endsWith(`/threads/${THREAD_ID}/files/${PROJECT_FILE_ID}`)) {
+        if (options.artifactFileStatus) {
+          return json(
+            route,
+            { detail: "private artifact storage failure" },
+            options.artifactFileStatus,
+          );
+        }
+        return route.fulfill({
+          status: 200,
+          contentType: "text/markdown",
+          body: "# Presented project report",
+        });
       }
-      return json(route, privateThread);
-    }
-    if (path.endsWith(`/threads/${THREAD_ID}/runs/stream`)) {
-      hasStreamed = true;
-      return handleRunStream(route);
-    }
-    if (/\/threads\/[^/]+\/runs(?:\?|$)/u.test(request.url())) {
-      return json(route, []);
-    }
-    return json(route, { detail: "not found" }, 404);
-  });
+      if (path.endsWith(`/threads/${THREAD_ID}`)) {
+        if (request.method() === "DELETE") {
+          threadExists = false;
+          return route.fulfill({ status: 204 });
+        }
+        if (!threadExists) return json(route, { detail: "not found" }, 404);
+        if (options.metadataStatus && options.metadataStatus !== 200) {
+          return json(
+            route,
+            { detail: "temporarily unavailable" },
+            options.metadataStatus,
+          );
+        }
+        return json(route, privateThread);
+      }
+      if (path.endsWith(`/threads/${THREAD_ID}/runs/stream`)) {
+        options.runBodies?.push(request.postDataJSON());
+        await options.streamGate;
+        hasStreamed = true;
+        return handleRunStream(route);
+      }
+      if (/\/threads\/[^/]+\/runs(?:\?|$)/u.test(request.url())) {
+        return json(route, []);
+      }
+      return json(route, { detail: "not found" }, 404);
+    },
+  );
   return requests;
 }
 
@@ -316,7 +342,7 @@ test("project list is owner-scoped and direct metadata misses show one public no
   await mockPrivateWork(page);
   await page.goto("/projects/research-lab/chats");
   await expect(page.getByText("Owner research")).toBeVisible();
-  await expect(page.getByRole("button", { name: "新建对话" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "新建对话" })).toBeEnabled();
 
   await page.goto(`/projects/research-lab/chats/${MISSING_THREAD_ID}`);
   await expect(
@@ -399,6 +425,133 @@ test("viewer can delete an owned thread but cannot create or run project work", 
   expect(projectRequests).toContain(
     `DELETE /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}`,
   );
+});
+
+test("project chat stop aborts the scoped in-flight stream", async ({
+  page,
+}) => {
+  let releaseStream!: () => void;
+  const streamGate = new Promise<void>((resolve) => {
+    releaseStream = resolve;
+  });
+  const runBodies: unknown[] = [];
+  await mockPrivateWork(page, true, { runBodies, streamGate });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await textarea.fill("Hold this project stream");
+  await textarea.press("Enter");
+  await expect.poll(() => runBodies).toHaveLength(1);
+
+  await page.getByLabel("Submit").click();
+  releaseStream();
+  await expect(textarea).toBeEnabled();
+  await expect(page.getByText("Hello from DeerFlow!")).toHaveCount(0);
+});
+
+test("project human-input answer stays hidden and scoped in the run body", async ({
+  page,
+}) => {
+  const runBodies: unknown[] = [];
+  await mockPrivateWork(page, true, {
+    runBodies,
+    stateMessages: [
+      {
+        type: "human",
+        id: "msg-human-input-question",
+        content: [{ type: "text", text: "Prepare deployment" }],
+      },
+      {
+        type: "ai",
+        id: "msg-human-input-call",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-project-clarification",
+            name: "ask_clarification",
+            args: { question: "Which environment?" },
+          },
+        ],
+      },
+      {
+        type: "tool",
+        id: "msg-human-input-tool",
+        name: "ask_clarification",
+        tool_call_id: "call-project-clarification",
+        content: "Which environment?",
+        artifact: {
+          human_input: {
+            version: 1,
+            kind: "human_input_request",
+            source: "ask_clarification",
+            request_id: "clarification:call-project-clarification",
+            tool_call_id: "call-project-clarification",
+            clarification_type: "approach_choice",
+            question: "Which environment should I deploy to?",
+            input_mode: "single_choice",
+            options: [
+              {
+                id: "option-development",
+                label: "development",
+                value: "development",
+              },
+              {
+                id: "option-staging",
+                label: "staging",
+                value: "staging",
+              },
+            ],
+          },
+        },
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect(page.getByTestId("human-input-card")).toBeVisible();
+  await page.getByRole("button", { name: "staging" }).click();
+
+  await expect.poll(() => runBodies).toHaveLength(1);
+  const serialized = JSON.stringify(runBodies[0]);
+  expect(serialized).toContain('"hide_from_ui":true');
+  expect(serialized).toContain('"kind":"human_input_response"');
+  expect(serialized).toContain('"value":"staging"');
+});
+
+test("project upload is sent only through the scoped upload route", async ({
+  page,
+}) => {
+  const runBodies: unknown[] = [];
+  const uploadRequests: string[] = [];
+  await mockPrivateWork(page, true, { runBodies, uploadRequests });
+  const legacyUploads: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path === `/api/threads/${THREAD_ID}/uploads`) {
+      legacyUploads.push(`${request.method()} ${path}`);
+    }
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await page.getByLabel("Upload files").setInputFiles({
+    name: "release.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("release upload\n"),
+  });
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await textarea.fill("Use the project upload");
+  await textarea.press("Enter");
+
+  await expect
+    .poll(() => uploadRequests)
+    .toEqual([
+      `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/uploads`,
+    ]);
+  await expect.poll(() => runBodies).toHaveLength(1);
+  expect(JSON.stringify(runBodies[0])).toContain(
+    "/mnt/user-data/uploads/release.txt",
+  );
+  expect(legacyUploads).toEqual([]);
 });
 
 test("metadata 5xx keeps usable project history instead of showing not-found", async ({

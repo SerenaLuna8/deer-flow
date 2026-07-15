@@ -458,13 +458,35 @@ test("project context re-enters on membership version changes and rejects the ol
   await expect(page.getByRole("link", { name: "项目设置" })).toHaveCount(0);
 });
 
-test("project home stays private-work disabled in dark mobile layout", async ({
+test("project home enables ready private work in dark mobile layout", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await page.emulateMedia({ colorScheme: "dark" });
   mockLangGraphAPI(page);
-  const api = await mockProjectsAPI(page);
+  const readyProject: Project = {
+    ...baseProject,
+    capabilities: [
+      ...baseProject.capabilities,
+      "shared_assets.execute",
+      "private_work.create",
+      "private_work.read_own",
+    ],
+  };
+  const api = await mockProjectsAPI(page, [readyProject]);
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/private-work/readiness`,
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "ready",
+          code: "PRIVATE_WORK_READY",
+          request_id: "req-ready",
+        }),
+      }),
+  );
   const threadRequests: string[] = [];
   page.on("request", (request) => {
     if (new URL(request.url()).pathname.includes("/threads")) {
@@ -486,11 +508,10 @@ test("project home stays private-work disabled in dark mobile layout", async ({
   await expect(page.getByText("共享 Skill")).toBeVisible();
   await expect(page.getByText("共享 MCP")).toBeVisible();
   const privateWork = page.getByRole("button", { name: "开始私有对话" });
-  await expect(privateWork).toBeDisabled();
-  const beforeUrl = page.url();
-  await privateWork.dispatchEvent("click");
-  await expect(page).toHaveURL(beforeUrl);
-  expect(threadRequests).toEqual([]);
+  await expect(privateWork).toBeEnabled();
+  expect(threadRequests).toEqual([
+    `http://localhost:3000/api/projects/${PROJECT_ID}/private-work/threads/search`,
+  ]);
   expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
   await expect
     .poll(() =>

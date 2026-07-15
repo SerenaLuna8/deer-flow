@@ -17,7 +17,7 @@ describe("project account prerequisites", () => {
     ).toBe(false);
   });
 
-  test("hard-disables private project work for M1", () => {
-    expect(PROJECT_PRIVATE_WORKSPACE).toBe(false);
+  test("enables private project work after the M4 release gate", () => {
+    expect(PROJECT_PRIVATE_WORKSPACE).toBe(true);
   });
 });

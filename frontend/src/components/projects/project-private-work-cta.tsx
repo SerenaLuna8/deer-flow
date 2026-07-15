@@ -58,7 +58,9 @@ export function ProjectPrivateWorkCta({ project }: { project: Project }) {
                   : readiness.data?.status === "unavailable" ||
                       readiness.isError
                     ? "暂时无法确认私有工作服务状态。"
-                    : "私有工作迁移门禁尚未开放。"}
+                    : readiness.isLoading
+                      ? "正在确认私有工作服务状态。"
+                      : "私有工作服务尚未就绪。"}
               </p>
             )}
           </div>
