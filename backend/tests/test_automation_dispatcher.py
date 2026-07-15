@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import func, select, text
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
-from app.automations.dispatcher import AutomationDispatcher
+from app.automations.dispatcher import AutomationDispatcher, AutomationDispatchResult
 from app.automations.errors import (
     AutomationConflict,
     AutomationForbidden,
@@ -245,6 +246,102 @@ async def test_dispatcher_launches_through_real_private_admission_and_backfills_
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_concurrent_dispatchers_converge_after_deterministic_admission_conflict(
+    dispatch_seed: DispatchSeed,
+) -> None:
+    seed = dispatch_seed
+    task, occurrence = await seed.claimed_occurrence()
+    barrier = asyncio.Barrier(2)
+    launch_calls: list[dict[str, object]] = []
+
+    async def launch_private_run(**kwargs):
+        launch_calls.append(kwargs)
+        await asyncio.wait_for(barrier.wait(), timeout=5)
+        admitted = await PrivateRunAdmissionService(seed.factory).admit(
+            kwargs["context"],
+            kwargs["thread_id"],
+            PrivateRunCreate(
+                run_id=kwargs["run_id"],
+                metadata=dict(kwargs["metadata"]),
+                kwargs={
+                    "input": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": kwargs["prompt"],
+                            }
+                        ]
+                    },
+                    "config": {"context": {"non_interactive": True}},
+                },
+            ),
+        )
+        return _runtime_record(admitted)
+
+    dispatchers = tuple(
+        AutomationDispatcher(
+            seed.factory,
+            thread_service=seed.thread_service,
+            launch_private_run=launch_private_run,
+            clock=lambda: NOW,
+        )
+        for _ in range(2)
+    )
+
+    outcomes = await asyncio.wait_for(
+        asyncio.gather(
+            *(dispatcher.dispatch(occurrence.id, app=SimpleNamespace()) for dispatcher in dispatchers),
+            return_exceptions=True,
+        ),
+        timeout=10,
+    )
+
+    expected = AutomationDispatchResult(
+        occurrence_id=occurrence.id,
+        thread_id=deterministic_thread_id(occurrence.id),
+        run_id=deterministic_run_id(occurrence.id),
+    )
+    assert (
+        launch_calls[0]["metadata"]
+        == launch_calls[1]["metadata"]
+        == {
+            "scheduled_task_id": task.id,
+            "scheduled_task_run_id": occurrence.id,
+            "scheduled_trigger": occurrence.trigger,
+        }
+    )
+    assert outcomes == [expected, expected]
+
+    persisted = await seed.persisted_occurrence(occurrence.id)
+    assert persisted.status == "running"
+    assert persisted.thread_id == expected.thread_id
+    assert persisted.run_id == expected.run_id
+    async with seed.factory() as session:
+        run_count = await session.scalar(
+            text(
+                """SELECT count(*) FROM runs
+                WHERE project_id=:project_id
+                  AND owner_user_id=:owner_user_id
+                  AND run_id=:run_id"""
+            ),
+            {
+                "project_id": seed.context.project_id,
+                "owner_user_id": seed.context.resource_scope.owner_user_id,
+                "run_id": expected.run_id,
+            },
+        )
+        run = await PrivateRunRepository(session).get(
+            scope=seed.context.resource_scope,
+            run_id=expected.run_id,
+        )
+    assert run_count == 1
+    assert run is not None
+    assert run.thread_id == expected.thread_id
+    assert run.metadata == launch_calls[0]["metadata"]
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_dispatcher_retry_adopts_matching_existing_private_run_without_relaunch(
     dispatch_seed: DispatchSeed,
 ) -> None:
@@ -286,6 +383,58 @@ async def test_dispatcher_retry_adopts_matching_existing_private_run_without_rel
     assert result.run_id == admitted.run.run_id
     launcher.assert_not_awaited()
     assert (await seed.persisted_occurrence(occurrence.id)).status == "running"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_dispatcher_rejects_matching_terminal_run_as_conflict(
+    dispatch_seed: DispatchSeed,
+) -> None:
+    seed = dispatch_seed
+    task, occurrence = await seed.claimed_occurrence()
+    thread_id = deterministic_thread_id(occurrence.id)
+    run_id = deterministic_run_id(occurrence.id)
+    metadata = {
+        "scheduled_task_id": task.id,
+        "scheduled_task_run_id": occurrence.id,
+        "scheduled_trigger": occurrence.trigger,
+    }
+    await seed.thread_service.create(
+        seed.context,
+        thread_id=thread_id,
+        agent=ThreadAgentRef(task.agent_asset_id, task.agent_scope),
+        metadata=metadata,
+    )
+    await PrivateRunAdmissionService(seed.factory).admit(
+        seed.context,
+        thread_id,
+        PrivateRunCreate(run_id=run_id, metadata=metadata),
+    )
+    async with seed.factory() as session, session.begin():
+        updated = await PrivateRunRepository(session).update_status(
+            scope=seed.context.resource_scope,
+            run_id=run_id,
+            status="error",
+            error="terminal runtime failure",
+        )
+    assert updated is True
+    launcher = AsyncMock()
+    dispatcher = AutomationDispatcher(
+        seed.factory,
+        thread_service=seed.thread_service,
+        launch_private_run=launcher,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(AutomationConflict):
+        await dispatcher.dispatch(occurrence.id, app=SimpleNamespace())
+
+    launcher.assert_not_awaited()
+    persisted = await seed.persisted_occurrence(occurrence.id)
+    assert persisted.status == "rejected"
+    assert persisted.error_code == "AUTOMATION_CONFLICT"
+    assert persisted.thread_id == thread_id
+    assert persisted.run_id == run_id
 
 
 @pytest.mark.postgres

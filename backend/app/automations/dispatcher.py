@@ -221,21 +221,36 @@ class AutomationDispatcher:
             if existing is not None:
                 self._require_matching_run(coordinates, existing)
                 if existing.status not in _RUN_ADOPTABLE_STATUSES:
-                    raise AutomationUnavailable(prepared.context.request_id)
+                    raise AutomationConflict(prepared.context.request_id)
                 return await self._mark_running(
                     coordinates,
                     prepared,
                     existing,
                 )
 
-            record = await self._launch_private_run(
-                app=app,
-                context=prepared.context,
-                thread_id=thread_id,
-                run_id=coordinates.expected_run_id,
-                prompt=prepared.task.prompt,
-                metadata=coordinates.run_metadata,
-            )
+            try:
+                record = await self._launch_private_run(
+                    app=app,
+                    context=prepared.context,
+                    thread_id=thread_id,
+                    run_id=coordinates.expected_run_id,
+                    prompt=prepared.task.prompt,
+                    metadata=coordinates.run_metadata,
+                )
+            except PrivateWorkConflict:
+                # Another dispatcher may have crossed the same deterministic
+                # precheck and won M4 admission. Adopt only that exact scoped
+                # Run; unrelated admission conflicts continue to fail closed.
+                raced = await self._get_private_run(
+                    prepared.context.resource_scope,
+                    coordinates.expected_run_id,
+                )
+                if raced is None:
+                    raise
+                self._require_matching_run(coordinates, raced)
+                if raced.status not in _RUN_ADOPTABLE_STATUSES:
+                    raise AutomationConflict(prepared.context.request_id) from None
+                return await self._mark_running(coordinates, prepared, raced)
             if record.thread_id != thread_id or record.run_id != coordinates.expected_run_id:
                 raise AutomationConflict(prepared.context.request_id)
             persisted = await self._get_private_run(
