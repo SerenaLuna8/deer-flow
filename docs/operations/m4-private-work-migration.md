@@ -16,6 +16,38 @@ future procedure or keep the installation on the legacy writer.
 write a backup there and does not consume `DEER_FLOW_M4_BACKUP_KEY`. The database backup and its
 restore proof remain operator-owned and must exist outside the repository before execute.
 
+## 0. Legacy SQLite private rows: stage at 0007 first
+
+Skip this section when the private rows are already in a versioned PostgreSQL database at 0007.
+When `threads_meta`, `runs`, `run_events`, or `feedback` still live in legacy SQLite, do **not**
+run normal `make setup-db` or `make migrate-db` first: both target the final schema, where the
+frozen owner-only rows cannot be inserted.
+
+Freeze every SQLite writer, choose a dedicated new PostgreSQL database (or an existing database
+already verified at 0007), and run:
+
+```bash
+export POSTGRES_ADMIN_URL='postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres'
+export DATABASE_URL='postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow_m4_cutover'
+make setup-m4-migration-db
+make migrate-sqlite ARGS="--m4-staging-target --source /path/legacy.db --backup-dir /secure/sqlite-backups --dry-run"
+make migrate-sqlite ARGS="--m4-staging-target --source /path/legacy.db --backup-dir /secure/sqlite-backups"
+```
+
+`setup-m4-migration-db` creates the named database when needed, applies the application migrations
+only through `0007_project_shared_assets`, initializes the LangGraph PostgreSQL tables, and rejects
+a non-empty unversioned database or any revision other than 0007. The importer reflects and
+validates the actual 0007 target tables against its frozen source contract before any row write;
+it still performs ordered cross-source conflict checks, verified backups, semantic read-back, and
+ledger writes.
+
+Before continuing, establish or verify the M2/M3 authority already required by M4: every imported
+owner must have one active membership in the target project selected by the owner map, and each
+legacy `assistant_id` must resolve to a published system or project Agent. Use the deployment's
+reviewed M2/M3 provisioning/cutover procedure; do not invent a project or Agent mapping in the M4
+command. Then continue with section 1 against the same 0007 database. The execute in section 6 is
+the only command that advances that database through 0008 and the final marker.
+
 ## 1. Online dry-run
 
 Dry-run is read-only and may run while the service is online. It calculates redacted counts and a

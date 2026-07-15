@@ -18,7 +18,7 @@ from app.channels.runtime_config_store import (
 )
 from app.gateway.deps import require_admin_user, require_legacy_private_open
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
-from deerflow.persistence.channel_connections import ChannelConnectionRepository
+from deerflow.persistence.channel_connections import LegacyChannelConnectionRepository
 from deerflow.persistence.engine import get_session_factory
 
 router = APIRouter(
@@ -190,14 +190,18 @@ async def _load_channels_config(request: Request, config: ChannelConnectionsConf
     return result
 
 
-def _get_repository(request: Request, config: ChannelConnectionsConfig) -> ChannelConnectionRepository:
-    repo = getattr(request.app.state, "channel_connection_repo", None)
-    if isinstance(repo, ChannelConnectionRepository):
+def _get_repository(
+    request: Request,
+    config: ChannelConnectionsConfig,
+) -> LegacyChannelConnectionRepository:
+    """Return the owner-only adapter used solely before the M4 cutover marker."""
+    repo = getattr(request.app.state, "legacy_channel_connection_repo", None)
+    if isinstance(repo, LegacyChannelConnectionRepository):
         return repo
 
     sf = get_session_factory()
-    repo = ChannelConnectionRepository(sf)
-    request.app.state.channel_connection_repo = repo
+    repo = LegacyChannelConnectionRepository(sf)
+    request.app.state.legacy_channel_connection_repo = repo
     return repo
 
 
@@ -313,7 +317,7 @@ def _new_binding_code() -> str:
 
 
 async def _create_state(
-    repo: ChannelConnectionRepository,
+    repo: LegacyChannelConnectionRepository,
     *,
     owner_user_id: str,
     provider: str,

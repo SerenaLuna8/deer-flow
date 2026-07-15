@@ -44,10 +44,22 @@ class TestCheckConfigExists:
 
 
 class TestCheckPostgres:
-    def test_root_make_doctor_exposes_backend_scripts(self):
+    def test_root_make_doctor_uses_cross_platform_backend_runner(self):
         makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
 
-        assert "cd backend && PYTHONPATH=. uv run python ../scripts/doctor.py" in makefile
+        assert "@$(BACKEND_UV_RUN) python ../scripts/doctor.py" in makefile
+        doctor_recipe = makefile.split("doctor:\n", 1)[1].split("\n\n", 1)[0]
+        assert "PYTHONPATH=" not in doctor_recipe
+
+    def test_doctor_adds_backend_import_path_without_shell_environment(self):
+        backend_root = str(REPO_ROOT / "backend")
+        original = list(sys.path)
+        try:
+            sys.path[:] = [entry for entry in sys.path if entry != backend_root]
+            doctor._ensure_backend_import_path(REPO_ROOT)
+            assert sys.path[0] == backend_root
+        finally:
+            sys.path[:] = original
 
     def test_backend_postgres_check_preserves_computed_health(self, tmp_path, monkeypatch):
         from scripts import check_postgres

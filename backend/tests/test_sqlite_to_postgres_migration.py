@@ -21,6 +21,7 @@ from scripts.migrate_sqlite_to_postgres import (
     MigrationError,
     MigrationErrorCode,
     MigrationReport,
+    MigrationTargetMode,
     NormalizedRow,
     TableMigrationReport,
     UnionPlan,
@@ -464,6 +465,27 @@ async def test_legacy_private_rows_refuse_direct_final_schema_target_before_writ
             "threads_meta",
             dry_run=True,
             union_reference_keys=frozenset(),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_m4_staging_mode_rejects_final_schema_before_target_write(
+    tmp_path: Path,
+    migrated_postgres_database_url: str,
+) -> None:
+    source = tmp_path / "legacy-private-final-target.db"
+    _add_later_user_business_rows(source, "legacy-owner")
+
+    with pytest.raises(
+        MigrationError,
+        match="exactly 0007_project_shared_assets",
+    ):
+        await migrate_source(
+            source,
+            migrated_postgres_database_url,
+            dry_run=True,
+            target_mode=MigrationTargetMode.M4_STAGING,
         )
 
 

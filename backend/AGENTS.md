@@ -98,6 +98,7 @@ make lint               # Lint with ruff
 make format             # Format code with ruff
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see Schema Migrations section)
 make setup-db           # 显式创建目标 PostgreSQL 数据库并 bootstrap 到 head
+make setup-m4-migration-db  # 创建/验证固定在0007的legacy SQLite private-work迁移库
 make migrate-db         # 仅升级已存在数据库，不执行管理员建库操作
 make migrate-assets ARGS="--dry-run ..."  # shared asset 脱敏 inventory / 显式 cutover
 make migrate-private-work ARGS="--dry-run ..."  # M4 core private-work staged migration

@@ -589,10 +589,16 @@ def test_cli_requires_explicit_environment_and_never_prints_secret(monkeypatch, 
 def test_makefiles_expose_database_targets() -> None:
     backend_makefile = setup_postgres.BACKEND_ROOT.joinpath("Makefile").read_text()
     root_makefile = setup_postgres.BACKEND_ROOT.parent.joinpath("Makefile").read_text()
-    for target in ("setup-db:", "migrate-db:", "check-db:"):
+    for target in (
+        "setup-db:",
+        "setup-m4-migration-db:",
+        "migrate-db:",
+        "check-db:",
+    ):
         assert target in backend_makefile
         assert target in root_makefile
     assert "setup_postgres.py --migrate-only" in backend_makefile
+    assert "setup_postgres.py --m4-migration-target" in backend_makefile
 
 
 @pytest_asyncio.fixture

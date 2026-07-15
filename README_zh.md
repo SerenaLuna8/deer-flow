@@ -236,13 +236,31 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    运维方案迁出数据，不能依赖 downgrade 自动删除。
 
    从旧版 SQLite 安装迁移时，先设置 `DATABASE_URL`，并把只读来源和 repo 外备份目录
-   作为参数传入。先执行 dry-run；只有所有来源都通过 schema、冲突和语义预检后才移除
-   `--dry-run`。写迁移会先为每个来源创建并校验原子备份，来源文件不会被修改或删除：
+   作为参数传入。下面的普通路径只适用于不含 legacy private Thread/run/event/feedback 的来源。
+   先执行 dry-run；只有所有来源都通过 schema、冲突和语义预检后才移除 `--dry-run`。写迁移会
+   先为每个来源创建并校验原子备份，来源文件不会被修改或删除：
 
    ```bash
    make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups --dry-run"
    make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups"
    ```
+
+   如果 SQLite 含 legacy private rows，不得先运行会把目标升级到 head 的 `make setup-db` 或
+   `make migrate-db`。必须创建/验证固定在 0007 的目标，并显式启用 staging contract：
+
+   ```bash
+   export POSTGRES_ADMIN_URL='postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres'
+   export DATABASE_URL='postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow_m4_cutover'
+   make setup-m4-migration-db
+   make migrate-sqlite ARGS="--m4-staging-target --source /path/legacy.db --backup-dir /secure/sqlite-backups --dry-run"
+   make migrate-sqlite ARGS="--m4-staging-target --source /path/legacy.db --backup-dir /secure/sqlite-backups"
+   ```
+
+   导入后，在同一 0007 库中确认每个 migrated user 已有 active project membership，并且每个
+   legacy `assistant_id` 都能解析到已发布的 system/project Agent（先完成适用的 M2/M3 authority
+   provisioning）。然后生成 owner map，按前文执行 `migrate-private-work` dry-run/execute。
+   staging importer 会拒绝任何非 `0007_project_shared_assets` 目标，并按实际 0007 表结构写入；
+   完整顺序与失败处理见 M4 runbook。
 
    可重复 `--source` 迁移多个来源。遇到未知表、非空 deferred 项目表、跨来源主键冲突、
    解码或 read-back 校验失败时命令会停止；输出仅包含 fingerprint、计数和脱敏错误。

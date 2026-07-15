@@ -20,6 +20,17 @@ from importlib import import_module
 from pathlib import Path
 from typing import Literal
 
+
+def _ensure_backend_import_path(project_root: Path) -> None:
+    """Expose backend packages without relying on POSIX shell assignments."""
+    backend_root = str(project_root / "backend")
+    if backend_root in sys.path:
+        sys.path.remove(backend_root)
+    sys.path.insert(0, backend_root)
+
+
+_ensure_backend_import_path(Path(__file__).resolve().parents[1])
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

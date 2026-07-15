@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup setup-db migrate-db migrate-sqlite migrate-assets migrate-private-work rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.PHONY: help config config-upgrade check install setup setup-db setup-m4-migration-db migrate-db migrate-sqlite migrate-assets migrate-private-work rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -25,6 +25,7 @@ help:
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make setup-db        - 创建并初始化 PostgreSQL 数据库"
+	@echo "  make setup-m4-migration-db - 创建/验证固定在0007的legacy SQLite迁移库"
 	@echo "  make migrate-db      - 仅升级已存在 PostgreSQL 数据库"
 	@echo "  make migrate-sqlite  - 只读预检/备份并迁移 legacy SQLite（参数通过 ARGS 传入）"
 	@echo "  make migrate-assets  - 显式预检/备份并迁移 legacy shared assets（参数通过 ARGS 传入）"
@@ -61,10 +62,13 @@ setup:
 	@$(BACKEND_UV_RUN) python ../scripts/setup_wizard.py
 
 doctor:
-	@cd backend && PYTHONPATH=. uv run python ../scripts/doctor.py
+	@$(BACKEND_UV_RUN) python ../scripts/doctor.py
 
 setup-db:
 	@$(MAKE) -C backend setup-db
+
+setup-m4-migration-db:
+	@$(MAKE) -C backend setup-m4-migration-db
 
 migrate-db:
 	@$(MAKE) -C backend migrate-db

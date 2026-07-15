@@ -25,6 +25,9 @@ format:
 setup-db:
 	PYTHONPATH=. uv run python scripts/setup_postgres.py
 
+setup-m4-migration-db:
+	PYTHONPATH=. uv run python scripts/setup_postgres.py --m4-migration-target
+
 migrate-db:
 	PYTHONPATH=. uv run python scripts/setup_postgres.py --migrate-only
 

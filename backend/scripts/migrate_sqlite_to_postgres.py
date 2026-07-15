@@ -22,7 +22,8 @@ from typing import Any
 
 import asyncpg
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-from sqlalchemy import JSON, Boolean, DateTime, LargeBinary, Uuid
+from sqlalchemy import JSON, Boolean, DateTime, LargeBinary, MetaData, Uuid
+from sqlalchemy.ext.asyncio import create_async_engine
 
 try:
     from scripts.sqlite_inventory import SQLiteInventory, inspect_sqlite, open_read_only
@@ -160,6 +161,30 @@ _SOURCE_TYPE_COLUMN_ALIASES = {
     ("run_events", "user_id"): "owner_user_id",
     ("feedback", "user_id"): "owner_user_id",
 }
+_FROZEN_SOURCE_UNIQUE_SPECS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "channel_connections": (
+        (
+            "uq_channel_connection_owner_provider_identity",
+            ("owner_user_id", "provider", "external_account_id", "workspace_id"),
+        ),
+        (
+            "uq_channel_connection_active_identity",
+            ("provider", "external_account_id", "workspace_id"),
+        ),
+    ),
+    "feedback": (("uq_feedback_thread_run_user", ("thread_id", "run_id", "user_id")),),
+    "run_events": (("uq_events_thread_seq", ("thread_id", "seq")),),
+    "users": (
+        ("ix_users_email", ("email",)),
+        ("idx_users_oauth_identity", ("oauth_provider", "oauth_id")),
+    ),
+    "channel_conversations": (
+        (
+            "uq_channel_conversation_connection_external",
+            ("connection_id", "external_conversation_id", "external_topic_id"),
+        ),
+    ),
+}
 
 
 class MigrationErrorCode(StrEnum):
@@ -169,6 +194,11 @@ class MigrationErrorCode(StrEnum):
     DECODE = "decode"
     FINGERPRINT = "fingerprint"
     BACKUP = "backup"
+
+
+class MigrationTargetMode(StrEnum):
+    CURRENT = "current"
+    M4_STAGING = "m4-staging"
 
 
 class MigrationError(RuntimeError):
@@ -602,7 +632,7 @@ def normalize_business_rows(source: Path, table: str) -> list[NormalizedRow]:
 
     target = Base.metadata.tables[table]
     source_pk = inventory_table.primary_key
-    target_pk = tuple(column.name for column in target.primary_key.columns)
+    target_pk = SOURCE_PRIMARY_KEYS[table]
     normalized: list[NormalizedRow] = []
     seen: set[str] = set()
     for row in _read_rows(source, table):
@@ -868,14 +898,22 @@ async def _migrate_business_table(
     dry_run: bool,
     union_reference_keys: frozenset[tuple[str, tuple[str, ...], str]],
     reconciliation: SourceReconciliation = SourceReconciliation(),
+    target_table: Any | None = None,
+    target_mode: MigrationTargetMode = MigrationTargetMode.CURRENT,
 ) -> TableMigrationReport:
     import deerflow.persistence.models  # noqa: F401
     from deerflow.persistence.base import Base
 
-    target = Base.metadata.tables[table]
+    target = target_table if target_table is not None else Base.metadata.tables[table]
     source_rows = normalize_business_rows(source, table)
     target_columns = {column.name for column in target.columns}
-    if source_rows and any(set(row.values) != target_columns for row in source_rows):
+    if target_mode is MigrationTargetMode.M4_STAGING:
+        if target_columns != SOURCE_SCHEMA_SIGNATURES[table]:
+            raise MigrationError("M4 staging target table does not match the frozen 0007 contract")
+        target_pk = tuple(column.name for column in target.primary_key.columns)
+        if target_pk != SOURCE_PRIMARY_KEYS[table]:
+            raise MigrationError("M4 staging target primary key does not match the frozen 0007 contract")
+    elif source_rows and any(set(row.values) != target_columns for row in source_rows):
         raise MigrationError("legacy private SQLite rows require a pre-M4 PostgreSQL target; complete SQLite cutover before migrate-private-work")
     rows = _apply_user_reconciliation(table, source_rows, reconciliation)
     inserted = adopted = already = planned = 0
@@ -1574,6 +1612,7 @@ async def migrate_source(
     union_reference_keys: frozenset[tuple[str, tuple[str, ...], str]] | None = None,
     planned_checkpoint_keys: frozenset[tuple[str, str, str]] | None = None,
     source_reconciliation: SourceReconciliation = SourceReconciliation(),
+    target_mode: MigrationTargetMode = MigrationTargetMode.CURRENT,
 ) -> MigrationReport:
     inspection = inspect_source(source)
     _require_fingerprint(inspection.inventory, expected_fingerprint)
@@ -1584,6 +1623,7 @@ async def migrate_source(
         union_reference_keys = _preflight_cross_source([source]).reference_keys
     planned_checkpoint_keys = planned_checkpoint_keys or frozenset()
     connection = None
+    staging_metadata: MetaData | None = None
     try:
         try:
             from scripts.setup_postgres import _asyncpg_url
@@ -1591,6 +1631,24 @@ async def migrate_source(
             from setup_postgres import _asyncpg_url
 
         connection = await asyncpg.connect(_asyncpg_url(target_url))
+        if target_mode is MigrationTargetMode.M4_STAGING:
+            revision = await connection.fetchval("SELECT version_num FROM alembic_version")
+            if revision != "0007_project_shared_assets":
+                raise MigrationError("M4 staging target must be exactly 0007_project_shared_assets")
+            from deerflow.config.database_config import DatabaseConfig
+
+            reflection_engine = create_async_engine(DatabaseConfig(url=target_url).sqlalchemy_url)
+            try:
+                staging_metadata = MetaData()
+                async with reflection_engine.connect() as reflection_connection:
+                    await reflection_connection.run_sync(
+                        lambda sync_connection: staging_metadata.reflect(
+                            bind=sync_connection,
+                            only=list(ORM_TABLE_ORDER),
+                        )
+                    )
+            finally:
+                await reflection_engine.dispose()
         for table in ORM_TABLE_ORDER:
             if table in tables:
                 reports[table] = await _migrate_business_table(
@@ -1601,6 +1659,8 @@ async def migrate_source(
                     dry_run=dry_run,
                     union_reference_keys=union_reference_keys,
                     reconciliation=source_reconciliation,
+                    target_table=(staging_metadata.tables[table] if staging_metadata is not None else None),
+                    target_mode=target_mode,
                 )
         checkpoints, writes = decode_checkpoint_rows(source)
         if checkpoints:
@@ -1660,6 +1720,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-url-env", default="DATABASE_URL", help="保存目标 PostgreSQL URL 的环境变量名")
     parser.add_argument("--backup-dir", required=True, type=Path, help="写迁移前的只读备份目录")
     parser.add_argument("--dry-run", action="store_true", help="完整预检，不写目标或 ledger，也不创建备份")
+    parser.add_argument(
+        "--m4-staging-target",
+        action="store_true",
+        help="要求目标恰为0007，并按实际0007表契约迁移legacy private rows",
+    )
     parser.add_argument("--reconcile-users-by-email", action="store_true", help="显式启用受限的跨来源重复用户归并")
     parser.add_argument("--reconcile-expected-conflicts", type=int, help="预期且必须精确匹配的用户归并数量")
     parser.add_argument("--reconcile-source-sha256", action="append", default=[], help="按 --source 顺序重复提供完整来源 SHA256")
@@ -1702,6 +1767,7 @@ def _build_union_plan(sources: list[Path], request: UserReconciliationRequest | 
 
 
 async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
+    target_mode = MigrationTargetMode.M4_STAGING if getattr(args, "m4_staging_target", False) else MigrationTargetMode.CURRENT
     reconciliation_request = _reconciliation_request_from_args(args)
     union_plan = _build_union_plan(args.source, reconciliation_request)
     preflights = []
@@ -1713,6 +1779,7 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
             union_reference_keys=union_plan.per_source_reference_keys[index],
             planned_checkpoint_keys=union_plan.per_source_checkpoint_keys[index],
             source_reconciliation=_source_reconciliation(union_plan, index),
+            target_mode=target_mode,
         )
         if not preflight.verified:
             raise MigrationError("dry-run verification failed")
@@ -1749,6 +1816,7 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
             union_reference_keys=snapshot_plan.per_source_reference_keys[index],
             planned_checkpoint_keys=snapshot_plan.per_source_checkpoint_keys[index],
             source_reconciliation=_source_reconciliation(snapshot_plan, index),
+            target_mode=target_mode,
         )
     for index, (source, _report, backup) in enumerate(frozen_sources):
         report = await migrate_source(
@@ -1759,6 +1827,7 @@ async def _run_cli(args: argparse.Namespace, target_url: str) -> None:
             union_reference_keys=snapshot_plan.per_source_reference_keys[index],
             planned_checkpoint_keys=snapshot_plan.per_source_checkpoint_keys[index],
             source_reconciliation=_source_reconciliation(snapshot_plan, index),
+            target_mode=target_mode,
         )
         if not report.verified:
             raise MigrationError("migration verification failed")
@@ -2031,31 +2100,15 @@ def _preflight_cross_source(
 
 
 def _business_unique_keys(table_name: str, values: dict[str, Any]) -> list[tuple[str, str]]:
-    import deerflow.persistence.models  # noqa: F401
-    from deerflow.persistence.base import Base
-
-    table = Base.metadata.tables[table_name]
     results: list[tuple[str, str]] = []
-    for constraint in table.constraints:
-        if constraint.__class__.__name__ != "UniqueConstraint":
-            continue
-        columns = tuple(column.name for column in constraint.columns)
+    for name, columns in _FROZEN_SOURCE_UNIQUE_SPECS.get(table_name, ()):
         if any(column not in values for column in columns):
             continue
         if any(values[column] is None for column in columns):
             continue
-        results.append((constraint.name or "+".join(columns), _json_canonical([values[column] for column in columns])))
-    for index in table.indexes:
-        if not index.unique:
+        if name == "uq_channel_connection_active_identity" and values.get("status") == "revoked":
             continue
-        columns = tuple(column.name for column in index.columns)
-        if any(column not in values for column in columns):
-            continue
-        if any(values[column] is None for column in columns):
-            continue
-        if index.name == "uq_channel_connection_active_identity" and values.get("status") == "revoked":
-            continue
-        results.append((index.name, _json_canonical([values[column] for column in columns])))
+        results.append((name, _json_canonical([values[column] for column in columns])))
     return results
 
 

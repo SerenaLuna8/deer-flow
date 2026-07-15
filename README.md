@@ -286,13 +286,17 @@ make check-db
 ```
 
 已有目标库只需运行 `make migrate-db`。从 legacy SQLite 切换时，先进入维护窗口，保留
-repo 外只读备份，并先 dry-run：
+repo 外只读备份，并先 dry-run。下面的普通路径只适用于不含 legacy private Thread/run/
+event/feedback 的来源：
 
 ```bash
 make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups --dry-run"
 make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups"
 make check-db
 ```
+
+如果 SQLite 含上述 private rows，不要先运行会把目标直接升到 head 的 `make setup-db` 或
+`make migrate-db`；必须使用下方 M4 的 0007 staging 顺序和 `--m4-staging-target`。
 
 迁移器不会修改 SQLite `db`/`wal`/`shm` 来源；失败时保持旧版本和只读备份，修复后重跑。
 产生 PostgreSQL 新写入后使用前向 migration 修复，不执行破坏性 downgrade。M1 只交付
@@ -373,6 +377,23 @@ export DATABASE_URL='postgresql+asyncpg://...'
 make migrate-private-work ARGS="--dry-run --owner-map /secure/private-work-owner-map.json --backup-dir /secure/backups"
 make migrate-private-work ARGS="--execute --owner-map /secure/private-work-owner-map.json --backup-dir /secure/backups"
 ```
+
+如果 private rows 仍在 legacy SQLite，目标必须先停在 0007，不能先创建 final/head schema。
+`DATABASE_URL` 应指向专用的新库或已验证的 0007 库；新库由 `POSTGRES_ADMIN_URL` 创建：
+
+```bash
+export POSTGRES_ADMIN_URL='postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres'
+export DATABASE_URL='postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow_m4_cutover'
+make setup-m4-migration-db
+make migrate-sqlite ARGS="--m4-staging-target --source /path/legacy.db --backup-dir /secure/sqlite-backups --dry-run"
+make migrate-sqlite ARGS="--m4-staging-target --source /path/legacy.db --backup-dir /secure/sqlite-backups"
+```
+
+随后在同一 0007 库中确认每个 migrated user 已有 active project membership，且每个 legacy
+`assistant_id` 对应一个已发布的 system/project Agent（先完成适用的 M2/M3 authority provisioning）。
+再生成 owner map 并执行上面的 `migrate-private-work` dry-run/execute。SQLite importer 会验证目标
+revision 恰为 `0007_project_shared_assets`，按实际 0007 表结构写入并保留 ledger；任何 head/final
+目标都会在写入前拒绝。完整顺序见 runbook。
 
 dry-run 只输出脱敏 counts 与稳定 source hash，不升级 schema、不写 ledger/marker，也不创建 backup
 目录。execute 固定按 0008 expand、分域 ledger、0009 finalize、0010/0011、最后

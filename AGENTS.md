@@ -104,8 +104,9 @@ make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
 make setup-db    # 显式创建并完整初始化 PostgreSQL 目标库
+make setup-m4-migration-db  # 创建/验证固定在0007的legacy SQLite private-work迁移库
 make migrate-db  # 升级已存在 PostgreSQL 目标库
-make migrate-sqlite ARGS="..."  # 只读预检、备份并迁移 legacy SQLite
+make migrate-sqlite ARGS="..."  # 只读预检、备份并迁移 legacy SQLite；private rows需--m4-staging-target
 make migrate-assets ARGS="--dry-run ..."  # 脱敏 inventory；execute 前必须先 dry-run
 make migrate-private-work ARGS="--dry-run ..."  # 显式 owner map 的 M4 private-work staged migration
 make rotate-credentials ARGS="--dry-run --key-id m3-next"  # 分批轮换 credential envelope

@@ -1,13 +1,14 @@
 # M4 Task 18 implementation and verification report
 
-Date: 2026-07-15
+Date: 2026-07-16
 
-Repair baseline: `d0c7ee98cf80a3222af084b253d4cace50810864`
+Formal-review repair baseline: `c5167f5239769983b9335943459df5a53d85b3a8`
 
-Status: **READY FOR FIXED-COMMIT INDEPENDENT REVIEW**. The bounded release-blocker repair
-wave and all required executable gates are green. M4 remains a candidate until the parent starts
-the single formal review from the fixed repair commit. This report does not mark Task 18 complete,
-does not change overall progress to 4/8, and does not check the final acceptance checklist.
+Status: **AWAITING PARENT COMPLETION VERIFICATION**. The single formal review reported
+0 Critical, 2 Important, and 1 Minor finding. One concentrated repair wave closed all three and
+all required executable gates are green. Per the runnable-first rule, no second formal review was
+started. This report does not mark Task 18 complete, does not change overall progress to 4/8, and
+does not check the final acceptance checklist.
 
 ## Repair scope
 
@@ -36,13 +37,45 @@ post-stream refresh restored old `THREAD_MESSAGES`. The helper now persists the 
 values through the same mock upsert path as the default stream. Production artifact/state merge
 code was not changed. Unmocked `127.0.0.1:8001` proxy messages remain known E2E log noise.
 
+## Formal-review repair closure
+
+The fixed-commit formal review of `c5167f52` found two runnable blockers and one portability bug:
+
+1. legacy SQLite private rows had no executable route through a pre-M4 PostgreSQL schema;
+2. marker-before legacy `/api/channels/*` requests reached the final project-scoped repository
+   signature and returned 500;
+3. the root `make doctor` recipe used a POSIX-only `PYTHONPATH=.` assignment.
+
+The bounded repair closes them without weakening final project scope:
+
+- `setup-m4-migration-db` creates or verifies a dedicated database whose application schema is
+  exactly `0007_project_shared_assets`, while still initializing the LangGraph tables;
+- `migrate-sqlite --m4-staging-target` requires that exact revision, reflects the actual 0007
+  target tables, validates their frozen column/primary-key contract, and imports from verified
+  backups before `migrate-private-work` advances through the final M4 marker;
+- a real disposable-PostgreSQL integration test executes legacy SQLite
+  `threads_meta/runs/run_events/feedback` through 0007, the private-work cutover, final revision
+  `0011_private_artifact_tombstone`, and `cutover_complete`, then verifies project/owner/Agent
+  authority on the resulting rows;
+- the legacy channel router alone uses `LegacyChannelConnectionRepository`, an explicit raw-SQL
+  adapter frozen to the 0007/0008 owner-only columns. The final `ChannelConnectionRepository`,
+  project route, and inbound routing remain project-scoped and unchanged;
+- the 25 removed pre-marker behavior cases were restored and now run against both 0007 and 0008;
+  the separate post-marker suite still proves stable `409 PRIVATE_WORK_CUTOVER` behavior;
+- `scripts/doctor.py` installs the backend import path in Python, and the root Make recipe uses the
+  existing cross-platform backend runner without a shell environment assignment.
+
+Focused RED/green evidence was preserved: the restored channel suite initially had 25 failures,
+the SQLite pipeline first failed because the 0007 setup target did not exist, and the Windows
+recipe assertions initially had 2 failures. The combined repaired slice is `232 passed`, 0 skipped.
+
 ## Frozen legacy SQLite contract
 
 The repair initially made SQLite source signatures match final M4 PostgreSQL rows. Technical
 verification rejected that approach because the real legacy source contract is
 `threads_meta/runs/run_events/feedback.user_id` without M4 project columns.
 
-The final repair therefore:
+The final source-contract repair therefore:
 
 - restores the frozen legacy source signatures and user-reference allowlist;
 - validates source columns against that frozen contract rather than current ORM columns;
@@ -50,22 +83,26 @@ The final repair therefore:
   preserving legacy source keys and ledger semantics;
 - keeps cross-source reference/unique discovery tolerant of columns that did not exist before M4;
 - fails before a transaction or target write when private legacy rows are pointed directly at the
-  final M4 schema, with the explicit message that a pre-M4 PostgreSQL target and subsequent
-  `migrate-private-work` cutover are required;
+  final M4 schema, and provides the explicit 0007 staging mode for the supported executable path;
+- reflects and validates the real 0007 target instead of trying to insert through final
+  `Base.metadata`;
 - keeps the real final-schema reconciliation test on rows the final schema can directly carry
   (`users` and `scheduled_tasks`) instead of inventing an M4-shaped SQLite source.
 
-Focused evidence: `tests/test_sqlite_to_postgres_migration.py` is `67 passed`, including the direct
-final-target fail-before-write regression.
+Focused evidence: `tests/test_sqlite_to_postgres_migration.py` is `68 passed`, including the direct
+final-target fail-before-write regression and the final-schema rejection of staging mode. The
+end-to-end 0007-to-final pipeline is also part of the fixed six-file PostgreSQL gate.
 
 ## Root diagnostics repairs
 
-Two deterministic `make doctor` defects were fixed:
+The repair history fixed three deterministic `make doctor` defects:
 
 1. the root recipe launched `../scripts/doctor.py` from `backend` without `PYTHONPATH=.`, so the
    backend `scripts.check_postgres` module was unavailable;
 2. `asdict(PostgresCheckResult)` omitted the computed `healthy` property, so doctor treated a
-   healthy result as false even when `make check-db` passed.
+   healthy result as false even when `make check-db` passed;
+3. the formal review found that the repaired root recipe still depended on a POSIX-only shell
+   assignment, so backend path installation now happens inside Python.
 
 Both have regression tests. A normal, gitignored `make config` setup was generated only in this
 isolated worktree, supplied one test-only model with no real secret, and pointed explicitly at the
@@ -75,26 +112,27 @@ temporary `config.yaml`, `.env`, and `frontend/.env` were deleted afterward.
 
 ## Disposable PostgreSQL safety record
 
-- Data directory: `/tmp/deerflow_m4_task18_repair_pg2.1EGZ09/data`
-- Bind: `127.0.0.1:55420`
+- Data directory: `/tmp/deerflow_m4_task18_review_fix_pg.RYA0Ax/data`
+- Bind: `127.0.0.1:55423`
 - Admin/maintenance database: `postgres`
-- Explicit check database: `deerflow_task18_check2`
+- Explicit check database: `deerflow_task18_review_fix_check`
 - `make setup-db` initialized the check database to `0011_private_artifact_tombstone`.
 - Integration fixtures created and dropped only random `deerflow_test_*` databases.
 - No business database URL or business database was used.
-- The PostgreSQL server was stopped and both Task 18 temporary cluster directories were deleted.
+- The PostgreSQL server was stopped and the formal-review repair cluster directory was deleted.
 
 ## Final backend evidence
 
 | Gate | Fresh result |
 | --- | --- |
-| M4 focused (`test_private_work_*`, `test_private_*`, scoped checkpointer) | `429 passed in 46.19s` |
-| blocking-I/O | `35 passed in 11.03s` |
-| frozen legacy SQLite migration | `67 passed in 1.18s` |
-| full backend after the final SQLite repair | `8160 passed, 18 skipped, 12 warnings in 256.62s` |
-| fixed M1-M4 six-file PostgreSQL gate | `16 passed in 4.32s`, 0 skipped |
+| formal-review repaired slice | `232 passed`, 0 skipped |
+| M4 focused (`test_private_work_*`, `test_private_*`, scoped checkpointer) | `429 passed in 45.14s` |
+| blocking-I/O | `35 passed in 11.00s` |
+| frozen legacy SQLite migration | `68 passed in 1.28s` |
+| full backend after the formal-review repair | `8221 passed, 18 skipped, 12 warnings in 272.25s` |
+| fixed M1-M4 six-file PostgreSQL gate | `17 passed in 5.25s`, 0 skipped |
 | Ruff check | all checks passed |
-| Ruff format check | `1009 files already formatted` |
+| Ruff format check | `1013 files already formatted` |
 
 The 18 full-suite skips are all declared environment/live conditions:
 
@@ -137,6 +175,6 @@ part of this bounded release-blocker repair.
 
 ## Next step
 
-Create the single repair commit, then let the parent start the one formal independent review from
-that immutable commit. Only a fixed-commit review with zero Critical/Important findings may move
-Task 18 to completion verification and update M4 to 4/8.
+Create the single formal-review repair commit and hand it to the parent for completion verification.
+No additional review loop is required; only the parent may mark Task 18 complete and update M4 to
+4/8 after confirming the commit and recorded gates.
