@@ -121,15 +121,18 @@ export function ScopedChatPage({
 }) {
   const { t } = useI18n();
   const router = useRouter();
-  const contextualPrivateWork = usePrivateWorkAccess();
-  const privateWork = useMemo(
-    () => ({ ...contextualPrivateWork, client: scope.client }),
-    [contextualPrivateWork, scope.client],
-  );
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat({
       allowNewThread: scope.canCreate && scope.newThreadPath.endsWith("/new"),
     });
+  const contextualPrivateWork = usePrivateWorkAccess(undefined, isMock);
+  const privateWork = useMemo(
+    () => ({
+      ...contextualPrivateWork,
+      client: isMock ? contextualPrivateWork.client : scope.client,
+    }),
+    [contextualPrivateWork, isMock, scope.client],
+  );
   // `isNewThread` tracks whether the backend has the thread yet — gates the
   // SDK's history fetch (see issue #2746).  `isWelcomeMode` is the visual
   // welcome layout (centered input, hero, quick actions); we flip it to false

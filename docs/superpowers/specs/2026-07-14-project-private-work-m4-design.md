@@ -1,7 +1,7 @@
 # M4 项目私有工作专项设计
 
 - 日期：2026-07-14
-- 状态：设计已确认，待实施
+- 状态：实现与全量门禁候选完成，待独立审查
 - 对应总体设计：`2026-07-12-project-first-saas-design.md`
 - 前置里程碑：M1、M2、M3 已完成
 - 里程碑：M4 — 私有对话、运行、文件、记忆和连接
@@ -17,6 +17,14 @@ M4 保留现有 LangGraph runtime、流式响应、输入区、文件侧栏、�
 M4 完成后，项目成员可以在项目内使用 M3 已发布并获准执行的 Agent、Skill 和 MCP 创建自己的私有对话。其他项目、同项目其他成员、项目 Admin 和平台 `system_admin` 均不能通过普通产品路径读取这些私有内容。
 
 M4 不交付 scheduled task、Worker 租约、持久化 SSE、配额、审计平台、备份恢复或 legacy 路径删除。上述能力分别属于 M5、M6 和 M7。
+
+当前 runnable-first 实现已经提供 project/owner scoped Chats、run、file/artifact、Memory、
+Connections、frontend cache/client、cutover guard 与真实 PostgreSQL migration gate。产品入口仍由
+final schema + `cutover_complete` marker + readiness + capability 共同控制，静态构建不暴露入口。
+staged migrator 首版只迁 PostgreSQL legacy Thread/run/event/feedback 与 checkpoint metadata marker；
+非空 legacy filesystem、Memory、file/artifact 或 connection source 在 DDL 前拒绝。当前
+`--backup-dir` 为保留参数且 CLI 不消费 `DEER_FLOW_M4_BACKUP_KEY`，operator backup proof 是外部运维
+前置条件，不把它描述为脚本内置的通用备份恢复。以上限制与独立审查结果决定 M4 是否最终完成。
 
 ## 2. 已冻结决策
 
@@ -749,7 +757,9 @@ Backend 继续 mandatory TDD，先写 failing test，再写最小实现。
 
 ### 17.5 CI
 
-现有 `.github/workflows/project-foundation-postgres-tests.yml` 增加 M4 integration gate，并继续固定运行 M1 cutover、M1 isolation、M2 governance、M3 shared assets 和 M4 private work。
+现有 `.github/workflows/project-foundation-postgres-tests.yml` 固定运行 M1 cutover、M1 isolation、
+M2 governance、M3 shared assets、M4 private work 和 M4 private-work migration 六个真实 PostgreSQL
+integration 文件；CI 缺少 `POSTGRES_TEST_URL` 时在 pytest 前硬失败。
 
 任何隔离、checkpoint、secret、file authority、migration 或 Frontend cache 测试失败时，不得开放 M4。
 

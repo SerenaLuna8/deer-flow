@@ -177,17 +177,43 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    空间。项目治理操作只使用服务端返回的能力，不从角色推导授权。Admin 创建邀请后只获得
    一次性 fragment 链接，M2 不发送邀请邮件、验证邮件或密码重置邮件。
    M2 不使用 PostgreSQL RLS，也不物理清除成员私有数据或项目数据；成员退出/移除与项目
-   删除只记录 30 天保留或恢复窗口。项目私有工作区保持硬关闭，不读取环境变量或用户
-   覆盖，也不会创建或跳转 Thread。
-   Thread、run、file、memory、automation 尚未完成项目与 owner 双重隔离，因此 M1 不能
-   作为完整多用户 SaaS 发布；M2 完成项目治理后仍不能作为完整多用户 SaaS 发布。
+   删除只记录 30 天保留或恢复窗口。
 
    M3 把 Agent、Skill、MCP 和 Credential 的系统级、项目级定义迁入 PostgreSQL。平台管理员
    通过 `/admin/assets` 管理系统资产；进入项目后，
    `/projects/<project_slug>/{agents,skills,mcp,credentials}` 分别显示系统资产与项目资产，系统
    binding 固定到明确 version。旧 `/workspace/{agents,skills,tools}` 只保留 PostgreSQL 系统
-   catalog 的只读兼容视图。所有 M3 项目页都不提供运行或开始对话入口；项目 Thread、run、file、
-   Memory、automation 仍未完成项目与 owner 双重隔离，因此 M3 也不能作为完整多用户 SaaS 发布。
+   catalog 的只读兼容视图。M3 资产页不直接启动运行，项目 Chats 从 M4 项目私有入口选择并执行
+   已发布且获准的 Agent、Skill 和 MCP 版本。
+
+   M4 项目私有工作在 `/projects/<project_slug>` 提供 Chats、Memory 和 Connections。入口同时要求
+   编译期 feature、服务端 readiness=`ready` 与 `private_work.read_own`；创建 Thread、运行、上传和
+   建立 connection 还要求相应 capability。Chats 复用现有 streaming/stop/human-input 体验，文件和
+   artifact 只通过项目作用域 URL 读取。Viewer 只能读取、导出和删除自己的既有私有数据，不能
+   创建 Thread、启动 run、上传、修改 Memory 或创建 connection。
+
+   项目私有请求和前端 cache 都按 authenticated account UUID + project UUID 分区；切换 scope 时先
+   取消查询，再清除 cache、reconnect metadata 与 LangGraph client。legacy cutover 完成后，旧
+   Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run` 统一返回
+   `409 PRIVATE_WORK_CUTOVER`，不得读取 project rows。
+
+   M4 staged migration 只通过显式命令执行。owner map 是 legacy owner UUID 到 active project UUID
+   的 JSON object；命令不猜默认项目。先完成 operator PostgreSQL 备份，再 dry-run、execute 和检查：
+
+   ```bash
+   export DATABASE_URL='postgresql+asyncpg://...'
+   make migrate-private-work ARGS="--dry-run --owner-map /secure/private-work-owner-map.json --backup-dir /secure/backups"
+   make migrate-private-work ARGS="--execute --owner-map /secure/private-work-owner-map.json --backup-dir /secure/backups"
+   make check-db
+   ```
+
+   当前 runnable-first CLI 不写 `--backup-dir`，也不消费 `DEER_FLOW_M4_BACKUP_KEY`；数据库备份证明由
+   operator 在仓库外保存，非空 legacy filesystem、Memory 或 connection source 会在 execute 前
+   fail closed。完整操作与故障决策见
+   [M4 private-work migration runbook](docs/operations/m4-private-work-migration.md)。
+
+   M4 当前是实现与门禁候选，待独立审查。M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、
+   M7 legacy 清理和 M8 完整发布验收尚未完成，因此仍不能作为完整多用户 SaaS 发布。
 
    共享资产迁移和 credential 轮换只通过显式命令执行，不会在应用启动时自动运行。
    `DATABASE_URL` 指向资产权威 PostgreSQL 数据库；主密钥只从环境变量读取，数据库仅保存

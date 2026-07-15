@@ -8,6 +8,10 @@
 
 **Tech Stack:** Python 3.12、FastAPI、Pydantic、SQLAlchemy 2 async、Alembic、asyncpg、PostgreSQL 17、LangGraph PostgreSQL checkpointer、pytest、Next.js 16 App Router、React 19、TypeScript、Zod、TanStack Query、LangGraph SDK、Playwright。
 
+**当前状态（2026-07-15）：** Tasks 1–17 已实现并完成各自审查；Task 18 的文档同步与 fresh
+verification 正在执行。M4 仍是待独立审查的候选，不得在 Step 8–9 通过前改成已完成、4/8 或勾选
+Task 18/Final acceptance checklist。
+
 ## Global Constraints
 
 - 以 `docs/superpowers/specs/2026-07-14-project-private-work-m4-design.md` 为冻结规格；总体进度只在 Task 18 的全部门禁通过后更新为 4/8。

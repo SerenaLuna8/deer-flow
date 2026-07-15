@@ -90,11 +90,11 @@ SDK reconnect metadata is stored under the same account/project scope. Scope cle
 TanStack cancellation before removing queries, mutations, reconnect metadata, or the client.
 Thread and upload hooks consume `usePrivateWorkAccess()` or an explicitly supplied access value;
 do not reintroduce direct module-global `getAPIClient()` calls inside those hooks. The default
-workspace client and its legacy keys remain compatible until the later UI cutover.
-The M1 `PROJECT_PRIVATE_WORKSPACE` feature constant is hard-disabled and must not be made
-environment- or user-configurable before the later private-work milestone.
-M1 仍保留旧版私有对话兼容路径，但 Thread、run、file、memory、automation 尚未完成项目与
-owner 双重隔离，因此项目优先界面不能被描述或发布为完整多用户 SaaS。
+workspace client and its legacy keys remain compatible only before the server cutover marker;
+after cutover those legacy APIs return `PRIVATE_WORK_CUTOVER`. `PROJECT_PRIVATE_WORKSPACE` is a
+compile-time constant set to true for the M4 candidate. It must remain combined with server
+readiness and `private_work.read_own`; static demo builds must expose no project-private
+navigation or data requests.
 Project-first mode renders the normal `/workspace` landing directly without the legacy
 `WorkspaceContent` sidebar; `/workspace/projects` is a compatibility redirect, while legacy
 `/workspace/chats`, agents, memory, skills, tools, and scheduled-task routes keep the existing
@@ -105,10 +105,11 @@ enter, pin, and update endpoints must never receive a slug. `/projects/[project_
 own server-side auth, QueryClient, and AuthProvider layout and must not be nested in
 `WorkspaceContent`. Its nested route layout is the sole owner of slug resolution and the enter
 mutation through `ProjectContextProvider`; project pages consume `useCurrentProject()` and must
-not repeat either request. The project shell shows only implemented M2 destinations, exposes
+not repeat either request. The project shell exposes only implemented destinations, exposes
 settings from server-returned `project.lifecycle.manage` or `project.update` capabilities, and
-never derives visibility from role. Its private-work CTA remains visibly disabled and has no
-thread or router integration until the private-work milestone.
+never derives visibility from role. Chats, Memory, Connections, and recent private work render
+only when the build flag, readiness=`ready`, and `private_work.read_own` agree; a disabled
+readiness state never starts a Thread query or navigation.
 项目资产页 `/projects/[project_slug]/{agents,skills,mcp,credentials}` 同样只消费
 `useCurrentProject()`，不得重复解析 slug、拉取项目列表或调用 enter。资产列表使用严格 read
 model，按系统级与项目级分组，并包含逐项 capability、当前已发布版本以及持久化的固定绑定、
@@ -124,7 +125,7 @@ M3 不提供运行或开始对话入口。旧 `/workspace/{agents,skills,tools}`
 cache、响应或错误；用户在 password control 中输入的值提交后必须立即清空，不得继续在 DOM 中
 残留或被 UI 回显。
 M3 的前端资产交付到此为止：`/admin/assets`、四类项目资产页和旧入口只读 catalog 已接入。
-M4 Task 14-16 提供 account/project-scoped LangGraph client、cache ownership、Thread/upload 注入，
+M4 提供 account/project-scoped LangGraph client、cache ownership、Thread/upload 注入，
 并让项目 chats 列表和详情复用 `ScopedChatPage`。项目 route 继续关闭 goal、compact、branch、
 regenerate、follow-up suggestions 和 scheduled-task；sidecar 与 artifact 只在 project-scoped
 Thread/file/artifact loaders 注入后启用，禁止回退到 legacy `/api/threads/*`、legacy artifact URL 或宿主
@@ -137,14 +138,16 @@ imperative API，连接临时状态在 `finally` 清除，不进入 TanStack mut
 项目级 provider discovery、secret replace 或 rebind，前端不得借用 global channel endpoints 模拟这些能力。
 Chats、Memory 与 Connections 导航入口必须同时满足编译期 feature flag、服务端 readiness=ready 和
 `private_work.read_own`；新建或运行仍额外要求 `private_work.create` 和 `shared_assets.execute`。
-automation 页面仍未接入，且 `PROJECT_PRIVATE_WORKSPACE` 在 Task 17 前保持关闭，不能把当前界面描述为
-完整多用户 SaaS。
+Viewer 仅 list/export/read/own-delete，不渲染 create/run/upload/connect 或 Memory mutation。项目或账号
+切换必须先 cancel，再删除 scoped queries/mutations、reconnect metadata 与 client；隔离 E2E 必须覆盖
+迟到响应不能污染新 scope。automation 页面仍未接入，M4 当前是实现与门禁候选、待独立审查，不能把
+当前界面描述为完整多用户 SaaS。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie
 跨越登录流程，不写入 storage；产品不发送邀请邮件。M2 的退出/移除和删除恢复 UI 只反映
-30 天保留窗口，不代表私有数据或项目数据已被物理清除。Thread、run、file、memory、
-automation 尚未完成项目与 owner 双重隔离，因此 M2 仍不能作为完整多用户 SaaS 发布。
+30 天保留窗口，不代表私有数据或项目数据已被物理清除。M5 automation、M6 Worker/SSE/配额/审计/
+通用备份恢复、M7 legacy cleanup 和 M8 完整发布验收仍未完成，因此不能作为完整多用户 SaaS 发布。
 
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)

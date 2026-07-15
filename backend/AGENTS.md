@@ -1088,6 +1088,21 @@ transaction；`lock=True` 在同一 transaction 内先执行 project `FOR UPDATE
 membership `FOR UPDATE`，以两条显式语句固定 project → membership 锁序。private-work HTTP 错误只映射固定
 `code/message/request_id`，不得拼接底层异常或资源细节。
 
+M4 项目私有 backend 已作为实现与门禁候选挂载：`/api/projects/{project_id}/private-work`
+负责 readiness、Thread、run/stream/wait、feed、file 和 artifact，项目 Memory 与 Connections
+使用各自的 project UUID 路由。Gateway lifespan 只在同一 PostgreSQL 配置上创建 scoped
+repositories、`ProjectScopedCheckpointer` 和专用 PostgreSQL private run-event store；普通项目
+代码不得取得 raw saver 或 unscoped repository。`.github/workflows/project-foundation-postgres-tests.yml`
+固定运行 M1 cutover/isolation、M2 governance、M3 shared assets 与 M4 private-work/migration 六个
+真实 PostgreSQL integration 文件，CI 缺少 `POSTGRES_TEST_URL` 时在 pytest 前硬失败。
+
+`make migrate-private-work` 是当前 runnable-first staged cutover：owner map 必须是 legacy owner UUID
+到 active project UUID 的直接 JSON 映射，dry-run 零写入，execute 依次完成 0008 expand、分域 ledger、
+0009 finalize、0010/0011 与 `cutover_complete` marker。当前 CLI 的 `--backup-dir` 是保留参数，不写
+filesystem backup，也不消费 `DEER_FLOW_M4_BACKUP_KEY`；operator 必须在维护窗口前独立完成并保存
+PostgreSQL backup proof。非空 legacy filesystem、Memory、file/artifact 或 connection source 在 DDL 前
+fail closed。故障分界、幂等重跑和 marker 决策见 `docs/operations/m4-private-work-migration.md`。
+
 M4 项目 Thread 的普通业务入口是 `app.private_work.PrivateThreadService`，repository 的每条
 create/get/search/check-access/update/delete SQL 必须把 `project_id`、`owner_user_id` 与
 `deleted_at` 放在数据库 predicate/insert authority 中；active 读取同时排除 frozen row，mutation
@@ -1195,8 +1210,8 @@ Unicode category C 字符、使用 RFC 5987 编码并写
 `X-Content-Type-Options: nosniff`；HTML/XHTML/SVG、JavaScript/ECMAScript、XML 和 PDF（去参数并
 lower 后判断）一律 attachment，artifact metadata 不能把 active file MIME 降级为 inline。
 
-Task 7 只提供 Task 11 可挂载的 authority/service/streaming primitives：不得在此阶段挂项目 routes，
-也不得接入 Task 8 sandbox restore/finalizer。既有 `/api/threads/{thread_id}/uploads` 与
+M4 的 authority/service/streaming primitives 已挂载到项目 routes，并接入 sandbox
+restore/finalizer。既有 `/api/threads/{thread_id}/uploads` 与
 `/api/artifacts` 在 Task 11/12 cutover 前继续使用 owner-scoped host directories；legacy 与 private
 默认限额保持独立，并通过纯 `app.upload_contracts` helper 共享 limit 解析；legacy 的 host `path`
 response schema 只搬入该纯模块供原 router re-export，不得作为未来 project/private response。安全

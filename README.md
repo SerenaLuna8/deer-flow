@@ -295,9 +295,9 @@ make check-db
 ```
 
 迁移器不会修改 SQLite `db`/`wal`/`shm` 来源；失败时保持旧版本和只读备份，修复后重跑。
-产生 PostgreSQL 新写入后使用前向 migration 修复，不执行破坏性 downgrade。M1 的
-`project_private_workspace` 仍硬关闭，Thread、run、file、memory、automation 尚未完成
-项目与 owner 双重隔离，因此不能把 M1 当作完整多用户 SaaS 发布。
+产生 PostgreSQL 新写入后使用前向 migration 修复，不执行破坏性 downgrade。M1 只交付
+PostgreSQL 与项目基础；项目私有入口必须等到 M4 的 final schema、cutover marker 和
+readiness gate 都就绪后才开放。
 
 ### 工作空间与项目治理（M2）
 
@@ -309,8 +309,6 @@ make check-db
 
 M2 不接入邮件服务；Admin 创建邀请后只获得一次性 fragment 链接。M2 不使用
 PostgreSQL RLS，也不物理清除成员私有数据或项目数据，只记录 30 天保留或恢复窗口。
-Thread、run、file、memory、automation 等私有业务数据仍未完成项目与 owner 双重隔离，
-因此 M2 仍不能作为完整多用户 SaaS 发布。
 
 ### 共享资产治理 API（M3）
 
@@ -338,23 +336,34 @@ submit/approve 流程发布；Credential 页面不提供明文查看或复制，
 已发布版本；旧文件即使仍存在也不会回退使用。旧版文件写接口统一返回
 `409 ASSET_CATALOG_CUTOVER`，请改用 `/admin/assets` 管理系统资产。
 M3 的兼容运行不会构造项目运行身份：credential materialization 只接受应用内部解析出的真实、
-不可变 `ProjectContext`。M4 Task 11 已挂载 project-private backend API：基路径
+不可变 `ProjectContext`。
+
+### 项目私有工作（M4 候选，待独立审查）
+
+进入 `/projects/{project_slug}` 后，服务端 readiness 为 `ready` 且当前成员具有
+`private_work.read_own` 时，项目菜单会显示 Chats、Memory 和 Connections。Chats 支持创建和继续
+自己的私有对话、运行与停止 Agent、上传文件、下载或删除自己的文件/产物，以及 chat sidecar；
+项目 Memory 可列出和导出，具有写能力的成员还可 reload/import/update/delete。Connections 绑定
+项目内可执行 Agent，普通入站文本复用同一项目私有 run lifecycle。
+
+Viewer 只能读取、导出和删除自己的既有 Thread、file 与 Memory 数据，不能创建 Thread、启动 run、
+上传文件、修改 Memory 或创建 connection。其他项目成员、项目 Admin 和平台 `system_admin` 不会因此
+获得 owner 私有内容读取权。所有页面和请求同时按 authenticated account UUID 与 project UUID 分区；
+切换账号或项目时先取消查询，再清理 cache、reconnect metadata 和 LangGraph client。
+
+Project-private backend API 基路径
 `/api/projects/{project_id}/private-work` 提供 readiness、Thread、run/stream/wait、feed
 （messages/events/token usage/feedback）、file 和 artifact 接口；项目 Memory 管理位于
 `/api/projects/{project_id}/memory`。这些接口复用 Gateway 的 run lifecycle，并按项目与 owner
 双重隔离；项目 run/feed 的消息与事件始终使用 PostgreSQL，因此 Gateway 重启后仍可读取，即使
-legacy `run_events.backend` 保持默认 `memory`。M4 Task 13 提供 runnable-first 显式迁移命令，首版覆盖
+legacy `run_events.backend` 保持默认 `memory`。runnable-first 显式迁移命令首版覆盖
 PostgreSQL legacy Thread/run/event/feedback 与 checkpoint scope marker；要求每个 legacy owner UUID
-显式映射到 active project UUID，不推断 default/recent/unique project。M4 Task 12 已加入运行期 cutover guard：只有 final schema 与
+显式映射到 active project UUID，不推断 default/recent/unique project。运行期 cutover guard 只有 final schema 与
 `private_work_cutover_state.stage=cutover_complete` 同时满足时项目私有 API 才开放；marker 完成后，
 旧 Thread/run/Memory/channel connection/upload/artifact HTTP 入口与 shared `start_run` 会统一返回
 `409 PRIVATE_WORK_CUTOVER`。非空 legacy filesystem、Memory 或 connection source 当前会在 execute 前
-安全拒绝。M4 Task 14 已建立前端 project-private client 基础：LangGraph client 按 authenticated
-account UUID 与 project UUID 双键隔离，严格连接
-`/api/projects/{project_id}/private-work`，Thread/upload hook 和 TanStack key 复用同一 project scope，
-项目或账号离开时先取消该 scope 的查询，再清理 reconnect state 与 client registry。默认 workspace
-client 仍保持原有兼容路径，CSRF 与 stream/cancel wrapper 不变。项目 chats 页面、Memory/connections
-页面、automation 和最终 cutover UI 仍待后续 Task 接入，因此这还不是完整的多用户 SaaS 发布。
+安全拒绝。完整操作顺序与故障决策见
+[M4 private-work migration runbook](docs/operations/m4-private-work-migration.md)。
 
 进入维护窗口并先完成外部 PostgreSQL 备份。owner map 是一个只包含 UUID→UUID 的 JSON object；
 `--backup-dir` 是当前 CLI 的保留运维参数，首版不会在其中写文件：
@@ -368,6 +377,9 @@ make migrate-private-work ARGS="--execute --owner-map /secure/private-work-owner
 dry-run 只输出脱敏 counts 与稳定 source hash，不升级 schema、不写 ledger/marker，也不创建 backup
 目录。execute 固定按 0008 expand、分域 ledger、0009 finalize、0010/0011、最后
 `cutover_complete` marker 的顺序执行；同一已完成 cutover 再执行会直接 no-op。
+
+M4 当前仅是实现与门禁候选，仍待独立审查。M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、
+M7 legacy source/API 清理和 M8 完整发布验收均未完成，因此 DeerFlow 仍不能作为完整多用户 SaaS 发布。
 
 #### M3 共享资产迁移与 credential 轮换
 

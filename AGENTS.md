@@ -71,20 +71,22 @@ M1/M2/M3 不使用 PostgreSQL RLS。应用授权依赖认证身份、不可变 `
 repository；应用连接使用普通非 superuser role，只有显式 setup/migration 脚本属于 trusted
 operations。登录后 `/workspace` 是没有项目级侧栏的多项目卡片工作空间；进入
 `/projects/{project_slug}` 后才显示项目菜单。M2 邀请只生成一次性 fragment 链接，不发送
-邮件；成员退出/移除和项目删除只记录 30 天窗口，不物理清除私有或项目数据。M4 Task 11 已挂载
+邮件；成员退出/移除和项目删除只记录 30 天窗口，不物理清除私有或项目数据。M4 已挂载
 project private-work、Memory 和 connection backend API，覆盖 Thread、run/stream/feed、file/artifact、
 项目 Memory 管理和 IM connection/OAuth/inbound 文本执行链，并保持项目与 owner 双重隔离。项目
-run/feed 的消息与事件固定写入 PostgreSQL，不受 legacy `run_events.backend=memory` 配置影响。M4 Task 13
+run/feed 的消息与事件固定写入 PostgreSQL，不受 legacy `run_events.backend=memory` 配置影响。M4
 提供 runnable-first 的显式 private-work migration：可 dry-run，并把 PostgreSQL legacy
 Thread/run/event/feedback 与 checkpoint metadata marker 迁入显式 owner→active project scope；非空 legacy
-filesystem、Memory 或 connection source 当前会安全拒绝，留待后续迁移。M4 Task 14-16 已接入
+filesystem、Memory 或 connection source 当前会安全拒绝，留待后续迁移。Frontend 已接入
 account/project-scoped frontend client、项目 Chats、Memory、Connections 以及 chat 内
 file/artifact/sidecar；所有项目私有数据 URL 均从当前 `ProjectPrivateWorkProvider` 派生，Viewer 只获得
-服务端 capability 允许的只读与 own-delete 操作。`PROJECT_PRIVATE_WORKSPACE` 仍保持关闭，Task 17
-完成真实 PostgreSQL/frontend release gate 前不开放入口；automation 项目化尚未完成。M4 Task 12 已接入 singleton
+服务端 capability 允许的只读与 own-delete 操作。`PROJECT_PRIVATE_WORKSPACE` 已编译期开启，但 Chats、
+Memory、Connections 和 recent-work 入口仍必须同时通过服务端 readiness 与 capability gate；静态构建不
+暴露入口。M4 已接入 singleton
 `private_work_cutover_state` guard：final schema 且 marker 完成后开放 project private API，同时关闭
-legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run`；因此当前仍不能
-作为完整多用户 SaaS 发布。
+legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run`。M4 当前是实现与
+门禁候选，待独立审查；M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、M7 legacy cleanup 和
+M8 发布验收尚未完成，因此当前仍不能作为完整多用户 SaaS 发布。
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
@@ -159,10 +161,15 @@ These apply repo-wide; module guides own the module-specific detail.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **PostgreSQL release gate** — `.github/workflows/project-foundation-postgres-tests.yml`
-  固定运行 M1 cutover、M1 isolation、M2 governance 和 M3 shared-assets 四个真实 PostgreSQL
-  集成文件；每个
+  固定运行 M1 cutover、M1 isolation、M2 governance、M3 shared-assets、M4 private-work 和 M4 migration
+  六个真实 PostgreSQL 集成文件；每个
   测试使用临时 `deerflow_test_*` 数据库。缺少 `POSTGRES_TEST_URL` 只能在本地明确 skip，
   CI 必须在进入 pytest 前硬失败。
+- **M4 private-work cutover 运维** — `migrate-private-work` 使用显式 owner UUID→active project UUID
+  map；先 dry-run，再在停止 Gateway/Scheduler/channel/embedded writers 的维护窗口 execute，随后运行
+  `make check-db` 与 M1–M4 probes。当前 runnable-first CLI 不写 `--backup-dir`、不消费
+  `DEER_FLOW_M4_BACKUP_KEY`，因此 operator 必须在仓库外保留数据库备份证明；完整故障决策见
+  `docs/operations/m4-private-work-migration.md`。
 - **M3 asset cutover 运维** — `migrate-assets` 扫描 repo 默认/system Agent、`skills/public`、
   canonical extensions config 和 `.deer-flow` 用户目录；project 来源必须通过 owner map 显式给出
   active default project，system 来源必须给出 system-admin actor。执行前先 dry-run；execute 先做

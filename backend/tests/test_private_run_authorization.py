@@ -251,7 +251,11 @@ async def test_normal_channel_connect_locks_identity_before_lookup(
     repository = ChannelConnectionRepository(lambda: Session())
 
     result = await repository.upsert_connection(
-        owner_user_id=row.owner_user_id,
+        scope=PrivateResourceScope(
+            project_id=str(row.project_id),
+            owner_user_id=row.owner_user_id,
+            membership_version=1,
+        ),
         provider=row.provider,
         external_account_id=row.external_account_id,
         workspace_id=row.workspace_id,
@@ -754,7 +758,7 @@ async def test_postgres_normal_connect_preserves_frozen_owner_credential(
         )
 
     connected = await ChannelConnectionRepository(seed.factory).upsert_connection(
-        owner_user_id=connecting_owner,
+        scope=seed.owner_b_scope,
         provider="slack",
         external_account_id="external-normal-retention",
         workspace_id="workspace-normal-retention",
@@ -783,7 +787,7 @@ async def test_postgres_normal_connect_preserves_frozen_owner_credential(
     ]
 
     repeated = await ChannelConnectionRepository(seed.factory).upsert_connection(
-        owner_user_id=connecting_owner,
+        scope=seed.owner_b_scope,
         provider="slack",
         external_account_id="external-normal-retention",
         workspace_id="workspace-normal-retention",
@@ -821,7 +825,7 @@ async def test_postgres_normal_connect_preserves_frozen_owner_credential(
         )
 
     transferred = await ChannelConnectionRepository(seed.factory).upsert_connection(
-        owner_user_id=connecting_owner,
+        scope=seed.owner_b_scope,
         provider="slack",
         external_account_id="external-normal-transfer",
         workspace_id="workspace-normal-transfer",
