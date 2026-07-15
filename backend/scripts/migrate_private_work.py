@@ -1103,8 +1103,7 @@ async def run_private_work_migration(
             already_complete = await _cutover_complete(connection)
             await _validate_owner_targets(connection, plan)
             await _validate_relations(connection)
-            if revision != "0007_project_shared_assets":
-                await _validate_unsupported_tables_empty(connection)
+            await _validate_unsupported_tables_empty(connection)
             if not execute:
                 if revision not in {
                     "0007_project_shared_assets",

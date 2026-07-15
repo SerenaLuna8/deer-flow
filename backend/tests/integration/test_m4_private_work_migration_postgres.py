@@ -11,7 +11,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.bootstrap import _get_alembic_config
-from scripts.migrate_private_work import run_private_work_migration
+from scripts.migrate_private_work import (
+    PrivateWorkMigrationError,
+    run_private_work_migration,
+)
 
 
 async def _upgrade(url: str, revision: str) -> None:
@@ -300,3 +303,44 @@ async def test_empty_install_path_reaches_cutover_without_creating_private_rows(
             assert await connection.scalar(text("SELECT stage FROM private_work_cutover_state WHERE id=1")) == "cutover_complete"
     finally:
         await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_0007_dry_run_rejects_legacy_channel_rows(
+    postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    await _upgrade(postgres_database_url, "0007_project_shared_assets")
+    owner, project = await _seed_legacy_private_work(postgres_database_url)
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO channel_connections
+                    (id,owner_user_id,provider,status,external_account_id,
+                     external_account_name,workspace_id,workspace_name,bot_user_id,
+                     scopes_json,capabilities_json,metadata_json,created_at,updated_at,
+                     last_seen_at,last_error_at)
+                    VALUES (:id,:owner,'slack','connected','legacy-account',NULL,
+                            'legacy-workspace',NULL,NULL,'[]'::jsonb,'{}'::jsonb,
+                            '{}'::jsonb,now(),now(),NULL,NULL)"""
+                ),
+                {"id": str(uuid.uuid4()), "owner": owner},
+            )
+    finally:
+        await engine.dispose()
+
+    with pytest.raises(
+        PrivateWorkMigrationError,
+        match="unsupported legacy source",
+    ):
+        await run_private_work_migration(
+            postgres_database_url,
+            owner_map={owner: project},
+            repo_root=tmp_path / "repo",
+            data_root=tmp_path / "data",
+            backup_dir=tmp_path / "backup",
+            execute=False,
+        )
