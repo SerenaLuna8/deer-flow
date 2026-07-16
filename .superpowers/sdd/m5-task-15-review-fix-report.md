@@ -108,6 +108,65 @@ git diff --check
 passed
 ```
 
+## Governance re-review closure
+
+The follow-up independent review found that the original governance test ran
+downgrade, removal, project-B leave, and project-A pending deletion before one
+final aggregate assertion. Project deletion could therefore freeze the same
+project-A rows even if the earlier downgrade/removal hooks had stopped working.
+
+The test now reads real PostgreSQL rows immediately after every governance
+operation. At each checkpoint it asserts the affected task is paused, frozen,
+and unscheduled, and its queued occurrence is cancelled with
+`AUTOMATION_AUTHORIZATION_REVOKED`. It also asserts every not-yet-affected
+sentinel remains enabled, unfrozen, scheduled, and queued. The project-B leave
+is checked independently, while project-A deletion proves that the same owner
+still has an unaffected task and occurrence in project B.
+
+For RED, the new immediate assertions were installed while the owner-B
+downgrade call was temporarily omitted. The first checkpoint failed on the
+still-enabled owner-B task; the old end-only structure would have allowed the
+later project deletion to hide that missing linkage:
+
+```text
+POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/postgres \
+  uv run pytest tests/integration/test_m5_project_automation_postgres.py::test_governance_downgrade_remove_leave_and_pending_delete_freeze_automation -q
+1 failed in 1.11s
+AssertionError: owner_b
+assert enabled == paused
+```
+
+The mutation was reverted and the real downgrade restored before GREEN:
+
+```text
+POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/postgres \
+  uv run pytest tests/integration/test_m5_project_automation_postgres.py::test_governance_downgrade_remove_leave_and_pending_delete_freeze_automation -q
+1 passed in 1.05s
+
+POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/postgres \
+  uv run pytest tests/integration/test_m5_project_automation_postgres.py -q
+8 passed in 2.76s
+
+POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/postgres \
+  uv run pytest \
+  tests/integration/test_m1_postgres_cutover.py \
+  tests/integration/test_project_isolation_postgres.py \
+  tests/integration/test_m2_project_governance_postgres.py \
+  tests/integration/test_m3_shared_assets_postgres.py \
+  tests/integration/test_m4_private_work_postgres.py \
+  tests/integration/test_m4_private_work_migration_postgres.py \
+  tests/integration/test_m5_project_automation_postgres.py -q
+25 passed in 8.42s
+
+uv run ruff format tests/integration/test_m5_project_automation_postgres.py
+1 file reformatted
+
+uv run ruff check \
+  tests/integration/test_m5_project_automation_postgres.py \
+  tests/support/m5_automation.py
+All checks passed!
+```
+
 ## Files in the repair
 
 - `backend/tests/integration/test_m5_project_automation_postgres.py`

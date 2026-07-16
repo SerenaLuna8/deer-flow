@@ -538,7 +538,16 @@ async def test_composite_foreign_keys_reject_cross_scope_task_thread_and_run(
 async def test_governance_downgrade_remove_leave_and_pending_delete_freeze_automation(
     m5_seed: M5Seed,
 ) -> None:
-    targets = {name: m5_seed.task_for(name) for name in ("owner_a", "owner_b", "viewer", "project_b_owner")}
+    targets = {
+        name: m5_seed.task_for(name)
+        for name in (
+            "owner_a",
+            "owner_b",
+            "viewer",
+            "project_b_owner",
+            "owner_a_project_b",
+        )
+    }
     occurrences = {
         name: await m5_seed.create_occurrence(
             name,
@@ -547,6 +556,30 @@ async def test_governance_downgrade_remove_leave_and_pending_delete_freeze_autom
         )
         for name, task in targets.items()
     }
+
+    async def read_state():
+        async with m5_seed.factory() as session:
+            task_rows = {row.id: row for row in (await session.execute(select(ScheduledTaskRow).where(ScheduledTaskRow.id.in_(tuple(task.id for task in targets.values()))))).scalars()}
+            occurrence_rows = {row.id: row for row in (await session.execute(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id.in_(tuple(item.id for item in occurrences.values()))))).scalars()}
+        return task_rows, occurrence_rows
+
+    def assert_revoked(name: str, task_rows, occurrence_rows) -> None:
+        task = task_rows[targets[name].id]
+        occurrence = occurrence_rows[occurrences[name].id]
+        assert task.status == "paused", name
+        assert task.frozen_at is not None, name
+        assert task.next_run_at is None, name
+        assert occurrence.status == "cancelled", name
+        assert occurrence.error_code == "AUTOMATION_AUTHORIZATION_REVOKED", name
+
+    def assert_not_revoked(name: str, task_rows, occurrence_rows) -> None:
+        task = task_rows[targets[name].id]
+        occurrence = occurrence_rows[occurrences[name].id]
+        assert task.status == "enabled", name
+        assert task.frozen_at is None, name
+        assert task.next_run_at is not None, name
+        assert occurrence.status == "queued", name
+        assert occurrence.error_code is None, name
 
     async with m5_seed.factory() as session:
         await MembershipService(
@@ -558,6 +591,11 @@ async def test_governance_downgrade_remove_leave_and_pending_delete_freeze_autom
             ProjectRole.VIEWER,
             expected_version=1,
         )
+    task_rows, occurrence_rows = await read_state()
+    assert_revoked("owner_b", task_rows, occurrence_rows)
+    for untouched in ("owner_a", "viewer", "project_b_owner", "owner_a_project_b"):
+        assert_not_revoked(untouched, task_rows, occurrence_rows)
+
     async with m5_seed.factory() as session:
         await MembershipService(
             MembershipRepository(session),
@@ -567,6 +605,12 @@ async def test_governance_downgrade_remove_leave_and_pending_delete_freeze_autom
             m5_seed.context("viewer").membership_id,
             expected_version=1,
         )
+    task_rows, occurrence_rows = await read_state()
+    for revoked in ("owner_b", "viewer"):
+        assert_revoked(revoked, task_rows, occurrence_rows)
+    for untouched in ("owner_a", "project_b_owner", "owner_a_project_b"):
+        assert_not_revoked(untouched, task_rows, occurrence_rows)
+
     async with m5_seed.factory() as session:
         await MembershipService(
             MembershipRepository(session),
@@ -575,6 +619,12 @@ async def test_governance_downgrade_remove_leave_and_pending_delete_freeze_autom
             m5_seed.project_context("project_b_owner"),
             expected_version=1,
         )
+    task_rows, occurrence_rows = await read_state()
+    for revoked in ("owner_b", "viewer", "project_b_owner"):
+        assert_revoked(revoked, task_rows, occurrence_rows)
+    for untouched in ("owner_a", "owner_a_project_b"):
+        assert_not_revoked(untouched, task_rows, occurrence_rows)
+
     async with m5_seed.factory() as session:
         await ProjectLifecycleService(
             ProjectLifecycleRepository(session),
@@ -582,15 +632,10 @@ async def test_governance_downgrade_remove_leave_and_pending_delete_freeze_autom
             m5_seed.project_context("owner_a"),
             M5_NOW + timedelta(minutes=3),
         )
-
-    async with m5_seed.factory() as session:
-        task_rows = {row.id: row for row in (await session.execute(select(ScheduledTaskRow).where(ScheduledTaskRow.id.in_(tuple(task.id for task in targets.values()))))).scalars()}
-        occurrence_rows = {row.id: row for row in (await session.execute(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id.in_(tuple(item.id for item in occurrences.values()))))).scalars()}
-    assert all(task_rows[task.id].status == "paused" for task in targets.values())
-    assert all(task_rows[task.id].frozen_at is not None for task in targets.values())
-    assert all(task_rows[task.id].next_run_at is None for task in targets.values())
-    assert all(occurrence_rows[item.id].status == "cancelled" for item in occurrences.values())
-    assert all(occurrence_rows[item.id].error_code == "AUTOMATION_AUTHORIZATION_REVOKED" for item in occurrences.values())
+    task_rows, occurrence_rows = await read_state()
+    for revoked in ("owner_a", "owner_b", "viewer", "project_b_owner"):
+        assert_revoked(revoked, task_rows, occurrence_rows)
+    assert_not_revoked("owner_a_project_b", task_rows, occurrence_rows)
 
 
 def _runtime_record(admitted) -> RunRecord:
