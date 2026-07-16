@@ -37,6 +37,7 @@ class ScheduledTaskRunRow(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     thread_id: Mapped[str | None] = mapped_column(String(64))
     run_id: Mapped[str | None] = mapped_column(String(64))
+    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     resolved_membership_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     resolved_membership_version: Mapped[int | None] = mapped_column(BigInteger)
     launch_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -57,6 +58,12 @@ class ScheduledTaskRunRow(Base):
             "task_id",
             "occurrence_key",
             name="uq_scheduled_task_runs_occurrence",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "id",
+            name="uq_scheduled_task_runs_job_scope",
         ),
         ForeignKeyConstraint(
             ["project_id"],
@@ -99,6 +106,12 @@ class ScheduledTaskRunRow(Base):
                 "runs.run_id",
             ],
             name="fk_scheduled_task_runs_private_run",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["job_id"],
+            ["jobs.id"],
+            name="fk_scheduled_task_runs_job",
             ondelete="RESTRICT",
         ),
         CheckConstraint(

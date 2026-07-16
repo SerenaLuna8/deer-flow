@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,62 @@ from deerflow.persistence.bootstrap import (
 )
 
 
+async def _upgrade_empty_database_to_0011(engine) -> None:
+    cfg = _get_alembic_config(engine)
+    await asyncio.to_thread(
+        alembic_command.upgrade,
+        cfg,
+        "0008_project_private_work_expand",
+    )
+    private_finalize = importlib.import_module("deerflow.persistence.migrations.versions.0009_project_private_work_finalize")
+    migration_run_id = uuid.uuid4()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """INSERT INTO private_work_migration_runs
+                (id,mode,status,source_fingerprint,owner_map_digest,
+                 legacy_source_probe_complete,checkpoint_marker_probe_complete,
+                 cross_scope_probe_complete,completed_at)
+                VALUES (:id,'execute','completed',:digest,:digest,true,true,true,now())"""
+            ),
+            {"id": migration_run_id, "digest": "c" * 64},
+        )
+        await connection.execute(
+            text(
+                """INSERT INTO private_work_migration_ledger
+                (migration_run_id,domain,source_key_hash,source_fingerprint,
+                 target_digest,status,row_count,byte_count)
+                VALUES (:run_id,:domain,:digest,:digest,:digest,'complete',0,0)"""
+            ),
+            [
+                {
+                    "run_id": migration_run_id,
+                    "domain": domain,
+                    "digest": f"{index:064x}",
+                }
+                for index, domain in enumerate(
+                    sorted(private_finalize.FINALIZE_LEDGER_DOMAINS),
+                    start=1,
+                )
+            ],
+        )
+    await asyncio.to_thread(
+        alembic_command.upgrade,
+        cfg,
+        "0011_private_artifact_tombstone",
+    )
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """INSERT INTO private_work_cutover_state
+                (id,stage,migration_run_id,empty_domain_probe_complete,
+                 checkpoint_marker_probe_complete,cutover_at,updated_at)
+                VALUES (1,'cutover_complete',:id,false,true,now(),now())"""
+            ),
+            {"id": migration_run_id},
+        )
+
+
 @pytest.mark.parametrize(
     ("revision", "expected"),
     [
@@ -33,6 +90,8 @@ from deerflow.persistence.bootstrap import (
         ("0011_private_artifact_tombstone", False),
         ("0012_project_automation_expand", False),
         ("0013_project_automation_finalize", False),
+        ("0014_project_reliability_expand", False),
+        ("0015_project_reliability_finalize", False),
         ("0010_unknown_future_revision", True),
     ],
 )
@@ -217,15 +276,7 @@ async def test_gateway_bootstrap_requires_explicit_automation_migration_for_none
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     engine = create_async_engine(postgres_database_url)
     try:
-        await bootstrap_schema(engine)
-        cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(
-            alembic_command.downgrade,
-            cfg,
-            "0011_private_artifact_tombstone",
-        )
-        await engine.dispose()
-        engine = create_async_engine(postgres_database_url)
+        await _upgrade_empty_database_to_0011(engine)
         async with engine.begin() as connection:
             await connection.execute(
                 text(
@@ -264,17 +315,10 @@ async def test_gateway_bootstrap_upgrades_empty_0011_automation_domain(
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     engine = create_async_engine(postgres_database_url)
     try:
-        await bootstrap_schema(engine)
-        cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(
-            alembic_command.downgrade,
-            cfg,
-            "0011_private_artifact_tombstone",
-        )
-        await engine.dispose()
-        engine = create_async_engine(postgres_database_url)
+        await _upgrade_empty_database_to_0011(engine)
 
-        await bootstrap_schema(engine)
+        with pytest.raises(RuntimeError, match="reliability migration required"):
+            await bootstrap_schema(engine)
 
         async with engine.connect() as connection:
             revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))

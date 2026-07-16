@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKeyConstraint, Index, String, Text, UniqueConstraint, Uuid, text
+from sqlalchemy import CHAR, JSON, CheckConstraint, DateTime, ForeignKeyConstraint, Index, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from deerflow.persistence.base import Base
@@ -50,6 +50,13 @@ class RunRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    execution_lease_token_hash: Mapped[str | None] = mapped_column(CHAR(64))
+    execution_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_reason: Mapped[str | None] = mapped_column(String(64))
     authorization_cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     authorization_cancel_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     finalization_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
@@ -57,6 +64,7 @@ class RunRow(Base):
     __table_args__ = (
         Index("ix_runs_thread_status", "thread_id", "status"),
         UniqueConstraint("project_id", "owner_user_id", "thread_id", "run_id", name="uq_runs_private_scope"),
+        UniqueConstraint("project_id", "owner_user_id", "run_id", name="uq_runs_job_scope"),
         ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_runs_project", ondelete="RESTRICT"),
         ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_runs_owner", ondelete="RESTRICT"),
         ForeignKeyConstraint(
@@ -71,6 +79,7 @@ class RunRow(Base):
             name="fk_runs_private_thread",
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(["job_id"], ["jobs.id"], name="fk_runs_job", ondelete="RESTRICT"),
         CheckConstraint(
             "finalization_status IN ('pending', 'finalizing', 'complete', 'failed')",
             name="ck_runs_finalization_status",

@@ -808,6 +808,8 @@ target database.
 - `migrations/versions/0007_project_shared_assets.py` — M3 Agent、Skill、MCP、Credential 类型化共享资产 schema、复合约束与数据库 trigger
 - `migrations/versions/0012_project_automation_expand.py` — M5 nullable project Automation expansion, migration receipts, and supporting indexes
 - `migrations/versions/0013_project_automation_finalize.py` — M5 fail-before-DDL final scope constraints, durable occurrence indexes, and cutover probe
+- `migrations/versions/0014_project_reliability_expand.py` — M6 in-progress expand revision for jobs/Workers, quota, audit, recovery controls, and nullable Run/occurrence job authority
+- `migrations/versions/0015_project_reliability_finalize.py` — M6 forward-only, fail-before-DDL final relations plus append-only triggers; ordinary Gateway bootstrap stops at the M5 final boundary until explicit M6 migration evidence exists
 - `persistence/bootstrap.py` — `bootstrap_schema(engine)`, the three-branch decision + PostgreSQL advisory locking
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor)
 

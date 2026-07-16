@@ -20,7 +20,8 @@ Three-branch decision (see ``_decide_state``)
 | versioned at M4 final through 0010    | upgrade to the 0011 Automation staging boundary |
 | versioned at 0011 with Automation rows| require explicit M5 migration before expand DDL |
 | versioned at 0011/0012 with empty rows| upgrade/finalize M5 and require the complete marker |
-| versioned at M5 final/head            | verify the complete M5 marker            |
+| versioned at M5 final/M6 expand       | require explicit M6 reliability migration before M6 DDL/finalize |
+| versioned at M6 final/head            | verify the complete M5 marker; M6 runtime guard owns M6 readiness |
 
 The legacy branch handles pre-alembic databases that already have at least one
 DeerFlow-owned table. A frozen 0001-era catalog runs first because stamping at
@@ -123,6 +124,7 @@ _PRIVATE_WORK_PRE_EXPAND_REVISIONS = frozenset(
 )
 _AUTOMATION_PRE_EXPAND_REVISION = "0011_private_artifact_tombstone"
 _AUTOMATION_FINAL_REVISION = "0013_project_automation_finalize"
+_RELIABILITY_FINAL_REVISION = "0015_project_reliability_finalize"
 _LEGACY_PRIVATE_WORK_DB_TABLES: tuple[str, ...] = (
     "threads_meta",
     "runs",
@@ -1011,12 +1013,20 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
                         database_has_source = await conn.run_sync(_database_has_legacy_automation_source_sync)
                     if database_has_source:
                         raise RuntimeError("automation migration required; stop writers and run the staged automation migration")
+                await _run_alembic_offload(
+                    _upgrade,
+                    cfg,
+                    _AUTOMATION_FINAL_REVISION,
+                )
+                current_revision = _AUTOMATION_FINAL_REVISION
+
+            await _assert_automation_cutover_complete(engine)
+            if not REVISION_ANCESTRY.contains(current_revision, _RELIABILITY_FINAL_REVISION):
+                raise RuntimeError("reliability migration required; stop writers and run the staged reliability migration")
             # Preserve the historical no-op Alembic call at head. Besides
             # making externally-added revisions discoverable, the offload is
             # the cancellation/lock boundary exercised by bootstrap callers.
             await _run_alembic_offload(_upgrade, cfg, "head")
-
-            await _assert_automation_cutover_complete(engine)
 
         else:  # pragma: no cover -- defensive
             raise RuntimeError(f"bootstrap: unhandled decision {decision!r}")

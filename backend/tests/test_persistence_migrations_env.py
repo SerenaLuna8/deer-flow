@@ -49,6 +49,19 @@ def test_filter_includes_deerflow_tables() -> None:
         "automation_migration_runs",
         "automation_migration_ledger",
         "automation_cutover_state",
+        "jobs",
+        "job_attempts",
+        "dead_jobs",
+        "worker_nodes",
+        "project_quotas",
+        "project_usage_counters",
+        "project_usage_ledger",
+        "audit_logs",
+        "deletion_tombstones",
+        "restore_proofs",
+        "reliability_migration_runs",
+        "reliability_migration_ledger",
+        "reliability_cutover_state",
     ):
         assert include_object(_table(owned), owned, "table", True, None) is True
 

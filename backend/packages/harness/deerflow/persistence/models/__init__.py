@@ -14,6 +14,7 @@ its storage implementation lives in ``deerflow.runtime.events.store.db`` and
 there is no matching entity directory.
 """
 
+from deerflow.persistence.audit import AuditLogRow
 from deerflow.persistence.automations import (
     AutomationCutoverStateRow,
     AutomationMigrationLedgerRow,
@@ -26,6 +27,7 @@ from deerflow.persistence.channel_connections.model import (
     ChannelOAuthStateRow,
 )
 from deerflow.persistence.feedback.model import FeedbackRow
+from deerflow.persistence.jobs import DeadJobRow, JobAttemptRow, JobRow, WorkerNodeRow
 from deerflow.persistence.migration_ledger.model import MigrationLedgerRow
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.private_work import (
@@ -45,6 +47,13 @@ from deerflow.persistence.projects.invitation_rate_limit_model import (
     ProjectInvitationRateLimitRow,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.quotas import ProjectQuotaRow, ProjectUsageCounterRow, ProjectUsageLedgerRow
+from deerflow.persistence.recovery import DeletionTombstoneRow, RestoreProofRow
+from deerflow.persistence.reliability import (
+    ReliabilityCutoverStateRow,
+    ReliabilityMigrationLedgerRow,
+    ReliabilityMigrationRunRow,
+)
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
@@ -72,6 +81,7 @@ from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
 
 __all__ = [
+    "AuditLogRow",
     "AutomationCutoverStateRow",
     "AutomationMigrationLedgerRow",
     "AutomationMigrationRunRow",
@@ -89,6 +99,10 @@ __all__ = [
     "CredentialRow",
     "CredentialVersionRow",
     "FeedbackRow",
+    "DeadJobRow",
+    "DeletionTombstoneRow",
+    "JobAttemptRow",
+    "JobRow",
     "MigrationLedgerRow",
     "McpCredentialSlotRow",
     "McpServerRow",
@@ -97,6 +111,9 @@ __all__ = [
     "ProjectInvitationRateLimitRow",
     "ProjectMembershipRow",
     "ProjectRow",
+    "ProjectQuotaRow",
+    "ProjectUsageCounterRow",
+    "ProjectUsageLedgerRow",
     "PrivateArtifactRow",
     "PrivateFileChunkRow",
     "PrivateFileRow",
@@ -110,6 +127,10 @@ __all__ = [
     "RunAssetVersionRow",
     "RunMcpGrantSnapshotRow",
     "RunRow",
+    "ReliabilityCutoverStateRow",
+    "ReliabilityMigrationLedgerRow",
+    "ReliabilityMigrationRunRow",
+    "RestoreProofRow",
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
     "SkillRow",
@@ -119,4 +140,5 @@ __all__ = [
     "UserRow",
     "UserProjectMemoryFactRow",
     "UserProjectMemoryRow",
+    "WorkerNodeRow",
 ]
