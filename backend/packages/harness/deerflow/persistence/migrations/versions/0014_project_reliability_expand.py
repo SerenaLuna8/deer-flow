@@ -313,6 +313,7 @@ def _create_migration_control_tables() -> None:
         sa.Column("id", sa.SmallInteger(), server_default=sa.text("1"), nullable=False),
         sa.Column("stage", sa.String(24), nullable=False),
         sa.Column("migration_run_id", sa.Uuid(), nullable=True),
+        sa.Column("empty_domain_probe_complete", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("source_probe_complete", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("active_run_probe_complete", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("quota_backfill_probe_complete", sa.Boolean(), server_default=sa.text("false"), nullable=False),
@@ -326,11 +327,12 @@ def _create_migration_control_tables() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.CheckConstraint("id = 1", name="ck_reliability_cutover_state_singleton"),
         sa.CheckConstraint(
-            "stage IN ('expand_ready', 'migration_ready', 'cutover_complete')",
+            "stage IN ('expand_ready', 'empty_install', 'migration_ready', 'cutover_complete')",
             name="ck_reliability_cutover_state_stage",
         ),
         sa.CheckConstraint(
-            "stage != 'cutover_complete' OR (migration_run_id IS NOT NULL AND source_probe_complete AND "
+            "stage != 'cutover_complete' OR (((empty_domain_probe_complete AND migration_run_id IS NULL) OR "
+            "(NOT empty_domain_probe_complete AND migration_run_id IS NOT NULL)) AND source_probe_complete AND "
             "active_run_probe_complete AND quota_backfill_probe_complete AND job_relation_probe_complete AND "
             "audit_trigger_probe_complete AND stream_probe_complete AND recovery_probe_complete AND "
             "final_schema_probe_complete AND schema_revision IS NOT NULL AND cutover_at IS NOT NULL)",

@@ -21,7 +21,9 @@ from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
+from deerflow.config.recovery_config import RecoveryConfig
 from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.runtime_paths import existing_project_file
@@ -42,6 +44,7 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.config.worker_config import WorkerConfig
 
 load_dotenv()
 
@@ -196,6 +199,27 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "scheduler",
             field_doc="Scheduled task runtime configuration (background poller for one-time and cron agent runs).",
+        ),
+    )
+    worker: WorkerConfig = Field(
+        default_factory=WorkerConfig,
+        description=format_field_description(
+            "worker",
+            field_doc="Independent Worker process polling, leasing, concurrency, and retry configuration.",
+        ),
+    )
+    quotas: QuotaConfig = Field(
+        default_factory=QuotaConfig,
+        description=format_field_description(
+            "quotas",
+            field_doc="Platform defaults and deployment ceilings for project quota enforcement.",
+        ),
+    )
+    recovery: RecoveryConfig = Field(
+        default_factory=RecoveryConfig,
+        description=format_field_description(
+            "recovery",
+            field_doc="Local paths and limits used by backup and recovery services.",
         ),
     )
     stream_bridge: StreamBridgeConfig | None = Field(

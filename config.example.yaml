@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 22
+config_version: 23
 
 # ============================================================================
 # Logging
@@ -1493,9 +1493,8 @@ run_events:
 # As elsewhere in this file, a scalar may be a $VARIABLE reference; environment
 # values are resolved before this section is validated.
 #
-# M5 topology note: scheduler.enabled=true is supported only by one Gateway
-# process with GATEWAY_WORKERS=1. Independent Scheduler/Worker processes and
-# cross-worker run takeover belong to M6. Before reconciliation or polling,
+# M5 scheduler compatibility note: scheduler.enabled=true is supported only by
+# one Gateway process with GATEWAY_WORKERS=1. Before reconciliation or polling,
 # the Gateway
 # must also acquire one process-lifetime PostgreSQL session advisory lock on a
 # dedicated checked-out connection. A competing Gateway fails startup closed;
@@ -1519,6 +1518,49 @@ scheduler:
   lease_seconds: 120
   max_concurrent_runs: 3
   min_once_delay_seconds: 60
+
+# ============================================================================
+# M6 Independent Worker
+# ============================================================================
+# Restart-required execution policy for the independent Worker process.
+worker:
+  enabled: true
+  poll_interval_seconds: 0.5
+  lease_seconds: 90
+  heartbeat_seconds: 20
+  max_concurrent_jobs: 4
+  shutdown_grace_seconds: 30
+  default_max_attempts: 3
+  retry_initial_seconds: 2
+  retry_max_seconds: 300
+
+# ============================================================================
+# M6 Project Quotas
+# ============================================================================
+# Platform defaults and hard deployment ceilings. Per-project values may be
+# lower, but never exceed the matching max_* field.
+quotas:
+  default_member_limit: 20
+  default_storage_bytes_limit: 5368709120
+  default_concurrent_run_limit: 3
+  default_mcp_calls_daily_limit: 10000
+  max_member_limit: 10000
+  max_storage_bytes_limit: 10995116277760
+  max_concurrent_run_limit: 1024
+  max_mcp_calls_daily_limit: 100000000
+  warning_threshold: 0.8
+
+# ============================================================================
+# M6 Backup and Recovery
+# ============================================================================
+# Non-secret local paths and limits. Archive encryption keys are supplied by
+# the credential envelope/keyring flow, never by config.yaml.
+recovery:
+  archive_chunk_bytes: 1048576
+  archive_root: .deer-flow/backups
+  tombstone_journal_path: .deer-flow/recovery/tombstones.journal
+  journal_fsync_policy: always
+  retention_days: 30
 
 # ============================================================================
 # Stream Bridge Configuration

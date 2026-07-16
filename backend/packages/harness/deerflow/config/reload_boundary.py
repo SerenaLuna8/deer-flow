@@ -67,6 +67,9 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
         "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "
         "and max_concurrent_runs are captured into the service instance and the background poller task is not rebuilt on config.yaml edits."
     ),
+    "worker": ("The independent Worker process captures polling, leasing, concurrency, shutdown, and retry policy at process startup; live workers are not rebuilt on config.yaml edits."),
+    "quotas": ("Project quota services capture platform defaults and deployment ceilings at Gateway and Worker startup so every admission path applies one coherent policy snapshot."),
+    "recovery": ("Backup and recovery services capture archive, tombstone-journal, fsync, and retention settings at process startup; active recovery workflows are not reconfigured in place."),
 }
 
 

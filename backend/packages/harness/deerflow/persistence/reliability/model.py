@@ -68,6 +68,7 @@ class ReliabilityCutoverStateRow(Base):
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1, server_default=text("1"))
     stage: Mapped[str] = mapped_column(String(24), nullable=False)
     migration_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("reliability_migration_runs.id", ondelete="RESTRICT"))
+    empty_domain_probe_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     source_probe_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     active_run_probe_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     quota_backfill_probe_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
@@ -83,11 +84,12 @@ class ReliabilityCutoverStateRow(Base):
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_reliability_cutover_state_singleton"),
         CheckConstraint(
-            "stage IN ('expand_ready', 'migration_ready', 'cutover_complete')",
+            "stage IN ('expand_ready', 'empty_install', 'migration_ready', 'cutover_complete')",
             name="ck_reliability_cutover_state_stage",
         ),
         CheckConstraint(
-            "stage != 'cutover_complete' OR (migration_run_id IS NOT NULL AND source_probe_complete AND "
+            "stage != 'cutover_complete' OR (((empty_domain_probe_complete AND migration_run_id IS NULL) OR "
+            "(NOT empty_domain_probe_complete AND migration_run_id IS NOT NULL)) AND source_probe_complete AND "
             "active_run_probe_complete AND quota_backfill_probe_complete AND job_relation_probe_complete AND "
             "audit_trigger_probe_complete AND stream_probe_complete AND recovery_probe_complete AND "
             "final_schema_probe_complete AND schema_revision IS NOT NULL AND cutover_at IS NOT NULL)",

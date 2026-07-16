@@ -14,7 +14,7 @@ Three-branch decision (see ``_decide_state``)
 
 | DB state                              | Action                                  |
 |---------------------------------------|-----------------------------------------|
-| empty (no DeerFlow tables)            | ``create_all`` + ``stamp head`` + M4/M5 empty probes and markers |
+| empty (no DeerFlow tables)            | ``create_all`` + ``stamp head`` + M4/M5/M6 empty probes and markers |
 | legacy (DeerFlow tables, no alembic)  | baseline-era backfill + ``stamp 0001`` + ``upgrade 0007`` + require explicit M4 migration |
 | versioned before M4 final             | require explicit M4 migration before any upgrade |
 | versioned at M4 final through 0010    | upgrade to the 0011 Automation staging boundary |
@@ -627,6 +627,109 @@ async def _write_empty_install_automation_cutover_marker(
         )
 
 
+def _reliability_schema_is_final_sync(sync_conn: Any) -> bool:
+    inspector = sa_inspect(sync_conn)
+    present = set(inspector.get_table_names())
+    required_tables = {
+        "audit_logs",
+        "dead_jobs",
+        "job_attempts",
+        "jobs",
+        "project_quotas",
+        "project_usage_counters",
+        "project_usage_ledger",
+        "deletion_tombstones",
+        "reliability_cutover_state",
+        "reliability_migration_ledger",
+        "reliability_migration_runs",
+        "restore_proofs",
+        "worker_nodes",
+    }
+    if not required_tables <= present:
+        return False
+    run_foreign_keys = {item["name"] for item in inspector.get_foreign_keys("runs")}
+    occurrence_foreign_keys = {item["name"] for item in inspector.get_foreign_keys("scheduled_task_runs")}
+    job_foreign_keys = {item["name"] for item in inspector.get_foreign_keys("jobs")}
+    marker_columns = {column["name"] for column in inspector.get_columns("reliability_cutover_state")}
+    triggers = set(
+        sync_conn.execute(
+            text(
+                """SELECT trigger_name FROM information_schema.triggers
+                WHERE event_object_schema=current_schema()
+                  AND trigger_name IN
+                      ('trg_project_usage_ledger_append_only',
+                       'trg_audit_logs_append_only',
+                       'trg_dead_jobs_append_only')"""
+            )
+        ).scalars()
+    )
+    return (
+        "empty_domain_probe_complete" in marker_columns
+        and "fk_runs_job" in run_foreign_keys
+        and "fk_scheduled_task_runs_job" in occurrence_foreign_keys
+        and {
+            "fk_jobs_private_run",
+            "fk_jobs_automation_occurrence",
+            "fk_jobs_predecessor_dead_job",
+        }
+        <= job_foreign_keys
+        and triggers
+        == {
+            "trg_project_usage_ledger_append_only",
+            "trg_audit_logs_append_only",
+            "trg_dead_jobs_append_only",
+        }
+    )
+
+
+async def _write_empty_install_reliability_cutover_marker(engine: AsyncEngine) -> None:
+    async with engine.begin() as conn:
+        project_markers = (
+            await conn.execute(
+                text(
+                    """SELECT
+                        (SELECT stage='cutover_complete' AND cutover_at IS NOT NULL
+                           FROM private_work_cutover_state WHERE id=1) AS private_ready,
+                        (SELECT stage='cutover_complete'
+                                AND final_schema_probe_complete AND cutover_at IS NOT NULL
+                           FROM automation_cutover_state WHERE id=1) AS automation_ready"""
+                )
+            )
+        ).one()
+        if project_markers.private_ready is not True or project_markers.automation_ready is not True:
+            raise RuntimeError("reliability empty-install prerequisites are incomplete")
+        active_execution = await conn.scalar(
+            text(
+                """SELECT EXISTS (
+                    SELECT 1 FROM runs WHERE status IN ('pending','running')
+                    UNION ALL
+                    SELECT 1 FROM scheduled_task_runs
+                    WHERE status IN ('queued','launching','running')
+                )"""
+            )
+        )
+        if active_execution:
+            raise RuntimeError("reliability migration required: active legacy execution remains")
+        schema_is_final = await conn.run_sync(_reliability_schema_is_final_sync)
+        if not schema_is_final:
+            raise RuntimeError("reliability final schema probe failed")
+        await conn.execute(
+            text(
+                """INSERT INTO reliability_cutover_state
+                (id,stage,migration_run_id,empty_domain_probe_complete,
+                 source_probe_complete,active_run_probe_complete,
+                 quota_backfill_probe_complete,job_relation_probe_complete,
+                 audit_trigger_probe_complete,stream_probe_complete,
+                 recovery_probe_complete,final_schema_probe_complete,
+                 schema_revision,cutover_at,updated_at)
+                VALUES
+                (1,'cutover_complete',NULL,true,true,true,true,true,true,true,true,true,
+                 '0015_project_reliability_finalize',now(),now())
+                ON CONFLICT (id) DO NOTHING"""
+            )
+        )
+
+
 async def _assert_automation_cutover_complete(engine: AsyncEngine) -> None:
     async with engine.connect() as conn:
         marker_table = await conn.scalar(text("SELECT to_regclass('automation_cutover_state')"))
@@ -949,6 +1052,7 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
                     raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
                 await _write_empty_install_cutover_marker(engine)
                 await _write_empty_install_automation_cutover_marker(engine)
+                await _write_empty_install_reliability_cutover_marker(engine)
             except BaseException:
                 # This invocation proved the DeerFlow-owned schema was empty
                 # before create_all. Restore that state so a failed stamp never

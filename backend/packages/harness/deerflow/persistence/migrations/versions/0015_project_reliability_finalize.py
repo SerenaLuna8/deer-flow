@@ -53,16 +53,20 @@ def _assert_no_active_legacy_execution(connection: Connection) -> None:
 def _assert_migration_evidence(connection: Connection) -> None:
     marker = connection.execute(
         sa.text(
-            """SELECT migration_run_id,source_probe_complete,
+            """SELECT migration_run_id,empty_domain_probe_complete,source_probe_complete,
                       active_run_probe_complete,quota_backfill_probe_complete,
                       job_relation_probe_complete,audit_trigger_probe_complete,
                       stream_probe_complete,recovery_probe_complete
                FROM reliability_cutover_state
-               WHERE id=1 AND stage='migration_ready'"""
+               WHERE id=1 AND stage IN ('empty_install','migration_ready')"""
         )
     ).one_or_none()
-    if marker is None or marker.migration_run_id is None or not all(marker[1:]):
+    if marker is None or not all(marker[2:]):
         raise RuntimeError("reliability migration required: migration_ready probes are incomplete")
+    if marker.empty_domain_probe_complete is True and marker.migration_run_id is None:
+        return
+    if marker.empty_domain_probe_complete is True or marker.migration_run_id is None:
+        raise RuntimeError("reliability migration required: migration evidence authority is invalid")
     migration_run = connection.execute(
         sa.text(
             """SELECT status,completed_at,source_probe_complete,
@@ -163,7 +167,7 @@ def _record_cutover_complete(connection: Connection) -> None:
                SET stage='cutover_complete',final_schema_probe_complete=true,
                    schema_revision='0015_project_reliability_finalize',
                    cutover_at=now(),updated_at=now()
-               WHERE id=1 AND stage='migration_ready'"""
+               WHERE id=1 AND stage IN ('empty_install','migration_ready')"""
         )
     )
     if result.rowcount != 1:

@@ -45,6 +45,10 @@ from app.gateway.routers import (
     uploads,
 )
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
+from app.reliability.error_mapping import (
+    ReliabilityHTTPException,
+    reliability_http_exception_handler,
+)
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
@@ -541,6 +545,13 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "Health check and system status endpoints",
             },
         ],
+    )
+
+    # M6 public reliability errors intentionally serialize at the response
+    # root, not through FastAPI's default {"detail": ...} wrapper.
+    app.add_exception_handler(
+        ReliabilityHTTPException,
+        reliability_http_exception_handler,
     )
 
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
