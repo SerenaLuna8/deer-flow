@@ -70,13 +70,13 @@ changes clear the Automation root in addition to project-private work.
 
 ## Verification
 
-| Gate | Result |
-| --- | ---: |
-| Task 11 + identity/project client/cache/private-work focused gate | 15 files, 62 tests passed |
-| Fresh full frontend unit suite | 121 files, 856 tests passed, 0 skipped |
-| `pnpm check` | ESLint and TypeScript passed |
-| Task 11 scoped Prettier check | all matched files passed |
-| `git diff --check` before report | passed |
+| Gate                                                              |                                 Result |
+| ----------------------------------------------------------------- | -------------------------------------: |
+| Task 11 + identity/project client/cache/private-work focused gate |              15 files, 62 tests passed |
+| Fresh full frontend unit suite                                    | 121 files, 856 tests passed, 0 skipped |
+| `pnpm check`                                                      |           ESLint and TypeScript passed |
+| Task 11 scoped Prettier check                                     |               all matched files passed |
+| `git diff --check` before report                                  |                                 passed |
 
 The repository-wide `pnpm format` check also reports two baseline warnings in
 `tests/unit/app/workspace/capability-pages.test.ts` and `tests/unit/core/uploads/api.test.ts`.
@@ -100,3 +100,39 @@ gate.
 
 No blocking Task 11 concern remains. The Automation workbench and milestone-level release closure
 remain deliberately deferred.
+
+## Review repair — stable manual-trigger idempotency lifecycle
+
+The independent review found one Important issue: the trigger hook created its idempotency UUID
+inside every `mutationFn` execution, so a TanStack transport retry or a user retry after an
+ambiguous network result could launch the same logical action with a different key.
+
+The repair keeps an imperative key registry in a hook-owned ref, indexed by account/project and
+task. The key remains only in that registry and the transport call; it never enters mutation
+variables, options metadata, or TanStack query/mutation state. Concurrent clicks, transport retries,
+and explicit retries for one task reuse the retained key, while different tasks and scopes remain
+isolated. A confirmed success rotates the next action to a new key. Abort, scope cleanup, and
+definitive non-retryable 403/404/422 failures clear it; authentication, conflict, rate-limit,
+server, malformed-response, and network failures retain it for safe retry. Compare-and-clear
+prevents a late completion from deleting a newer key after scope cleanup.
+
+Strict TDD evidence for the review repair:
+
+```text
+RED: 2 focused files, 11 tests; 7 new tests failed and 4 existing tests passed.
+     The original hook sent KEY_ONE then KEY_TWO across ambiguous retries and registered no scope
+     cleanup effect; the registry/options helpers did not exist.
+GREEN: 2 focused files, 11 tests passed.
+```
+
+Final repair verification:
+
+| Gate                                |                                 Result |
+| ----------------------------------- | -------------------------------------: |
+| Project Automation unit directory   |               6 files, 27 tests passed |
+| Fresh full frontend unit suite      | 122 files, 863 tests passed, 0 skipped |
+| `pnpm check`                        |           ESLint and TypeScript passed |
+| Task 11 scoped Prettier write/check |               all matched files passed |
+
+This repair changes only the Task 11 frontend hook/tests/report. It adds no Task 12 UI or backend
+behavior and leaves `.superpowers/sdd/progress.md` unchanged.

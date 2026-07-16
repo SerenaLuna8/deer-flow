@@ -6,6 +6,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
@@ -16,6 +17,7 @@ import {
 } from "@/core/private-work/types";
 
 import {
+  AutomationApiError,
   createAutomation,
   createAutomationIdempotencyKey,
   deleteAutomation,
@@ -27,6 +29,7 @@ import {
   resumeAutomation,
   triggerAutomation,
   updateAutomation,
+  type AutomationErrorCode,
 } from "./api";
 import {
   automationMutationKey,
@@ -41,6 +44,81 @@ import {
 } from "./types";
 
 const INACTIVE_ROOT = ["automations", "inactive"] as const;
+
+const DEFINITIVE_TRIGGER_ERROR_CODES = new Set<AutomationErrorCode>([
+  "AUTOMATION_FORBIDDEN",
+  "AUTOMATION_NOT_FOUND",
+  "AUTOMATION_INVALID",
+  "AUTOMATION_VALIDATION_FAILED",
+]);
+
+type AutomationTriggerTransport = typeof triggerAutomation;
+
+export type AutomationTriggerIdempotencyRegistry = {
+  acquire(
+    scope: ProjectClientScope,
+    taskId: string,
+    createKey: () => string,
+  ): string;
+  clear(scope: ProjectClientScope, taskId: string, key?: string): void;
+  clearScope(scope: ProjectClientScope): void;
+};
+
+function triggerScopeKey(scope: ProjectClientScope): string {
+  const root = automationRoot(scope);
+  return `${root[1]}:${root[3]}`;
+}
+
+export function createAutomationTriggerIdempotencyRegistry(): AutomationTriggerIdempotencyRegistry {
+  const keysByScope = new Map<string, Map<string, string>>();
+
+  return {
+    acquire(scope, taskId, createKey) {
+      const scopeKey = triggerScopeKey(scope);
+      let keysByTask = keysByScope.get(scopeKey);
+      if (!keysByTask) {
+        keysByTask = new Map();
+        keysByScope.set(scopeKey, keysByTask);
+      }
+      const existing = keysByTask.get(taskId);
+      if (existing) return existing;
+
+      const key = createKey();
+      keysByTask.set(taskId, key);
+      return key;
+    },
+    clear(scope, taskId, key) {
+      const scopeKey = triggerScopeKey(scope);
+      const keysByTask = keysByScope.get(scopeKey);
+      if (!keysByTask) return;
+      if (key !== undefined && keysByTask.get(taskId) !== key) return;
+
+      keysByTask.delete(taskId);
+      if (keysByTask.size === 0) keysByScope.delete(scopeKey);
+    },
+    clearScope(scope) {
+      keysByScope.delete(triggerScopeKey(scope));
+    },
+  };
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    error.name === "AbortError"
+  );
+}
+
+function isDefinitiveTriggerError(error: unknown): boolean {
+  return (
+    error instanceof AutomationApiError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    DEFINITIVE_TRIGGER_ERROR_CODES.has(error.code)
+  );
+}
 
 function sameScope(
   left: ProjectClientScope | null,
@@ -117,6 +195,33 @@ export function automationMutationOptions<TData, TVariables>(
       });
     },
   };
+}
+
+export function automationTriggerMutationOptions(
+  queryClient: QueryClient,
+  access: PrivateWorkAccess,
+  registry: AutomationTriggerIdempotencyRegistry,
+  transport: AutomationTriggerTransport = triggerAutomation,
+  createKey: () => string = createAutomationIdempotencyKey,
+) {
+  return automationMutationOptions(
+    queryClient,
+    access,
+    "trigger",
+    async (scope, taskId: string, signal) => {
+      const key = registry.acquire(scope, taskId, createKey);
+      try {
+        const run = await transport(scope, taskId, key, signal);
+        registry.clear(scope, taskId, key);
+        return run;
+      } catch (error) {
+        if (isAbortError(error) || isDefinitiveTriggerError(error)) {
+          registry.clear(scope, taskId, key);
+        }
+        throw error;
+      }
+    },
+  );
 }
 
 export function useProjectAutomations(
@@ -274,7 +379,21 @@ export function useResumeProjectAutomation() {
 }
 
 export function useTriggerProjectAutomation() {
-  return useAutomationMutation("trigger", (scope, taskId: string, signal) =>
-    triggerAutomation(scope, taskId, createAutomationIdempotencyKey(), signal),
+  const queryClient = useQueryClient();
+  const access = usePrivateWorkAccess();
+  const registryRef = useRef<AutomationTriggerIdempotencyRegistry | null>(null);
+  registryRef.current ??= createAutomationTriggerIdempotencyRegistry();
+  const registry = registryRef.current;
+  const scope = access.scope;
+
+  useEffect(
+    () => () => {
+      if (scope) registry.clearScope(scope);
+    },
+    [registry, scope],
+  );
+
+  return useMutation(
+    automationTriggerMutationOptions(queryClient, access, registry),
   );
 }
