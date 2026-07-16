@@ -143,7 +143,7 @@ Chats、Memory 与 Connections 导航入口必须同时满足编译期 feature f
 Viewer 仅 list/export/read/own-delete，不渲染 create/run/upload/connect 或 Memory mutation。项目或账号
 切换必须先 cancel，再删除 scoped queries/mutations、reconnect metadata 与 client；隔离 E2E 必须覆盖
 迟到响应不能污染新 scope；Thread search 的普通与 infinite TanStack query 都必须把 query signal
-传给 project client，保证切换时真实中止旧 scope 请求。M5 Automation 前端候选已把
+传给 project client，保证切换时真实中止旧 scope 请求。已完成的 M5 Automation 前端把
 `PROJECT_AUTOMATION` 编译期开启，入口、query/mutation、manual idempotency 与 E2E mock 均按认证
 account + project UUID 双重隔离；入口仍同时依赖非 static、服务端 readiness 和
 `private_work.read_own`。静态 build 的 `/projects/*` server layout 必须直接 `notFound()`，不得回跳
@@ -151,9 +151,8 @@ workspace；能力不足的 Automation 直达页在 `ProjectContextProvider` 完
 not-found boundary，且不得启动 readiness/list/history。由于 slug/enter 权限只有该 client provider
 拥有，初始 HTML status 可能仍为 200，真正的资源权限必须由项目 API 返回 403/404，页面不得复制
 server-side slug paging 或 enter。静态独立 build/browser 门禁必须同时证明 workspace 没有项目入口、
-项目 Automation 直达为 404、且没有 Automation 或 legacy scheduled-task API 请求。M5 只有在 Task 18
-的里程碑总门禁与独立审查完成后才算完成，当前仍不能把
-界面描述为完整多用户 SaaS。
+项目 Automation 直达为 404、且没有 Automation 或 legacy scheduled-task API 请求。Task 18 的里程碑
+总门禁与独立关闭审查已于 2026-07-16 完成；M6–M8 尚未交付，因此仍不能把界面描述为完整多用户 SaaS。
 Automation 的所有 query/mutation key 必须同时以认证 account UUID 和 entered project UUID 开头；
 无论 account 还是 project 变化，都必须先 cancel in-flight query，再清理 scoped query、mutation、
 client 与 reconnect 状态。Viewer 仅能读取自己的 definition/history，不能显示 mutation 或 manual
@@ -162,14 +161,14 @@ schedule_spec 与 timezone 只有发生规范化后的语义变化才发送，�
 `+00:00`）不得触发 schedule update；create payload 仍保持完整。M5 cutover 后 legacy
 `/workspace/scheduled-tasks` 只根据结构化
 `409 AUTOMATION_CUTOVER` 显示本地化迁移完成说明，不显示服务端文本或任何 legacy mutation 控件。
-当前前端是等待 Task 18 独立终审的 M5 release candidate；独立 Worker、持久化 SSE、
+当前前端已完成 M5；独立 Worker、持久化 SSE、
 通用 jobs/retries、配额、审计与通用备份恢复仍属于 M6。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie
 跨越登录流程，不写入 storage；产品不发送邀请邮件。M2 的退出/移除和删除恢复 UI 只反映
-30 天保留窗口，不代表私有数据或项目数据已被物理清除。M5 仍待 Task 18 独立终审，M6 Worker/SSE/
-配额/审计/通用备份恢复、M7 legacy cleanup 和 M8 完整发布验收仍未交付，因此不能作为完整多用户
+30 天保留窗口，不代表私有数据或项目数据已被物理清除。M5 已完成，当前进度为 5/8（62.5%）；
+M6 Worker/SSE/配额/审计/通用备份恢复、M7 legacy cleanup 和 M8 完整发布验收仍未交付，因此不能作为完整多用户
 SaaS 发布。
 
 - **`hooks/`** — Shared React hooks

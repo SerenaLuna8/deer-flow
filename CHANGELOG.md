@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **project automation:** Prepare the M5 release candidate with project- and
+- **project automation:** Complete M5 with project- and
   owner-scoped Automation definitions and durable occurrences, Viewer read-only
   history, manual idempotent triggers, private-run admission, crash reconciliation,
   and staged legacy migration.
@@ -19,10 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **frontend:** Add account/project-scoped Automation workbench, cache isolation,
   capability gates, and independent static-build browser coverage.
 
-The candidate still awaits the Task 18 independent review. Independent Workers,
-durable SSE, generic jobs/retries, quotas, audit, general backup/restore, legacy
-cleanup, and final release acceptance remain in M6-M8, so this is not yet a complete
-releasable multi-user SaaS.
+M5 passed the Task 18 full-stack gates and independent closure review on 2026-07-16.
+Independent Workers, durable SSE, generic jobs/retries, quotas, audit, general
+backup/restore, legacy cleanup, and final release acceptance remain in M6-M8, so this
+is not yet a complete releasable multi-user SaaS.
 
 ## [2.0.0] — 2026-06-15
 

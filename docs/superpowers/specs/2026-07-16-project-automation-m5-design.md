@@ -1,7 +1,7 @@
 # M5 项目自动化与持久化调度专项设计
 
 - 日期：2026-07-16
-- 状态：Release candidate，等待 Task 18 独立终审
+- 状态：已完成（2026-07-16）
 - 对应总体设计：`2026-07-12-project-first-saas-design.md`
 - 对应实施计划：`../plans/2026-07-16-project-automation-m5.md`
 - 前置里程碑：M1、M2、M3、M4 已完成
@@ -16,14 +16,14 @@ M5 不是从零建设定时任务。仓库已经存在 legacy `scheduled_tasks`�
 `user_id` 作用域，通过 legacy `start_run()` 启动；M4 cutover 后 shared `start_run()` 已 fail closed，
 因此它们不能成为项目 SaaS 的自动化 authority。
 
-M5 release candidate 已把现有 MVP 收敛为项目与 owner 双重隔离的 automation，并复用 M4 已完成的私有 Thread、run、
-asset snapshot、credential materialization、文件 authority、Memory 和授权取消链路。M5 完成后，项目
+M5 已把现有 MVP 收敛为项目与 owner 双重隔离的 automation，并复用 M4 已完成的私有 Thread、run、
+asset snapshot、credential materialization、文件 authority、Memory 和授权取消链路。项目
 成员可以创建、暂停、恢复、手动触发并查看自己的自动化；Scheduler 重启后，schedule definition、
 执行 occurrence 和 terminal outcome 仍然存在。
 
-当前候选实现已完成 final schema、scoped repositories、occurrence-before-admission、M4 private run
-dispatch、crash reconciliation、project API/UI、显式 migration 与全栈门禁实现。只有 Task 18 的 fresh
-总门禁和独立终审均通过后才能把本里程碑标记为完成；此状态不代表完整多用户 SaaS 可发布。
+Task 18 已完成 final schema、scoped repositories、occurrence-before-admission、M4 private run
+dispatch、crash reconciliation、project API/UI、显式 migration、fresh 全栈门禁与独立关闭审查。
+M5 已正式完成；此状态不代表完整多用户 SaaS 可发布。
 
 ## 2. 决策优先级与 M6 边界
 

@@ -13,14 +13,13 @@ stale current-status statement at
   manual trigger, single-Gateway `scheduler.enabled`, occurrence-before-admission,
   no replay after admission, and M6 boundary.
 - root/backend/frontend `AGENTS.md`: project+owner authority, Scheduler ownership,
-  migration command, cache cancel-before-clear, Viewer constraints, and release-candidate
-  status.
-- overall/M4/M5 specs: release-candidate status and corrected M6 ownership of generic
+  migration command, cache cancel-before-clear, Viewer constraints, and completion status.
+- overall/M4/M5 specs: M5 completion status and corrected M6 ownership of generic
   jobs, independent Workers, durable SSE, quotas, audit, and general backup/restore.
 - `docs/operations/m5-automation-migration.md`: maintenance window, writer stop,
   authenticated external backup proof, exact dry-run/execute/check commands, probes,
   recovery, rollback boundary, and redacted logging rules.
-- `CHANGELOG.md`: unreleased M5 release-candidate summary without a completion claim.
+- `CHANGELOG.md`: unreleased M5 completion summary with the remaining M6–M8 boundary.
 
 ## Fresh verification
 
@@ -524,5 +523,27 @@ passed after this report update.
 
 The fourth review's Important findings are therefore covered by both focused RED/GREEN
 evidence and the fresh complete gates. The broad locale cleanup remains one acknowledged
-non-blocking Minor. M5 is still pending independent re-review; this report does not mark
-the milestone complete.
+non-blocking Minor.
+
+## Bounded closure review and milestone completion
+
+The single bounded closure review inspected only `a5aff3da..f4943149` and did not reopen
+the full M5 branch. It confirmed both prior Important findings as CLOSED: durable admitted
+Run outcomes are preserved without releasing active capacity, and near-once title edits
+use a semantic backend schedule comparison plus a real sparse frontend PATCH. Reviewer
+verification reported 78 affected backend tests, 917 frontend unit tests, one focused
+Playwright regression, `pnpm check`, and a clean worktree/diff. Critical regressions: none.
+
+Verdict: `APPROVED FOR M5 CLOSURE`. M5 is complete as of 2026-07-16. Overall progress is
+M1–M5 complete (5/8, 62.5%). The project Automation i18n cleanup remains a non-blocking
+follow-up; M6 Worker/durable SSE/quotas/audit/general backup and recovery, M7 legacy
+cleanup, and M8 final release acceptance remain open, so DeerFlow is not yet a complete
+releasable multi-user SaaS.
+
+### Completion-marker verification
+
+After synchronizing the completion state and marking every implementation-plan checkbox,
+the affected final verification passed again: 78 backend dispatcher/service tests, 16
+Automation form unit tests, and all 12 project Automation browser scenarios. The required
+stale-status scan returned no matches, no unchecked plan steps remained, and
+`git diff --check` was clean.

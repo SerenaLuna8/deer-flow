@@ -1,5 +1,9 @@
 # M5 Project Automation Implementation Plan
 
+**完成状态（2026-07-16）：** Tasks 1–18 已完成。Task 18 fresh full gates 全绿；定向关闭审查确认两个
+既有 Important finding 均 CLOSED，0 Critical regression，1 个 project Automation i18n Minor 作为非阻塞
+后续。M5 已完成，总体进度为 5/8（62.5%）；M6–M8 仍未完成。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把现有 legacy scheduled-task MVP 迁为 project+owner scoped Automation，并通过持久化 occurrence、权限重校验和 M4 private-run admission 提供可恢复、可隔离的项目自动化。
@@ -116,7 +120,7 @@
 - `0012` down revision固定 `0011_private_artifact_tombstone`；`0013` down revision固定 `0012_project_automation_expand`。
 - `0013` 在任何 rename/NOT NULL/FK DDL 前调用 `_assert_finalize_ready(connection)`。
 
-- [ ] **Step 1: 写 final schema、staged migration 与 descendant revision 失败测试**
+- [x] **Step 1: 写 final schema、staged migration 与 descendant revision 失败测试**
 
 ```python
 M5_TABLES = {
@@ -183,7 +187,7 @@ EXPECTED_RUN_CHECKS = {
 
 并覆盖 task→membership/thread/Agent、occurrence→task/thread/run 的 composite FK、manual idempotency partial unique、active occurrence index、singleton marker CHECK、fresh `Base.metadata.create_all` 与 migration head shape一致。
 
-- [ ] **Step 2: 运行 schema tests，确认当前 legacy shape 失败**
+- [x] **Step 2: 运行 schema tests，确认当前 legacy shape 失败**
 
 Run:
 
@@ -194,7 +198,7 @@ uv run pytest tests/test_m5_automation_schema_postgres.py tests/test_persistence
 
 Expected: FAIL，原因包含缺少 `project_id`、`automation_cutover_state`、revision仍为 `0011_private_artifact_tombstone` 或 M4 guard拒绝 descendant head。真实 PostgreSQL fixture若 skip，先配置测试数据库，不能把 skip 当作失败证据。
 
-- [ ] **Step 3: 把 definition 和 occurrence ORM 改为 final shape**
+- [x] **Step 3: 把 definition 和 occurrence ORM 改为 final shape**
 
 `ScheduledTaskRow` 的 authority fields按以下定义实现；保留现有 string primary key，只保留受约束的 last outcome summary：
 
@@ -262,7 +266,7 @@ class ScheduledTaskRunRow(Base):
 
 安装规格第 7 节列出的完整 CHECK、composite FK、unique 和 partial indexes；删除 unscoped `user_id` synonym、`last_run_id`、`last_thread_id` 和 task-row lease fields。
 
-- [ ] **Step 4: 建立 migration control rows 和 revision ancestry cache**
+- [x] **Step 4: 建立 migration control rows 和 revision ancestry cache**
 
 `automations/model.py` 使用不可变 ledger：
 
@@ -316,7 +320,7 @@ class RevisionAncestry:
 
 缓存由 Gateway startup建立并传给 M4/M5 guards；request path只查 map，未知 revision/branch返回 false。
 
-- [ ] **Step 5: 编写 expand 与 fail-before-DDL finalize**
+- [x] **Step 5: 编写 expand 与 fail-before-DDL finalize**
 
 `0012` 只做 additive/nullable 变化、control tables和supporting indexes：
 
@@ -379,7 +383,7 @@ def _assert_finalize_ready(connection: Connection) -> None:
 非空分支要求两 domain ledger complete、source/target row count一致、所有 scope/Agent/thread/run关系可建立；
 空分支要求 task/run 均为零且 M4 marker complete。任一失败必须发生在任何 destructive DDL前。
 
-- [ ] **Step 6: 更新 fresh bootstrap 和 M4 cutover guard**
+- [x] **Step 6: 更新 fresh bootstrap 和 M4 cutover guard**
 
 Fresh DB通过final ORM `create_all`后stamp head，或通过线性Alembic执行上述empty-domain finalize分支；两条路径都必须在
 legacy automation domain为空且 M4 marker complete时完成空域probe，final schema probe通过后才写：
@@ -402,7 +406,7 @@ if not marker.cutover_complete or not self._revisions.contains(
     raise PrivateWorkCutover(self.request_id)
 ```
 
-- [ ] **Step 7: 运行 schema tests 并提交**
+- [x] **Step 7: 运行 schema tests 并提交**
 
 Run:
 
@@ -438,7 +442,7 @@ git commit -m "feat: add M5 automation schema foundation"
 - `ScheduledTaskRepository(session: AsyncSession)` 和 `ScheduledTaskRunRepository(session: AsyncSession)` 都是 session-bound；每个方法第一个 authority 参数是 exact `PrivateResourceScope`。
 - 后续 Task 4–8 只消费这些 repository；legacy router不得直接实例化或传裸 owner。
 
-- [ ] **Step 1: 写跨 project/owner CRUD、history 和裸 ID 禁止测试**
+- [x] **Step 1: 写跨 project/owner CRUD、history 和裸 ID 禁止测试**
 
 ```python
 async def test_task_repository_never_returns_cross_owner(seed):
@@ -495,7 +499,7 @@ async def test_occurrence_history_is_scoped_by_parent(seed):
         assert await repo.list_by_task(seed.outsider_scope, "task-owner", limit=50, offset=0) == ()
 ```
 
-- [ ] **Step 2: 运行 repository tests，确认 legacy factory/user-id API 失败**
+- [x] **Step 2: 运行 repository tests，确认 legacy factory/user-id API 失败**
 
 Run:
 
@@ -506,7 +510,7 @@ uv run pytest tests/test_project_automation_repository.py tests/test_scheduled_t
 
 Expected: FAIL，原因包含缺少 typed commands、repository constructor仍接收 session factory或方法仍暴露 `user_id`。
 
-- [ ] **Step 3: 定义 immutable commands/records 和 scope predicate**
+- [x] **Step 3: 定义 immutable commands/records 和 scope predicate**
 
 在 `scheduled_tasks/sql.py` 定义：
 
@@ -557,7 +561,7 @@ class ScheduledTaskRepository:
 
 所有 get/list/update/delete query必须直接包含 `*predicates(scope)`；禁止 `session.get(ScheduledTaskRow, task_id)` 后再判断 owner。
 
-- [ ] **Step 4: 实现 definition CRUD、version CAS 和 queued cancellation**
+- [x] **Step 4: 实现 definition CRUD、version CAS 和 queued cancellation**
 
 Exact mutation contract：
 
@@ -587,7 +591,7 @@ async def update(
 
 提供 `lock_active()`、`list()`、`list_by_thread()`、`soft_delete()`；每个 list都有 hard limit `1..1000` 和 deterministic `(created_at desc, id desc)`。
 
-- [ ] **Step 5: 实现 scoped occurrence history 与 terminal CAS**
+- [x] **Step 5: 实现 scoped occurrence history 与 terminal CAS**
 
 ```python
 TERMINAL_OCCURRENCE_STATUSES = frozenset(
@@ -627,7 +631,7 @@ async def finish(
 
 提供 scoped `get()`、`get_by_agent_run_id()`、`list_by_task()`、`has_active()`、`cancel_queued()`，并保证 output record不暴露 lease/idempotency hash给 HTTP层。
 
-- [ ] **Step 6: 运行 repository tests 并提交**
+- [x] **Step 6: 运行 repository tests 并提交**
 
 Run:
 
@@ -666,7 +670,7 @@ git commit -m "feat: scope automation repositories"
 - Produces `AutomationReadinessService.read(session, context, scheduler_enabled) -> AutomationReadiness`。
 - Produces immutable `AutomationCreate`、`AutomationChanges`、`AutomationView`、`AutomationRunView`。
 
-- [ ] **Step 1: 写 error、marker/revision 和 readiness matrix 失败测试**
+- [x] **Step 1: 写 error、marker/revision 和 readiness matrix 失败测试**
 
 ```python
 @pytest.mark.parametrize(
@@ -716,7 +720,7 @@ async def test_readiness_reports_scheduler_disabled_without_closing_project_api(
     assert result.automation_cutover_ready is True
 ```
 
-- [ ] **Step 2: 运行 tests，确认 modules 尚不存在**
+- [x] **Step 2: 运行 tests，确认 modules 尚不存在**
 
 Run:
 
@@ -727,7 +731,7 @@ uv run pytest tests/test_automation_errors.py tests/test_automation_cutover.py t
 
 Expected: collection FAIL，提示 `app.automations` 不存在。
 
-- [ ] **Step 3: 定义 stable errors 和 immutable app models**
+- [x] **Step 3: 定义 stable errors 和 immutable app models**
 
 ```python
 class AutomationError(Exception):
@@ -763,7 +767,7 @@ class AutomationChanges:
 
 `AutomationView`/`AutomationRunView` 只包含 public fields；不包含 owner、lease owner、idempotency hash、raw runtime kwargs或credential identifiers。
 
-- [ ] **Step 4: 实现 cutover guards 与 readiness**
+- [x] **Step 4: 实现 cutover guards 与 readiness**
 
 `AutomationCutoverGuard.require_project_open()` 同时验证：
 
@@ -791,7 +795,7 @@ AutomationReadiness(
 
 Marker/revision incomplete返回 `migration_required`；DB失败返回 `unavailable`，不把 exception text放 response。
 
-- [ ] **Step 5: 运行 tests 并提交**
+- [x] **Step 5: 运行 tests 并提交**
 
 Run:
 
@@ -824,7 +828,7 @@ git commit -m "feat: add automation cutover contracts"
 - Methods: `create(context, command)`、`get(context, task_id)`、`list(context, limit, offset, thread_id)`、`update(context, task_id, changes)`、`pause(context, task_id, expected_version)`、`resume(...)`、`delete(...)`。
 - Produces `next_scheduled_occurrence(schedule_type, schedule_spec, timezone, now, coalesce=True)`；cron结果严格晚于 `now`。
 
-- [ ] **Step 1: 写 role、Thread/Agent、version、pause/resume 和 coalesce 失败测试**
+- [x] **Step 1: 写 role、Thread/Agent、version、pause/resume 和 coalesce 失败测试**
 
 ```python
 async def test_viewer_can_read_but_cannot_create(seed):
@@ -872,7 +876,7 @@ def test_cron_misfire_coalesces_to_one_future_tick():
     assert result == datetime(2026, 7, 16, 11, 0, tzinfo=UTC)
 ```
 
-- [ ] **Step 2: 运行 tests，确认 service 不存在/legacy schedule语义不足**
+- [x] **Step 2: 运行 tests，确认 service 不存在/legacy schedule语义不足**
 
 Run:
 
@@ -883,7 +887,7 @@ uv run pytest tests/test_project_automation_service.py tests/test_scheduled_task
 
 Expected: FAIL，提示缺少 `ProjectAutomationService` 或 mutation仍未检查 scope/version。
 
-- [ ] **Step 3: 实现 create/read/list 和 execution capability validation**
+- [x] **Step 3: 实现 create/read/list 和 execution capability validation**
 
 Create transaction固定锁序：project→membership→Thread/Agent→task。
 
@@ -914,7 +918,7 @@ async def create(
 
 Read/list仅要求 `PRIVATE_WORK_READ_OWN`。`_validate_target` 对 reuse Thread进行同 scope active lookup并要求 Thread Agent与command完全相等；fresh mode要求 thread_id is None并解析Agent executable binding。
 
-- [ ] **Step 4: 实现 update/pause/resume/delete state machine**
+- [x] **Step 4: 实现 update/pause/resume/delete state machine**
 
 Mutation transaction：lock task→reject launching/running→cancel queued→CAS update。
 
@@ -947,7 +951,7 @@ async def pause(
 
 Resume从当前时间计算 future tick；once `run_at <= now` 抛 `AutomationOnceExpired`。Delete soft-deletes并paused；history保留。
 
-- [ ] **Step 5: 运行 service tests 并提交**
+- [x] **Step 5: 运行 service tests 并提交**
 
 Run:
 
@@ -982,7 +986,7 @@ git commit -m "feat: add project automation lifecycle"
 - Produces `claim_next(now, lease_owner, lease_seconds) -> ScheduledTaskRunRecord | None`。
 - PostgreSQL advisory xact lock key固定为 `_AUTOMATION_ADMISSION_LOCK = 0x0DEE_12F1_0A55_0005`。
 
-- [ ] **Step 1: 写并发 tick、manual idempotency、overlap skip 和 global cap 失败测试**
+- [x] **Step 1: 写并发 tick、manual idempotency、overlap skip 和 global cap 失败测试**
 
 ```python
 async def test_two_pollers_reserve_one_occurrence(postgres_seed):
@@ -1035,7 +1039,7 @@ async def test_manual_and_scheduled_share_global_cap(postgres_seed):
         )
 ```
 
-- [ ] **Step 2: 运行 tests，确认 legacy task-row lease无法满足**
+- [x] **Step 2: 运行 tests，确认 legacy task-row lease无法满足**
 
 Run:
 
@@ -1046,7 +1050,7 @@ uv run pytest tests/test_automation_occurrences.py tests/test_scheduled_task_cla
 
 Expected: FAIL，原因包含缺少 occurrence service、manual idempotency、atomic next-run advance或global cap race。
 
-- [ ] **Step 3: 实现 deterministic keys 和 atomic due reservation**
+- [x] **Step 3: 实现 deterministic keys 和 atomic due reservation**
 
 ```python
 def scheduled_occurrence_key(task_id: str, scheduled_for: datetime) -> str:
@@ -1062,7 +1066,7 @@ def manual_occurrence_key(task_id: str, idempotency_hash: str) -> str:
 
 如果同 task已有 launching/running occurrence，插入 terminal `skipped` history并设置 `AUTOMATION_OVERLAP_SKIPPED`，不占 cap。
 
-- [ ] **Step 4: 实现 manual reservation 与 UUID header validation contract**
+- [x] **Step 4: 实现 manual reservation 与 UUID header validation contract**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -1077,7 +1081,7 @@ def hash_manual_idempotency(value: uuid.UUID) -> str:
 
 Manual path在同一 advisory lock下先按 partial unique hash查询；存在即返回，active occurrence存在则抛 `AutomationActiveRun`，global cap耗尽抛 `AutomationConcurrencyLimit`。Manual occurrence不修改 task `next_run_at`。
 
-- [ ] **Step 5: 实现 occurrence claim/lease**
+- [x] **Step 5: 实现 occurrence claim/lease**
 
 Claim query只接受 `queued`、`next_attempt_at is null or <= now`，使用 `FOR UPDATE SKIP LOCKED`，写入：
 
@@ -1096,7 +1100,7 @@ Claim query只接受 `queued`、`next_attempt_at is null or <= now`，使用 `FO
 
 Fresh Thread ID使用 UUIDv5 namespace `8bc2f65e-f186-5fb2-a480-7f23125f8005`；run ID使用 `a58150d1-9869-55b1-8cbe-cd30e6edba05`。Reuse mode保留 task thread ID。
 
-- [ ] **Step 6: 运行 occurrence tests 并提交**
+- [x] **Step 6: 运行 occurrence tests 并提交**
 
 Run:
 
@@ -1134,7 +1138,7 @@ git commit -m "feat: persist automation occurrences"
 - Extends `start_private_run(..., *, run_id: str | None = None, server_context: Mapping[str, object] | None = None)`；两个 keyword只供 app-internal callers，公共 Pydantic model不暴露。
 - Produces `ensure_automation_thread(context, task, occurrence) -> str`，fresh mode幂等创建，reuse mode重校验。
 
-- [ ] **Step 1: 写 client non-interactive stripping、deterministic IDs、scope revalidation 和 private-run reuse 失败测试**
+- [x] **Step 1: 写 client non-interactive stripping、deterministic IDs、scope revalidation 和 private-run reuse 失败测试**
 
 ```python
 def test_public_private_run_strips_non_interactive():
@@ -1176,7 +1180,7 @@ async def test_dispatch_rejects_viewer_downgrade_before_thread_create(seed):
     seed.launch_private_run.assert_not_awaited()
 ```
 
-- [ ] **Step 2: 运行 tests，确认 scheduled path仍调用 legacy `start_run`**
+- [x] **Step 2: 运行 tests，确认 scheduled path仍调用 legacy `start_run`**
 
 Run:
 
@@ -1187,7 +1191,7 @@ uv run pytest tests/test_automation_dispatcher.py tests/test_private_work_run_ro
 
 Expected: FAIL，提示 dispatcher不存在、client `non_interactive`仍保留或 `launch_scheduled_thread_run`仍调用 shared `start_run()`。
 
-- [ ] **Step 3: 把 `non_interactive` 加入 client authority stripping，并允许 internal server context**
+- [x] **Step 3: 把 `non_interactive` 加入 client authority stripping，并允许 internal server context**
 
 在 `_CLIENT_AUTHORITY_FIELDS` 增加：
 
@@ -1220,7 +1224,7 @@ create_request = PrivateRunCreate(
 
 Public router永远不传 `server_context` 或 `run_id`。
 
-- [ ] **Step 4: 实现 scheduler-only private run adapter**
+- [x] **Step 4: 实现 scheduler-only private run adapter**
 
 ```python
 async def start_scheduled_private_run(
@@ -1260,7 +1264,7 @@ async def start_scheduled_private_run(
 
 删除或停止使用 `launch_scheduled_thread_run()` 的 legacy shared-run实现；兼容 import若暂时保留，必须在 M4 cutover后抛 `AutomationCutover`，不能 fallback。
 
-- [ ] **Step 5: 实现 server context re-resolution 和 Thread preparation**
+- [x] **Step 5: 实现 server context re-resolution 和 Thread preparation**
 
 Dispatcher transaction先按 occurrence→task composite scope加载 rows，然后：
 
@@ -1288,7 +1292,7 @@ ThreadAgentRef(asset_id=task.agent_asset_id, scope=task.agent_scope)
 
 若 deterministic Thread已存在，只接受相同 scope、Agent ref和 `metadata["scheduled_task_run_id"]`；否则 `AutomationConflict`。Reuse mode只读取 task.thread_id并再次验证 active。
 
-- [ ] **Step 6: 启动 private run并把 occurrence转为 running**
+- [x] **Step 6: 启动 private run并把 occurrence转为 running**
 
 Private run成功返回后，scoped transaction执行：
 
@@ -1304,7 +1308,7 @@ await run_repo.mark_running(
 
 若 private admission前失败，按分类写 `rejected` 或带 `next_attempt_at` 的 queued；若 M4 run row已经存在，绝不requeue。
 
-- [ ] **Step 7: 运行 dispatcher/private-run tests 并提交**
+- [x] **Step 7: 运行 dispatcher/private-run tests 并提交**
 
 Run:
 
@@ -1341,7 +1345,7 @@ git commit -m "feat: launch automations through private runtime"
 - `ScheduledTaskService` constructor改为 `occurrences`、`dispatcher`、`reconciler`；不再接 legacy repositories/launch function。
 - `ScheduledTaskService.run_once(now)` 先 reserve due，再反复 claim/dispatch到budget耗尽。
 
-- [ ] **Step 1: 写 metadata非authority、terminal CAS、once/cron parent和restart失败测试**
+- [x] **Step 1: 写 metadata非authority、terminal CAS、once/cron parent和restart失败测试**
 
 ```python
 async def test_completion_uses_persisted_run_scope_not_forged_metadata(seed):
@@ -1385,7 +1389,7 @@ async def test_restart_interrupts_admitted_run_without_replay(seed):
     assert (await seed.private_run()).status == "interrupted"
 ```
 
-- [ ] **Step 2: 运行 tests，确认 legacy startup全表 sweep语义失败**
+- [x] **Step 2: 运行 tests，确认 legacy startup全表 sweep语义失败**
 
 Run:
 
@@ -1396,7 +1400,7 @@ uv run pytest tests/test_automation_reconciliation.py tests/test_scheduled_task_
 
 Expected: FAIL，原因包含 reconciler不存在、completion信任 metadata或 startup仍调用 `mark_stale_active_runs()`。
 
-- [ ] **Step 3: 实现 scoped completion lookup 和 parent update**
+- [x] **Step 3: 实现 scoped completion lookup 和 parent update**
 
 Lookup顺序固定：
 
@@ -1430,7 +1434,7 @@ RUN_TO_OCCURRENCE = {
 
 Cron保持 enabled；once success→completed、failed→failed、interrupted→cancelled。只有第一次terminal CAS成功时increment parent run_count。
 
-- [ ] **Step 4: 实现 restart reconciliation**
+- [x] **Step 4: 实现 restart reconciliation**
 
 在受支持的单 Gateway startup中：
 
@@ -1457,7 +1461,7 @@ if occurrence.status == "launching" and occurrence.lease_expires_at < now:
 
 Running occurrence缺 run row→failed `AUTOMATION_RUN_MISSING`；terminal rows不变。日志只写 counts/error code，不写 task/title/prompt/IDs。
 
-- [ ] **Step 5: 重写 Scheduler service 为 orchestration-only poller**
+- [x] **Step 5: 重写 Scheduler service 为 orchestration-only poller**
 
 ```python
 async def run_once(self, *, now: datetime) -> None:
@@ -1475,7 +1479,7 @@ async def run_once(self, *, now: datetime) -> None:
 
 `start()` 先 `reconcile_restart()` 再开 poll loop。`scheduler.enabled=false` 时 app仍初始化 service/dispatcher供manual trigger，但不调用 `start()`。
 
-- [ ] **Step 6: 将 completion hook 和 app lifecycle 接到新 reconciler**
+- [x] **Step 6: 将 completion hook 和 app lifecycle 接到新 reconciler**
 
 `get_run_context()` 使用：
 
@@ -1489,7 +1493,7 @@ on_run_completed=(
 
 Gateway startup实例化 services顺序：repositories/session factory→cutover/readiness→occurrences→reconciler→dispatcher→scheduler。Shutdown先停止 scheduler，再停止 channel/runtime。
 
-- [ ] **Step 7: 运行 lifecycle tests 并提交**
+- [x] **Step 7: 运行 lifecycle tests 并提交**
 
 Run:
 
@@ -1526,7 +1530,7 @@ git commit -m "feat: reconcile automation executions"
 - `restore_owner(s)` clears `frozen_at` but leaves task status paused and `next_run_at=None`。
 - Existing membership/lifecycle service lock order and post-commit local run notification remain unchanged。
 
-- [ ] **Step 1: 写 freeze/restore、Viewer downgrade和project suspend失败测试**
+- [x] **Step 1: 写 freeze/restore、Viewer downgrade和project suspend失败测试**
 
 ```python
 async def test_freeze_pauses_tasks_and_cancels_queued_occurrences(seed):
@@ -1558,7 +1562,7 @@ async def test_restore_does_not_auto_resume_task(seed):
 
 Viewer downgrade service test断言 retention hook在角色从 Runner→Viewer时被调用；当前代码只mark run cancellation，测试应先失败。
 
-- [ ] **Step 2: 运行 retention tests，确认 Automation尚未包含在 change set**
+- [x] **Step 2: 运行 retention tests，确认 Automation尚未包含在 change set**
 
 Run:
 
@@ -1569,7 +1573,7 @@ uv run pytest tests/test_automation_retention.py tests/test_private_run_authoriz
 
 Expected: FAIL，原因包含 `RetentionChange` 缺字段或 task仍 enabled。
 
-- [ ] **Step 3: 扩展 freeze/restore SQL**
+- [x] **Step 3: 扩展 freeze/restore SQL**
 
 Freeze：
 
@@ -1605,7 +1609,7 @@ Restore只执行：
 .values(frozen_at=None, status="paused", next_run_at=None, updated_at=restored_at)
 ```
 
-- [ ] **Step 4: 让 Viewer downgrade 复用 freeze hook**
+- [x] **Step 4: 让 Viewer downgrade 复用 freeze hook**
 
 在 `MembershipService.change_role()` 的 non-Viewer→Viewer分支中，mark revoked后调用：
 
@@ -1620,7 +1624,7 @@ await self._retention.freeze_owner(
 
 Remove/leave/suspend/pending deletion已调用同一 hook，不新增第二种锁序。Restore/rejoin使用现有 restore hook，保持paused。
 
-- [ ] **Step 5: 运行 lifecycle tests 并提交**
+- [x] **Step 5: 运行 lifecycle tests 并提交**
 
 Run:
 
@@ -1660,7 +1664,7 @@ git commit -m "feat: freeze automations on authorization loss"
 - Manual trigger要求 `Idempotency-Key` UUID header。
 - Legacy router在 expand阶段冻结 mutation，在 cutover complete后所有 route返回 `409 AUTOMATION_CUTOVER`。
 
-- [ ] **Step 1: 写 route contract、capability、strict body、404/403/409/429/503失败测试**
+- [x] **Step 1: 写 route contract、capability、strict body、404/403/409/429/503失败测试**
 
 ```python
 def test_project_automation_routes_are_mounted(app):
@@ -1703,7 +1707,7 @@ async def test_trigger_requires_uuid_idempotency_key(client, project_id, task_id
     assert response.status_code == 422
 ```
 
-- [ ] **Step 2: 运行 router tests，确认 project routes不存在**
+- [x] **Step 2: 运行 router tests，确认 project routes不存在**
 
 Run:
 
@@ -1714,7 +1718,7 @@ uv run pytest tests/test_project_automations_router.py tests/test_scheduled_task
 
 Expected: FAIL，提示 routes未挂载或 legacy router仍直接调用 user-scoped repository。
 
-- [ ] **Step 3: 定义 strict request/response models 与 route dependency**
+- [x] **Step 3: 定义 strict request/response models 与 route dependency**
 
 ```python
 class StrictAutomationModel(BaseModel):
@@ -1769,7 +1773,7 @@ Response不返回 owner/membership/lease/hash；datetime统一ISO offset。
 `require_project_automation_open` 的 `router`，并在 `app.py` 中分别mount，避免migration状态被总router
 dependency提前截断。
 
-- [ ] **Step 4: 实现 read/mutation endpoints 与统一错误映射**
+- [x] **Step 4: 实现 read/mutation endpoints 与统一错误映射**
 
 Endpoints exact：
 
@@ -1789,7 +1793,7 @@ GET    /threads/{thread_id}
 
 Read用 `private_work.read_own`；mutation调用 service/occurrence层，Router不直接访问 session/repository。`limit` 1..100、`offset >= 0`。Error catch只接 `AutomationError` 并交给 mapper。
 
-- [ ] **Step 5: 接入 app state 和 Scheduler/manual dispatch**
+- [x] **Step 5: 接入 app state 和 Scheduler/manual dispatch**
 
 `langgraph_runtime` 创建：
 
@@ -1806,7 +1810,7 @@ app.state.automation_dispatcher = AutomationDispatcher(sf, app=app)
 
 Manual trigger reserve后立即调用 dispatcher；`scheduler.enabled`不阻断manual。
 
-- [ ] **Step 6: 冻结/关闭 legacy router**
+- [x] **Step 6: 冻结/关闭 legacy router**
 
 给 legacy routes添加 guard：
 
@@ -1817,7 +1821,7 @@ async def require_legacy_automation_open(request: Request) -> None:
 
 当 DB已expand但未cutover：GET/list/history只读可用，所有 mutation返回 `409 AUTOMATION_MIGRATION_REQUIRED`。Cutover complete后所有 legacy routes返回 `409 AUTOMATION_CUTOVER`。Legacy router不再触发 run。
 
-- [ ] **Step 7: 运行 router tests 并提交**
+- [x] **Step 7: 运行 router tests 并提交**
 
 Run:
 
@@ -1857,7 +1861,7 @@ git commit -m "feat: expose project automation API"
 - Produces `AutomationMigrationReport(mode, counts, source_key_hash, cutover_complete, empty_install, noop)`；不含私有 values/IDs。
 - Execute只接受 revision `0011` 或 `0012`；cutover complete时no-op。
 
-- [ ] **Step 1: 写 parser、redacted inventory、map/relation、idempotency和fail-before-DDL失败测试**
+- [x] **Step 1: 写 parser、redacted inventory、map/relation、idempotency和fail-before-DDL失败测试**
 
 ```python
 def test_parser_requires_mode_owner_map_and_backup_dir(tmp_path):
@@ -1904,7 +1908,7 @@ async def test_fresh_task_requires_explicit_agent_map(m5_legacy_database):
 
 同时覆盖 reuse Thread map mismatch、inactive Viewer target、Agent not executable、orphan run、unsupported status、fingerprint change、ledger digest conflict、cutover no-op。
 
-- [ ] **Step 2: 运行 migration tests，确认 CLI不存在**
+- [x] **Step 2: 运行 migration tests，确认 CLI不存在**
 
 Run:
 
@@ -1915,7 +1919,7 @@ uv run pytest tests/test_automation_migration.py tests/test_automation_migration
 
 Expected: collection FAIL，提示 `scripts.migrate_automations` 不存在或 check-db不识别 M5 tables/head。
 
-- [ ] **Step 3: 实现 parser、canonical map 与 redacted inventory**
+- [x] **Step 3: 实现 parser、canonical map 与 redacted inventory**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -1960,13 +1964,13 @@ def owner_map_item_schema(value: object) -> AutomationOwnerMapItem:
 
 Inventory canonical digest包含source row的所有字段，但report只返回 counts/status aggregates和digest前12字符。
 
-- [ ] **Step 4: 实现 dry-run validation**
+- [x] **Step 4: 实现 dry-run validation**
 
 Dry-run读取 `0011/0012/0013`，验证：M4 marker complete、每个owner有map、active non-Viewer membership、fresh Agent executable、reuse Thread scope/Agent、task-run parent、存在的Thread/run pointer可通过M4 composite relation、所有status可转换。
 
 Legacy fresh task的thread_id统一计划为NULL；pre-admission skipped row的不存在Thread pointer计划为NULL，并在target digest中记录转换。
 
-- [ ] **Step 5: 实现 staged execute 和 ledger**
+- [x] **Step 5: 实现 staged execute 和 ledger**
 
 Exact sequence：
 
@@ -1985,7 +1989,7 @@ await mark_cutover_complete(engine, migration_run_id)
 
 Staging写两 domain ledger、scope/Agent/version/frozen fields和occurrence conversion。`migration_ready`前验证source/target row count和digest。`0013`负责最后rename/constraint。
 
-- [ ] **Step 6: 接入 Makefile、setup/check/doctor**
+- [x] **Step 6: 接入 Makefile、setup/check/doctor**
 
 Backend target：
 
@@ -1996,7 +2000,7 @@ migrate-automations:
 
 Root target代理 `$(MAKE) -C backend migrate-automations ARGS="$(ARGS)"`，help明确先dry-run。`check_postgres.REQUIRED_TABLES`加入三control tables；doctor只报告 `ready/migration_required/unavailable`，不读prompt或map。
 
-- [ ] **Step 7: 运行 migration/ops tests 并提交**
+- [x] **Step 7: 运行 migration/ops tests 并提交**
 
 Run:
 
@@ -2036,7 +2040,7 @@ git commit -m "feat: migrate legacy automations"
 - API functions全部接 `ProjectClientScope` 和 optional AbortSignal；base URL固定 `/api/projects/{projectId}/automations`。
 - Mutations接受scope并使用scoped mutation key；manual trigger生成/接收UUID idempotency key header。
 
-- [ ] **Step 1: 写 strict schema、query key、API URL/header和cache isolation失败测试**
+- [x] **Step 1: 写 strict schema、query key、API URL/header和cache isolation失败测试**
 
 ```typescript
 it("keys every automation query by account and project", () => {
@@ -2073,7 +2077,7 @@ it("sends the manual idempotency key only as a header", async () => {
 
 Strict schema test向 response添加 `owner_user_id` 或 `lease_owner`，Expected: parse throws。
 
-- [ ] **Step 2: 运行 unit tests，确认 modules不存在**
+- [x] **Step 2: 运行 unit tests，确认 modules不存在**
 
 Run:
 
@@ -2084,7 +2088,7 @@ pnpm test -- project-automations
 
 Expected: FAIL，提示 imports无法解析。
 
-- [ ] **Step 3: 定义 strict Zod contracts**
+- [x] **Step 3: 定义 strict Zod contracts**
 
 ```typescript
 export const automationStatusSchema = z.enum([
@@ -2122,7 +2126,7 @@ export const automationSchema = z
 
 Run schema包含public status/error message但不含lease/hash/resolved membership。
 
-- [ ] **Step 4: 实现 scoped API 和 readiness**
+- [x] **Step 4: 实现 scoped API 和 readiness**
 
 ```typescript
 function automationBaseURL(scope: ProjectClientScope): string {
@@ -2152,7 +2156,7 @@ export async function triggerAutomation(
 
 所有 mutation body只含contract fields/expected_version；错误通过 existing Gateway error parser转安全 public message。
 
-- [ ] **Step 5: 实现 query/mutation hooks 与 scope cleanup兼容**
+- [x] **Step 5: 实现 query/mutation hooks 与 scope cleanup兼容**
 
 Hooks从 `usePrivateWorkAccess().scope`读取 account/project；scope null时disabled。Example：
 
@@ -2172,7 +2176,7 @@ export function useProjectAutomations(enabled = true) {
 
 Mutation success只invalidate同scope root。Provider unmount现有 `transitionPrivateWorkScope` 必须增加 automation root cancellation/removal；先cancel queries/mutations，再remove。
 
-- [ ] **Step 6: 运行 Frontend core tests 并提交**
+- [x] **Step 6: 运行 Frontend core tests 并提交**
 
 Run:
 
@@ -2211,7 +2215,7 @@ git commit -m "feat: add scoped automation client"
 - `AutomationWorkbench` 接 typed records和callbacks；Viewer无mutation callbacks。
 - 复用 `ScheduledTaskScheduleInput` 的纯 schedule value；不复用 legacy hooks/URLs。
 
-- [ ] **Step 1: 写 Viewer、scheduler-disabled、create/edit/history/conflict state 失败测试**
+- [x] **Step 1: 写 Viewer、scheduler-disabled、create/edit/history/conflict state 失败测试**
 
 ```typescript
 it("renders Viewer history without mutation controls", () => {
@@ -2248,7 +2252,7 @@ it("shows scheduler disabled while keeping manual trigger available", () => {
 
 Form test验证prompt不会出现在URL/localStorage，mutation完成后form state清空。
 
-- [ ] **Step 2: 运行 component tests，确认 project page不存在**
+- [x] **Step 2: 运行 component tests，确认 project page不存在**
 
 Run:
 
@@ -2259,7 +2263,7 @@ pnpm test -- components/projects/automations
 
 Expected: FAIL，提示 modules无法解析。
 
-- [ ] **Step 3: 抽出可复用 schedule/recipe presentation contract**
+- [x] **Step 3: 抽出可复用 schedule/recipe presentation contract**
 
 保持 legacy `ScheduledTaskScheduleInput` URL/API无感，只导出通用别名：
 
@@ -2270,7 +2274,7 @@ export { ScheduledTaskScheduleInput as AutomationScheduleInput };
 
 Recipes只作为前端初始 title/prompt/schedule value，不包含project/owner/Agent authority。Form提交前必须由用户选择一个server catalog Agent。
 
-- [ ] **Step 4: 实现 form 与 permission model**
+- [x] **Step 4: 实现 form 与 permission model**
 
 ```typescript
 export function automationPermissions(capabilities: ProjectCapability[]) {
@@ -2286,7 +2290,7 @@ export function automationPermissions(capabilities: ProjectCapability[]) {
 
 Form校验：trimmed title/prompt、fresh mode no thread、reuse mode UUID thread、Agent ref required、once future、cron 5 fields、timezone non-empty。Edit锁定schedule type/context mode，与backend contract一致。
 
-- [ ] **Step 5: 实现 workbench 与 page states**
+- [x] **Step 5: 实现 workbench 与 page states**
 
 Project page state顺序：
 
@@ -2303,7 +2307,7 @@ return <AutomationWorkbench />;
 
 Workbench提供 list/filter、create/edit、pause/resume/manual/delete、run history、Thread link和409/429/503 refresh message。Manual trigger每次用户动作生成 `crypto.randomUUID()`；mutation retry复用同一key。
 
-- [ ] **Step 6: 创建 route wrapper**
+- [x] **Step 6: 创建 route wrapper**
 
 ```tsx
 "use client";
@@ -2316,7 +2320,7 @@ export default function ProjectAutomationsRoute() {
 }
 ```
 
-- [ ] **Step 7: 运行 component tests 并提交**
+- [x] **Step 7: 运行 component tests 并提交**
 
 Run:
 
@@ -2358,7 +2362,7 @@ git commit -m "feat: add project automation workbench"
 - `ThreadScheduledTasksLink` 由 caller提供 `href`，组件不再内置 legacy URL。
 - Project Chat只生成 `/projects/{slug}/automations?thread_id={uuid}`；workspace chat继续生成 legacy URL。
 
-- [ ] **Step 1: 写 nav/capability/readiness/static/chat-link失败测试**
+- [x] **Step 1: 写 nav/capability/readiness/static/chat-link失败测试**
 
 ```typescript
 it("shows project automations only when every gate is open", () => {
@@ -2393,7 +2397,7 @@ it("uses the project automation route from project chat", () => {
 
 Static test设置 `NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true`，断言没有Automation link且没有 `/automations/readiness` fetch。
 
-- [ ] **Step 2: 运行入口测试，确认 gate/link尚未实现**
+- [x] **Step 2: 运行入口测试，确认 gate/link尚未实现**
 
 Run:
 
@@ -2404,7 +2408,7 @@ pnpm test -- project-automation-entry project-shell project-chat static-private-
 
 Expected: FAIL，提示 `PROJECT_AUTOMATION`、Automation nav item或link `href` contract不存在。
 
-- [ ] **Step 3: 增加关闭状态的编译期 flag和纯函数入口判定**
+- [x] **Step 3: 增加关闭状态的编译期 flag和纯函数入口判定**
 
 ```typescript
 export const PROJECT_AUTOMATION = false as const;
@@ -2427,7 +2431,7 @@ export function projectAutomationEntryEnabled(
 
 `ProjectNavigationLinks` 仅在feature非static且用户能读private work时调用 `useProjectAutomationReadiness`。Viewer具有 `private_work.read_own` 时可看到入口；mutation controls由Task 12 permission model隐藏。
 
-- [ ] **Step 4: 参数化Thread link并分别接project/workspace URL**
+- [x] **Step 4: 参数化Thread link并分别接project/workspace URL**
 
 ```tsx
 export function ThreadScheduledTasksLink({
@@ -2458,7 +2462,7 @@ const automationHref = `/projects/${encodeURIComponent(
 
 Project Automation page只把query中的UUID作为form初始reuse Thread，不把它写入localStorage或mutation cache。
 
-- [ ] **Step 5: 增加中英文文案并运行测试**
+- [x] **Step 5: 增加中英文文案并运行测试**
 
 Locales新增强类型字段：`project.automations`、`automation.create`、`automation.runNow`、`automation.schedulerDisabled`、`automation.migrationRequired`、`automation.retry`、`automation.history`。中文使用“自动化”，英文使用“Automations”。
 
@@ -2471,7 +2475,7 @@ pnpm test -- project-automation-entry project-shell project-chat static-private-
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交 gated entry**
+- [x] **Step 6: 提交 gated entry**
 
 ```bash
 git add frontend/src/core/projects/features.ts frontend/src/components/projects/project-nav.tsx frontend/src/components/workspace/thread-scheduled-tasks-link.tsx frontend/src/components/workspace/chats/scoped-chat-page.tsx frontend/src/components/projects/private-work/project-chat-page.tsx frontend/src/core/i18n/locales frontend/tests/unit/components/projects/project-shell.test.tsx frontend/tests/unit/components/projects/private-work/project-chat.test.tsx frontend/tests/unit/components/projects/private-work/static-private-work-entry.test.tsx frontend/tests/unit/components/projects/project-automation-entry.test.tsx
@@ -2501,7 +2505,7 @@ git commit -m "feat: gate project automation entry"
 - DB/API async路径不直接调用同步Alembic、文件读写、sleep或blocking HTTP。
 - Scheduler structured logs只包含counts、status、request ID和digest prefix。
 
-- [ ] **Step 1: 写配置边界、单例生命周期和disabled行为失败测试**
+- [x] **Step 1: 写配置边界、单例生命周期和disabled行为失败测试**
 
 ```python
 def test_scheduler_config_rejects_lease_not_greater_than_poll():
@@ -2524,7 +2528,7 @@ async def test_disabled_scheduler_keeps_manual_dispatcher(app_factory):
 
 补充两次lifespan startup测试，断言每个app实例最多一个poll task且shutdown后task已await/cancel。
 
-- [ ] **Step 2: 运行 wiring/config/blocking tests，确认 lifecycle尚未闭合**
+- [x] **Step 2: 运行 wiring/config/blocking tests，确认 lifecycle尚未闭合**
 
 Run:
 
@@ -2535,7 +2539,7 @@ uv run pytest tests/test_automation_app_wiring.py tests/test_automation_schedule
 
 Expected: FAIL，提示Automation app state、task lifecycle或blocking detector fixture不存在。
 
-- [ ] **Step 3: 固化配置校验与示例**
+- [x] **Step 3: 固化配置校验与示例**
 
 ```python
 @model_validator(mode="after")
@@ -2553,7 +2557,7 @@ def validate_scheduler_timing(self) -> "SchedulerConfig":
 
 `config.example.yaml` 保留保守默认值并写明：M5只支持single Gateway，lease只覆盖admission，不是Worker execution lease。
 
-- [ ] **Step 4: 实现可测试的Scheduler lifespan**
+- [x] **Step 4: 实现可测试的Scheduler lifespan**
 
 ```python
 async def start_automation_scheduler(app: FastAPI) -> None:
@@ -2579,11 +2583,11 @@ async def stop_automation_scheduler(app: FastAPI) -> None:
 
 Marker incomplete/migration required时startup记录safe status并保持poll task为None；Gateway继续启动以提供readiness/migration错误，不回退legacy poll。
 
-- [ ] **Step 5: 把Automation路径加入blocking-I/O扫描**
+- [x] **Step 5: 把Automation路径加入blocking-I/O扫描**
 
 `test_automations.py` 对 `app.automations`、project router、Scheduler和migration request path运行static/runtime detector。唯一允许的同步Alembic调用必须位于migration CLI并由 `asyncio.to_thread()` 包裹；request path不得导入 `alembic.command`。
 
-- [ ] **Step 6: 运行focused wiring/blocking tests并提交**
+- [x] **Step 6: 运行focused wiring/blocking tests并提交**
 
 Run:
 
@@ -2615,7 +2619,7 @@ git commit -m "feat: wire project automation scheduler"
 - Matrix包含 project A owner A、project A owner B、project A Viewer、project B owner和system_admin。
 - Integration必须使用真实 scoped repositories、transactions和constraints，不mock session/locks。
 
-- [ ] **Step 1: 写真实数据库fixture和隔离矩阵失败测试**
+- [x] **Step 1: 写真实数据库fixture和隔离矩阵失败测试**
 
 ```python
 @pytest.mark.parametrize(
@@ -2644,7 +2648,7 @@ async def test_definition_id_probe_is_project_and_owner_scoped(
 
 同一matrix覆盖list/pagination/update/delete/history/thread reverse lookup；Viewer只能读自己的行，不能trigger；Admin不能读其他owner；system_admin没有private override。
 
-- [ ] **Step 2: 写真实并发、constraint、revocation和run admission失败测试**
+- [x] **Step 2: 写真实并发、constraint、revocation和run admission失败测试**
 
 ```python
 async def test_two_scheduler_claims_create_one_occurrence(m5_database, scheduled_task):
@@ -2667,7 +2671,7 @@ async def test_two_scheduler_claims_create_one_occurrence(m5_database, scheduled
 - restart reconciliation对已admitted run只写`interrupted`，不调用第二次`start_private_run()`；
 - M4 guard在current revision=`0013_project_automation_finalize`时仍ready。
 
-- [ ] **Step 3: 运行两次定向integration，确认测试先失败**
+- [x] **Step 3: 运行两次定向integration，确认测试先失败**
 
 Run:
 
@@ -2679,7 +2683,7 @@ POSTGRES_TEST_URL="$POSTGRES_TEST_URL" uv run pytest tests/integration/test_m5_p
 
 Expected: implementation未完成时FAIL；实现完成后两次均PASS且数据库名均以`deerflow_test_`开头。若本地没有变量则测试明确SKIP，但不能执行Task 18完成标记。
 
-- [ ] **Step 4: 将M5 runtime integration加入固定CI**
+- [x] **Step 4: 将M5 runtime integration加入固定CI**
 
 Workflow job/name改为 `M1, M2, M3, M4 and M5 PostgreSQL gates`，pytest文件列表追加：
 
@@ -2689,7 +2693,7 @@ Workflow job/name改为 `M1, M2, M3, M4 and M5 PostgreSQL gates`，pytest文件�
 
 保留进入pytest前的 `POSTGRES_TEST_URL` 硬失败shell step；不得用SQLite替代。
 
-- [ ] **Step 5: 运行workflow syntax相关单测并提交**
+- [x] **Step 5: 运行workflow syntax相关单测并提交**
 
 Run:
 
@@ -2721,7 +2725,7 @@ git commit -m "test: gate M5 automation isolation"
 - Migration integration调用真实 CLI core、Alembic revisions和PostgreSQL constraints。
 - 任何invalid map/fingerprint/source relation必须在`0013`首条DDL之前失败，并保留revision=`0012`。
 
-- [ ] **Step 1: 写0011→0012→0013、幂等和empty install失败测试**
+- [x] **Step 1: 写0011→0012→0013、幂等和empty install失败测试**
 
 ```python
 async def test_legacy_migration_reaches_head_and_is_idempotent(m5_legacy_database):
@@ -2756,7 +2760,7 @@ async def test_legacy_migration_reaches_head_and_is_idempotent(m5_legacy_databas
 
 Fresh install必须直接创建final schema、empty-domain marker和ready cutover state，不能要求owner map。
 
-- [ ] **Step 2: 写map conflict、fingerprint变化和fail-before-DDL失败测试**
+- [x] **Step 2: 写map conflict、fingerprint变化和fail-before-DDL失败测试**
 
 ```python
 async def test_finalize_probe_fails_before_ddl(m5_expand_database):
@@ -2772,7 +2776,7 @@ async def test_finalize_probe_fails_before_ddl(m5_expand_database):
 
 Fingerprint变化发生在dry-run与execute之间时必须拒绝；reuse Thread跨scope、owner map改变和ledger target digest冲突都不得写cutover marker。
 
-- [ ] **Step 3: 运行新migration integration，证明门禁能捕获缺口**
+- [x] **Step 3: 运行新migration integration，证明门禁能捕获缺口**
 
 Run:
 
@@ -2783,7 +2787,7 @@ POSTGRES_TEST_URL="$POSTGRES_TEST_URL" uv run pytest tests/integration/test_m5_a
 
 Expected: FAIL，首个未满足的0011 migration、empty install、fingerprint或fail-before-DDL断言给出具体原因；不得以SKIP作为失败证据。
 
-- [ ] **Step 4: 按失败类别完成对应实现并重跑两次**
+- [x] **Step 4: 按失败类别完成对应实现并重跑两次**
 
 失败只允许落到以下已定义边界：schema/empty finalize修改Task 1列出的两个revision与schema test；
 map/fingerprint/ledger/idempotency修改Task 10的`migrate_automations.py`与migration unit tests；数据库创建/销毁问题只
@@ -2800,7 +2804,7 @@ POSTGRES_TEST_URL="$POSTGRES_TEST_URL" uv run pytest tests/integration/test_m5_a
 
 Expected: 两次均PASS；failure cases保留可重跑状态且没有半成品final DDL。
 
-- [ ] **Step 5: 将migration文件加入固定CI并运行M1–M5组合**
+- [x] **Step 5: 将migration文件加入固定CI并运行M1–M5组合**
 
 Workflow pytest列表追加：
 
@@ -2825,7 +2829,7 @@ POSTGRES_TEST_URL="$POSTGRES_TEST_URL" uv run pytest \
 
 Expected: PASS；M1–M4在Alembic head前进后仍通过。
 
-- [ ] **Step 6: 提交migration gate**
+- [x] **Step 6: 提交migration gate**
 
 ```bash
 git add backend/tests/integration/test_m5_automation_migration_postgres.py backend/tests/support/m5_automation.py .github/workflows/project-foundation-postgres-tests.yml
@@ -2852,7 +2856,7 @@ git commit -m "test: gate M5 automation migration"
 - 覆盖create/edit/pause/resume/trigger/delete/history、Viewer、readiness、409/429/503和direct URL。
 - Flag只在本任务所有unit/E2E isolation tests通过后改为 `true as const`。
 
-- [ ] **Step 1: 写未开启flag下的完整E2E失败场景**
+- [x] **Step 1: 写未开启flag下的完整E2E失败场景**
 
 ```typescript
 test("keeps automation data isolated across account and project transitions", async ({
@@ -2883,7 +2887,7 @@ test("keeps automation data isolated across account and project transitions", as
 - static demo没有入口、页面请求和legacy fallback；
 - Project Chat link只跳project Automation route。
 
-- [ ] **Step 2: 运行focused unit和E2E，确认flag关闭时失败**
+- [x] **Step 2: 运行focused unit和E2E，确认flag关闭时失败**
 
 Run:
 
@@ -2895,7 +2899,7 @@ pnpm test:e2e -- project-automations.spec.ts project-private-work-isolation.spec
 
 Expected: 新E2E因入口关闭或mock handler未实现而FAIL。
 
-- [ ] **Step 3: 实现account/project scoped mock和迟到响应断言**
+- [x] **Step 3: 实现account/project scoped mock和迟到响应断言**
 
 Mock key固定：
 
@@ -2907,7 +2911,7 @@ function automationStoreKey(accountId: string, projectId: string): string {
 
 Account/project切换测试挂起旧scope list response；切换时断言旧request收到abort，释放迟到响应后新scope cache仍不包含旧task。Mutation cache也必须由private-work scope transition先cancel后clear。
 
-- [ ] **Step 4: 开启编译期入口并重跑focused gate**
+- [x] **Step 4: 开启编译期入口并重跑focused gate**
 
 ```typescript
 export const PROJECT_AUTOMATION = true as const;
@@ -2923,7 +2927,7 @@ pnpm test:e2e -- project-automations.spec.ts project-private-work-isolation.spec
 
 Expected: PASS。
 
-- [ ] **Step 5: 运行Frontend全量门禁并提交**
+- [x] **Step 5: 运行Frontend全量门禁并提交**
 
 Run:
 
@@ -2965,7 +2969,7 @@ git commit -m "test: release project automation frontend"
 - M5 spec仅在fresh full gate和独立审查通过后改为“已完成”。
 - 总体进度改为5/8（62.5%），继续明确系统不能作为完整多用户SaaS发布。
 
-- [ ] **Step 1: 先写文档一致性失败测试/扫描**
+- [x] **Step 1: 先写文档一致性失败测试/扫描**
 
 Run:
 
@@ -2979,7 +2983,7 @@ fi
 
 Expected: FAIL并列出尚未更新的M5状态、旧CI名称或关闭flag，证明文档同步尚未完成。
 
-- [ ] **Step 2: 编写用户、开发和运维文档**
+- [x] **Step 2: 编写用户、开发和运维文档**
 
 README说明项目Automation入口、Viewer只读、manual trigger和scheduler config。三个AGENTS说明：
 
@@ -2999,7 +3003,7 @@ make check-db
 
 不得把prompt/title、owner map或完整ID写入示例日志。
 
-- [ ] **Step 3: 运行Backend full verification**
+- [x] **Step 3: 运行Backend full verification**
 
 Run:
 
@@ -3013,7 +3017,7 @@ uvx ruff format --check .
 
 Expected: 全部PASS且没有blocking-I/O finding。
 
-- [ ] **Step 4: 运行真实PostgreSQL、运维和migration smoke**
+- [x] **Step 4: 运行真实PostgreSQL、运维和migration smoke**
 
 Run:
 
@@ -3036,7 +3040,7 @@ make check-db
 
 Expected: `test -n`成功且所有命令PASS。另用Task 16 fixtures各执行一次fresh install smoke和legacy dry-run/execute smoke；缺真实PostgreSQL证据不得标记M5完成。
 
-- [ ] **Step 5: 运行Frontend full verification和workspace检查**
+- [x] **Step 5: 运行Frontend full verification和workspace检查**
 
 Run:
 
@@ -3055,13 +3059,13 @@ rg -n "M5.*尚未完成|M1.M2.M3.*M4 PostgreSQL|PROJECT_AUTOMATION.*false" \
 
 Expected: Frontend命令PASS、`git diff --check`无输出；一致性扫描只允许M5前置历史描述，不允许当前状态、CI gate或flag仍旧。
 
-- [ ] **Step 6: 请求一次独立代码审查并关闭findings**
+- [x] **Step 6: 请求一次独立代码审查并关闭findings**
 
 使用 `superpowers:requesting-code-review`，审查范围从M5首个implementation commit到当前HEAD。Reviewer必须核对design第18节全部完成标准、scope predicates、crash replay边界、migration fail-before-DDL、client authority stripping和M6边界。
 
 如发现Critical/Important：先使用 `superpowers:receiving-code-review` 验证finding，添加失败测试，修复并重跑Steps 3–5；每项记录修复commit。未关闭Critical/Important时不得继续。
 
-- [ ] **Step 7: 标记M5完成并做最终fresh verification**
+- [x] **Step 7: 标记M5完成并做最终fresh verification**
 
 只有Steps 3–6均有本次运行的成功输出后，更新：
 
@@ -3071,7 +3075,7 @@ Expected: Frontend命令PASS、`git diff --check`无输出；一致性扫描只�
 
 然后再次运行受改动影响的文档扫描、`git diff --check`和M5 focused backend/frontend tests。
 
-- [ ] **Step 8: 提交文档与完成标记**
+- [x] **Step 8: 提交文档与完成标记**
 
 ```bash
 git add README.md README_zh.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs/superpowers/specs/2026-07-12-project-first-saas-design.md docs/superpowers/specs/2026-07-14-project-private-work-m4-design.md docs/superpowers/specs/2026-07-16-project-automation-m5-design.md docs/operations/m5-automation-migration.md CHANGELOG.md

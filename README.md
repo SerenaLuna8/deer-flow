@@ -400,7 +400,7 @@ dry-run 只输出脱敏 counts 与稳定 source hash，不升级 schema、不写
 `cutover_complete` marker 的顺序执行；同一已完成 cutover 再执行会直接 no-op。
 
 M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation
-已形成等待 Task 18 独立终审的 release candidate；M6 Worker/SSE/配额/审计/通用备份恢复、
+也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查；M6 Worker/SSE/配额/审计/通用备份恢复、
 M7 legacy source/API 清理和 M8 完整发布验收仍未交付，因此 DeerFlow 仍不能作为完整多用户 SaaS 发布。
 
 #### M3 共享资产迁移与 credential 轮换
@@ -965,7 +965,7 @@ All dict-returning methods are validated against Gateway Pydantic response model
 
 ## Scheduled Tasks
 
-The M5 release candidate adds project Automation at
+M5 adds project Automation at
 `/projects/{project_slug}/automations`. Each definition and occurrence is private to
 the authenticated account and entered project. Admins, Editors, and Runners with the
 server-issued capability can create, edit, pause, resume, manually trigger, inspect,
@@ -998,9 +998,9 @@ readiness endpoints. Manual trigger requires a UUID `Idempotency-Key`; disabling
 background polling does not disable manual runs. During the M5 expand window the
 legacy read routes remain outside the mutation freeze, while legacy mutations
 return a migration-required conflict; after cutover every legacy route rejects
-requests in favor of the project API. The M5 release candidate is awaiting its
-independent Task 18 review and is not yet a complete releasable multi-user SaaS;
-M6-M8 remain open.
+requests in favor of the project API. M5 completed its Task 18 full-stack gates and
+independent closure review on 2026-07-16. M6-M8 remain open, so DeerFlow is still not
+a complete releasable multi-user SaaS.
 
 ## Terminal Workbench (TUI)
 

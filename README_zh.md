@@ -213,7 +213,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    [M4 private-work migration runbook](docs/operations/m4-private-work-migration.md)。
 
    M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation
-   已形成等待 Task 18 独立终审的 release candidate；M6 Worker/SSE/配额/审计/通用备份恢复、
+   也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查；M6 Worker/SSE/配额/审计/通用备份恢复、
    M7 legacy 清理和 M8 完整发布验收仍未交付，因此仍不能作为完整多用户 SaaS 发布。
 
    共享资产迁移和 credential 轮换只通过显式命令执行，不会在应用启动时自动运行。
@@ -828,7 +828,7 @@ client.clear_goal("thread-1")
 
 ## 定时任务 (Scheduled Tasks)
 
-M5 release candidate 在 `/projects/{project_slug}/automations` 提供项目 Automation。
+M5 在 `/projects/{project_slug}/automations` 提供项目 Automation。
 每个 definition 和 occurrence 都按认证账号与当前项目双重隔离。具备服务端下发能力的
 Admin、Editor 和 Runner 可以创建、编辑、暂停、恢复、手动触发、查看和删除自己的
 Automation；Viewer 只能查看自己的 definition 和运行历史。
@@ -850,8 +850,8 @@ Automation；Viewer 只能查看自己的 definition 和运行历史。
 和手动触发，手动触发仍使用同一 durable occurrence 与 private-run 链路。独立 Worker、持久化
 SSE、通用 jobs/retries、配额、审计和通用备份恢复属于 M6。
 
-项目 API 位于 `/api/projects/{project_id}/automations`。M5 release candidate 仍在等待 Task 18
-独立终审，M6-M8 也仍未交付，因此当前不能作为完整可发布的多用户 SaaS。
+项目 API 位于 `/api/projects/{project_id}/automations`。M5 已于 2026-07-16 通过 Task 18 全量门禁和
+独立关闭审查；M6-M8 仍未交付，因此当前不能作为完整可发布的多用户 SaaS。
 
 ## 终端工作台 (TUI)
 
