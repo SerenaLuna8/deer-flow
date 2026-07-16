@@ -1,4 +1,4 @@
-name: M1, M2, M3 and M4 PostgreSQL Gates
+name: M1, M2, M3, M4 and M5 PostgreSQL Gates
 
 on:
   push:
@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   postgres-release-gates:
-    name: M1, M2, M3 and M4 PostgreSQL gates
+    name: M1, M2, M3, M4 and M5 PostgreSQL gates
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -94,7 +94,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run M1, M2, M3 and M4 PostgreSQL isolation gates
+      - name: Run M1, M2, M3, M4 and M5 PostgreSQL isolation gates
         working-directory: backend
         run: >-
           uv run pytest
@@ -104,6 +104,7 @@ jobs:
           tests/integration/test_m3_shared_assets_postgres.py
           tests/integration/test_m4_private_work_postgres.py
           tests/integration/test_m4_private_work_migration_postgres.py
+          tests/integration/test_m5_project_automation_postgres.py
           -q
 
       - name: Run PostgreSQL scripts and project lint gates
