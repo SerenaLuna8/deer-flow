@@ -6,6 +6,8 @@
 - Worktree: `/Users/jiangfeng/deer-flow/.worktrees/m5-project-automation`
 - Task 16 is complete and independently approved at ledger commit `599e4216`.
 - Task 17 initial implementation is committed at `7240d8d1`.
+- Task 17 fresh verification resumed on `2026-07-16` and is complete; the task
+  remains pending an independent base-to-head review.
 - The first independent Task 17 review reported `0 Critical / 3 Important / 0 Minor`:
   1. account isolation used a mock variable plus reload instead of a real same-SPA AuthProvider transition;
   2. the static-demo check read source strings instead of running a static production build;
@@ -31,15 +33,18 @@
 - Full static E2E: `1 passed`.
 - `git diff --check`: passed.
 
-## Interrupted work
+## Resume result
 
-A final fresh verification repeat was intentionally stopped for shutdown after normal E2E reached `64 / 164` with no failures. Do not claim Task 17 complete from this checkpoint alone.
+The interrupted repeat was discarded as evidence and rerun from the beginning.
+The final post-repair fresh gates are `pnpm check` passed, `pnpm format` passed,
+`126 files / 915 unit passed / 0 skipped`, `164 normal E2E passed`, and one
+independent static production-build E2E passed. `git diff --check` must remain
+clean through the verification commit. Do not claim Task 17 complete until the
+independent review approves the full `599e4216..HEAD` package.
 
-## Resume sequence
+## Remaining sequence
 
-1. Confirm the worktree is clean at this checkpoint commit and inspect its base-to-head diff from `599e4216`.
-2. Run `pnpm check`, `pnpm format`, and full `pnpm test` from `frontend/`.
-3. Run the full normal plus static Playwright command recorded in `frontend/package.json` (`pnpm test:e2e:all`).
-4. Regenerate the Task 17 full review package from `599e4216` to the new HEAD.
-5. Send the complete package to a fresh independent reviewer and close every Critical/Important finding.
-6. Only after approval, add the Task 17 completion ledger entry and continue Task 18.
+1. Commit the fresh verification evidence and the test synchronization repair.
+2. Regenerate the Task 17 full review package from `599e4216` to the new HEAD.
+3. Send the complete package to a fresh independent reviewer and close every Critical/Important finding.
+4. Only after approval, add the Task 17 completion ledger entry and continue Task 18.

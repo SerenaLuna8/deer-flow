@@ -212,3 +212,32 @@ independent static-build E2E: 1 passed
 # Patch structure
 git diff --check: passed
 ```
+
+## Resume fresh verification
+
+Recorded at `2026-07-16T19:07:10+08:00`. This verification was run after the
+shutdown checkpoint; none of the pre-pause results were substituted for it.
+
+The first fresh combined browser run reached `163 passed` and one deterministic
+timeout in the AuthProvider account-transition scenario. Its trace showed that
+the test clicked the persistent `Automations` sidebar link before the preceding
+project-home navigation had committed, so the Automation query never unmounted
+and `holdNextList(...).started` waited for a request that could not begin. The
+test now waits for the real `project-home` surface before returning to
+Automations. No production code changed for this repair.
+
+Final fresh evidence after that synchronization repair:
+
+```text
+pnpm check: passed
+pnpm format: passed
+pnpm test: 126 files, 915 passed, 0 failed, 0 skipped
+pnpm exec playwright test tests/e2e/project-automations.spec.ts: 8 passed
+pnpm test:e2e:all:
+  normal Chromium: 164 passed
+  independent static production build + Chromium: 1 passed
+  combined command: exit 0
+```
+
+Task 17 remains pending an independent base-to-head review. This section does
+not mark the task or the M5 milestone complete.

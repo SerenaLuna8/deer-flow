@@ -432,6 +432,7 @@ test("AuthProvider account transition aborts the old list and cannot reuse its c
   ).toBeVisible();
 
   await page.getByRole("link", { name: "项目概览" }).click();
+  await expect(page.getByTestId("project-home")).toBeVisible();
   const held = state.holdNextList(ACCOUNT_A, PROJECT_ALPHA);
   await page.getByRole("link", { name: "Automations" }).click();
   await held.started;
