@@ -293,6 +293,162 @@ async def test_project_api_is_project_owner_and_capability_scoped(
     assert deleted.owner_user_id == str(seed.context("owner_a").user_id)
     assert deleted.deleted_at == M5_NOW
 
+    runner_update_target = await seed.create_task(
+        "owner_b",
+        task_id="m5-api-runner-update",
+        next_run_at=M5_NOW + timedelta(days=1),
+    )
+    runner_delete_target = await seed.create_task(
+        "owner_b",
+        task_id="m5-api-runner-delete",
+        next_run_at=M5_NOW + timedelta(days=1),
+    )
+    runner_trigger_target = await seed.create_task(
+        "owner_b",
+        task_id="m5-api-runner-trigger",
+        next_run_at=M5_NOW + timedelta(days=1),
+    )
+    owner_cross_update_target = await seed.create_task(
+        "owner_a",
+        task_id="m5-api-owner-cross-update",
+        next_run_at=M5_NOW + timedelta(days=1),
+    )
+    owner_cross_delete_target = await seed.create_task(
+        "owner_a",
+        task_id="m5-api-owner-cross-delete",
+        next_run_at=M5_NOW + timedelta(days=1),
+    )
+    owner_cross_trigger_target = await seed.create_task(
+        "owner_a",
+        task_id="m5-api-owner-cross-trigger",
+        next_run_at=M5_NOW + timedelta(days=1),
+    )
+
+    runner_update = await m5_app.request(
+        "PATCH",
+        f"/api/projects/{owner_project}/automations/{runner_update_target.id}",
+        actor="owner_b",
+        json={"expected_version": 1, "title": "runner-updated-own-task"},
+    )
+    assert runner_update.status_code == 200
+    assert runner_update.json()["title"] == "runner-updated-own-task"
+    assert runner_update.json()["version"] == 2
+
+    runner_delete = await m5_app.request(
+        "DELETE",
+        f"/api/projects/{owner_project}/automations/{runner_delete_target.id}",
+        actor="owner_b",
+        json={"expected_version": 1},
+    )
+    assert runner_delete.status_code == 200
+
+    dispatched_occurrences: list[str] = []
+
+    class RecordingDispatcher:
+        async def dispatch(self, occurrence_id: str, *, app) -> None:
+            del app
+            dispatched_occurrences.append(occurrence_id)
+
+    m5_app.app.state.automation_dispatcher = RecordingDispatcher()
+    runner_idempotency_key = uuid.uuid4()
+    runner_trigger = await m5_app.request(
+        "POST",
+        f"/api/projects/{owner_project}/automations/{runner_trigger_target.id}/trigger",
+        actor="owner_b",
+        headers={"Idempotency-Key": str(runner_idempotency_key)},
+    )
+    assert runner_trigger.status_code == 200
+    assert runner_trigger.json()["automation_id"] == runner_trigger_target.id
+    assert runner_trigger.json()["trigger"] == "manual"
+    assert runner_trigger.json()["status"] == "launching"
+    assert dispatched_occurrences == [runner_trigger.json()["id"]]
+
+    cross_update = await m5_app.request(
+        "PATCH",
+        f"/api/projects/{owner_project}/automations/{owner_cross_update_target.id}",
+        actor="owner_b",
+        json={"expected_version": 1, "title": "runner-cross-update"},
+    )
+    cross_delete = await m5_app.request(
+        "DELETE",
+        f"/api/projects/{owner_project}/automations/{owner_cross_delete_target.id}",
+        actor="owner_b",
+        json={"expected_version": 1},
+    )
+    cross_trigger = await m5_app.request(
+        "POST",
+        f"/api/projects/{owner_project}/automations/{owner_cross_trigger_target.id}/trigger",
+        actor="owner_b",
+        headers={"Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert cross_update.status_code == 404
+    assert cross_delete.status_code == 404
+    assert cross_trigger.status_code == 404
+    assert dispatched_occurrences == [runner_trigger.json()["id"]]
+
+    async with seed.factory() as session:
+        repository = ScheduledTaskRepository(session)
+        persisted_runner_update = await repository.get(
+            seed.context("owner_b").resource_scope,
+            runner_update_target.id,
+        )
+        persisted_runner_delete = await session.get(
+            ScheduledTaskRow,
+            runner_delete_target.id,
+        )
+        persisted_runner_occurrence = await session.get(
+            ScheduledTaskRunRow,
+            runner_trigger.json()["id"],
+        )
+        persisted_cross_targets = tuple(
+            [
+                await repository.get(
+                    seed.context("owner_a").resource_scope,
+                    cross_target.id,
+                )
+                for cross_target in (
+                    owner_cross_update_target,
+                    owner_cross_delete_target,
+                    owner_cross_trigger_target,
+                )
+            ]
+        )
+        cross_occurrence_count = await session.scalar(
+            select(func.count())
+            .select_from(ScheduledTaskRunRow)
+            .where(
+                ScheduledTaskRunRow.task_id.in_(
+                    (
+                        owner_cross_update_target.id,
+                        owner_cross_delete_target.id,
+                        owner_cross_trigger_target.id,
+                    )
+                )
+            )
+        )
+    assert persisted_runner_update is not None
+    assert persisted_runner_update.project_id == seed.context("owner_b").project_id
+    assert persisted_runner_update.owner_user_id == str(seed.context("owner_b").user_id)
+    assert persisted_runner_update.title == "runner-updated-own-task"
+    assert persisted_runner_update.version == 2
+    assert persisted_runner_delete is not None
+    assert persisted_runner_delete.project_id == seed.context("owner_b").project_id
+    assert persisted_runner_delete.owner_user_id == str(seed.context("owner_b").user_id)
+    assert persisted_runner_delete.deleted_at == M5_NOW
+    assert persisted_runner_occurrence is not None
+    assert persisted_runner_occurrence.project_id == seed.context("owner_b").project_id
+    assert persisted_runner_occurrence.owner_user_id == str(seed.context("owner_b").user_id)
+    assert persisted_runner_occurrence.task_id == runner_trigger_target.id
+    assert persisted_runner_occurrence.trigger == "manual"
+    assert persisted_runner_occurrence.status == "launching"
+    assert persisted_runner_occurrence.manual_idempotency_hash == hashlib.sha256(str(runner_idempotency_key).encode("ascii")).hexdigest()
+    assert persisted_cross_targets == (
+        owner_cross_update_target,
+        owner_cross_delete_target,
+        owner_cross_trigger_target,
+    )
+    assert cross_occurrence_count == 0
+
     viewer_trigger = await m5_app.request(
         "POST",
         f"/api/projects/{owner_project}/automations/{viewer_task.id}/trigger",
@@ -309,6 +465,7 @@ async def test_project_api_is_project_owner_and_capability_scoped(
             )
         )
     assert viewer_occurrence_count == 0
+    assert dispatched_occurrences == [runner_trigger.json()["id"]]
 
 
 @pytest.mark.asyncio

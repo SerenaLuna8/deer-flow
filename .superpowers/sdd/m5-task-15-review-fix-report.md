@@ -167,6 +167,71 @@ uv run ruff check \
 All checks passed!
 ```
 
+## Runner mutation and trigger re-review closure
+
+The third independent review found that Runner (`owner_b`) read isolation was
+covered, but the API gate did not prove the complete mutation and manual-trigger
+contract in both directions.
+
+The API test now creates dedicated, post-pagination tasks for every operation:
+
+- Runner PATCH, DELETE, and TRIGGER on three separate Runner-owned tasks all
+  succeed. Real PostgreSQL reads prove the PATCH title/version and owner scope,
+  the DELETE soft-delete timestamp and owner scope, and the manual occurrence's
+  project, owner, task, status, trigger, and idempotency hash. A narrow recording
+  dispatcher proves the claimed occurrence is the one dispatched without
+  replacing any persistence or authorization component.
+- Runner PATCH, DELETE, and TRIGGER against three separate owner-A tasks all
+  return 404. Full repository records remain field-for-field equal to their
+  pre-request records, the real occurrence count across those targets remains
+  zero, and the dispatcher receives no second call.
+- The earlier Admin, Viewer, and `system_admin` matrix remains intact. The new
+  tasks are created only after pagination/history assertions and the governance
+  test uses an independent disposable database.
+
+For a non-KeyError RED, the Runner PATCH success target was temporarily seeded
+under owner A while the new success assertion still required Runner authority.
+The scoped API correctly returned 404, proving that the new success path detects
+an incorrectly owned fixture:
+
+```text
+POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/postgres \
+  uv run pytest tests/integration/test_m5_project_automation_postgres.py::test_project_api_is_project_owner_and_capability_scoped -q
+1 failed in 1.30s
+assert 404 == 200
+```
+
+The target was restored to the real Runner scope before GREEN:
+
+```text
+POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/postgres \
+  uv run pytest tests/integration/test_m5_project_automation_postgres.py::test_project_api_is_project_owner_and_capability_scoped -q
+1 passed in 1.27s
+
+POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/postgres \
+  uv run pytest tests/integration/test_m5_project_automation_postgres.py -q
+8 passed in 2.84s
+
+POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/postgres \
+  uv run pytest \
+  tests/integration/test_m1_postgres_cutover.py \
+  tests/integration/test_project_isolation_postgres.py \
+  tests/integration/test_m2_project_governance_postgres.py \
+  tests/integration/test_m3_shared_assets_postgres.py \
+  tests/integration/test_m4_private_work_postgres.py \
+  tests/integration/test_m4_private_work_migration_postgres.py \
+  tests/integration/test_m5_project_automation_postgres.py -q
+25 passed in 8.55s
+
+uv run ruff format tests/integration/test_m5_project_automation_postgres.py
+1 file left unchanged
+
+uv run ruff check \
+  tests/integration/test_m5_project_automation_postgres.py \
+  tests/support/m5_automation.py
+All checks passed!
+```
+
 ## Files in the repair
 
 - `backend/tests/integration/test_m5_project_automation_postgres.py`
