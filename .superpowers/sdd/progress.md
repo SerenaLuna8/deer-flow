@@ -16,6 +16,7 @@
 - Task 6: complete (commits `2f73202a..4da08702`, review clean after two repair waves: 0 Critical/Important/Minor; private M4 Thread/run launch and atomic runtime-pointer backfill complete).
 - Task 7: complete (commits `d3431533..ba085826`, review clean after three repair waves: 0 Critical/Important/Minor; completion CAS, restart reconciliation, scheduler lifecycle and PostgreSQL lifetime ownership complete).
 - Task 8: complete (commits `16ee6717..9819dc05`, review clean after one repair wave: 0 Critical/Important/Minor; governance lock order and authorization-loss terminalization verified by 81 real-PostgreSQL tests).
+- Task 9: complete (commits `b37646d8..fa03d8b5`, review clean after one repair wave: 0 Critical/Important/Minor; strict project API and expand-only read adapter verified with cutover fail-close).
 
 ---
 
