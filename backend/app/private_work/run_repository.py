@@ -40,6 +40,7 @@ class PrivateRunRecord:
     model_name: str | None
     created_at: datetime
     updated_at: datetime
+    job_id: uuid.UUID | None = None
 
 
 class PrivateRunConflict(Exception):
@@ -85,6 +86,7 @@ class PrivateRunRepository:
             model_name=row.model_name,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            job_id=row.job_id,
         )
 
     async def create(
@@ -168,6 +170,34 @@ class PrivateRunRepository:
             statement = statement.with_for_update(of=RunRow)
         row = (await self.session.execute(statement)).scalar_one_or_none()
         return None if row is None else self.record(row)
+
+    async def attach_job(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+    ) -> PrivateRunRecord:
+        """Attach the exact durable job once under private Run authority."""
+
+        if not isinstance(job_id, uuid.UUID):
+            raise PrivateRunConflict
+        row = (
+            await self.session.execute(
+                select(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    *self.predicates(scope),
+                )
+                .with_for_update(of=RunRow)
+            )
+        ).scalar_one_or_none()
+        if row is None or (row.job_id is not None and row.job_id != job_id):
+            raise PrivateRunConflict
+        row.job_id = job_id
+        row.updated_at = datetime.now(UTC)
+        await self.session.flush()
+        return self.record(row)
 
     async def list_by_thread(
         self,

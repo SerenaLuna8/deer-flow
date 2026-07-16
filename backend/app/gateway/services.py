@@ -15,7 +15,7 @@ import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,8 +28,6 @@ from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
 from app.gateway.deps import (
     get_checkpointer,
     get_local_provider,
-    get_private_run_event_store,
-    get_project_checkpointer,
     get_run_context,
     get_run_manager,
     get_stream_bridge,
@@ -40,28 +38,18 @@ from app.gateway.internal_auth import (
     get_trusted_internal_runtime_user_id,
 )
 from app.gateway.utils import sanitize_log_param
-from app.private_work.asset_runtime import PrivateAssetRuntime
-from app.private_work.authorization import PrivateRunAuthorizationBoundary
 from app.private_work.context import PrivateWorkContext, strip_private_client_fields
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import (
-    PrivateWorkAssetStale,
-    PrivateWorkConflict,
     PrivateWorkCutover,
     PrivateWorkError,
-    PrivateWorkUnavailable,
 )
-from app.private_work.file_finalizer import PrivateFileFinalizer
-from app.private_work.revalidation import PrivateWorkRevalidator
-from app.private_work.run_admission import PrivateRunAdmissionService
-from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
+from app.private_work.run_admission import (
+    PrivateRunAdmissionServerContext,
+    PrivateRunAdmissionService,
+)
+from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.runtime_context import prepare_private_run_config
-from app.private_work.sandbox_files import (
-    PrivateFileRunScope,
-    PrivateRunFileAuthority,
-    PrivateSandboxFileProjection,
-)
-from app.projects.capabilities import Capability
 from deerflow.config.app_config import get_app_config
 from deerflow.persistence.thread_meta import LegacyThreadCreateAuthorityUnavailable
 from deerflow.runtime import (
@@ -94,7 +82,6 @@ from deerflow.runtime.user_context import (
     set_current_user,
     set_runtime_storage_user_id,
 )
-from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 logger = logging.getLogger(__name__)
@@ -994,25 +981,6 @@ async def start_run(
             reset_current_user(owner_context_token)
 
 
-async def _mark_private_run_launch_failed(
-    context: PrivateWorkContext,
-    run_id: str,
-) -> None:
-    from deerflow.persistence.engine import get_session_factory
-
-    try:
-        session_factory = get_session_factory()
-        async with session_factory() as session, session.begin():
-            await PrivateRunRepository(session).update_status(
-                scope=context.resource_scope,
-                run_id=run_id,
-                status="error",
-                error="Private runtime launch failed",
-            )
-    except Exception:
-        logger.warning("Failed to mark private run launch failure", exc_info=True)
-
-
 async def start_private_run(
     body: Any,
     thread_id: str,
@@ -1022,16 +990,15 @@ async def start_private_run(
     run_id: str | None = None,
     server_context: Mapping[str, object] | None = None,
     admission_service: PrivateRunAdmissionService | None = None,
-    asset_runtime: PrivateAssetRuntime | None = None,
 ) -> RunRecord:
-    """Admit exact project assets, register them, and launch the sole worker."""
+    """Persist a private Run plus durable job; execution belongs to Worker."""
 
-    from deerflow.persistence.engine import get_session_factory
+    del request
+    if admission_service is None:
+        from deerflow.persistence.engine import get_session_factory
 
-    session_factory = get_session_factory()
-    admission_service = admission_service or PrivateRunAdmissionService(session_factory)
-    asset_runtime = asset_runtime or PrivateAssetRuntime(session_factory)
-    sanitized_config, checkpoint_control = _normalize_run_checkpoint_inputs(
+        admission_service = PrivateRunAdmissionService(get_session_factory())
+    sanitized_config, _checkpoint_control = _normalize_run_checkpoint_inputs(
         body,
         thread_id,
         preserve_runtime_selection=False,
@@ -1045,33 +1012,6 @@ async def start_private_run(
         metadata=raw_metadata if isinstance(raw_metadata, Mapping) else None,
         body_context=raw_body_context if isinstance(raw_body_context, Mapping) else None,
     )
-    trusted_server_context = strip_private_client_fields(server_context) if isinstance(server_context, Mapping) else {}
-    if isinstance(server_context, Mapping) and server_context.get("non_interactive") is True:
-        trusted_server_context["non_interactive"] = True
-    config["context"] = {
-        **dict(config.get("context", {})),
-        **trusted_server_context,
-    }
-    scoped_checkpointer = get_project_checkpointer(request, context)
-    async with session_factory() as session, session.begin():
-        await PrivateWorkRevalidator().require(
-            session,
-            context,
-            Capability.PRIVATE_WORK_CREATE,
-            Capability.SHARED_ASSETS_EXECUTE,
-            lock=False,
-        )
-    await apply_checkpoint_to_run_config(
-        config,
-        body=body,
-        thread_id=thread_id,
-        request=request,
-        checkpoint_control=checkpoint_control,
-        checkpointer=scoped_checkpointer,
-    )
-
-    command = getattr(body, "command", None)
-    graph_input = Command(resume=command["resume"]) if command and command.get("resume") is not None else normalize_input(body.input)
     persisted_context = dict(config.get("context", {}))
     persisted_context.pop("private_scope", None)
     persisted_config = {
@@ -1080,6 +1020,12 @@ async def start_private_run(
         "configurable": dict(config.get("configurable", {})),
     }
     disconnect = DisconnectMode.cancel if getattr(body, "on_disconnect", "cancel") == "cancel" else DisconnectMode.continue_
+    raw_command = getattr(body, "command", None)
+    persisted_command = strip_private_client_fields(raw_command) if isinstance(raw_command, Mapping) else None
+    raw_interrupt_before = getattr(body, "interrupt_before", None)
+    raw_interrupt_after = getattr(body, "interrupt_after", None)
+    persisted_interrupt_before = "*" if raw_interrupt_before == "*" else list(raw_interrupt_before or ())
+    persisted_interrupt_after = "*" if raw_interrupt_after == "*" else list(raw_interrupt_after or ())
     create_request = PrivateRunCreate(
         run_id=run_id or str(uuid.uuid4()),
         assistant_id=None,
@@ -1087,131 +1033,38 @@ async def start_private_run(
         kwargs={
             "input": body.input,
             "config": redact_config_secrets(persisted_config),
+            "command": persisted_command,
+            "interrupt_before": persisted_interrupt_before,
+            "interrupt_after": persisted_interrupt_after,
+            "stream_mode": normalize_stream_modes(getattr(body, "stream_mode", None)),
+            "stream_subgraphs": bool(getattr(body, "stream_subgraphs", False)),
         },
         multitask_strategy=getattr(body, "multitask_strategy", "reject"),
     )
 
-    admitted = await admission_service.admit(context, thread_id, create_request)
-    authorization_boundary = PrivateRunAuthorizationBoundary(
-        session_factory,
-        project_id=admitted.run.project_id,
-        owner_user_id=admitted.run.owner_user_id,
-        run_id=admitted.run.run_id,
+    trusted_admission_context = PrivateRunAdmissionServerContext(non_interactive=True) if isinstance(server_context, Mapping) and server_context.get("non_interactive") is True else None
+    admitted = await admission_service.admit(
+        context,
+        thread_id,
+        create_request,
+        server_context=trusted_admission_context,
     )
-    private_runtime = None
-    file_authority = None
-    record = None
-    try:
-        base_run_context = get_run_context(request)
-        exact_model_name = admitted.run.model_name
-        if base_run_context.app_config is None or exact_model_name is None or base_run_context.app_config.get_model_config(exact_model_name) is None:
-            raise PrivateWorkAssetStale(context.request_id)
-        private_runtime = await asset_runtime.materialize(
-            context,
-            admitted,
-            authorization_boundary=authorization_boundary,
-        )
-        if private_runtime.model_ref != exact_model_name:
-            raise PrivateWorkAssetStale(context.request_id)
-        skills_config = getattr(base_run_context.app_config, "skills", None)
-        skill_container_path = getattr(skills_config, "container_path", None)
-        skill_root = getattr(private_runtime, "skill_root", None)
-        authority_mounts = (
-            (
-                RunScopedReadOnlyMount(
-                    run_id=admitted.run.run_id,
-                    container_path=skill_container_path,
-                    host_path=str(skill_root),
-                ),
-            )
-            if isinstance(skill_container_path, str) and skill_root is not None
-            else ()
-        )
-        file_authority = PrivateRunFileAuthority(
-            PrivateFileRunScope(
-                context,
-                thread_id=admitted.thread_id,
-                run_id=admitted.run.run_id,
-                authorization_boundary=authorization_boundary,
-            ),
-            PrivateSandboxFileProjection(session_factory),
-            PrivateFileFinalizer(session_factory),
-            mounts=authority_mounts,
-        )
-        run_manager = get_run_manager(request)
-        record = await run_manager.register_persisted(
-            run_id=admitted.run.run_id,
-            thread_id=admitted.thread_id,
-            assistant_id=admitted.run.assistant_id,
-            on_disconnect=disconnect,
-            metadata=admitted.run.metadata,
-            kwargs=admitted.run.kwargs,
-            multitask_strategy=admitted.run.multitask_strategy,
-            model_name=private_runtime.model_ref,
-            scope=admitted.opaque_runtime_scope,
-            created_at=admitted.run.created_at.isoformat(),
-        )
-        authorization_boundary.bind_abort_event(record.abort_event)
-        set_checkpoint_boundary = getattr(
-            scoped_checkpointer,
-            "set_authorization_boundary",
-            None,
-        )
-        if callable(set_checkpoint_boundary):
-            set_checkpoint_boundary(authorization_boundary)
-        private_run_context = replace(
-            base_run_context,
-            checkpointer=scoped_checkpointer,
-            event_store=get_private_run_event_store(request),
-            thread_store=None,
-            private_scope=admitted.opaque_runtime_scope,
-            authorization_boundary=authorization_boundary,
-            file_authority=file_authority,
-            private_agent_runtime=private_runtime,
-        )
-        _launch_registered_run(
-            bridge=get_stream_bridge(request),
-            run_manager=run_manager,
-            record=record,
-            run_context=private_run_context,
-            agent_factory=resolve_agent_factory(None),
-            graph_input=graph_input,
-            config=config,
-            stream_modes=normalize_stream_modes(getattr(body, "stream_mode", None)),
-            stream_subgraphs=bool(getattr(body, "stream_subgraphs", False)),
-            interrupt_before=getattr(body, "interrupt_before", None),
-            interrupt_after=getattr(body, "interrupt_after", None),
-            owner_user_id=admitted.run.owner_user_id,
-            runtime_user_id=admitted.run.owner_user_id,
-        )
-        return record
-    except Exception as error:
-        if record is not None:
-            try:
-                await get_run_manager(request).set_status(
-                    record.run_id,
-                    RunStatus.error,
-                    error="Private runtime launch failed",
-                )
-            except Exception:
-                logger.warning("Failed to compensate private run manager state")
-        else:
-            await _mark_private_run_launch_failed(context, admitted.run.run_id)
-        if private_runtime is not None:
-            try:
-                await private_runtime.aclose()
-            except Exception:
-                logger.warning("Failed to clean private runtime after launch failure")
-        if file_authority is not None:
-            try:
-                await file_authority.release()
-            except Exception:
-                logger.warning("Failed to clean private file authority after launch failure")
-        if isinstance(error, ConflictError):
-            raise PrivateWorkConflict(context.request_id) from None
-        if isinstance(error, PrivateWorkError):
-            raise type(error)(context.request_id) from None
-        raise PrivateWorkUnavailable(context.request_id) from None
+    return RunRecord(
+        run_id=admitted.run.run_id,
+        thread_id=admitted.thread_id,
+        assistant_id=admitted.run.assistant_id,
+        status=RunStatus(admitted.run.status),
+        on_disconnect=disconnect,
+        multitask_strategy=admitted.run.multitask_strategy,
+        metadata=admitted.run.metadata,
+        kwargs=admitted.run.kwargs,
+        scope=admitted.opaque_runtime_scope,
+        user_id=admitted.run.owner_user_id,
+        created_at=admitted.run.created_at.isoformat(),
+        updated_at=admitted.run.updated_at.isoformat(),
+        model_name=admitted.run.model_name,
+        store_only=True,
+    )
 
 
 async def start_scheduled_private_run(

@@ -45,6 +45,8 @@ from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRecord, ThreadAgentRef
 from app.private_work.thread_service import PrivateThreadService
 from app.projects.capabilities import Capability
+from app.reliability.error_mapping import reliability_http_exception
+from app.reliability.errors import ReliabilityError
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.persistence.private_work.file_repository import (
     PRIVATE_FILE_CHUNK_SIZE,
@@ -465,10 +467,11 @@ async def create_private_run(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateRunResponse:
     try:
-        _require_run_runtime(request, context.request_id)
         record = await start_private_run(body, str(thread_id), request, context)
     except PrivateWorkError as error:
         _raise_http(error)
+    except ReliabilityError as error:
+        raise reliability_http_exception(error) from None
     return _run_response(record)
 
 
@@ -484,6 +487,8 @@ async def stream_private_run(
         record = await start_private_run(body, str(thread_id), request, context)
     except PrivateWorkError as error:
         _raise_http(error)
+    except ReliabilityError as error:
+        raise reliability_http_exception(error) from None
 
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_manager),
@@ -538,6 +543,8 @@ async def wait_private_run(
         return serialize_channel_values_for_api(channel_values if isinstance(channel_values, dict) else {})
     except PrivateWorkError as error:
         _raise_http(error)
+    except ReliabilityError as error:
+        raise reliability_http_exception(error) from None
 
 
 @router.get(

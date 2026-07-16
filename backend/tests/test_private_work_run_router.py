@@ -23,6 +23,11 @@ from app.private_work.checkpointer import PRIVATE_SCOPE_MARKER, ProjectScopedChe
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.reliability.error_mapping import (
+    ReliabilityHTTPException,
+    reliability_http_exception_handler,
+)
+from app.reliability.errors import ReliabilityQuotaExceeded
 from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 
 
@@ -72,6 +77,10 @@ async def harness(seed: M4ThreadSeed) -> _Harness:
     raw = InMemorySaver()
     scoped = ProjectScopedCheckpointer(raw, seed.factory)
     app = FastAPI()
+    app.add_exception_handler(
+        ReliabilityHTTPException,
+        reliability_http_exception_handler,
+    )
     install_open_project_cutover_guard(app)
     app.include_router(private_work_router.router)
     app.state.private_run_service = PrivateRunService(seed.factory)
@@ -195,6 +204,8 @@ async def test_start_run_strips_nested_authority_and_serializes_no_private_coord
     record = _runtime_record(thread_id)
     launcher = AsyncMock(return_value=record)
     monkeypatch.setattr(private_work_router, "start_private_run", launcher)
+    del harness.app.state.stream_bridge
+    del harness.app.state.run_manager
 
     response = await harness.request(
         "POST",
@@ -247,6 +258,34 @@ async def test_start_run_strips_nested_authority_and_serializes_no_private_coord
     )
     assert invalid.status_code == 422
     assert invalid.json()["detail"]["code"] == "PRIVATE_WORK_INVALID"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_start_run_maps_transactional_quota_rejection(
+    harness: _Harness,
+    monkeypatch,
+) -> None:
+    thread_id = str(uuid.uuid4())
+    await _seed_thread(harness.seed, context=harness.seed.owner_a, thread_id=thread_id)
+    monkeypatch.setattr(
+        private_work_router,
+        "start_private_run",
+        AsyncMock(side_effect=ReliabilityQuotaExceeded("req-quota")),
+    )
+
+    response = await harness.request(
+        "POST",
+        f"/threads/{thread_id}/runs",
+        json={"input": {}},
+    )
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "code": "RELIABILITY_QUOTA_EXCEEDED",
+        "message": "Reliability quota was exceeded.",
+        "request_id": "req-quota",
+    }
 
 
 @pytest.mark.postgres
