@@ -107,6 +107,8 @@ class DispatchSeed:
         status: str = "enabled",
         agent_asset_id: uuid.UUID | None = None,
         agent_scope: str = "system",
+        schedule_type: str = "cron",
+        next_run_at: datetime | None = NOW,
     ) -> tuple[ScheduledTaskRecord, ScheduledTaskRunRecord]:
         context = context or self.context
         task_id = f"task-{uuid.uuid4().hex[:20]}"
@@ -123,10 +125,10 @@ class DispatchSeed:
                     agent_scope=agent_scope,
                     title="Private automation",
                     prompt="Process private project work.",
-                    schedule_type="cron",
-                    schedule_spec={"cron": "0 * * * *"},
+                    schedule_type=schedule_type,
+                    schedule_spec=({"cron": "0 * * * *"} if schedule_type == "cron" else {"run_at": NOW.isoformat()}),
                     timezone="UTC",
-                    next_run_at=NOW,
+                    next_run_at=next_run_at,
                 ),
             )
             if status != "enabled":
@@ -170,6 +172,15 @@ class DispatchSeed:
             record = await ScheduledTaskRunRepository(session).get(
                 self.context.resource_scope,
                 occurrence_id,
+            )
+        assert record is not None
+        return record
+
+    async def persisted_task(self, task_id: str) -> ScheduledTaskRecord:
+        async with self.factory() as session:
+            record = await ScheduledTaskRepository(session).get(
+                self.context.resource_scope,
+                task_id,
             )
         assert record is not None
         return record
@@ -715,6 +726,110 @@ async def test_reuse_thread_revalidates_active_scope_and_agent(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+@pytest.mark.parametrize("schedule_type", ["cron", "once"])
+async def test_scheduled_reuse_overlap_skips_and_settles_parent_once(
+    dispatch_seed: DispatchSeed,
+    schedule_type: str,
+) -> None:
+    seed = dispatch_seed
+    reuse_thread_id = f"reuse-overlap-{uuid.uuid4().hex}"
+    await seed.thread_service.create(
+        seed.context,
+        thread_id=reuse_thread_id,
+        agent=ThreadAgentRef(seed.database.system_agent_id, "system"),
+    )
+    next_run_at = NOW + timedelta(hours=1) if schedule_type == "cron" else None
+    task, occurrence = await seed.claimed_occurrence(
+        context_mode="reuse_thread",
+        thread_id=reuse_thread_id,
+        schedule_type=schedule_type,
+        next_run_at=next_run_at,
+    )
+    unrelated_run_id = str(uuid.uuid4())
+    await PrivateRunAdmissionService(seed.factory).admit(
+        seed.context,
+        reuse_thread_id,
+        PrivateRunCreate(run_id=unrelated_run_id, metadata={"source": "unrelated"}),
+    )
+    launch_calls: list[dict[str, object]] = []
+    dispatcher = AutomationDispatcher(
+        seed.factory,
+        thread_service=seed.thread_service,
+        launch_private_run=_real_admission_launcher(seed, launch_calls),
+        clock=lambda: NOW,
+    )
+
+    for _ in range(2):
+        with pytest.raises(AutomationConflict):
+            await dispatcher.dispatch(occurrence.id, app=SimpleNamespace())
+
+    assert len(launch_calls) == 1
+    persisted = await seed.persisted_occurrence(occurrence.id)
+    assert persisted.status == "skipped"
+    assert persisted.error_code == "AUTOMATION_OVERLAP_SKIPPED"
+    assert persisted.thread_id is None
+    assert persisted.run_id is None
+    parent = await seed.persisted_task(task.id)
+    assert parent.status == ("enabled" if schedule_type == "cron" else "cancelled")
+    assert parent.next_run_at == next_run_at
+    assert parent.last_run_at == NOW
+    assert parent.last_outcome == "skipped"
+    assert parent.last_error_code == "AUTOMATION_OVERLAP_SKIPPED"
+    assert parent.run_count == 1
+    async with seed.factory() as session:
+        deterministic = await PrivateRunRepository(session).get(
+            scope=seed.context.resource_scope,
+            run_id=deterministic_run_id(occurrence.id),
+        )
+    assert deterministic is None
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_manual_reuse_overlap_remains_rejected_and_settles_parent(
+    dispatch_seed: DispatchSeed,
+) -> None:
+    seed = dispatch_seed
+    reuse_thread_id = f"reuse-manual-overlap-{uuid.uuid4().hex}"
+    await seed.thread_service.create(
+        seed.context,
+        thread_id=reuse_thread_id,
+        agent=ThreadAgentRef(seed.database.system_agent_id, "system"),
+    )
+    task, occurrence = await seed.claimed_occurrence(
+        context_mode="reuse_thread",
+        thread_id=reuse_thread_id,
+        trigger="manual",
+        next_run_at=NOW + timedelta(hours=1),
+    )
+    await PrivateRunAdmissionService(seed.factory).admit(
+        seed.context,
+        reuse_thread_id,
+        PrivateRunCreate(run_id=str(uuid.uuid4()), metadata={"source": "manual-unrelated"}),
+    )
+    dispatcher = AutomationDispatcher(
+        seed.factory,
+        thread_service=seed.thread_service,
+        launch_private_run=_real_admission_launcher(seed, []),
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(AutomationConflict):
+        await dispatcher.dispatch(occurrence.id, app=SimpleNamespace())
+
+    persisted = await seed.persisted_occurrence(occurrence.id)
+    assert persisted.status == "rejected"
+    assert persisted.error_code == "AUTOMATION_CONFLICT"
+    parent = await seed.persisted_task(task.id)
+    assert parent.status == "enabled"
+    assert parent.last_run_at == NOW
+    assert parent.last_outcome == "rejected"
+    assert parent.last_error_code == "AUTOMATION_CONFLICT"
+    assert parent.run_count == 1
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_dispatch_rejects_definition_version_drift_with_version_conflict(
     dispatch_seed: DispatchSeed,
 ) -> None:
@@ -795,6 +910,7 @@ async def test_failure_settlement_does_not_requeue_frozen_definition(
     task = SimpleNamespace(
         id=task_id,
         status="paused",
+        schedule_type="cron",
         version=2,
         frozen_at=NOW,
         deleted_at=None,

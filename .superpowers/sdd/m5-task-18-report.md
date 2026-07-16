@@ -249,3 +249,159 @@ then set `DATABASE_URL` explicitly to
 the temporary config and database were removed.
 
 M5 remains a release candidate awaiting another independent whole-branch review.
+
+## Whole-branch third final-review repair wave
+
+The third concentrated review reported zero Critical findings, four Important
+findings, and two Minor findings. This wave is still in progress and does not mark M5
+complete.
+
+### Sequential M4 to M5 migration TDD
+
+A real PostgreSQL regression now starts from one revision-0007 database containing
+both legacy M4 private-work rows and legacy Automation rows. M4 must preserve every
+Automation row and stop at revision 0011; the subsequent M5 migration owns the
+remaining upgrade to revision 0013 and final Automation cutover marker.
+
+```text
+# RED
+1 failed in 0.98s: M4 unconditionally upgraded to head and failed safely
+
+# GREEN
+1 passed in 0.93s
+```
+
+The M4 migrator now checks both legacy Automation tables after committing its own
+marker. It returns at the M4 final revision when either contains data, while retaining
+the previous head-upgrade behavior for an empty Automation domain.
+
+### Overlap settlement TDD
+
+Concurrent scheduled reservation, scheduled reuse-thread dispatch, and manual
+reuse-thread dispatch now all prove occurrence and parent-definition settlement. Cron
+parents remain enabled and advance; once parents become terminal; every winning
+terminal CAS increments the parent exactly once.
+
+```text
+# RED
+5 failed in 1.70s: parents were not settled and reuse overlap used the wrong outcome
+
+# focused GREEN
+5 passed in 1.56s
+
+# complete occurrence, dispatcher, and reconciliation files
+60 passed in 12.94s
+```
+
+The shared settlement helper records the parent only after a successful occurrence
+terminal transition. Scheduled overlap uses `skipped` with
+`AUTOMATION_OVERLAP_SKIPPED`; manual overlap remains `rejected` with
+`AUTOMATION_CONFLICT`.
+
+### Once-delay and task-ID TDD
+
+The service-level regressions cover the configured one-time schedule boundary, zero
+writes on an invalid schedule-changing update, a title-only update within the minimum
+window, strict constructor input, Gateway config injection, and the public task-ID
+shape.
+
+```text
+# RED
+8 failed in 1.93s
+
+# focused GREEN
+8 passed in 1.84s
+
+# complete service and app-wiring files
+56 passed in 12.19s
+```
+
+`ProjectAutomationService` now receives the effective scheduler
+`min_once_delay_seconds`, rejects non-integer or negative constructor values, enforces
+the lower bound for create and schedule-changing update, and validates an update before
+cancelling queued work. Non-schedule edits preserve the existing occurrence time.
+New IDs use the strict `task-<32 lowercase UUID hex>` form.
+
+### Legacy cutover UI TDD
+
+The legacy workspace page regression returns the real structured
+`409 AUTOMATION_CUTOVER` envelope and runs in both `en-US` and `zh-CN`. It requires
+localized repository-owned copy, no raw server message, no legacy create/filter/workbench
+controls, and no non-GET scheduled-task request.
+
+```text
+# API parser RED
+1 failed; 915 passed: the structured error class was absent
+
+# API parser GREEN
+5 passed in 0.10s
+
+# browser RED
+1 failed; 1 did not run: no migration-complete state existed
+
+# browser GREEN
+2 passed in 40.2s
+```
+
+The shared Gateway error parser now preserves HTTP status and structured code while
+remaining compatible with string-detail responses. The legacy page recognizes only
+`409 + AUTOMATION_CUTOVER`, hides all legacy mutation surfaces, and renders stable English
+or Chinese migration-complete guidance without displaying server text.
+
+### Third-wave fresh full-gate evidence
+
+Every PostgreSQL command in this wave used the retained isolated cluster at
+`127.0.0.1:55435`. Integration fixtures created only generated `deerflow_test_*`
+databases. The operations gate used and then dropped
+`deerflow_test_task18_repair3_ops`; its temporary non-secret `config.yaml` was also
+removed.
+
+The first full backend run exposed two stale `SimpleNamespace` scheduler fixtures in
+`test_gateway_run_recovery.py`; both omitted the newly wired configuration field. No
+production fallback was added because real `AppConfig.scheduler` is strict. Adding the
+field to those two fixtures produced `5 passed, 1 skipped` for the affected file, then
+the required complete rerun passed.
+
+```text
+# first complete backend run
+2 failed, 7663 passed, 889 skipped, 10 warnings in 136.75s
+
+# post-fixture complete backend rerun
+7665 passed, 889 skipped, 10 warnings in 105.23s
+
+# blocking-I/O
+41 passed in 11.26s
+
+# backend lint / format
+All checks passed; 1059 files formatted
+
+# exact eight-file M1-M5 PostgreSQL gate
+33 passed in 10.07s; 0 skipped
+
+# fresh-install and legacy migration smokes
+2 passed in 1.32s; 0 skipped
+
+# operations
+doctor: Ready with 6 optional warnings
+check-db: healthy; current/head 0013_project_automation_finalize; Automation ready
+
+# frontend
+check: passed after one import-order-only correction
+format: passed
+unit: 126 files; 916 passed; 0 failed or skipped
+normal E2E: 169 passed
+independent static-build E2E: 1 passed
+
+# workspace
+git diff --check: passed
+required consistency scan: passed with no matches
+```
+
+The third review's four Important findings are covered by the sequential M4→M5
+migration, terminal occurrence/parent settlement, service-level once-delay enforcement,
+and legacy cutover UI sections above. The two Minor findings are covered by the strict
+new task-ID shape and stable repository-owned English/Chinese cutover presentation.
+Root/backend guides and the M4 runbook now also document the `0011` Automation handoff.
+
+M5 remains a release candidate pending an independent re-review of this repair wave. This
+report does not mark M5 complete or claim 5/8 or 62.5%; M6-M8 remain open.

@@ -190,6 +190,10 @@ export interface Translations {
   // Scheduled tasks
   scheduledTasks: {
     description: string;
+    migrationComplete: {
+      title: string;
+      description: string;
+    };
     scheduleType: { cron: string; once: string };
     preset: {
       label: string;

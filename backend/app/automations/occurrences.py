@@ -21,6 +21,7 @@ from app.automations.errors import (
     AutomationUnavailable,
 )
 from app.automations.models import AutomationRunView
+from app.automations.settlement import settle_created_terminal_occurrence
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
@@ -188,7 +189,8 @@ class AutomationOccurrenceService:
                         budget -= 1
 
                     occurrence = await occurrences.create(scope, request)
-                    advanced = await ScheduledTaskRepository(session).advance_after_reservation(
+                    tasks = ScheduledTaskRepository(session)
+                    advanced = await tasks.advance_after_reservation(
                         scope,
                         task_row.id,
                         expected_next_run_at=due_at,
@@ -197,6 +199,15 @@ class AutomationOccurrenceService:
                     )
                     if advanced is None:
                         raise AutomationUnavailable("scheduler")
+                    if overlapping:
+                        await settle_created_terminal_occurrence(
+                            tasks,
+                            scope,
+                            task_row,
+                            occurrence,
+                            occurred_at=now,
+                            request_id="scheduler",
+                        )
                     reserved.append(occurrence)
                 return tuple(reserved)
         except Exception as error:

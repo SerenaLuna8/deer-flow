@@ -175,6 +175,70 @@ test("loading and failed requests do not show empty task onboarding", async ({
   await expect(page.getByTestId("scheduled-task-empty")).toHaveCount(0);
 });
 
+for (const state of [
+  {
+    locale: "en-US",
+    title: "Automation migration is complete",
+    description:
+      "This legacy scheduled-task page is closed. Open a project to manage Automations.",
+  },
+  {
+    locale: "zh-CN",
+    title: "自动化迁移已完成",
+    description: "旧版定时任务页面已关闭。请进入项目管理自动化。",
+  },
+] as const) {
+  test(`legacy cutover renders only the stable ${state.locale} migration state`, async ({
+    page,
+    baseURL,
+  }) => {
+    mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
+    await page.context().addCookies([
+      {
+        name: "locale",
+        value: state.locale,
+        url: baseURL ?? "http://localhost:3000",
+      },
+    ]);
+    const requestMethods: string[] = [];
+    await page.route("**/api/scheduled-tasks**", (route) => {
+      requestMethods.push(route.request().method());
+      return route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: {
+            code: "AUTOMATION_CUTOVER",
+            message: "server text must not be rendered",
+            request_id: "req-cutover",
+          },
+        }),
+      });
+    });
+
+    await page.goto("/workspace/scheduled-tasks");
+
+    const migration = page.getByTestId("scheduled-task-migration-complete");
+    await expect(migration).toBeVisible({ timeout: 15_000 });
+    await expect(migration).toContainText(state.title);
+    await expect(migration).toContainText(state.description);
+    await expect(migration).not.toContainText(
+      "server text must not be rendered",
+    );
+    await expect(page.getByTestId("scheduled-task-load-error")).toHaveCount(0);
+    await expect(page.getByTestId("scheduled-task-create-trigger")).toHaveCount(
+      0,
+    );
+    await expect(page.getByTestId("scheduled-task-empty-action")).toHaveCount(
+      0,
+    );
+    await expect(page.getByTestId("scheduled-task-filters")).toHaveCount(0);
+    await expect(page.getByTestId("scheduled-task-workbench")).toHaveCount(0);
+    expect(requestMethods.length).toBeGreaterThan(0);
+    expect(requestMethods.every((method) => method === "GET")).toBe(true);
+  });
+}
+
 test("filters with no matches explain how to restore scheduled tasks", async ({
   page,
 }) => {

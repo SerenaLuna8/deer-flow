@@ -484,6 +484,19 @@ async def _cutover_complete(connection: AsyncConnection) -> bool:
     return value is True
 
 
+async def _automation_domain_is_empty(connection: AsyncConnection) -> bool:
+    return bool(
+        await connection.scalar(
+            text(
+                """SELECT NOT (
+                    EXISTS (SELECT 1 FROM scheduled_tasks LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM scheduled_task_runs LIMIT 1)
+                )"""
+            )
+        )
+    )
+
+
 async def _validate_owner_targets(
     connection: AsyncConnection,
     plan: PrivateWorkMigrationPlan,
@@ -1186,6 +1199,16 @@ async def run_private_work_migration(
             )
             if not await _cutover_complete(connection):
                 raise PrivateWorkMigrationError("private-work cutover marker is incomplete")
+
+        async with engine.connect() as connection:
+            if not await _automation_domain_is_empty(connection):
+                return PrivateWorkMigrationReport(
+                    mode="execute",
+                    counts=counts,
+                    source_key_hash=inventory.source_fingerprint[:12],
+                    cutover_complete=True,
+                    empty_install=not any(counts.values()),
+                )
 
         # M5 finalize requires the M4 marker to be complete. Cross that newer
         # boundary only after the private-work transaction above commits.

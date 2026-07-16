@@ -41,6 +41,7 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import { GatewayApiError } from "@/core/api/errors";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   useCreateScheduledTask,
@@ -104,6 +105,10 @@ export default function ScheduledTasksPage() {
   const threadTasksQuery = useThreadScheduledTasks(threadId);
   const data = threadId ? threadTasksQuery.data : allTasksQuery.data;
   const queryError = threadId ? threadTasksQuery.error : allTasksQuery.error;
+  const isLegacyAutomationCutover =
+    queryError instanceof GatewayApiError &&
+    queryError.status === 409 &&
+    queryError.code === "AUTOMATION_CUTOVER";
   const [createSheetOpen, setCreateSheetOpen] = useState(false);
   const createTriggerRef = useRef<HTMLButtonElement>(null);
   const createOpenerRef = useRef<HTMLButtonElement | null>(null);
@@ -226,6 +231,38 @@ export default function ScheduledTasksPage() {
     // does not wipe edits in progress.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTask?.id]);
+
+  if (isLegacyAutomationCutover) {
+    return (
+      <WorkspaceContainer>
+        <WorkspaceHeader />
+        <WorkspaceBody className="overflow-y-auto">
+          <div className="mx-auto flex w-full max-w-[1440px] min-w-0 flex-col gap-5 p-4 sm:p-6 md:p-8">
+            <header className="space-y-1">
+              <h1 className="text-2xl font-semibold tracking-tight">
+                {t.sidebar.scheduledTasks}
+              </h1>
+              <p className="text-muted-foreground text-sm">{st.description}</p>
+            </header>
+            <Empty
+              data-testid="scheduled-task-migration-complete"
+              className="bg-card/60 min-h-[320px] border"
+            >
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <CalendarClockIcon />
+                </EmptyMedia>
+                <EmptyTitle>{st.migrationComplete.title}</EmptyTitle>
+                <EmptyDescription>
+                  {st.migrationComplete.description}
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          </div>
+        </WorkspaceBody>
+      </WorkspaceContainer>
+    );
+  }
 
   return (
     <WorkspaceContainer>

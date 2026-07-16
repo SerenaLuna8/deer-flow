@@ -17,6 +17,7 @@ from app.automations.execution_authority import (
     lock_automation_execution_authority,
 )
 from app.automations.occurrences import deterministic_run_id, deterministic_thread_id
+from app.automations.settlement import settle_terminal_occurrence
 from app.private_work.run_repository import PrivateRunRecord, PrivateRunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs import (
@@ -283,13 +284,17 @@ class AutomationReconciler:
                         occurrence,
                     )
                     if denial is not None:
-                        changed = await occurrences.finish(
+                        changed = await settle_terminal_occurrence(
+                            tasks,
+                            occurrences,
                             candidate.scope,
-                            occurrence.id,
+                            task,
+                            occurrence,
                             status=denial.occurrence_status,
                             error_code=denial.error_code,
                             error_message=None,
                             finished_at=now,
+                            request_id="automation-reconciliation",
                         )
                         if not changed:
                             return "unchanged"
@@ -439,37 +444,20 @@ class AutomationReconciler:
         thread_id: str | None = None,
         run_id: str | None = None,
     ) -> bool:
-        changed = await occurrences.finish(
+        return await settle_terminal_occurrence(
+            tasks,
+            occurrences,
             scope,
-            occurrence.id,
+            task,
+            occurrence,
             status=outcome.occurrence_status,
             error_code=outcome.error_code,
             error_message=outcome.error_message,
             finished_at=finished_at,
+            request_id="automation-reconciliation",
             thread_id=thread_id,
             run_id=run_id,
         )
-        if not changed:
-            return False
-        terminal_status = None
-        if task.schedule_type == "once":
-            terminal_status = {
-                "success": "completed",
-                "failed": "failed",
-                "interrupted": "cancelled",
-                "cancelled": "cancelled",
-            }.get(outcome.occurrence_status)
-        updated = await tasks.record_automation_outcome(
-            scope,
-            task.id,
-            outcome=outcome.occurrence_status,
-            error_code=outcome.error_code,
-            occurred_at=finished_at,
-            terminal_status=terminal_status,
-        )
-        if updated is None:
-            raise AutomationUnavailable("automation-reconciliation")
-        return True
 
     @staticmethod
     def _validated_now(now: datetime) -> datetime:

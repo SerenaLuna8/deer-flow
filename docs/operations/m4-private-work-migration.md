@@ -12,6 +12,12 @@ default, recent, or unique project. If legacy filesystem, Memory, file/artifact,
 sources are non-empty, preflight fails before finalization; migrate those sources with a reviewed
 future procedure or keep the installation on the legacy writer.
 
+This command owns revisions only through the M4 final revision when legacy Automation data exists.
+After the M4 marker commits, any row in `scheduled_tasks` or `scheduled_task_runs` makes execute
+return successfully at `0011`, preserving that domain byte-for-byte for the M5 Automation
+migrator. Only when both tables are empty may the command continue the fresh-install bootstrap to
+the current head.
+
 `--backup-dir` is a reserved CLI contract in this runnable-first version. The script does not
 write a backup there and does not consume `DEER_FLOW_M4_BACKUP_KEY`. The database backup and its
 restore proof remain operator-owned and must exist outside the repository before execute.
@@ -132,7 +138,11 @@ make check-db
 Execute advances through `0008_project_private_work_expand`, writes the per-domain idempotency
 ledger, satisfies `0009_project_private_work_finalize`, upgrades through `0010` and `0011`, and
 finally writes `private_work_cutover_state.stage=cutover_complete`. A completed cutover rerun is a
-no-op.
+no-op. If either legacy Automation table contains rows, the successful report remains at `0011`;
+`make check-db` may therefore correctly report that the separate M5 Automation migration is still
+required. Keep writers stopped and follow `docs/operations/m5-automation-migration.md`. Do not run
+a generic head upgrade across those rows. An empty Automation domain may bootstrap directly to
+head.
 
 Run the fixed real-PostgreSQL probes against a disposable clone or the approved test environment,
 never by pointing pytest at the production database:
@@ -195,7 +205,7 @@ not-found response before ending the maintenance window.
 
 M4 does not provide a general backup/restore product, point-in-time recovery workflow, deletion
 tombstone replay, disaster-recovery drill, or physical retention purge. It does not migrate
-arbitrary non-empty filesystem/Memory/connection sources. M5 automation and persistent workers,
-M6 Worker/SSE/quotas/audit/general backup recovery, M7 legacy cleanup, and M8 full release
-acceptance remain separate milestones. The system must not be described as a complete multi-user
-SaaS until those gates are delivered.
+arbitrary non-empty filesystem/Memory/connection sources. Project Automation uses its separate M5
+migration and cutover; independent Workers, durable SSE, quotas, audit, and general backup recovery
+remain M6, with M7 legacy cleanup and M8 full release acceptance still separate. The system must
+not be described as a complete multi-user SaaS until those gates are delivered.

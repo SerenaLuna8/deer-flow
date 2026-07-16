@@ -25,6 +25,7 @@ from app.automations.execution_authority import (
     lock_automation_execution_authority,
 )
 from app.automations.occurrences import deterministic_run_id, deterministic_thread_id
+from app.automations.settlement import settle_terminal_occurrence
 from app.gateway.services import start_scheduled_private_run
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
@@ -458,6 +459,8 @@ class AutomationDispatcher:
                     coordinates.scope,
                     coordinates.task_id,
                 )
+                if task is None:
+                    raise AutomationUnavailable(error.request_id)
                 occurrences = ScheduledTaskRunRepository(session)
                 occurrence = await occurrences.get(
                     coordinates.scope,
@@ -467,7 +470,8 @@ class AutomationDispatcher:
                 if occurrence is None or occurrence.status != "launching":
                     return
                 denial = automation_retry_denial(authority, task, occurrence)
-                run = await PrivateRunRepository(session).get(
+                runs = PrivateRunRepository(session)
+                run = await runs.get(
                     scope=coordinates.scope,
                     run_id=coordinates.expected_run_id,
                     lock=True,
@@ -482,13 +486,17 @@ class AutomationDispatcher:
                         attach_run = True
                 if run is None and isinstance(error, AutomationUnavailable):
                     if denial is not None:
-                        await occurrences.finish(
+                        await settle_terminal_occurrence(
+                            tasks,
+                            occurrences,
                             coordinates.scope,
-                            coordinates.occurrence_id,
+                            task,
+                            occurrence,
                             status=denial.occurrence_status,
                             error_code=denial.error_code,
                             error_message=None,
                             finished_at=now,
+                            request_id=error.request_id,
                         )
                         return
                     await occurrences.requeue_launch(
@@ -499,11 +507,27 @@ class AutomationDispatcher:
                         updated_at=now,
                     )
                     return
-                await occurrences.reject_launch(
+                scheduled_reuse_overlap = (
+                    run is None
+                    and coordinates.trigger == "scheduled"
+                    and coordinates.context_mode == "reuse_thread"
+                    and coordinates.reuse_thread_id is not None
+                    and await runs.has_conflicting_active_run(
+                        scope=coordinates.scope,
+                        thread_id=coordinates.reuse_thread_id,
+                    )
+                )
+                await settle_terminal_occurrence(
+                    tasks,
+                    occurrences,
                     coordinates.scope,
-                    coordinates.occurrence_id,
-                    error_code=error.code,
+                    task,
+                    occurrence,
+                    status="skipped" if scheduled_reuse_overlap else "rejected",
+                    error_code=("AUTOMATION_OVERLAP_SKIPPED" if scheduled_reuse_overlap else error.code),
+                    error_message=None,
                     finished_at=now,
+                    request_id=error.request_id,
                     thread_id=run.thread_id if attach_run and run is not None else None,
                     run_id=run.run_id if attach_run and run is not None else None,
                 )

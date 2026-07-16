@@ -4,6 +4,7 @@ rs.mock("@/core/api/fetcher", () => ({
   fetch: rs.fn(),
 }));
 
+import { GatewayApiError } from "@/core/api/errors";
 import { fetch } from "@/core/api/fetcher";
 import {
   createScheduledTask,
@@ -107,6 +108,34 @@ describe("scheduled tasks api", () => {
     await expect(fetchScheduledTasks()).rejects.toThrow(
       "Cron expression is invalid",
     );
+  });
+
+  it("retains structured cutover status and code", async () => {
+    mockedFetch.mockResolvedValue({
+      ok: false,
+      status: 409,
+      statusText: "Conflict",
+      json: async () => ({
+        detail: {
+          code: "AUTOMATION_CUTOVER",
+          message: "Automation cutover is complete.",
+          request_id: "req-cutover",
+        },
+      }),
+    } as Response);
+
+    let error: unknown;
+    try {
+      await fetchScheduledTasks();
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(GatewayApiError);
+    expect(error).toMatchObject({
+      status: 409,
+      code: "AUTOMATION_CUTOVER",
+    });
   });
 
   it("falls back to a generic message when detail is missing", async () => {

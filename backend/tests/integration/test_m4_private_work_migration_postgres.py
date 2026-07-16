@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.bootstrap import _get_alembic_config
 from scripts import setup_postgres
+from scripts.migrate_automations import run_automation_migration
 from scripts.migrate_private_work import (
     PrivateWorkMigrationError,
     run_private_work_migration,
@@ -196,6 +197,66 @@ async def _seed_legacy_private_work(url: str) -> tuple[str, uuid.UUID]:
     finally:
         await engine.dispose()
     return owner, project
+
+
+async def _seed_legacy_automation(
+    url: str,
+    *,
+    owner: str,
+    project: uuid.UUID,
+) -> uuid.UUID:
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as connection:
+            agent_id = await connection.scalar(text("SELECT id FROM agents WHERE slug='lead-agent'"))
+            assert isinstance(agent_id, uuid.UUID)
+            version_id = await connection.scalar(
+                text("SELECT current_published_version_id FROM agents WHERE id=:agent"),
+                {"agent": agent_id},
+            )
+            assert isinstance(version_id, uuid.UUID)
+            await connection.execute(
+                text(
+                    """INSERT INTO project_system_agent_bindings
+                    (project_id,system_agent_id,system_asset_scope,agent_version_id,
+                     enabled,version,created_by_user_id,updated_by_user_id)
+                    VALUES (:project,:agent,'system',:version,true,1,:owner,:owner)"""
+                ),
+                {
+                    "project": project,
+                    "agent": agent_id,
+                    "version": version_id,
+                    "owner": owner,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO scheduled_tasks
+                    (id,user_id,thread_id,context_mode,assistant_id,title,prompt,
+                     schedule_type,schedule_spec,timezone,status,overlap_policy,
+                     next_run_at,last_run_at,last_run_id,last_thread_id,last_error,
+                     lease_owner,lease_expires_at,run_count,created_at,updated_at)
+                    VALUES
+                    ('legacy-sequential-task',:owner,'thread-1','reuse_thread',
+                     'lead-agent','Sequential title','Sequential private prompt','cron',
+                     '{"cron":"0 9 * * *"}'::json,'UTC','enabled','skip',now(),now(),
+                     'run-1','thread-1',NULL,NULL,NULL,1,now(),now())"""
+                ),
+                {"owner": owner},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO scheduled_task_runs
+                    (id,task_id,thread_id,run_id,scheduled_for,trigger,status,error,
+                     started_at,finished_at,created_at)
+                    VALUES
+                    ('legacy-sequential-run','legacy-sequential-task','thread-1','run-1',
+                     now(),'scheduled','success',NULL,now(),now(),now())"""
+                )
+            )
+            return agent_id
+    finally:
+        await engine.dispose()
 
 
 def _write_legacy_private_sqlite(path: Path, owner: str) -> None:
@@ -524,6 +585,96 @@ async def test_dry_run_is_zero_write_and_execute_migrates_core_rows_idempotently
         execute=True,
     )
     assert again.noop is True
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_sequential_m4_then_m5_migration_preserves_legacy_automation(
+    postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    await _upgrade(postgres_database_url, "0007_project_shared_assets")
+    owner, project = await _seed_legacy_private_work(postgres_database_url)
+    agent_id = await _seed_legacy_automation(
+        postgres_database_url,
+        owner=owner,
+        project=project,
+    )
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            tasks_before = (await connection.execute(text("SELECT * FROM scheduled_tasks ORDER BY id"))).mappings().all()
+            runs_before = (await connection.execute(text("SELECT * FROM scheduled_task_runs ORDER BY id"))).mappings().all()
+    finally:
+        await engine.dispose()
+
+    m4_result = await run_private_work_migration(
+        postgres_database_url,
+        owner_map={owner: project},
+        repo_root=tmp_path / "repo",
+        data_root=tmp_path / "data",
+        backup_dir=tmp_path / "m4-backup",
+        execute=True,
+    )
+    assert m4_result.cutover_complete is True
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0011_private_artifact_tombstone"
+            assert await connection.scalar(text("SELECT stage FROM private_work_cutover_state WHERE id=1")) == "cutover_complete"
+            assert (await connection.execute(text("SELECT * FROM scheduled_tasks ORDER BY id"))).mappings().all() == tasks_before
+            assert (await connection.execute(text("SELECT * FROM scheduled_task_runs ORDER BY id"))).mappings().all() == runs_before
+    finally:
+        await engine.dispose()
+
+    backup_dir = tmp_path / "m5-backup"
+    backup_dir.mkdir()
+    (backup_dir / "restore-proof.txt").write_text(
+        "verified external PostgreSQL backup and restore rehearsal",
+        encoding="utf-8",
+    )
+    owner_map = {
+        owner: {
+            "project_id": str(project),
+            "fresh_thread_agent": {
+                "asset_id": str(agent_id),
+                "scope": "system",
+            },
+        }
+    }
+    preview = await run_automation_migration(
+        postgres_database_url,
+        owner_map=owner_map,
+        backup_dir=backup_dir,
+        execute=False,
+    )
+    assert preview.counts == {"scheduled_tasks": 1, "scheduled_task_runs": 1}
+    executed = await run_automation_migration(
+        postgres_database_url,
+        owner_map=owner_map,
+        backup_dir=backup_dir,
+        execute=True,
+    )
+    assert executed.cutover_complete is True
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013_project_automation_finalize"
+            marker = (
+                await connection.execute(
+                    text(
+                        """SELECT stage,final_schema_probe_complete,cutover_at
+                        FROM automation_cutover_state WHERE id=1"""
+                    )
+                )
+            ).one()
+            assert marker.stage == "cutover_complete"
+            assert marker.final_schema_probe_complete is True
+            assert marker.cutover_at is not None
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.postgres

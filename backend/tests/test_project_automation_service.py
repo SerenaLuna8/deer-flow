@@ -225,6 +225,31 @@ async def test_definition_reads_are_project_and_owner_scoped(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_create_uses_prefixed_uuid_hex_task_id(
+    automation_service_seed: AutomationServiceSeed,
+) -> None:
+    seed = automation_service_seed
+    task = await ProjectAutomationService(seed.factory, seed.clock).create(
+        seed.owner_context,
+        seed.create_command(),
+    )
+
+    assert task.id == f"task-{uuid.UUID(task.id.removeprefix('task-')).hex}"
+
+
+@pytest.mark.parametrize("invalid_delay", [-1, True, 1.5])
+def test_min_once_delay_requires_nonnegative_plain_integer(
+    invalid_delay: object,
+) -> None:
+    with pytest.raises(ValueError, match="min_once_delay_seconds"):
+        ProjectAutomationService(
+            FailIfCalledSessionFactory(),  # type: ignore[arg-type]
+            min_once_delay_seconds=invalid_delay,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_create_requires_server_issued_context_and_executable_exact_agent(
     automation_service_seed: AutomationServiceSeed,
 ) -> None:
@@ -484,6 +509,131 @@ async def test_create_rejects_invalid_schedule_and_thread_shapes(
     with pytest.raises(AutomationInvalid) as raised:
         await service.create(seed.owner_context, seed.create_command(**changes))
     assert raised.value.request_id == seed.owner_context.request_id
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_once_create_enforces_configured_minimum_delay_boundary(
+    automation_service_seed: AutomationServiceSeed,
+) -> None:
+    seed = automation_service_seed
+    service = ProjectAutomationService(
+        seed.factory,
+        seed.clock,
+        min_once_delay_seconds=60,
+    )
+
+    with pytest.raises(AutomationInvalid) as raised:
+        await service.create(
+            seed.owner_context,
+            seed.create_command(
+                schedule_type="once",
+                schedule_spec={"run_at": (NOW + timedelta(seconds=59)).isoformat()},
+            ),
+        )
+    assert raised.value.request_id == seed.owner_context.request_id
+    assert await service.list(seed.owner_context, limit=50, offset=0) == ()
+
+    created = await service.create(
+        seed.owner_context,
+        seed.create_command(
+            schedule_type="once",
+            schedule_spec={"run_at": (NOW + timedelta(seconds=60)).isoformat()},
+        ),
+    )
+    assert created.next_run_at == NOW + timedelta(seconds=60)
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_once_schedule_update_validates_delay_before_any_write(
+    automation_service_seed: AutomationServiceSeed,
+) -> None:
+    seed = automation_service_seed
+    service = ProjectAutomationService(
+        seed.factory,
+        seed.clock,
+        min_once_delay_seconds=60,
+    )
+    task = await seed.create_task(
+        schedule_type="once",
+        schedule_spec={"run_at": (NOW + timedelta(hours=2)).isoformat()},
+    )
+    queued = await seed.create_occurrence(task, status="queued")
+    async with seed.factory() as session:
+        task_before = await ScheduledTaskRepository(session).get(
+            seed.owner_context.resource_scope,
+            task.id,
+        )
+        occurrence_before = await ScheduledTaskRunRepository(session).get(
+            seed.owner_context.resource_scope,
+            queued.id,
+        )
+    assert task_before is not None
+    assert occurrence_before is not None
+
+    with pytest.raises(AutomationInvalid):
+        await service.update(
+            seed.owner_context,
+            task.id,
+            AutomationChanges(
+                expected_version=task.version,
+                schedule_spec={"run_at": (NOW + timedelta(seconds=59)).isoformat()},
+            ),
+        )
+
+    async with seed.factory() as session:
+        task_after = await ScheduledTaskRepository(session).get(
+            seed.owner_context.resource_scope,
+            task.id,
+        )
+        occurrence_after = await ScheduledTaskRunRepository(session).get(
+            seed.owner_context.resource_scope,
+            queued.id,
+        )
+    assert task_after == task_before
+    assert occurrence_after == occurrence_before
+
+    updated = await service.update(
+        seed.owner_context,
+        task.id,
+        AutomationChanges(
+            expected_version=task.version,
+            schedule_spec={"run_at": (NOW + timedelta(seconds=60)).isoformat()},
+        ),
+    )
+    assert updated.next_run_at == NOW + timedelta(seconds=60)
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_once_title_only_update_near_existing_run_is_not_delay_validated(
+    automation_service_seed: AutomationServiceSeed,
+) -> None:
+    seed = automation_service_seed
+    service = ProjectAutomationService(
+        seed.factory,
+        seed.clock,
+        min_once_delay_seconds=60,
+    )
+    run_at = NOW + timedelta(hours=2)
+    task = await service.create(
+        seed.owner_context,
+        seed.create_command(
+            schedule_type="once",
+            schedule_spec={"run_at": run_at.isoformat()},
+        ),
+    )
+    seed.clock.now = run_at - timedelta(seconds=30)
+
+    updated = await service.update(
+        seed.owner_context,
+        task.id,
+        AutomationChanges(expected_version=task.version, title="Near run"),
+    )
+
+    assert updated.title == "Near run"
+    assert updated.next_run_at == task.next_run_at
 
 
 @pytest.mark.postgres

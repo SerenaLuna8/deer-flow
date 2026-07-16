@@ -385,6 +385,7 @@ async def test_automation_reconciliation_failure_blocks_generic_orphan_mutation(
             poll_interval_seconds=5,
             lease_seconds=120,
             max_concurrent_runs=3,
+            min_once_delay_seconds=60,
         ),
     )
     stream_bridge = _FakeStreamBridge()
@@ -489,6 +490,7 @@ async def test_automation_reconciliation_precedes_generic_orphan_recovery(
             poll_interval_seconds=5,
             lease_seconds=120,
             max_concurrent_runs=3,
+            min_once_delay_seconds=60,
         ),
     )
     order: list[str] = []

@@ -157,7 +157,9 @@ server-side slug paging 或 enter。静态独立 build/browser 门禁必须同�
 Automation 的所有 query/mutation key 必须同时以认证 account UUID 和 entered project UUID 开头；
 无论 account 还是 project 变化，都必须先 cancel in-flight query，再清理 scoped query、mutation、
 client 与 reconnect 状态。Viewer 仅能读取自己的 definition/history，不能显示 mutation 或 manual
-trigger 控件。当前前端是等待 Task 18 独立终审的 M5 release candidate；独立 Worker、持久化 SSE、
+trigger 控件。M5 cutover 后 legacy `/workspace/scheduled-tasks` 只根据结构化
+`409 AUTOMATION_CUTOVER` 显示本地化迁移完成说明，不显示服务端文本或任何 legacy mutation 控件。
+当前前端是等待 Task 18 独立终审的 M5 release candidate；独立 Worker、持久化 SSE、
 通用 jobs/retries、配额、审计与通用备份恢复仍属于 M6。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。

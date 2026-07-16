@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -70,9 +70,14 @@ class ProjectAutomationService:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        *,
+        min_once_delay_seconds: int = 60,
     ) -> None:
+        if type(min_once_delay_seconds) is not int or min_once_delay_seconds < 0:
+            raise ValueError("min_once_delay_seconds must be a non-negative integer")
         self._session_factory = session_factory
         self._clock = clock
+        self._min_once_delay_seconds = min_once_delay_seconds
         self._revalidator = PrivateWorkRevalidator()
         self._resolver = ProjectAssetResolver(session_factory)
 
@@ -112,10 +117,16 @@ class ProjectAutomationService:
                 )
                 if next_run_at is None:
                     raise AutomationInvalid(context.request_id)
+                self._validate_once_delay(
+                    context.request_id,
+                    command.schedule_type,
+                    next_run_at,
+                    now,
+                )
                 record = await ScheduledTaskRepository(session).create(
                     context.resource_scope,
                     ScheduledTaskCreate(
-                        task_id=str(uuid.uuid4()),
+                        task_id=f"task-{uuid.uuid4().hex}",
                         thread_id=command.thread_id,
                         context_mode=command.context_mode,
                         agent_asset_id=command.agent_asset_id,
@@ -217,6 +228,12 @@ class ProjectAutomationService:
                     changes.expected_version,
                 )
                 now = self._now(context.request_id)
+                values = self._update_values(
+                    context.request_id,
+                    task,
+                    changes,
+                    now,
+                )
                 await self._prepare_mutation(
                     session,
                     context,
@@ -225,12 +242,6 @@ class ProjectAutomationService:
                     now=now,
                 )
                 await self._validate_target_record(session, context, current, task)
-                values = self._update_values(
-                    context.request_id,
-                    task,
-                    changes,
-                    now,
-                )
                 updated = await ScheduledTaskRepository(session).update(
                     context.resource_scope,
                     task.id,
@@ -524,8 +535,6 @@ class ProjectAutomationService:
             schedule_spec = normalized
             values["schedule_spec"] = dict(normalized)
             values["timezone"] = timezone
-
-        if task.status == "enabled":
             next_run_at = self._next_occurrence(
                 request_id,
                 task.schedule_type,
@@ -535,19 +544,24 @@ class ProjectAutomationService:
             )
             if next_run_at is None:
                 raise AutomationOnceExpired(request_id)
-            values["next_run_at"] = next_run_at
-        elif schedule_changed:
-            next_run_at = self._next_occurrence(
+            self._validate_once_delay(
                 request_id,
                 task.schedule_type,
-                schedule_spec,
-                timezone,
+                next_run_at,
                 now,
             )
-            if next_run_at is None:
-                raise AutomationOnceExpired(request_id)
-            values["next_run_at"] = None
+            values["next_run_at"] = next_run_at if task.status == "enabled" else None
         return values
+
+    def _validate_once_delay(
+        self,
+        request_id: str,
+        schedule_type: str,
+        next_run_at: datetime,
+        now: datetime,
+    ) -> None:
+        if schedule_type == "once" and next_run_at < now + timedelta(seconds=self._min_once_delay_seconds):
+            raise AutomationInvalid(request_id)
 
     @classmethod
     def _validated_create(

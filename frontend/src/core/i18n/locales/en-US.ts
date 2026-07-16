@@ -252,6 +252,11 @@ export const enUS: Translations = {
   // Scheduled tasks
   scheduledTasks: {
     description: "Run tasks on a schedule and review every result.",
+    migrationComplete: {
+      title: "Automation migration is complete",
+      description:
+        "This legacy scheduled-task page is closed. Open a project to manage Automations.",
+    },
     scheduleType: {
       cron: "Recurring",
       once: "One-time",

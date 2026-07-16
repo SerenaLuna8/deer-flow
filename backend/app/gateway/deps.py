@@ -358,7 +358,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         else:
             app.state.automation_scheduler_ownership = AutomationSchedulerOwnership(persistence_engine)
         app.state.automation_cutover_guard = AutomationCutoverGuard(sf)
-        app.state.automation_service = ProjectAutomationService(sf)
+        app.state.automation_service = ProjectAutomationService(
+            sf,
+            min_once_delay_seconds=effective_scheduler_config.min_once_delay_seconds,
+        )
         app.state.automation_readiness_service = AutomationReadinessService(scheduler_status_provider=lambda: app.state.scheduled_task_service.status)
         app.state.automation_occurrence_service = AutomationOccurrenceService(
             sf,

@@ -243,23 +243,38 @@ async def test_once_due_reservation_keeps_one_overdue_history_and_clears_next_ru
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_scheduled_overlap_writes_terminal_skipped_history_without_using_cap(
+@pytest.mark.parametrize("schedule_type", ["cron", "once"])
+async def test_scheduled_overlap_settles_terminal_history_and_parent_once(
     occurrence_seed: OccurrenceSeed,
+    schedule_type: str,
 ) -> None:
     seed = occurrence_seed
-    task = await seed.create_task()
+    task = await seed.create_task(
+        schedule_type=schedule_type,
+        schedule_spec=({"cron": "0 * * * *"} if schedule_type == "cron" else {"run_at": DUE_AT.isoformat()}),
+    )
     await seed.create_occurrence(task, status="running", scheduled_for=DUE_AT - timedelta(hours=1), suffix="running")
+    services = (
+        AutomationOccurrenceService(seed.factory, max_concurrent_runs=1),
+        AutomationOccurrenceService(seed.factory, max_concurrent_runs=1),
+    )
 
-    reserved = await AutomationOccurrenceService(seed.factory, max_concurrent_runs=1).reserve_due(now=NOW, limit=10)
+    batches = await asyncio.gather(*(service.reserve_due(now=NOW, limit=10) for service in services))
 
-    assert len(reserved) == 1
-    assert reserved[0].status == "skipped"
+    reserved = tuple(item for batch in batches for item in batch)
+    assert len(reserved) == 1 and reserved[0].status == "skipped"
     rows = await seed.occurrences(task.id)
     assert {row.status for row in rows} == {"running", "skipped"}
     skipped = next(row for row in rows if row.status == "skipped")
     assert skipped.error_code == "AUTOMATION_OVERLAP_SKIPPED"
     assert skipped.finished_at == NOW
-    assert (await seed.task(task.id)).next_run_at is not None
+    persisted = await seed.task(task.id)
+    assert persisted.status == ("enabled" if schedule_type == "cron" else "cancelled")
+    assert persisted.next_run_at is not None and persisted.next_run_at > NOW if schedule_type == "cron" else persisted.next_run_at is None
+    assert persisted.last_run_at == NOW
+    assert persisted.last_outcome == "skipped"
+    assert persisted.last_error_code == "AUTOMATION_OVERLAP_SKIPPED"
+    assert persisted.run_count == 1
 
 
 @pytest.mark.postgres

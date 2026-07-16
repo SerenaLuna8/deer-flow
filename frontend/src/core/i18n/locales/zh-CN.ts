@@ -243,6 +243,10 @@ export const zhCN: Translations = {
   // 定时任务
   scheduledTasks: {
     description: "按计划自动运行任务，并查看每次执行结果。",
+    migrationComplete: {
+      title: "自动化迁移已完成",
+      description: "旧版定时任务页面已关闭。请进入项目管理自动化。",
+    },
     scheduleType: {
       cron: "重复",
       once: "单次",

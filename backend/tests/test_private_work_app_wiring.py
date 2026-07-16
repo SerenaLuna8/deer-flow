@@ -25,6 +25,7 @@ from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.private_work.thread_service import PrivateThreadService
 from app.scheduler import ScheduledTaskService
+from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
 from deerflow.runtime.events.store.db import DbRunEventStore
 
@@ -55,6 +56,7 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
             max_trace_content=321,
         ),
         stream_bridge=None,
+        scheduler=SchedulerConfig(min_once_delay_seconds=73),
     )
     session_factory = MagicMock(name="session_factory")
 
@@ -123,6 +125,7 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
             assert app.state.private_run_event_store._max_trace_content == 321
 
             assert isinstance(app.state.automation_cutover_guard, AutomationCutoverGuard)
+            assert app.state.automation_service._min_once_delay_seconds == 73
             assert isinstance(
                 app.state.automation_readiness_service,
                 AutomationReadinessService,

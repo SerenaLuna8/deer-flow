@@ -175,7 +175,9 @@ These apply repo-wide; module guides own the module-specific detail.
   测试中明确 skip，M1–M5 release evidence 必须提供该变量并保持 0 skip；CI 必须在进入 pytest 前硬失败。
 - **M4 private-work cutover 运维** — `migrate-private-work` 使用显式 owner UUID→active project UUID
   map；先 dry-run，再在停止 Gateway/Scheduler/channel/embedded writers 的维护窗口 execute，随后运行
-  `make check-db` 与 M1–M4 probes。当前 runnable-first CLI 不写 `--backup-dir`、不消费
+  `make check-db` 与 M1–M4 probes。M4 marker 完成后，若 legacy Automation 任一表非空，命令固定停在
+  `0011` 并保留原行，由后续 `migrate-automations` 独占 `0012/0013`；仅 Automation 空域可继续完成
+  head bootstrap。当前 runnable-first CLI 不写 `--backup-dir`、不消费
   `DEER_FLOW_M4_BACKUP_KEY`，因此 operator 必须在仓库外保留数据库备份证明；完整故障决策见
   `docs/operations/m4-private-work-migration.md`。
 - **M3 asset cutover 运维** — `migrate-assets` 扫描 repo 默认/system Agent、`skills/public`、
