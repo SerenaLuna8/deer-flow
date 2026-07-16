@@ -358,6 +358,51 @@ def _add_nullable_execution_columns() -> None:
 
 
 def _add_durable_stream_terminal_invariant() -> None:
+    op.create_table(
+        "thread_event_sequences",
+        sa.Column("project_id", sa.Uuid(), nullable=False),
+        sa.Column("owner_user_id", sa.String(36), nullable=False),
+        sa.Column("thread_id", sa.String(64), nullable=False),
+        sa.Column(
+            "high_watermark",
+            sa.BigInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "high_watermark >= 0",
+            name="ck_thread_event_sequences_high_watermark",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id"],
+            [
+                "threads_meta.project_id",
+                "threads_meta.owner_user_id",
+                "threads_meta.thread_id",
+            ],
+            name="fk_thread_event_sequences_thread",
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint(
+            "project_id",
+            "owner_user_id",
+            "thread_id",
+        ),
+    )
+    op.execute(
+        sa.text(
+            """INSERT INTO thread_event_sequences
+               (project_id,owner_user_id,thread_id,high_watermark)
+               SELECT t.project_id,t.owner_user_id,t.thread_id,
+                      COALESCE(MAX(e.seq),0)
+               FROM threads_meta t
+               LEFT JOIN run_events e
+                 ON e.project_id=t.project_id
+                AND e.owner_user_id=t.owner_user_id
+                AND e.thread_id=t.thread_id
+               GROUP BY t.project_id,t.owner_user_id,t.thread_id"""
+        )
+    )
     op.create_index(
         "uq_run_events_stream_terminal",
         "run_events",

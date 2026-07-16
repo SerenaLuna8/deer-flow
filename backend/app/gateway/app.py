@@ -451,6 +451,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=[
+                "Content-Location",
+                "Location",
+                "Retry-After",
+                "X-Trace-Id",
+            ],
         )
 
     # Request trace correlation: when logging.enhance.enabled=true, bind one

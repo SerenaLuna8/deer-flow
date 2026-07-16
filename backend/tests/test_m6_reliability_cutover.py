@@ -23,6 +23,7 @@ from app.reliability.errors import (
     ReliabilityError,
     ReliabilityForbidden,
     ReliabilityInvalid,
+    ReliabilityInvalidStreamCursor,
     ReliabilityMigrationRequired,
     ReliabilityNotFound,
     ReliabilityQuotaExceeded,
@@ -45,6 +46,7 @@ def test_m6_reliability_contract_modules_exist() -> None:
 
 def test_reliability_errors_have_exact_safe_http_mapping() -> None:
     cases = (
+        (ReliabilityInvalidStreamCursor, 400),
         (ReliabilityNotFound, 404),
         (ReliabilityForbidden, 403),
         (ReliabilityConflict, 409),
@@ -64,6 +66,10 @@ def test_reliability_errors_have_exact_safe_http_mapping() -> None:
             "message": error_type.public_message,
             "request_id": "request-1",
         }
+        if expected_status in {429, 503}:
+            assert mapped.headers == {"Retry-After": "1"}
+        else:
+            assert mapped.headers is None
 
     class UnapprovedReliabilityError(ReliabilityError):
         pass
@@ -88,6 +94,7 @@ async def test_reliability_http_handler_serializes_top_level_contract_only() -> 
         response = await client.get("/failure")
 
     assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"
     assert response.json() == {
         "code": "WORKER_UNAVAILABLE",
         "message": "No Worker is currently available.",

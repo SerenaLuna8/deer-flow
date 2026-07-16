@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 RELIABILITY_ERROR_STATUS = {
+    "INVALID_STREAM_CURSOR": 400,
     "RELIABILITY_NOT_FOUND": 404,
     "RELIABILITY_FORBIDDEN": 403,
     "RELIABILITY_CONFLICT": 409,
@@ -29,6 +30,11 @@ class ReliabilityError(Exception):
 class ReliabilityNotFound(ReliabilityError):
     code = "RELIABILITY_NOT_FOUND"
     public_message = "Reliability resource was not found."
+
+
+class ReliabilityInvalidStreamCursor(ReliabilityError):
+    code = "INVALID_STREAM_CURSOR"
+    public_message = "Stream cursor is invalid."
 
 
 class ReliabilityForbidden(ReliabilityError):
@@ -79,6 +85,7 @@ __all__ = [
     "ReliabilityError",
     "ReliabilityForbidden",
     "ReliabilityInvalid",
+    "ReliabilityInvalidStreamCursor",
     "ReliabilityMigrationRequired",
     "ReliabilityNotFound",
     "ReliabilityQuotaExceeded",

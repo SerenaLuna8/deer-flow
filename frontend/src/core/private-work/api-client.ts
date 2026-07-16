@@ -14,6 +14,60 @@ import {
 
 const projectClients = new Map<string, LangGraphClient>();
 const projectThreadVersions = new Map<string, Map<string, number>>();
+const projectStreamCursorStates = new Map<string, ProjectStreamCursorState>();
+const CANONICAL_POSITIVE_EVENT_ID = /^[1-9][0-9]*$/;
+
+export type ProjectStreamCursorState = {
+  lastEventId: number;
+  terminalRunId: string | null;
+};
+
+export type ProjectStreamFrame = {
+  id?: string;
+  event: string;
+  data: unknown;
+};
+
+export type ProjectStreamFrameDecision = {
+  accepted: boolean;
+  state: ProjectStreamCursorState;
+};
+
+export function emptyProjectStreamCursorState(): ProjectStreamCursorState {
+  return { lastEventId: 0, terminalRunId: null };
+}
+
+export function acceptProjectStreamFrame(
+  state: ProjectStreamCursorState,
+  frame: ProjectStreamFrame,
+  runId: string,
+): ProjectStreamFrameDecision {
+  if (
+    typeof frame.id !== "string" ||
+    !CANONICAL_POSITIVE_EVENT_ID.test(frame.id)
+  ) {
+    return { accepted: false, state };
+  }
+  const eventId = Number(frame.id);
+  if (!Number.isSafeInteger(eventId) || eventId <= state.lastEventId) {
+    return { accepted: false, state };
+  }
+  return {
+    accepted: true,
+    state: {
+      lastEventId: eventId,
+      terminalRunId:
+        frame.event === "end" && runId.length > 0 ? runId : state.terminalRunId,
+    },
+  };
+}
+
+export function shouldReconnectProjectStream(
+  state: ProjectStreamCursorState,
+  runId: string,
+): boolean {
+  return state.terminalRunId !== runId;
+}
 
 const privateThreadSchema = z
   .object({
@@ -344,6 +398,146 @@ function projectReconnectKey(
   return `lg:stream:account:${scope.accountId}:project:${scope.projectId}:${key.slice("lg:stream:".length)}`;
 }
 
+function projectReconnectPrefix(scope: ProjectClientScope): string {
+  return `lg:stream:account:${scope.accountId}:project:${scope.projectId}:`;
+}
+
+export function projectStreamCursorStorageKey(
+  scope: ProjectClientScope,
+  threadId: string,
+): string {
+  const parsed = projectClientScopeSchema.parse(scope);
+  const selectedThreadId = z.string().min(1).parse(threadId);
+  return `${projectReconnectPrefix(parsed)}cursor:${selectedThreadId}`;
+}
+
+function readProjectStreamCursorState(
+  scope: ProjectClientScope,
+  threadId: string,
+): ProjectStreamCursorState {
+  const key = projectStreamCursorStorageKey(scope, threadId);
+  const cached = projectStreamCursorStates.get(key);
+  if (cached) return cached;
+
+  const storage = browserSessionStorage();
+  if (storage) {
+    try {
+      const raw = storage.getItem(key);
+      if (raw) {
+        const value: unknown = JSON.parse(raw);
+        if (typeof value === "object" && value !== null) {
+          const lastEventId = Reflect.get(value, "lastEventId");
+          const terminalRunId = Reflect.get(value, "terminalRunId");
+          if (
+            Number.isSafeInteger(lastEventId) &&
+            typeof lastEventId === "number" &&
+            lastEventId >= 0 &&
+            (terminalRunId === null || typeof terminalRunId === "string")
+          ) {
+            const state = { lastEventId, terminalRunId };
+            projectStreamCursorStates.set(key, state);
+            return state;
+          }
+        }
+      }
+    } catch {
+      // A damaged browser entry is ignored and replaced after the next frame.
+    }
+  }
+  const state = emptyProjectStreamCursorState();
+  projectStreamCursorStates.set(key, state);
+  return state;
+}
+
+function writeProjectStreamCursorState(
+  scope: ProjectClientScope,
+  threadId: string,
+  state: ProjectStreamCursorState,
+): void {
+  const key = projectStreamCursorStorageKey(scope, threadId);
+  projectStreamCursorStates.set(key, state);
+  try {
+    browserSessionStorage()?.setItem(key, JSON.stringify(state));
+  } catch {
+    // The in-memory cursor still protects this mounted client from duplicates.
+  }
+}
+
+function streamFrameRunId(frame: ProjectStreamFrame): string | null {
+  if (frame.event !== "metadata") return null;
+  if (typeof frame.data !== "object" || frame.data === null) return null;
+  const runId = Reflect.get(frame.data, "run_id");
+  return typeof runId === "string" && runId.length > 0 ? runId : null;
+}
+
+function installProjectStreamAdapter(
+  client: LangGraphClient,
+  scope: ProjectClientScope,
+): void {
+  const reconnectStorage = projectReconnectStorage(scope);
+  const originalRunStream = client.runs.stream.bind(client.runs);
+  client.runs.stream = async function* (threadId, assistantId, payload) {
+    if (threadId == null) {
+      yield* originalRunStream(threadId, assistantId, payload);
+      return;
+    }
+
+    let state = readProjectStreamCursorState(scope, threadId);
+    if (state.terminalRunId !== null) {
+      state = { ...state, terminalRunId: null };
+      writeProjectStreamCursorState(scope, threadId, state);
+    }
+    let runId = "";
+    for await (const frame of originalRunStream(
+      threadId,
+      assistantId,
+      payload,
+    )) {
+      runId = streamFrameRunId(frame) ?? runId;
+      const decision = acceptProjectStreamFrame(state, frame, runId);
+      if (!decision.accepted) continue;
+      state = decision.state;
+      writeProjectStreamCursorState(scope, threadId, state);
+      if (state.terminalRunId !== null) {
+        reconnectStorage.removeItem(`lg:stream:${threadId}`);
+      }
+      yield frame;
+    }
+  } as typeof client.runs.stream;
+
+  const originalJoinStream = client.runs.joinStream.bind(client.runs);
+  client.runs.joinStream = async function* (threadId, runId, options) {
+    if (threadId == null) {
+      yield* originalJoinStream(threadId, runId, options);
+      return;
+    }
+
+    let state = readProjectStreamCursorState(scope, threadId);
+    if (!shouldReconnectProjectStream(state, runId)) {
+      reconnectStorage.removeItem(`lg:stream:${threadId}`);
+      return;
+    }
+    const selectedOptions =
+      typeof AbortSignal !== "undefined" && options instanceof AbortSignal
+        ? { signal: options, lastEventId: String(state.lastEventId) }
+        : { ...options, lastEventId: String(state.lastEventId) };
+    for await (const frame of originalJoinStream(
+      threadId,
+      runId,
+      selectedOptions,
+    )) {
+      const decision = acceptProjectStreamFrame(state, frame, runId);
+      if (!decision.accepted) continue;
+      state = decision.state;
+      writeProjectStreamCursorState(scope, threadId, state);
+      if (state.terminalRunId === runId) {
+        reconnectStorage.removeItem(`lg:stream:${threadId}`);
+      }
+      yield frame;
+    }
+  } as typeof client.runs.joinStream;
+}
+
 export function projectReconnectStorage(
   scope: ProjectClientScope,
   storageOverride?: Pick<Storage, "getItem" | "setItem" | "removeItem">,
@@ -365,9 +559,12 @@ export function projectReconnectStorage(
 
 export function clearProjectReconnectStorage(scope: ProjectClientScope): void {
   const parsed = projectClientScopeSchema.parse(scope);
+  const prefix = projectReconnectPrefix(parsed);
+  for (const key of projectStreamCursorStates.keys()) {
+    if (key.startsWith(prefix)) projectStreamCursorStates.delete(key);
+  }
   const storage = browserSessionStorage();
   if (!storage) return;
-  const prefix = `lg:stream:account:${parsed.accountId}:project:${parsed.projectId}:`;
   try {
     const keys = Array.from({ length: storage.length }, (_, index) =>
       storage.key(index),
@@ -403,6 +600,7 @@ export function getProjectAPIClient(
       runMetadataStorage: projectReconnectStorage(parsed),
     });
     installProjectThreadAdapter(client, parsed);
+    installProjectStreamAdapter(client, parsed);
     projectClients.set(key, client);
   }
   return client;

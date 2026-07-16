@@ -146,6 +146,13 @@ def test_gateway_cors_allows_configured_origin():
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "https://app.example"
     assert response.headers["access-control-allow-credentials"] == "true"
+    exposed = {value.strip().lower() for value in response.headers["access-control-expose-headers"].split(",")}
+    assert {
+        "content-location",
+        "location",
+        "retry-after",
+        "x-trace-id",
+    } <= exposed
 
 
 def test_gateway_cors_rejects_unconfigured_origin():

@@ -16,6 +16,7 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.bootstrap import _get_alembic_config
 
 M6_TABLES = {
+    "thread_event_sequences",
     "jobs",
     "job_attempts",
     "dead_jobs",
@@ -63,6 +64,17 @@ def test_m6_job_catalog_pins_authority_and_lease_constraints() -> None:
     }
     assert any(isinstance(constraint, UniqueConstraint) and tuple(column.name for column in constraint.columns) == ("job_type", "idempotency_key") for constraint in jobs.constraints)
     assert {index.name for index in jobs.indexes} >= {"ix_jobs_claim", "ix_jobs_active_lease"}
+
+
+def test_m6_thread_event_sequence_catalog_pins_deletion_stable_cursor() -> None:
+    sequences = Base.metadata.tables["thread_event_sequences"]
+    assert set(sequences.primary_key.columns.keys()) == {
+        "project_id",
+        "owner_user_id",
+        "thread_id",
+    }
+    assert "high_watermark" in sequences.columns
+    assert {constraint.name for constraint in sequences.constraints if isinstance(constraint, CheckConstraint)} >= {"ck_thread_event_sequences_high_watermark"}
 
 
 def test_m6_existing_rows_receive_nullable_job_authority_columns() -> None:

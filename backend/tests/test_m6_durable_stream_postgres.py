@@ -16,6 +16,7 @@ from deerflow.runtime.events.models import (
     StreamFrame,
     StreamLeaseProof,
     StreamScopeRequired,
+    StreamWriteAuthorizationRevoked,
 )
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.stream_bridge.postgres import (
@@ -61,6 +62,26 @@ async def _seed_run(seed, *, thread_id: str, run_id: str) -> None:
             thread_id=thread_id,
             request=PrivateRunCreate(run_id=run_id),
         )
+
+
+async def _wait_for_advisory_wait(factory) -> None:
+    for _ in range(200):
+        async with factory() as session:
+            waiting = await session.scalar(
+                text(
+                    """SELECT EXISTS (
+                        SELECT 1 FROM pg_stat_activity
+                        WHERE datname=current_database()
+                          AND pid<>pg_backend_pid()
+                          AND wait_event_type='Lock'
+                          AND wait_event='advisory'
+                    )"""
+                )
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("stream repair did not wait on the thread advisory lock")
 
 
 @pytest.mark.postgres
@@ -113,6 +134,129 @@ async def test_frames_survive_bridge_restart_with_gap_free_decimal_cursor(
         ]
         assert [frame.data for frame in final_page] == [{"delta": "4"}]
     finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_thread_cursor_high_watermark_survives_run_event_retention(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    thread_id = f"m6-stream-retention-{uuid.uuid4()}"
+    first_run_id = str(uuid.uuid4())
+    second_run_id = str(uuid.uuid4())
+    try:
+        await _seed_run(seed, thread_id=thread_id, run_id=first_run_id)
+        bridge = PostgresStreamBridge(seed.factory)
+        await bridge.publish_frame(
+            seed.owner_a_scope,
+            thread_id,
+            first_run_id,
+            StreamFrame(event="updates", data={"delta": "old"}),
+        )
+        old_terminal = await bridge.publish_terminal(
+            seed.owner_a_scope,
+            thread_id,
+            first_run_id,
+            status="completed",
+        )
+
+        async with seed.factory() as session, session.begin():
+            repository = PrivateRunRepository(session)
+            assert await repository.delete(
+                scope=seed.owner_a_scope,
+                run_id=first_run_id,
+            )
+            await repository.create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                request=PrivateRunCreate(run_id=second_run_id),
+            )
+
+        new_frame = await bridge.publish_frame(
+            seed.owner_a_scope,
+            thread_id,
+            second_run_id,
+            StreamFrame(event="updates", data={"delta": "new"}),
+        )
+        replay = await bridge.read_after(
+            seed.owner_a_scope,
+            thread_id,
+            cursor=int(old_terminal.id),
+            limit=10,
+            run_id=second_run_id,
+        )
+
+        assert int(new_frame.id) > int(old_terminal.id)
+        assert len(replay) == 1
+        assert replay[0].id == new_frame.id
+        assert replay[0].run_id == second_run_id
+        assert replay[0].data == {"delta": "new"}
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_terminal_repair_revalidates_governance_after_thread_lock_wait(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    thread_id = f"m6-stream-repair-revoke-{uuid.uuid4()}"
+    run_id = str(uuid.uuid4())
+    repair_task = None
+    try:
+        await _seed_run(seed, thread_id=thread_id, run_id=run_id)
+        async with seed.factory() as session, session.begin():
+            assert await PrivateRunRepository(session).update_status(
+                scope=seed.owner_a_scope,
+                run_id=run_id,
+                status="interrupted",
+            )
+
+        bridge = PostgresStreamBridge(seed.factory)
+        async with seed.factory() as blocker, blocker.begin():
+            await blocker.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(CAST(:thread_id AS text))::bigint)"),
+                {"thread_id": thread_id},
+            )
+            repair_task = asyncio.create_task(
+                bridge.ensure_settled_terminal(
+                    seed.owner_a_scope,
+                    thread_id,
+                    run_id,
+                    status="interrupted",
+                )
+            )
+            await _wait_for_advisory_wait(seed.factory)
+            async with seed.factory() as session, session.begin():
+                await session.execute(
+                    text(
+                        """UPDATE project_memberships
+                           SET role='viewer',version=version+1,updated_at=now()
+                           WHERE project_id=:project_id AND user_id=:user_id"""
+                    ),
+                    {
+                        "project_id": seed.owner_a.project_id,
+                        "user_id": str(seed.owner_a.user_id),
+                    },
+                )
+
+        with pytest.raises(StreamWriteAuthorizationRevoked):
+            await repair_task
+        frames = await bridge.read_after(
+            seed.owner_a_scope,
+            thread_id,
+            cursor=0,
+            limit=10,
+            run_id=run_id,
+        )
+        assert frames == ()
+    finally:
+        if repair_task is not None and not repair_task.done():
+            repair_task.cancel()
+            await asyncio.gather(repair_task, return_exceptions=True)
         await seed.engine.dispose()
 
 

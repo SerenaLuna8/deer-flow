@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -30,6 +31,7 @@ from app.reliability.error_mapping import (
 )
 from app.reliability.errors import ReliabilityQuotaExceeded
 from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
+from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
 
 
 @pytest_asyncio.fixture()
@@ -86,6 +88,7 @@ async def harness(seed: M4ThreadSeed) -> _Harness:
     app.include_router(private_work_router.router)
     app.state.private_run_service = PrivateRunService(seed.factory)
     app.state.project_scoped_checkpointer = scoped
+    app.state.private_stream_bridge = PostgresStreamBridge(seed.factory)
     app.state.stream_bridge = object()
     app.state.run_manager = object()
 
@@ -282,6 +285,7 @@ async def test_start_run_maps_transactional_quota_rejection(
     )
 
     assert response.status_code == 429
+    assert response.headers["retry-after"] == "1"
     assert response.json() == {
         "code": "RELIABILITY_QUOTA_EXCEEDED",
         "message": "Reliability quota was exceeded.",
@@ -316,23 +320,27 @@ async def test_wait_run_uses_bridge_helper_and_returns_final_scoped_values(
     )
     record = _runtime_record(thread_id, task=object())
     monkeypatch.setattr(private_work_router, "start_private_run", AsyncMock(return_value=record))
-    waiter = AsyncMock(return_value=True)
-    monkeypatch.setattr(private_work_router, "wait_for_run_completion", waiter)
+    durable_record = SimpleNamespace(status="success", error=None)
+    waiter = AsyncMock(return_value=(True, durable_record))
+    monkeypatch.setattr(private_work_router, "_wait_for_durable_private_run", waiter)
 
     response = await harness.request("POST", f"/threads/{thread_id}/runs/wait", json={"input": {}})
 
     assert response.status_code == 200
     assert response.json() == {"answer": "private final"}
     waiter.assert_awaited_once_with(
-        harness.app.state.stream_bridge,
-        record,
-        waiter.await_args.args[2],
-        harness.app.state.run_manager,
+        service=harness.app.state.private_run_service,
+        context=harness.seed.owner_a,
+        thread_id=thread_id,
+        run_id=record.run_id,
+        request=waiter.await_args.kwargs["request"],
+        cancel_on_disconnect=True,
     )
 
-    record.status = RunStatus.running
-    record.error = "client disconnected"
-    waiter.return_value = False
+    waiter.return_value = (
+        False,
+        SimpleNamespace(status="running", error="client disconnected"),
+    )
     disconnected = await harness.request(
         "POST",
         f"/threads/{thread_id}/runs/wait",
@@ -451,7 +459,7 @@ async def test_run_service_revalidates_membership_capability_and_runtime_depende
     assert revoked.status_code == 404
     assert revoked.json()["detail"]["code"] == "PRIVATE_WORK_NOT_FOUND"
 
-    harness.app.state.stream_bridge = None
+    harness.app.state.private_stream_bridge = None
     missing_runtime = await harness.request(
         "POST",
         f"/threads/{uuid.uuid4()}/runs/wait",

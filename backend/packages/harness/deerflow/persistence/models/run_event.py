@@ -5,10 +5,55 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKeyConstraint, Index, String, Text, UniqueConstraint, Uuid, text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKeyConstraint,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from deerflow.persistence.base import Base
+
+
+class ThreadEventSequenceRow(Base):
+    """Deletion-stable high-watermark for one private Thread event log."""
+
+    __tablename__ = "thread_event_sequences"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    thread_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    high_watermark: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "high_watermark >= 0",
+            name="ck_thread_event_sequences_high_watermark",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id"],
+            [
+                "threads_meta.project_id",
+                "threads_meta.owner_user_id",
+                "threads_meta.thread_id",
+            ],
+            name="fk_thread_event_sequences_thread",
+            ondelete="CASCADE",
+        ),
+    )
 
 
 class RunEventRow(Base):

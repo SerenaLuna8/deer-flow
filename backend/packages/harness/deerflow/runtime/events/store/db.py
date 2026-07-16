@@ -17,7 +17,7 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.jobs.model import JobRow
-from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.models.run_event import RunEventRow, ThreadEventSequenceRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -63,6 +63,100 @@ class DbRunEventStore(RunEventStore):
             RunEventRow.project_id == project_id,
             RunEventRow.owner_user_id == owner_user_id,
         )
+
+    @classmethod
+    async def _lock_event_sequence(
+        cls,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+    ) -> ThreadEventSequenceRow:
+        """Lock a deletion-stable Thread high-watermark before event writes."""
+
+        project_id, owner_user_id = cls._coordinates(scope)
+        bind = session.get_bind()
+        if bind is not None and bind.dialect.name == "postgresql":
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(CAST(:thread_id AS text))::bigint)"),
+                {"thread_id": thread_id},
+            )
+        sequence = (
+            await session.execute(
+                select(ThreadEventSequenceRow)
+                .where(
+                    ThreadEventSequenceRow.project_id == project_id,
+                    ThreadEventSequenceRow.owner_user_id == owner_user_id,
+                    ThreadEventSequenceRow.thread_id == thread_id,
+                )
+                .with_for_update(of=ThreadEventSequenceRow)
+            )
+        ).scalar_one_or_none()
+        if sequence is None:
+            thread_exists = await session.scalar(
+                select(ThreadMetaRow.thread_id).where(
+                    ThreadMetaRow.project_id == project_id,
+                    ThreadMetaRow.owner_user_id == owner_user_id,
+                    ThreadMetaRow.thread_id == thread_id,
+                )
+            )
+            if thread_exists is None:
+                raise StreamScopeNotFound("scoped stream thread was not found")
+            current = await session.scalar(
+                select(func.max(RunEventRow.seq)).where(
+                    RunEventRow.project_id == project_id,
+                    RunEventRow.owner_user_id == owner_user_id,
+                    RunEventRow.thread_id == thread_id,
+                )
+            )
+            sequence = ThreadEventSequenceRow(
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                thread_id=thread_id,
+                high_watermark=int(current or 0),
+            )
+            session.add(sequence)
+            await session.flush()
+        return sequence
+
+    @classmethod
+    async def _event_high_watermark(
+        cls,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+    ) -> int:
+        project_id, owner_user_id = cls._coordinates(scope)
+        value = await session.scalar(
+            select(ThreadEventSequenceRow.high_watermark).where(
+                ThreadEventSequenceRow.project_id == project_id,
+                ThreadEventSequenceRow.owner_user_id == owner_user_id,
+                ThreadEventSequenceRow.thread_id == thread_id,
+            )
+        )
+        if value is not None:
+            return int(value)
+        legacy_max = await session.scalar(
+            select(func.max(RunEventRow.seq)).where(
+                RunEventRow.project_id == project_id,
+                RunEventRow.owner_user_id == owner_user_id,
+                RunEventRow.thread_id == thread_id,
+            )
+        )
+        return int(legacy_max or 0)
+
+    @staticmethod
+    def _advance_event_sequence(
+        sequence: ThreadEventSequenceRow,
+        *,
+        count: int = 1,
+    ) -> int:
+        if type(count) is not int or count < 1:
+            raise ValueError("event sequence reservation must be positive")
+        first = sequence.high_watermark + 1
+        sequence.high_watermark += count
+        return first
 
     @classmethod
     async def _require_parent_run(
@@ -124,19 +218,15 @@ class DbRunEventStore(RunEventStore):
             )
 
     @staticmethod
-    async def _authorize_stream_lease(
+    async def _lock_stream_governance(
         session: AsyncSession,
         *,
         project_id: uuid.UUID,
         owner_user_id: str,
-        run_id: str,
-        job_id: uuid.UUID,
-        lease: StreamLeaseProof,
-    ) -> bool:
-        if type(lease) is not StreamLeaseProof or lease.job_id != job_id:
-            raise StreamWriteLeaseLost(
-                "stream lease capability does not match the Run job",
-            )
+        membership_version: int,
+    ) -> None:
+        """Lock and revalidate current private stream mutation authority."""
+
         project = (await session.execute(select(ProjectRow).where(ProjectRow.id == project_id).with_for_update(of=ProjectRow))).scalar_one_or_none()
         membership = (
             await session.execute(
@@ -148,10 +238,32 @@ class DbRunEventStore(RunEventStore):
                 .with_for_update(of=ProjectMembershipRow)
             )
         ).scalar_one_or_none()
-        if project is None or project.status != "active" or project.is_suspended or membership is None or membership.status != "active" or membership.role not in _EXECUTABLE_ROLES:
+        if project is None or project.status != "active" or project.is_suspended or membership is None or membership.status != "active" or membership.role not in _EXECUTABLE_ROLES or membership.version != membership_version:
             raise StreamWriteAuthorizationRevoked(
                 "stream execution governance is no longer active",
             )
+
+    @staticmethod
+    async def _authorize_stream_lease(
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        membership_version: int,
+        run_id: str,
+        job_id: uuid.UUID,
+        lease: StreamLeaseProof,
+    ) -> bool:
+        if type(lease) is not StreamLeaseProof or lease.job_id != job_id:
+            raise StreamWriteLeaseLost(
+                "stream lease capability does not match the Run job",
+            )
+        await DbRunEventStore._lock_stream_governance(
+            session,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            membership_version=membership_version,
+        )
 
         job = (
             await session.execute(
@@ -284,7 +396,11 @@ class DbRunEventStore(RunEventStore):
 
         if type(frame) is not StreamFrame:
             raise TypeError("StreamFrame is required")
-        max_seq = await self._max_seq_for_thread(session, thread_id, scope)
+        sequence = await self._lock_event_sequence(
+            session,
+            scope=scope,
+            thread_id=thread_id,
+        )
         try:
             project_id, owner_user_id, job_id = await self._require_stream_parent_run(
                 session,
@@ -324,6 +440,7 @@ class DbRunEventStore(RunEventStore):
                 session,
                 project_id=project_id,
                 owner_user_id=owner_user_id,
+                membership_version=scope.membership_version,
                 run_id=run_id,
                 job_id=job_id,
                 lease=lease,
@@ -342,6 +459,7 @@ class DbRunEventStore(RunEventStore):
             frame.data,
             {"stream_terminal": frame.terminal},
         )
+        seq = self._advance_event_sequence(sequence)
         row = RunEventRow(
             thread_id=thread_id,
             run_id=run_id,
@@ -351,7 +469,7 @@ class DbRunEventStore(RunEventStore):
             category="stream",
             content=db_content,
             event_metadata=metadata,
-            seq=(max_seq or 0) + 1,
+            seq=seq,
             created_at=datetime.now(UTC),
         )
         session.add(row)
@@ -383,14 +501,12 @@ class DbRunEventStore(RunEventStore):
         if thread_exists is None:
             raise StreamScopeNotFound("scoped stream thread was not found")
 
-        max_seq = await session.scalar(
-            select(func.max(RunEventRow.seq)).where(
-                RunEventRow.project_id == project_id,
-                RunEventRow.owner_user_id == owner_user_id,
-                RunEventRow.thread_id == thread_id,
-            )
+        high_watermark = await self._event_high_watermark(
+            session,
+            scope=scope,
+            thread_id=thread_id,
         )
-        if cursor > (max_seq or 0):
+        if cursor > high_watermark:
             raise StreamCursorOutOfRange("stream cursor is ahead of the event log")
         statement = select(RunEventRow).where(
             RunEventRow.project_id == project_id,
@@ -429,33 +545,137 @@ class DbRunEventStore(RunEventStore):
             return None
         return self._stream_row(row, created=False)
 
-    @staticmethod
-    async def _max_seq_for_thread(
+    async def ensure_settled_stream_terminal(
+        self,
         session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
         thread_id: str,
-        scope: PrivateResourceScope | None = None,
-    ) -> int | None:
-        """Return the current max seq while serializing writers per thread.
+        run_id: str,
+        status: str,
+    ) -> StoredStreamFrame:
+        """Persist the missing terminal fact for an already-settled Run.
 
-        PostgreSQL rejects ``SELECT max(...) FOR UPDATE`` because aggregate
-        results are not lockable rows. As a release-safe workaround, take a
-        transaction-level advisory lock keyed by thread_id before reading the
-        aggregate. Other dialects keep the existing row-locking statement.
+        This path deliberately cannot close an executing job. It is only the
+        durable repair used by reconnect readers after the authoritative Run
+        and, when present, Job rows already reached a consistent terminal pair.
         """
-        stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
-        if scope is not None:
-            stmt = stmt.where(*DbRunEventStore._scope_predicates(scope))
-        bind = session.get_bind()
-        dialect_name = bind.dialect.name if bind is not None else ""
 
-        if dialect_name == "postgresql":
-            await session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtext(CAST(:thread_id AS text))::bigint)"),
-                {"thread_id": thread_id},
+        frame = StreamFrame.end(status=status)
+        sequence = await self._lock_event_sequence(
+            session,
+            scope=scope,
+            thread_id=thread_id,
+        )
+        project_id, owner_user_id = self._coordinates(scope)
+        await self._lock_stream_governance(
+            session,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            membership_version=scope.membership_version,
+        )
+        projected_job_id = await session.scalar(
+            select(RunRow.job_id).where(
+                RunRow.project_id == project_id,
+                RunRow.owner_user_id == owner_user_id,
+                RunRow.thread_id == thread_id,
+                RunRow.run_id == run_id,
             )
-            return await session.scalar(stmt)
+        )
+        job = None
+        if projected_job_id is not None:
+            job = (
+                await session.execute(
+                    select(JobRow)
+                    .where(
+                        JobRow.id == projected_job_id,
+                        JobRow.job_type.in_(("private_run", "automation_run")),
+                        JobRow.project_id == project_id,
+                        JobRow.owner_user_id == owner_user_id,
+                        JobRow.run_id == run_id,
+                    )
+                    .with_for_update(of=JobRow)
+                )
+            ).scalar_one_or_none()
+        run = (
+            await session.execute(
+                select(RunRow)
+                .where(
+                    RunRow.project_id == project_id,
+                    RunRow.owner_user_id == owner_user_id,
+                    RunRow.thread_id == thread_id,
+                    RunRow.run_id == run_id,
+                )
+                .with_for_update(of=RunRow)
+            )
+        ).scalar_one_or_none()
+        if run is None or run.job_id != projected_job_id:
+            raise StreamScopeNotFound("scoped stream Run was not found")
+        if projected_job_id is not None and job is None:
+            raise StreamWriteAuthorityRequired(
+                "stream terminal repair requires the exact settled Job",
+            )
 
-        return await session.scalar(stmt.with_for_update())
+        expected_status = {
+            "success": "completed",
+            "error": "error",
+            "timeout": "timeout",
+            "interrupted": "interrupted",
+        }.get(run.status)
+        if expected_status is None or frame.data != {"status": expected_status}:
+            raise StreamWriteAuthorityRequired(
+                "stream terminal repair requires the exact settled Run state",
+            )
+        if job is not None:
+            allowed_job_statuses = {
+                "success": frozenset({"succeeded"}),
+                "error": frozenset({"failed", "dead"}),
+                "timeout": frozenset({"failed", "dead"}),
+                "interrupted": frozenset({"cancelled"}),
+            }[run.status]
+            if job.status not in allowed_job_statuses:
+                raise StreamWriteAuthorityRequired(
+                    "stream terminal repair requires the exact settled Job state",
+                )
+
+        db_content, metadata = self._content_to_db(
+            frame.data,
+            {"stream_terminal": True},
+        )
+        terminal = (
+            await session.execute(
+                select(RunEventRow).where(
+                    RunEventRow.project_id == project_id,
+                    RunEventRow.owner_user_id == owner_user_id,
+                    RunEventRow.thread_id == thread_id,
+                    RunEventRow.run_id == run_id,
+                    RunEventRow.category == "stream",
+                    RunEventRow.event_type == "stream.end",
+                )
+            )
+        ).scalar_one_or_none()
+        if terminal is not None:
+            if terminal.content != db_content or terminal.event_metadata != metadata:
+                terminal.content = db_content
+                terminal.event_metadata = metadata
+                await session.flush()
+            return self._stream_row(terminal, created=False)
+
+        row = RunEventRow(
+            thread_id=thread_id,
+            run_id=run_id,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            event_type="stream.end",
+            category="stream",
+            content=db_content,
+            event_metadata=metadata,
+            seq=self._advance_event_sequence(sequence),
+            created_at=datetime.now(UTC),
+        )
+        session.add(row)
+        await session.flush()
+        return self._stream_row(row, created=True)
 
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None, scope=None):  # noqa: D401
         """Write a single event — low-frequency path only.
@@ -482,8 +702,12 @@ class DbRunEventStore(RunEventStore):
                     thread_id=thread_id,
                     run_id=run_id,
                 )
-                max_seq = await self._max_seq_for_thread(session, thread_id, scope)
-                seq = (max_seq or 0) + 1
+                sequence = await self._lock_event_sequence(
+                    session,
+                    scope=scope,
+                    thread_id=thread_id,
+                )
+                seq = self._advance_event_sequence(sequence)
                 row = RunEventRow(
                     thread_id=thread_id,
                     run_id=run_id,
@@ -524,8 +748,18 @@ class DbRunEventStore(RunEventStore):
                         thread_id=thread_id,
                         run_id=run_id,
                     )
-                max_seq = await self._max_seq_for_thread(session, thread_id, scope)
-                seq = max_seq or 0
+                sequence = await self._lock_event_sequence(
+                    session,
+                    scope=scope,
+                    thread_id=thread_id,
+                )
+                seq = (
+                    self._advance_event_sequence(
+                        sequence,
+                        count=len(events),
+                    )
+                    - 1
+                )
                 rows = []
                 for e in events:
                     seq += 1

@@ -29,7 +29,7 @@ from deerflow.persistence.channel_connections.model import (
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.jobs import DeadJobRow, JobAttemptRow, JobRow, WorkerNodeRow
 from deerflow.persistence.migration_ledger.model import MigrationLedgerRow
-from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.models.run_event import RunEventRow, ThreadEventSequenceRow
 from deerflow.persistence.private_work import (
     PrivateArtifactRow,
     PrivateFileChunkRow,
@@ -124,6 +124,7 @@ __all__ = [
     "ProjectSystemMcpBindingRow",
     "ProjectSystemSkillBindingRow",
     "RunEventRow",
+    "ThreadEventSequenceRow",
     "RunAssetVersionRow",
     "RunMcpGrantSnapshotRow",
     "RunRow",

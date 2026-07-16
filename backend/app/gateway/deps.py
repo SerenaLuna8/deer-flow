@@ -380,6 +380,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             sf,
             max_trace_content=getattr(run_events_config, "max_trace_content", 10240),
         )
+        from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+
+        # Project-private streams are durable and cross-process. Keep the
+        # configurable legacy bridge for legacy routes only.
+        app.state.private_stream_bridge = PostgresStreamBridge(sf)
 
         # RunManager with store backing for persistence
         app.state.run_manager = RunManager(store=app.state.run_store)

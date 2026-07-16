@@ -129,6 +129,27 @@ class PostgresStreamBridge(StreamBridge):
             lease=lease,
         )
 
+    async def ensure_settled_terminal(
+        self,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        *,
+        status: str,
+    ) -> StoredStreamFrame:
+        """Repair a missing terminal frame from settled database authority."""
+
+        async with self._sessions() as session, session.begin():
+            stored = await self._events.ensure_settled_stream_terminal(
+                session,
+                scope=scope,
+                thread_id=thread_id,
+                run_id=run_id,
+                status=status,
+            )
+        await self._notify(stored)
+        return stored
+
     async def publish_end(self, run_id: str) -> StoredStreamFrame:
         del run_id
         raise StreamScopeRequired(

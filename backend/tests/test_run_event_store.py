@@ -419,37 +419,58 @@ class TestDbRunEventStore:
     """Tests for DbRunEventStore with temp SQLite."""
 
     @pytest.mark.anyio
-    async def test_postgres_max_seq_uses_advisory_lock_without_for_update(self):
+    async def test_postgres_sequence_uses_advisory_lock_and_row_lock(self):
+        import uuid
+
         from sqlalchemy.dialects import postgresql
 
+        from deerflow.persistence.models.run_event import ThreadEventSequenceRow
         from deerflow.runtime.events.store.db import DbRunEventStore
+
+        sequence = ThreadEventSequenceRow(
+            project_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+            owner_user_id="00000000-0000-0000-0000-000000000002",
+            thread_id="thread-1",
+            high_watermark=41,
+        )
+
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return sequence
 
         class FakeSession:
             def __init__(self):
                 self.dialect = postgresql.dialect()
                 self.execute_calls = []
-                self.scalar_stmt = None
 
             def get_bind(self):
                 return self
 
             async def execute(self, stmt, params=None):
                 self.execute_calls.append((stmt, params))
-
-            async def scalar(self, stmt):
-                self.scalar_stmt = stmt
-                return 41
+                return FakeResult()
 
         session = FakeSession()
+        scope = PrivateResourceScope(
+            project_id=str(sequence.project_id),
+            owner_user_id=sequence.owner_user_id,
+            membership_version=1,
+        )
 
-        max_seq = await DbRunEventStore._max_seq_for_thread(session, "thread-1")
+        locked = await DbRunEventStore._lock_event_sequence(
+            session,  # type: ignore[arg-type]
+            scope=scope,
+            thread_id="thread-1",
+        )
 
-        assert max_seq == 41
-        assert session.execute_calls
+        assert locked is sequence
+        assert len(session.execute_calls) == 2
         assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
         assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
-        compiled = str(session.scalar_stmt.compile(dialect=postgresql.dialect()))
-        assert "FOR UPDATE" not in compiled
+        compiled = str(
+            session.execute_calls[1][0].compile(dialect=postgresql.dialect()),
+        )
+        assert "FOR UPDATE" in compiled
 
     @pytest.mark.anyio
     async def test_basic_crud(self, _postgres_database):

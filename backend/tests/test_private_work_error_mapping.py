@@ -37,6 +37,10 @@ def test_private_work_error_mapping_is_stable_and_redacted(error_type: type[Exce
 
     assert mapped.status_code == status
     assert mapped.detail == {"code": code, "message": message, "request_id": "req-123"}
+    if status == 503:
+        assert mapped.headers == {"Retry-After": "1"}
+    else:
+        assert mapped.headers is None
     rendered = repr(mapped.detail)
     assert "postgresql" not in rendered
     assert "private/file" not in rendered

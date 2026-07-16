@@ -13,6 +13,7 @@ from app.reliability.errors import (
     ReliabilityError,
     ReliabilityForbidden,
     ReliabilityInvalid,
+    ReliabilityInvalidStreamCursor,
     ReliabilityMigrationRequired,
     ReliabilityNotFound,
     ReliabilityQuotaExceeded,
@@ -20,6 +21,7 @@ from app.reliability.errors import (
 )
 
 _RELIABILITY_ERROR_TYPES = (
+    ReliabilityInvalidStreamCursor,
     ReliabilityNotFound,
     ReliabilityForbidden,
     ReliabilityConflict,
@@ -35,8 +37,14 @@ _RELIABILITY_ERROR_TYPES = (
 class ReliabilityHTTPException(HTTPException):
     """HTTP exception carrying the exact public top-level response body."""
 
-    def __init__(self, *, status_code: int, body: dict[str, Any]) -> None:
-        super().__init__(status_code=status_code, detail=body)
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        body: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=body, headers=headers)
         self.body = body
 
 
@@ -59,13 +67,15 @@ def reliability_http_exception(error: ReliabilityError) -> ReliabilityHTTPExcept
     error_type = type(error)
     if error_type not in _RELIABILITY_ERROR_TYPES:
         raise TypeError("unsupported reliability error")
+    status_code = RELIABILITY_ERROR_STATUS[error_type.code]
     return ReliabilityHTTPException(
-        status_code=RELIABILITY_ERROR_STATUS[error_type.code],
+        status_code=status_code,
         body={
             "code": error_type.code,
             "message": error_type.public_message,
             "request_id": error.request_id,
         },
+        headers={"Retry-After": "1"} if status_code in {429, 503} else None,
     )
 
 

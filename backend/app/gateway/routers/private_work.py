@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime
@@ -17,6 +18,7 @@ from fastapi import (
     status,
 )
 from pydantic import ConfigDict, Field, model_validator
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
@@ -28,7 +30,7 @@ from app.gateway.private_work_schemas import (
     strip_client_authority_fields,
 )
 from app.gateway.routers.thread_runs import RunCreateRequest, ThreadTokenUsageResponse
-from app.gateway.services import sse_consumer, start_private_run, wait_for_run_completion
+from app.gateway.services import format_sse, start_private_run
 from app.private_work.checkpointer import (
     PRIVATE_SCOPE_MARKER,
     ProjectScopedCheckpointer,
@@ -57,15 +59,24 @@ from app.private_work.thread_repository import PrivateThreadRecord, ThreadAgentR
 from app.private_work.thread_service import PrivateThreadService
 from app.projects.capabilities import Capability
 from app.reliability.error_mapping import reliability_http_exception
-from app.reliability.errors import ReliabilityError
+from app.reliability.errors import (
+    ReliabilityDatabaseUnavailable,
+    ReliabilityError,
+    ReliabilityInvalidStreamCursor,
+)
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.persistence.private_work.file_repository import (
     PRIVATE_FILE_CHUNK_SIZE,
     PrivateFileRecord,
 )
-from deerflow.runtime import RunRecord, serialize_channel_values_for_api
+from deerflow.runtime import DisconnectMode, RunRecord, serialize_channel_values_for_api
+from deerflow.runtime.events.models import (
+    StoredStreamFrame,
+    StreamCursorOutOfRange,
+)
 from deerflow.runtime.events.store import RunEventStore
 from deerflow.runtime.runs.store import RunStore
+from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
 from deerflow.utils.time import coerce_iso
 
 router = APIRouter(
@@ -340,11 +351,224 @@ def _runtime_dependency(request: Request, request_id: str, name: str) -> object:
     return dependency
 
 
-def _require_run_runtime(request: Request, request_id: str) -> tuple[object, object]:
+def _private_stream_bridge(
+    request: Request,
+    request_id: str,
+) -> PostgresStreamBridge:
+    bridge = getattr(request.app.state, "private_stream_bridge", None)
+    if not isinstance(bridge, PostgresStreamBridge):
+        raise PrivateWorkUnavailable(request_id)
+    return bridge
+
+
+def _require_run_runtime(request: Request, request_id: str) -> PostgresStreamBridge:
     _runtime_dependency(request, request_id, "project_scoped_checkpointer")
-    bridge = _runtime_dependency(request, request_id, "stream_bridge")
-    run_manager = _runtime_dependency(request, request_id, "run_manager")
-    return bridge, run_manager
+    return _private_stream_bridge(request, request_id)
+
+
+_CANONICAL_STREAM_CURSOR = re.compile(r"0|[1-9][0-9]*")
+_PRIVATE_STREAM_POLL_SECONDS = 0.25
+_PRIVATE_STREAM_HEARTBEAT_SECONDS = 15.0
+_PRIVATE_RUN_TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
+
+
+def _private_stream_cursor(request: Request, request_id: str) -> int:
+    raw_cursor = request.headers.get("Last-Event-ID")
+    if raw_cursor is None or raw_cursor == "":
+        return 0
+    if _CANONICAL_STREAM_CURSOR.fullmatch(raw_cursor) is None:
+        raise ReliabilityInvalidStreamCursor(request_id)
+    return int(raw_cursor)
+
+
+def _private_stream_headers(
+    context: PrivateWorkContext,
+    thread_id: str,
+    run_id: str,
+) -> dict[str, str]:
+    run_path = f"/api/projects/{context.project_id}/private-work/threads/{thread_id}/runs/{run_id}"
+    return {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+        "Content-Location": run_path,
+        # LangGraph SDK resolves this against its project-private API base.
+        "Location": f"/threads/{thread_id}/runs/{run_id}/stream",
+    }
+
+
+def _fallback_terminal_status(status_value: str) -> str:
+    return "completed" if status_value == "success" else status_value
+
+
+async def _read_private_stream_page(
+    bridge: PostgresStreamBridge,
+    context: PrivateWorkContext,
+    thread_id: str,
+    run_id: str,
+    cursor: int,
+) -> tuple[StoredStreamFrame, ...]:
+    try:
+        return await bridge.read_after(
+            context.resource_scope,
+            thread_id,
+            cursor=cursor,
+            limit=100,
+            run_id=run_id,
+        )
+    except StreamCursorOutOfRange:
+        raise ReliabilityInvalidStreamCursor(context.request_id) from None
+    except DBAPIError:
+        raise ReliabilityDatabaseUnavailable(context.request_id) from None
+
+
+async def _durable_private_sse_consumer(
+    *,
+    bridge: PostgresStreamBridge,
+    service: PrivateRunService,
+    context: PrivateWorkContext,
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    cursor: int,
+    initial_frames: tuple[StoredStreamFrame, ...],
+    cancel_on_disconnect: bool,
+) -> AsyncIterator[str]:
+    frames = initial_frames
+    pending_terminal: StoredStreamFrame | None = None
+    disconnected = False
+    cancelled = False
+    terminal_emitted = False
+    loop = asyncio.get_running_loop()
+    next_heartbeat = loop.time() + _PRIVATE_STREAM_HEARTBEAT_SECONDS
+    try:
+        while True:
+            for frame in frames:
+                if frame.terminal:
+                    pending_terminal = frame
+                    break
+                cursor = int(frame.id)
+                yield format_sse(
+                    frame.event,
+                    frame.data,
+                    event_id=frame.id,
+                )
+            frames = ()
+
+            if await request.is_disconnected():
+                disconnected = True
+                return
+
+            if pending_terminal is None:
+                frames = await _read_private_stream_page(
+                    bridge,
+                    context,
+                    thread_id,
+                    run_id,
+                    cursor,
+                )
+                if frames:
+                    continue
+
+            record = await service.get(context, thread_id, run_id)
+            if record.status in _PRIVATE_RUN_TERMINAL_STATUSES:
+                terminal = await bridge.ensure_settled_terminal(
+                    context.resource_scope,
+                    thread_id,
+                    run_id,
+                    status=_fallback_terminal_status(record.status),
+                )
+                cursor = int(terminal.id)
+                terminal_emitted = True
+                yield format_sse(
+                    terminal.event,
+                    terminal.data,
+                    event_id=terminal.id,
+                )
+                return
+
+            now = loop.time()
+            if now >= next_heartbeat:
+                yield ": heartbeat\n\n"
+                next_heartbeat = loop.time() + _PRIVATE_STREAM_HEARTBEAT_SECONDS
+            await asyncio.sleep(
+                min(
+                    _PRIVATE_STREAM_POLL_SECONDS,
+                    max(0.001, next_heartbeat - loop.time()),
+                )
+            )
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+    finally:
+        if (disconnected or cancelled) and cancel_on_disconnect and not terminal_emitted:
+            await _persist_private_disconnect_cancel(
+                service=service,
+                context=context,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
+
+
+async def _persist_private_disconnect_cancel(
+    *,
+    service: PrivateRunService,
+    context: PrivateWorkContext,
+    thread_id: str,
+    run_id: str,
+) -> None:
+    cancel_task = asyncio.create_task(
+        service.cancel(
+            context,
+            thread_id,
+            run_id,
+            reason="client_disconnected",
+        )
+    )
+    try:
+        await asyncio.shield(cancel_task)
+    except asyncio.CancelledError:
+        try:
+            await cancel_task
+        except PrivateWorkError:
+            pass
+    except PrivateWorkError:
+        pass
+
+
+async def _wait_for_durable_private_run(
+    *,
+    service: PrivateRunService,
+    context: PrivateWorkContext,
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    cancel_on_disconnect: bool,
+) -> tuple[bool, PrivateRunRecord]:
+    try:
+        while True:
+            record = await service.get(context, thread_id, run_id)
+            if record.status in _PRIVATE_RUN_TERMINAL_STATUSES:
+                return True, record
+            if await request.is_disconnected():
+                if cancel_on_disconnect:
+                    await _persist_private_disconnect_cancel(
+                        service=service,
+                        context=context,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                    )
+                return False, record
+            await asyncio.sleep(_PRIVATE_STREAM_POLL_SECONDS)
+    except asyncio.CancelledError:
+        if cancel_on_disconnect:
+            await _persist_private_disconnect_cancel(
+                service=service,
+                context=context,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
+        raise
 
 
 def _scoped_checkpointer(
@@ -494,22 +718,84 @@ async def stream_private_run(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> StreamingResponse:
     try:
-        bridge, run_manager = _require_run_runtime(request, context.request_id)
+        bridge = _private_stream_bridge(request, context.request_id)
+        cursor = _private_stream_cursor(request, context.request_id)
         record = await start_private_run(body, str(thread_id), request, context)
+        service = _run_service(request, context.request_id)
     except PrivateWorkError as error:
         _raise_http(error)
     except ReliabilityError as error:
         raise reliability_http_exception(error) from None
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_manager),
+        _durable_private_sse_consumer(
+            bridge=bridge,
+            service=service,
+            context=context,
+            thread_id=str(thread_id),
+            run_id=record.run_id,
+            request=request,
+            cursor=cursor,
+            initial_frames=(),
+            cancel_on_disconnect=record.on_disconnect == DisconnectMode.cancel,
+        ),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Content-Location": (f"/api/projects/{context.project_id}/private-work/threads/{thread_id}/runs/{record.run_id}"),
-        },
+        headers=_private_stream_headers(
+            context,
+            str(thread_id),
+            record.run_id,
+        ),
+    )
+
+
+@router.get("/threads/{thread_id}/runs/{run_id}/stream")
+async def reconnect_private_run_stream(
+    thread_id: uuid.UUID,
+    run_id: uuid.UUID,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> StreamingResponse:
+    selected_thread_id = str(thread_id)
+    selected_run_id = str(run_id)
+    try:
+        bridge = _private_stream_bridge(request, context.request_id)
+        cursor = _private_stream_cursor(request, context.request_id)
+        service = _run_service(request, context.request_id)
+        await service.get(
+            context,
+            selected_thread_id,
+            selected_run_id,
+        )
+        initial_frames = await _read_private_stream_page(
+            bridge,
+            context,
+            selected_thread_id,
+            selected_run_id,
+            cursor,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    except ReliabilityError as error:
+        raise reliability_http_exception(error) from None
+
+    return StreamingResponse(
+        _durable_private_sse_consumer(
+            bridge=bridge,
+            service=service,
+            context=context,
+            thread_id=selected_thread_id,
+            run_id=selected_run_id,
+            request=request,
+            cursor=cursor,
+            initial_frames=initial_frames,
+            cancel_on_disconnect=False,
+        ),
+        media_type="text/event-stream",
+        headers=_private_stream_headers(
+            context,
+            selected_thread_id,
+            selected_run_id,
+        ),
     )
 
 
@@ -524,19 +810,21 @@ async def wait_private_run(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> dict[str, Any]:
     try:
-        bridge, run_manager = _require_run_runtime(request, context.request_id)
+        _require_run_runtime(request, context.request_id)
         record = await start_private_run(body, str(thread_id), request, context)
-        completed = True
-        if record.task is not None:
-            completed = await wait_for_run_completion(
-                bridge,
-                record,
-                request,
-                run_manager,
-            )
+        completed, durable_record = await _wait_for_durable_private_run(
+            service=_run_service(request, context.request_id),
+            context=context,
+            thread_id=str(thread_id),
+            run_id=record.run_id,
+            request=request,
+            cancel_on_disconnect=record.on_disconnect == DisconnectMode.cancel,
+        )
         if not completed:
-            raw_status = getattr(record.status, "value", record.status)
-            return {"status": str(raw_status), "error": record.error}
+            return {
+                "status": durable_record.status,
+                "error": durable_record.error,
+            }
 
         saver = _scoped_checkpointer(request, context.request_id).for_context(context)
         item = await saver.aget_tuple(
