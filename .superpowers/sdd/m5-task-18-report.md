@@ -405,3 +405,124 @@ Root/backend guides and the M4 runbook now also document the `0011` Automation h
 
 M5 remains a release candidate pending an independent re-review of this repair wave. This
 report does not mark M5 complete or claim 5/8 or 62.5%; M6-M8 remain open.
+
+## Whole-branch fourth final-review repair wave
+
+The fourth concentrated review reported zero Critical findings, two Important findings,
+and two Minor findings. This wave repairs both Important contracts and the configuration-
+comment Minor. The remaining broad project-Automation locale cleanup is intentionally
+recorded as a non-blocking follow-up rather than mixed into the execution/admission repair.
+M5 remains a release candidate and is not marked complete.
+
+### Post-admission durable Run TDD
+
+Real PostgreSQL dispatcher regressions now cover an exact terminal Run after real
+`PrivateRunAdmissionService.admit`, an admitted `pending` Run whose launcher raises,
+completion-before-backfill, deterministic adoption and mismatch behavior, no-Run
+unavailable requeue, and concurrent governance cancellation. Terminal private errors are
+retained only on the Run; the occurrence receives a fixed public-safe message and the
+shared `AUTOMATION_RUN_*` outcome. Active admitted Runs are linked as `running` with their
+durable `created_at`, do not increment the parent, and continue occupying the global cap.
+
+```text
+# RED
+8 failed, 1 passed in 2.77s
+All eight failures were the old rejected/pre-admission settlement behavior.
+
+# focused GREEN
+9 passed in 2.62s
+
+# complete dispatcher + reconciliation + occurrence files
+63 passed in 13.77s
+```
+
+The private Run terminal-to-public outcome mapper now lives in shared settlement code and
+is consumed by both dispatcher failure recovery and reconciliation. Terminal settlement
+updates the parent only after the first occurrence CAS; the completion-before-backfill
+race leaves `run_count == 1`. An exact `pending`/`running` Run is backfilled instead of
+requeued or rejected, so a `max_concurrent_runs=1` probe cannot reserve a second due task.
+Only unavailable dispatch with no matching Run keeps the existing requeue path.
+
+### Semantic schedule update and sparse PATCH TDD
+
+The backend regression moves an enabled once Automation to 30 seconds before its persisted
+execution, then sends a title change plus the exact normalized persisted
+`schedule_spec`/`timezone`. The update must succeed, preserve `next_run_at`, and cancel an
+existing queued occurrence through the normal title-update transaction. A true `+59`
+second schedule change still fails before any definition or occurrence write.
+
+The frontend builder now receives the initial `Automation` and emits only changed fields.
+Its once comparison treats equivalent ISO-8601 instants such as `Z` and `+00:00` as equal;
+the real form E2E fixes browser time at `:30`, edits a once Automation due at the next
+minute, and proves the PATCH is exactly `{expected_version,title}`.
+
+```text
+# backend RED
+1 failed in 0.74s with AutomationInvalid from the minimum-delay check
+
+# backend GREEN and true-change guard
+3 passed in 1.11s
+
+# frontend RED
+2 unit failures; near-once E2E reached a request with an unwanted schedule_spec
+
+# frontend GREEN
+917 unit tests passed; near-once E2E 1 passed; frontend check passed
+
+# complete focused service/router and project Automation E2E
+70 backend tests passed in 13.02s
+12 browser tests passed in 25.2s
+```
+
+`config.example.yaml` now describes `min_once_delay_seconds` as applying to creation and
+schedule-changing updates. Full project Automation i18n remains the only broad Minor from
+this review and is deferred to a dedicated locale cleanup to avoid expanding this
+execution-critical repair wave.
+
+### Fourth-wave fresh full-gate evidence
+
+All PostgreSQL commands used the isolated retained cluster at
+`127.0.0.1:55435`; no command used the default `5432` port. Integration fixtures created
+only generated `deerflow_test_*` databases. The operations chain created, initialized,
+checked, and dropped `deerflow_test_task18_repair4_ops`, and its temporary non-secret
+`config.yaml` was removed.
+
+```text
+# complete backend
+7665 passed, 893 skipped, 10 warnings in 109.39s
+
+# blocking-I/O
+41 passed in 11.35s
+
+# backend lint / format
+All checks passed; 1059 files formatted
+
+# exact eight-file M1-M5 PostgreSQL gate
+33 passed in 10.53s; 0 skipped
+
+# sequential final-schema, legacy, and fresh migration smokes
+3 passed in 1.92s; 0 skipped
+
+# operations
+setup-db: created at 0013_project_automation_finalize
+doctor: Ready with 6 optional environment/capability warnings
+check-db: healthy; current/head 0013_project_automation_finalize; Automation ready
+
+# frontend
+check: passed
+format: passed
+unit: 126 files; 917 passed; 0 failed or skipped
+normal E2E: 170 passed
+independent static-build E2E: 1 passed
+```
+
+The first fresh frontend launch attempt was stopped before test discovery because the
+execution sandbox denied both local listeners on port 3000 with `EPERM`. The same commands
+were then rerun serially with local-listener permission and produced the complete passing
+counts above; there was no product assertion failure. Final consistency and diff checks
+passed after this report update.
+
+The fourth review's Important findings are therefore covered by both focused RED/GREEN
+evidence and the fresh complete gates. The broad locale cleanup remains one acknowledged
+non-blocking Minor. M5 is still pending independent re-review; this report does not mark
+the milestone complete.

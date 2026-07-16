@@ -522,19 +522,24 @@ class ProjectAutomationService:
         if changes.prompt is not None:
             values["prompt"] = changes.prompt
 
-        schedule_spec: Mapping[str, object] = changes.schedule_spec if changes.schedule_spec is not None else task.schedule_spec
-        timezone = changes.timezone or task.timezone
-        schedule_changed = changes.schedule_spec is not None or changes.timezone is not None
-        if schedule_changed:
+        schedule_fields_present = changes.schedule_spec is not None or changes.timezone is not None
+        if schedule_fields_present:
+            schedule_spec: Mapping[str, object] = changes.schedule_spec if changes.schedule_spec is not None else task.schedule_spec
+            timezone = changes.timezone if changes.timezone is not None else task.timezone
             normalized = self._normalized_schedule(
                 request_id,
                 task.schedule_type,
                 schedule_spec,
                 timezone,
             )
+            schedule_changed = dict(normalized) != dict(task.schedule_spec) or timezone != task.timezone
+            if not schedule_changed:
+                return values
             schedule_spec = normalized
-            values["schedule_spec"] = dict(normalized)
-            values["timezone"] = timezone
+            if dict(normalized) != dict(task.schedule_spec):
+                values["schedule_spec"] = dict(normalized)
+            if timezone != task.timezone:
+                values["timezone"] = timezone
             next_run_at = self._next_occurrence(
                 request_id,
                 task.schedule_type,

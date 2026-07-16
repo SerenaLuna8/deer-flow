@@ -28,6 +28,7 @@ from app.automations.occurrences import (
     deterministic_run_id,
     deterministic_thread_id,
 )
+from app.automations.reconciliation import AutomationReconciler
 from app.private_work.authorization import PrivateRunAuthorizationService
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import is_issued_private_work_context
@@ -438,7 +439,7 @@ async def test_dispatcher_retry_adopts_matching_existing_private_run_without_rel
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_dispatcher_rejects_matching_terminal_run_as_conflict(
+async def test_dispatcher_settles_matching_terminal_run_from_durable_outcome(
     dispatch_seed: DispatchSeed,
 ) -> None:
     seed = dispatch_seed
@@ -482,16 +483,21 @@ async def test_dispatcher_rejects_matching_terminal_run_as_conflict(
 
     launcher.assert_not_awaited()
     persisted = await seed.persisted_occurrence(occurrence.id)
-    assert persisted.status == "rejected"
-    assert persisted.error_code == "AUTOMATION_CONFLICT"
+    assert persisted.status == "failed"
+    assert persisted.error_code == "AUTOMATION_RUN_FAILED"
+    assert persisted.error_message == "The automation run failed."
     assert persisted.thread_id == thread_id
     assert persisted.run_id == run_id
+    parent = await seed.persisted_task(task.id)
+    assert parent.last_outcome == "failed"
+    assert parent.last_error_code == "AUTOMATION_RUN_FAILED"
+    assert parent.run_count == 1
 
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dispatch_path", ["normal_launch", "adoption"])
-async def test_locked_run_status_gate_rejects_pending_to_error_race(
+async def test_locked_run_status_gate_settles_pending_to_error_race(
     dispatch_seed: DispatchSeed,
     monkeypatch: pytest.MonkeyPatch,
     dispatch_path: str,
@@ -578,8 +584,9 @@ async def test_locked_run_status_gate_rejects_pending_to_error_race(
     else:
         assert len(launch_calls) == 1
     persisted = await seed.persisted_occurrence(occurrence.id)
-    assert persisted.status == "rejected"
-    assert persisted.error_code == "AUTOMATION_CONFLICT"
+    assert persisted.status == "failed"
+    assert persisted.error_code == "AUTOMATION_RUN_FAILED"
+    assert persisted.error_message == "The automation run failed."
     assert persisted.thread_id == thread_id
     assert persisted.run_id == run_id
     async with seed.factory() as session:
@@ -591,6 +598,10 @@ async def test_locked_run_status_gate_rejects_pending_to_error_race(
     assert run.status == "error"
     assert run.thread_id == thread_id
     assert run.metadata == metadata
+    parent = await seed.persisted_task(task.id)
+    assert parent.last_outcome == "failed"
+    assert parent.last_error_code == "AUTOMATION_RUN_FAILED"
+    assert parent.run_count == 1
 
 
 @pytest.mark.postgres
@@ -1317,19 +1328,26 @@ async def test_governance_and_dispatch_failure_settlement_follow_one_lock_order(
     assert persisted_task.status == "paused"
     assert persisted_task.frozen_at == NOW
     assert persisted_occurrence is not None
-    assert persisted_occurrence.status == "rejected"
+    assert persisted_occurrence.status == "running"
+    assert persisted_occurrence.thread_id == thread_id
     assert persisted_occurrence.run_id == run_id
+    assert persisted_task.run_count == 0
     assert authorization_cancel_requested_at == NOW
     assert membership is not None and membership.role == "viewer"
 
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_post_admission_failure_never_requeues_existing_private_run(
+@pytest.mark.parametrize("schedule_type", ["cron", "once"])
+async def test_post_admission_terminal_failure_uses_safe_durable_run_outcome(
     dispatch_seed: DispatchSeed,
+    schedule_type: str,
 ) -> None:
     seed = dispatch_seed
-    task, occurrence = await seed.claimed_occurrence()
+    task, occurrence = await seed.claimed_occurrence(
+        schedule_type=schedule_type,
+        next_run_at=NOW + timedelta(hours=1) if schedule_type == "cron" else None,
+    )
 
     async def fail_after_admission(**kwargs):
         admitted = await PrivateRunAdmissionService(seed.factory).admit(
@@ -1345,7 +1363,7 @@ async def test_post_admission_failure_never_requeues_existing_private_run(
                 scope=kwargs["context"].resource_scope,
                 run_id=admitted.run.run_id,
                 status="error",
-                error="Private runtime launch failed",
+                error="secret private runtime launch failed",
             )
         raise PrivateWorkUnavailable(kwargs["context"].request_id)
 
@@ -1360,10 +1378,12 @@ async def test_post_admission_failure_never_requeues_existing_private_run(
         await dispatcher.dispatch(occurrence.id, app=SimpleNamespace())
 
     persisted = await seed.persisted_occurrence(occurrence.id)
-    assert persisted.status == "rejected"
+    assert persisted.status == "failed"
     assert persisted.thread_id == deterministic_thread_id(occurrence.id)
     assert persisted.run_id == deterministic_run_id(occurrence.id)
-    assert persisted.error_code == "AUTOMATION_UNAVAILABLE"
+    assert persisted.error_code == "AUTOMATION_RUN_FAILED"
+    assert persisted.error_message == "The automation run failed."
+    assert "secret" not in persisted.error_message
     async with seed.factory() as session:
         run = await PrivateRunRepository(session).get(
             scope=seed.context.resource_scope,
@@ -1372,3 +1392,134 @@ async def test_post_admission_failure_never_requeues_existing_private_run(
     assert run is not None
     assert run.thread_id == persisted.thread_id
     assert run.metadata["scheduled_task_id"] == task.id
+    parent = await seed.persisted_task(task.id)
+    assert parent.status == ("enabled" if schedule_type == "cron" else "failed")
+    assert parent.last_outcome == "failed"
+    assert parent.last_error_code == "AUTOMATION_RUN_FAILED"
+    assert parent.run_count == 1
+
+    with pytest.raises(AutomationConflict):
+        await dispatcher.dispatch(occurrence.id, app=SimpleNamespace())
+    assert (await seed.persisted_task(task.id)).run_count == 1
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_post_admission_active_run_keeps_occurrence_and_global_cap(
+    dispatch_seed: DispatchSeed,
+) -> None:
+    seed = dispatch_seed
+    task, occurrence = await seed.claimed_occurrence(
+        next_run_at=NOW + timedelta(hours=1),
+    )
+    admitted_run = None
+
+    async def fail_after_admission(**kwargs):
+        nonlocal admitted_run
+        admitted = await PrivateRunAdmissionService(seed.factory).admit(
+            kwargs["context"],
+            kwargs["thread_id"],
+            PrivateRunCreate(
+                run_id=kwargs["run_id"],
+                metadata=dict(kwargs["metadata"]),
+            ),
+        )
+        admitted_run = admitted.run
+        raise PrivateWorkUnavailable(kwargs["context"].request_id)
+
+    dispatcher = AutomationDispatcher(
+        seed.factory,
+        thread_service=seed.thread_service,
+        launch_private_run=fail_after_admission,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(AutomationUnavailable):
+        await dispatcher.dispatch(occurrence.id, app=SimpleNamespace())
+
+    assert admitted_run is not None
+    persisted = await seed.persisted_occurrence(occurrence.id)
+    assert persisted.status == "running"
+    assert persisted.thread_id == admitted_run.thread_id
+    assert persisted.run_id == admitted_run.run_id
+    assert persisted.started_at == admitted_run.created_at
+    assert persisted.error_code is None
+    parent = await seed.persisted_task(task.id)
+    assert parent.run_count == 0
+    assert parent.last_outcome is None
+
+    async with seed.factory() as session, session.begin():
+        blocked = await ScheduledTaskRepository(session).create(
+            seed.context.resource_scope,
+            ScheduledTaskCreate(
+                task_id=f"blocked-{uuid.uuid4().hex[:20]}",
+                thread_id=None,
+                context_mode="fresh_thread_per_run",
+                agent_asset_id=seed.database.system_agent_id,
+                agent_scope="system",
+                title="Blocked by admitted run",
+                prompt="Must wait for the active admitted run.",
+                schedule_type="cron",
+                schedule_spec={"cron": "0 * * * *"},
+                timezone="UTC",
+                next_run_at=NOW,
+            ),
+        )
+    reserved = await AutomationOccurrenceService(
+        seed.factory,
+        max_concurrent_runs=1,
+    ).reserve_due(now=NOW, limit=10)
+    assert reserved == ()
+    assert (await seed.persisted_task(blocked.id)).next_run_at == NOW
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_completion_before_backfill_wins_without_double_settlement(
+    dispatch_seed: DispatchSeed,
+) -> None:
+    seed = dispatch_seed
+    task, occurrence = await seed.claimed_occurrence()
+
+    async def complete_before_launcher_returns(**kwargs):
+        admitted = await PrivateRunAdmissionService(seed.factory).admit(
+            kwargs["context"],
+            kwargs["thread_id"],
+            PrivateRunCreate(
+                run_id=kwargs["run_id"],
+                metadata=dict(kwargs["metadata"]),
+            ),
+        )
+        async with seed.factory() as session, session.begin():
+            assert await PrivateRunRepository(session).update_status(
+                scope=kwargs["context"].resource_scope,
+                run_id=admitted.run.run_id,
+                status="error",
+                error="secret completion failure",
+            )
+        await AutomationReconciler(
+            seed.factory,
+            clock=lambda: NOW,
+        ).handle_run_completion(_runtime_record(admitted))
+        raise PrivateWorkUnavailable(kwargs["context"].request_id)
+
+    dispatcher = AutomationDispatcher(
+        seed.factory,
+        thread_service=seed.thread_service,
+        launch_private_run=complete_before_launcher_returns,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(AutomationUnavailable):
+        await dispatcher.dispatch(occurrence.id, app=SimpleNamespace())
+
+    persisted = await seed.persisted_occurrence(occurrence.id)
+    assert persisted.status == "failed"
+    assert persisted.error_code == "AUTOMATION_RUN_FAILED"
+    assert persisted.error_message == "The automation run failed."
+    assert persisted.thread_id == deterministic_thread_id(occurrence.id)
+    assert persisted.run_id == deterministic_run_id(occurrence.id)
+    parent = await seed.persisted_task(task.id)
+    assert parent.last_outcome == "failed"
+    assert parent.last_error_code == "AUTOMATION_RUN_FAILED"
+    assert parent.run_count == 1

@@ -92,7 +92,7 @@ type BuildSubmissionOptions =
   | {
       mode: "edit";
       draft: AutomationFormDraft;
-      expectedVersion: number;
+      initial: Automation;
     };
 
 function scheduleSpec(value: AutomationScheduleValue): Record<string, unknown> {
@@ -100,6 +100,40 @@ function scheduleSpec(value: AutomationScheduleValue): Record<string, unknown> {
     return { run_at: value.schedule_spec.run_at };
   }
   return { cron: value.schedule_spec.cron };
+}
+
+function sameSchedule(
+  current: AutomationScheduleValue,
+  initial: Automation,
+): boolean {
+  if (current.schedule_type !== initial.schedule_type) return false;
+  if (current.schedule_type === "once") {
+    const currentRunAt = current.schedule_spec.run_at;
+    const initialRunAt = initial.schedule_spec.run_at;
+    if (
+      typeof currentRunAt !== "string" ||
+      typeof initialRunAt !== "string" ||
+      Object.keys(initial.schedule_spec).length !== 1
+    ) {
+      return false;
+    }
+    const currentTimestamp = Date.parse(currentRunAt);
+    const initialTimestamp = Date.parse(initialRunAt);
+    return (
+      Number.isFinite(currentTimestamp) &&
+      Number.isFinite(initialTimestamp) &&
+      currentTimestamp === initialTimestamp
+    );
+  }
+  const currentCron = current.schedule_spec.cron;
+  const initialCron = initial.schedule_spec.cron;
+  return (
+    typeof currentCron === "string" &&
+    typeof initialCron === "string" &&
+    Object.keys(initial.schedule_spec).length === 1 &&
+    currentCron.trim().replace(/\s+/gu, " ") ===
+      initialCron.trim().replace(/\s+/gu, " ")
+  );
 }
 
 export function buildAutomationFormSubmission(
@@ -148,21 +182,23 @@ export function buildAutomationFormSubmission(
   }
 
   if (options.mode === "edit") {
-    if (
-      !Number.isInteger(options.expectedVersion) ||
-      options.expectedVersion < 1
-    ) {
+    const { initial } = options;
+    if (!Number.isInteger(initial.version) || initial.version < 1) {
       return { ok: false, message: "Automation 版本无效，请刷新。" };
     }
+    const input: UpdateAutomationInput = {
+      expected_version: initial.version,
+    };
+    if (title !== initial.title) input.title = title;
+    if (prompt !== initial.prompt) input.prompt = prompt;
+    const nextScheduleSpec = scheduleSpec(draft.schedule);
+    if (!sameSchedule(draft.schedule, initial)) {
+      input.schedule_spec = nextScheduleSpec;
+    }
+    if (timezone !== initial.timezone) input.timezone = timezone;
     return {
       ok: true,
-      input: {
-        expected_version: options.expectedVersion,
-        title,
-        prompt,
-        schedule_spec: scheduleSpec(draft.schedule),
-        timezone,
-      },
+      input,
     };
   }
 
@@ -267,15 +303,16 @@ export function AutomationForm({
       data-testid="automation-form"
       onSubmit={(event) => {
         event.preventDefault();
-        const result = buildAutomationFormSubmission(
-          mode === "edit"
-            ? {
-                mode,
-                draft,
-                expectedVersion: initial?.version ?? 0,
-              }
-            : { mode, draft },
-        );
+        let result: FormSubmission;
+        if (mode === "edit") {
+          if (!initial) {
+            setFormError("Automation 版本无效，请刷新。");
+            return;
+          }
+          result = buildAutomationFormSubmission({ mode, draft, initial });
+        } else {
+          result = buildAutomationFormSubmission({ mode, draft });
+        }
         if (!result.ok) {
           setFormError(result.message);
           return;

@@ -263,6 +263,9 @@ test("failed dialog feedback clears on close, action change, and project change"
 
   await page.getByRole("button", { name: "编辑" }).click();
   let dialog = page.getByRole("dialog", { name: "编辑 Automation" });
+  await dialog
+    .getByRole("textbox", { name: "Title" })
+    .fill("Lifecycle task edited");
   await dialog.getByRole("button", { name: "保存修改" }).click();
   await expect(dialog.getByText("状态已更新，请刷新后重试。")).toBeVisible();
   await dialog.getByRole("button", { name: "取消" }).click();
@@ -350,6 +353,43 @@ test("owner lifecycle uses only project URLs for create, edit, pause, resume, ma
       path.startsWith("/api/scheduled-tasks"),
     ),
   ).toBe(false);
+});
+
+test("near-execution once title edit submits a sparse PATCH", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date("2026-07-16T13:50:30Z") });
+  const runAt = "2026-07-16T13:51:00Z";
+  const nearOnce: Automation = {
+    ...automation(TASK_ALPHA, "Near once"),
+    schedule_type: "once",
+    schedule_spec: { run_at: runAt },
+    timezone: "UTC",
+    next_run_at: runAt,
+  };
+  const state = await mockProjectAutomationAPI(page, [
+    ownerAccount([ALPHA], { [PROJECT_ALPHA]: [nearOnce] }),
+  ]);
+  await page.goto("/projects/alpha/automations");
+
+  await page.getByRole("button", { name: "编辑" }).click();
+  const dialog = page.getByRole("dialog", { name: "编辑 Automation" });
+  await dialog.getByRole("textbox", { name: "Title" }).fill("Near once edited");
+  await dialog.getByRole("button", { name: "保存修改" }).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Near once edited" }),
+  ).toBeVisible();
+  const patch = state.requests.find(
+    ({ method, path }) =>
+      method === "PATCH" &&
+      path === `/api/projects/${PROJECT_ALPHA}/automations/${TASK_ALPHA}`,
+  );
+  expect(patch?.body).toEqual({
+    expected_version: 1,
+    title: "Near once edited",
+  });
 });
 
 test("Viewer can list and read history but receives no mutation controls", async ({

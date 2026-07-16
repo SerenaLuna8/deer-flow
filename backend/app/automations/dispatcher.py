@@ -25,7 +25,11 @@ from app.automations.execution_authority import (
     lock_automation_execution_authority,
 )
 from app.automations.occurrences import deterministic_run_id, deterministic_thread_id
-from app.automations.settlement import settle_terminal_occurrence
+from app.automations.settlement import (
+    ACTIVE_PRIVATE_RUN_STATUSES,
+    automation_outcome_for_private_run,
+    settle_terminal_occurrence,
+)
 from app.gateway.services import start_scheduled_private_run
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
@@ -61,7 +65,6 @@ from deerflow.runtime import RunRecord
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 _DISPATCH_REQUEST_ID = "automation-dispatch"
-_RUN_ADOPTABLE_STATUSES = frozenset({"pending", "running", "success"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +228,7 @@ class AutomationDispatcher:
             )
             if existing is not None:
                 self._require_matching_run(coordinates, existing)
-                if existing.status not in _RUN_ADOPTABLE_STATUSES:
+                if existing.status not in ACTIVE_PRIVATE_RUN_STATUSES:
                     raise AutomationConflict(prepared.context.request_id)
                 return await self._mark_running(
                     coordinates,
@@ -253,7 +256,7 @@ class AutomationDispatcher:
                 if raced is None:
                     raise
                 self._require_matching_run(coordinates, raced)
-                if raced.status not in _RUN_ADOPTABLE_STATUSES:
+                if raced.status not in ACTIVE_PRIVATE_RUN_STATUSES:
                     raise AutomationConflict(prepared.context.request_id) from None
                 return await self._mark_running(coordinates, prepared, raced)
             if record.thread_id != thread_id or record.run_id != coordinates.expected_run_id:
@@ -406,7 +409,7 @@ class AutomationDispatcher:
                 if locked_run is None:
                     raise AutomationUnavailable(prepared.context.request_id)
                 self._require_matching_run(coordinates, locked_run)
-                if locked_run.status not in _RUN_ADOPTABLE_STATUSES:
+                if locked_run.status not in ACTIVE_PRIVATE_RUN_STATUSES:
                     raise AutomationConflict(prepared.context.request_id)
                 marked = await occurrence_repository.mark_running(
                     prepared.context.resource_scope,
@@ -469,7 +472,6 @@ class AutomationDispatcher:
                 )
                 if occurrence is None or occurrence.status != "launching":
                     return
-                denial = automation_retry_denial(authority, task, occurrence)
                 runs = PrivateRunRepository(session)
                 run = await runs.get(
                     scope=coordinates.scope,
@@ -484,6 +486,35 @@ class AutomationDispatcher:
                         attach_run = False
                     else:
                         attach_run = True
+                if attach_run and run is not None:
+                    outcome = automation_outcome_for_private_run(run)
+                    if outcome is not None:
+                        await settle_terminal_occurrence(
+                            tasks,
+                            occurrences,
+                            coordinates.scope,
+                            task,
+                            occurrence,
+                            status=outcome.occurrence_status,
+                            error_code=outcome.error_code,
+                            error_message=outcome.error_message,
+                            finished_at=now,
+                            request_id=error.request_id,
+                            thread_id=run.thread_id,
+                            run_id=run.run_id,
+                        )
+                        return
+                    if run.status in ACTIVE_PRIVATE_RUN_STATUSES:
+                        await occurrences.mark_running(
+                            coordinates.scope,
+                            coordinates.occurrence_id,
+                            thread_id=run.thread_id,
+                            run_id=run.run_id,
+                            started_at=run.created_at,
+                            updated_at=now,
+                        )
+                        return
+                denial = automation_retry_denial(authority, task, occurrence)
                 if run is None and isinstance(error, AutomationUnavailable):
                     if denial is not None:
                         await settle_terminal_occurrence(

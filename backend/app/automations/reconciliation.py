@@ -17,7 +17,12 @@ from app.automations.execution_authority import (
     lock_automation_execution_authority,
 )
 from app.automations.occurrences import deterministic_run_id, deterministic_thread_id
-from app.automations.settlement import settle_terminal_occurrence
+from app.automations.settlement import (
+    ACTIVE_PRIVATE_RUN_STATUSES,
+    AutomationRunOutcome,
+    automation_outcome_for_private_run,
+    settle_terminal_occurrence,
+)
 from app.private_work.run_repository import PrivateRunRecord, PrivateRunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs import (
@@ -35,16 +40,11 @@ from deerflow.runtime.private_scope import PrivateResourceScope
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_RUN_STATUSES = frozenset({"pending", "running"})
-_TERMINAL_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 _RESTART_ERROR_CODE = "AUTOMATION_GATEWAY_RESTARTED"
 _RESTART_RUN_ERROR = "Gateway restarted before automation run completion"
 _RESTART_ERROR_MESSAGE = "The automation run was interrupted by a Gateway restart."
 _MISSING_RUN_ERROR_CODE = "AUTOMATION_RUN_MISSING"
 _MISSING_RUN_ERROR_MESSAGE = "The admitted automation run could not be found."
-_RUN_FAILED_ERROR_MESSAGE = "The automation run failed."
-_RUN_TIMEOUT_ERROR_MESSAGE = "The automation run timed out."
-_RUN_INTERRUPTED_ERROR_MESSAGE = "The automation run was interrupted."
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,13 +87,6 @@ class _RestartCoordinates:
             owner_user_id=self.owner_user_id,
             membership_version=1,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class _Outcome:
-    occurrence_status: str
-    error_code: str | None
-    error_message: str | None
 
 
 class AutomationReconciler:
@@ -152,7 +145,7 @@ class AutomationReconciler:
                 )
                 if run is None or not self._relation_is_valid(task, occurrence, run):
                     return
-                outcome = self._outcome_for_run(run)
+                outcome = automation_outcome_for_private_run(run)
                 if outcome is None:
                     return
                 await self._settle(
@@ -313,7 +306,7 @@ class AutomationReconciler:
                     candidate.scope,
                     task,
                     occurrence,
-                    _Outcome(
+                    AutomationRunOutcome(
                         "failed",
                         _MISSING_RUN_ERROR_CODE,
                         _MISSING_RUN_ERROR_MESSAGE,
@@ -324,7 +317,7 @@ class AutomationReconciler:
 
             if not self._relation_is_valid(task, occurrence, run):
                 return "unchanged"
-            outcome = self._outcome_for_run(run)
+            outcome = automation_outcome_for_private_run(run)
             if outcome is not None:
                 changed = await self._settle(
                     tasks,
@@ -341,7 +334,7 @@ class AutomationReconciler:
                     return "unchanged"
                 return "succeeded" if outcome.occurrence_status == "success" else ("interrupted" if outcome.occurrence_status == "interrupted" else "failed")
 
-            if run.status not in _ACTIVE_RUN_STATUSES:
+            if run.status not in ACTIVE_PRIVATE_RUN_STATUSES:
                 return "unchanged"
             await PrivateRunRepository(session).update_status(
                 scope=candidate.scope,
@@ -355,7 +348,7 @@ class AutomationReconciler:
                 candidate.scope,
                 task,
                 occurrence,
-                _Outcome(
+                AutomationRunOutcome(
                     "interrupted",
                     _RESTART_ERROR_CODE,
                     _RESTART_ERROR_MESSAGE,
@@ -408,37 +401,13 @@ class AutomationReconciler:
         )
 
     @staticmethod
-    def _outcome_for_run(run: PrivateRunRecord) -> _Outcome | None:
-        if run.status not in _TERMINAL_RUN_STATUSES:
-            return None
-        if run.status == "success":
-            return _Outcome("success", None, None)
-        if run.status == "error":
-            return _Outcome(
-                "failed",
-                "AUTOMATION_RUN_FAILED",
-                _RUN_FAILED_ERROR_MESSAGE,
-            )
-        if run.status == "timeout":
-            return _Outcome(
-                "failed",
-                "AUTOMATION_RUN_TIMEOUT",
-                _RUN_TIMEOUT_ERROR_MESSAGE,
-            )
-        return _Outcome(
-            "interrupted",
-            "AUTOMATION_RUN_INTERRUPTED",
-            _RUN_INTERRUPTED_ERROR_MESSAGE,
-        )
-
-    @staticmethod
     async def _settle(
         tasks: ScheduledTaskRepository,
         occurrences: ScheduledTaskRunRepository,
         scope: PrivateResourceScope,
         task: ScheduledTaskRecord,
         occurrence: ScheduledTaskRunRecord,
-        outcome: _Outcome,
+        outcome: AutomationRunOutcome,
         *,
         finished_at: datetime,
         thread_id: str | None = None,

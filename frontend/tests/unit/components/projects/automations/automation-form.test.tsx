@@ -11,6 +11,7 @@ import {
   type AutomationFormDraft,
 } from "@/components/projects/automations/automation-form";
 import { I18nProvider } from "@/core/i18n/context";
+import type { Automation } from "@/core/project-automations/types";
 import { RECIPES } from "@/core/scheduled-tasks/recipes";
 
 const AGENT = {
@@ -34,6 +35,31 @@ function draft(patch: Partial<AutomationFormDraft> = {}): AutomationFormDraft {
       schedule_spec: { cron: "0 9 * * *" },
       timezone: "Asia/Shanghai",
     },
+    ...patch,
+  };
+}
+
+function automation(patch: Partial<Automation> = {}): Automation {
+  return {
+    id: "automation-1",
+    thread_id: THREAD_ID,
+    context_mode: "reuse_thread",
+    agent_asset_id: AGENT.id,
+    agent_scope: AGENT.scope,
+    title: "Daily review",
+    prompt: "Review the project.",
+    schedule_type: "cron",
+    schedule_spec: { cron: "0 9 * * *" },
+    timezone: "Asia/Shanghai",
+    status: "enabled",
+    next_run_at: "2026-07-17T01:00:00Z",
+    last_run_at: null,
+    last_outcome: null,
+    last_error_code: null,
+    run_count: 0,
+    version: 4,
+    created_at: "2026-07-16T00:00:00Z",
+    updated_at: "2026-07-16T00:00:00Z",
     ...patch,
   };
 }
@@ -111,10 +137,11 @@ describe("AutomationForm", () => {
   });
 
   test("requires a UUID Thread in reuse mode and locks immutable edit fields", () => {
+    const initial = automation();
     const result = buildAutomationFormSubmission(
       {
         mode: "edit",
-        expectedVersion: 4,
+        initial,
         draft: draft({ contextMode: "reuse_thread", threadId: THREAD_ID }),
       },
       NOW,
@@ -123,10 +150,6 @@ describe("AutomationForm", () => {
       ok: true,
       input: {
         expected_version: 4,
-        title: "Daily review",
-        prompt: "Review the project.",
-        schedule_spec: { cron: "0 9 * * *" },
-        timezone: "Asia/Shanghai",
       },
     });
 
@@ -134,27 +157,7 @@ describe("AutomationForm", () => {
       <I18nProvider initialLocale="zh-CN">
         <AutomationForm
           mode="edit"
-          initial={{
-            id: "automation-1",
-            thread_id: THREAD_ID,
-            context_mode: "reuse_thread",
-            agent_asset_id: AGENT.id,
-            agent_scope: AGENT.scope,
-            title: "Daily review",
-            prompt: "Review the project.",
-            schedule_type: "cron",
-            schedule_spec: { cron: "0 9 * * *" },
-            timezone: "Asia/Shanghai",
-            status: "enabled",
-            next_run_at: "2026-07-17T01:00:00Z",
-            last_run_at: null,
-            last_outcome: null,
-            last_error_code: null,
-            run_count: 0,
-            version: 4,
-            created_at: "2026-07-16T00:00:00Z",
-            updated_at: "2026-07-16T00:00:00Z",
-          }}
+          initial={initial}
           agents={[AGENT]}
           canSubmit
           onSubmit={() => undefined}
@@ -164,6 +167,45 @@ describe("AutomationForm", () => {
     expect(html).toContain('data-testid="automation-context-mode"');
     expect(html).toContain('data-testid="automation-agent"');
     expect(html).toContain("disabled");
+  });
+
+  test("builds a sparse title-only PATCH for a near-execution once Automation", () => {
+    const initial = automation({
+      title: "Near once",
+      schedule_type: "once",
+      schedule_spec: { run_at: "2026-07-16T00:00:30Z" },
+      timezone: "UTC",
+      next_run_at: "2026-07-16T00:00:30Z",
+    });
+
+    expect(
+      buildAutomationFormSubmission(
+        {
+          mode: "edit",
+          initial,
+          draft: draft({
+            title: "Near once edited",
+            prompt: initial.prompt,
+            contextMode: initial.context_mode,
+            threadId: initial.thread_id ?? "",
+            agentAssetId: initial.agent_asset_id,
+            agentScope: initial.agent_scope,
+            schedule: {
+              schedule_type: "once",
+              schedule_spec: { run_at: "2026-07-16T00:00:30+00:00" },
+              timezone: "UTC",
+            },
+          }),
+        },
+        NOW,
+      ),
+    ).toEqual({
+      ok: true,
+      input: {
+        expected_version: 4,
+        title: "Near once edited",
+      },
+    });
   });
 
   test("keeps reusable schedule controls from submitting the parent form", () => {

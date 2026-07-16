@@ -638,6 +638,53 @@ async def test_once_title_only_update_near_existing_run_is_not_delay_validated(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_once_title_update_ignores_explicit_semantically_equal_schedule(
+    automation_service_seed: AutomationServiceSeed,
+) -> None:
+    seed = automation_service_seed
+    service = ProjectAutomationService(
+        seed.factory,
+        seed.clock,
+        min_once_delay_seconds=60,
+    )
+    run_at = NOW + timedelta(hours=2)
+    task = await service.create(
+        seed.owner_context,
+        seed.create_command(
+            schedule_type="once",
+            schedule_spec={"run_at": run_at.isoformat()},
+        ),
+    )
+    queued = await seed.create_occurrence(task, status="queued")
+    seed.clock.now = run_at - timedelta(seconds=30)
+
+    updated = await service.update(
+        seed.owner_context,
+        task.id,
+        AutomationChanges(
+            expected_version=task.version,
+            title="Near run with legacy full payload",
+            schedule_spec=dict(task.schedule_spec),
+            timezone=task.timezone,
+        ),
+    )
+
+    assert updated.title == "Near run with legacy full payload"
+    assert updated.schedule_spec == task.schedule_spec
+    assert updated.timezone == task.timezone
+    assert updated.next_run_at == task.next_run_at
+    async with seed.factory() as session:
+        cancelled = await ScheduledTaskRunRepository(session).get(
+            seed.owner_context.resource_scope,
+            queued.id,
+        )
+    assert cancelled is not None
+    assert cancelled.status == "cancelled"
+    assert cancelled.error_code == "AUTOMATION_UPDATED"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_update_cancels_queued_and_uses_version_cas(
     automation_service_seed: AutomationServiceSeed,
 ) -> None:

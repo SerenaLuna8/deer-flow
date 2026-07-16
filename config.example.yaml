@@ -1512,7 +1512,7 @@ run_events:
 #   poll_interval_seconds: 5     # How often to scan for due tasks
 #   lease_seconds: 120           # Occurrence admission lease; must exceed poll interval; not a Worker execution lease
 #   max_concurrent_runs: 3       # Global cap on active scheduled runs; each poll claims only into the remaining budget
-#   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
+#   min_once_delay_seconds: 60   # Minimum future offset for one-time task creation and schedule-changing updates
 scheduler:
   enabled: false
   poll_interval_seconds: 5
