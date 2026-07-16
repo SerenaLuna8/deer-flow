@@ -765,9 +765,9 @@ Expected: PASS；浏览器刷新、Gateway 重启和跨实例重连均不丢帧�
 - Test: `backend/tests/test_m6_quota_service_postgres.py`
 - Test: `backend/tests/test_m6_quota_reconciliation_postgres.py`
 
-**Interfaces:** `QuotaService.reserve/release/consume(session, scope, resource, amount, idempotency_key)`；effective limit 为平台默认与项目收紧值的最小值；counter 与 ledger 同事务，80% 只追加一次 threshold event。
+**Interfaces:** `QuotaService.reserve/consume(session, issued_context, resource, amount, idempotency_key)`；`release` 只接受 module-issued、reason→dimension 固定且匹配原 reservation 的 compensation authority；effective limit 为平台默认与项目收紧值的最小值；counter 与 ledger 同事务，ordinary/policy/reconcile 的 80% threshold 各 bucket 只追加一次。
 
-- [ ] **Step 1: 写 RED tests**
+- [x] **Step 1: 写 RED tests**
 
 ```python
 async def test_concurrent_reservations_never_exceed_limit(quota, project_scope):
@@ -785,7 +785,7 @@ async def test_same_idempotency_key_writes_one_ledger_row(quota, scope):
 
 覆盖 20 members、5 GiB、3 runs、10,000 MCP/day 默认值，Admin只能收紧，日窗 UTC，release补偿行，trigger拒绝 UPDATE/DELETE，reconcile dry-run/execute。
 
-- [ ] **Step 2: 观察 RED**
+- [x] **Step 2: 观察 RED**
 
 ```bash
 cd backend
@@ -794,12 +794,13 @@ uv run pytest tests/test_m6_quota_service_postgres.py tests/test_m6_quota_reconc
 
 Expected: FAIL with missing quota repository/service。
 
-- [ ] **Step 3: 实现原子 reserve**
+- [x] **Step 3: 实现原子 reserve**
 
 ```python
-async def reserve(self, session, scope, resource, amount, key):
-    counter = await self._repo.lock_counter(session, scope.project_id, resource, current_window(resource))
-    limit = await self._repo.effective_limit(session, scope.project_id, resource)
+async def reserve(self, session, context, resource, amount, key):
+    await self._lock_current_authority(session, context)
+    counter = await self._repo.lock_counter(session, context.project_id, resource, current_window(resource))
+    limit = await self._repo.effective_limit(session, context.project_id, resource)
     if counter.used + counter.reserved + amount > limit:
         raise QuotaExceeded(resource)
     return await self._repo.append_and_apply(session, counter, amount, key, operation="reserve")
@@ -807,7 +808,7 @@ async def reserve(self, session, scope, resource, amount, key):
 
 reconciliation 从 authoritative rows 计算 expected，dry-run只报差异；execute追加 `reconcile_adjustment` ledger 后修正 counter。
 
-- [ ] **Step 4: 验证并提交**
+- [x] **Step 4: 验证并提交**
 
 ```bash
 cd backend

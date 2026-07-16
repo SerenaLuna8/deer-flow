@@ -401,7 +401,7 @@ dry-run 只输出脱敏 counts 与稳定 source hash，不升级 schema、不写
 
 M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation
 也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查；M6 durable job、独立 Worker、Worker-only
-private run、Automation 原子 admission、独立 Scheduler、PostgreSQL durable stream writer/reader、Gateway SSE reconnect 与前端 cursor/dedupe 已完成当前实现，配额/完整审计/通用备份恢复、
+private run、Automation 原子 admission、独立 Scheduler、PostgreSQL durable stream writer/reader、Gateway SSE reconnect、前端 cursor/dedupe 与项目配额 core 已完成当前实现。成员/存储/并发 Run/MCP 强制接线、完整审计和通用备份恢复、
 M7 legacy source/API 清理和 M8 完整发布验收仍未交付，因此 DeerFlow 仍不能作为完整多用户 SaaS 发布。
 
 #### M3 共享资产迁移与 credential 轮换
@@ -991,8 +991,9 @@ Enable background polling with `config.yaml -> scheduler.enabled` and run the ba
 Scheduler role with `cd backend && make scheduler`. It—not Gateway—holds the PostgreSQL
 scheduler ownership lock and only admits jobs. Disabling polling leaves the project API
 and manual trigger available; manual trigger uses the same atomic occurrence/Run/job
-path. PostgreSQL durable stream writing/reading, terminal uniqueness, Gateway SSE reconnect, and
-frontend cursor/dedupe are implemented; quotas, complete audit, and general backup/restore remain later M6 work.
+path. PostgreSQL durable stream writing/reading, terminal uniqueness, Gateway SSE reconnect,
+frontend cursor/dedupe, and the atomic project quota core are implemented. Member, storage,
+concurrent-Run, and MCP enforcement wiring, complete audit, and general backup/restore remain later M6 work.
 
 The project-scoped backend API is available at
 `/api/projects/{project_id}/automations`. It provides strict create, list, read,

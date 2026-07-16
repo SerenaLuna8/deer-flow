@@ -3,5 +3,11 @@ from deerflow.persistence.quotas.model import (
     ProjectUsageCounterRow,
     ProjectUsageLedgerRow,
 )
+from deerflow.persistence.quotas.sql import QuotaRepository
 
-__all__ = ["ProjectQuotaRow", "ProjectUsageCounterRow", "ProjectUsageLedgerRow"]
+__all__ = [
+    "ProjectQuotaRow",
+    "ProjectUsageCounterRow",
+    "ProjectUsageLedgerRow",
+    "QuotaRepository",
+]
