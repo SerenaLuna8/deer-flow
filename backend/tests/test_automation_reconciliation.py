@@ -228,40 +228,86 @@ async def test_completion_uses_persisted_run_scope_and_terminal_cas(
 @pytest.mark.postgres
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("run_status", "occurrence_status", "task_status"),
+    (
+        "run_status",
+        "occurrence_status",
+        "task_status",
+        "error_code",
+        "public_error_message",
+    ),
     [
-        ("error", "failed", "failed"),
-        ("timeout", "failed", "failed"),
-        ("interrupted", "interrupted", "cancelled"),
+        (
+            "error",
+            "failed",
+            "failed",
+            "AUTOMATION_RUN_FAILED",
+            "The automation run failed.",
+        ),
+        (
+            "timeout",
+            "failed",
+            "failed",
+            "AUTOMATION_RUN_TIMEOUT",
+            "The automation run timed out.",
+        ),
+        (
+            "interrupted",
+            "interrupted",
+            "cancelled",
+            "AUTOMATION_RUN_INTERRUPTED",
+            "The automation run was interrupted.",
+        ),
     ],
 )
-async def test_completion_maps_terminal_run_outcomes_for_once_tasks(
+@pytest.mark.parametrize("entrypoint", ["completion", "restart"])
+async def test_terminal_run_outcomes_are_public_safe_for_completion_and_restart(
     reconciliation_seed: M4ThreadSeed,
     run_status: str,
     occurrence_status: str,
     task_status: str,
+    error_code: str,
+    public_error_message: str,
+    entrypoint: str,
 ) -> None:
     seed = reconciliation_seed
-    scenario = await _create_scenario(seed, schedule_type="once")
+    scenario = await _create_scenario(
+        seed,
+        schedule_type="once",
+        occurrence_status=("launching" if entrypoint == "restart" else "running"),
+        attach_run=entrypoint != "restart",
+    )
+    private_error = "provider secret sk-private prompt=customer-confidential"
     async with seed.factory() as session, session.begin():
         assert await PrivateRunRepository(session).update_status(
             scope=seed.owner_a.resource_scope,
             run_id=scenario.run_id,
             status=run_status,
-            error="safe persisted error",
+            error=private_error,
         )
-    await AutomationReconciler(seed.factory, clock=lambda: NOW).handle_run_completion(
-        _callback(
-            scenario,
-            status=RunStatus.success,
-            scope=seed.owner_a.resource_scope,
-            metadata={},
+    reconciler = AutomationReconciler(seed.factory, clock=lambda: NOW)
+    if entrypoint == "completion":
+        await reconciler.handle_run_completion(
+            _callback(
+                scenario,
+                status=RunStatus.success,
+                scope=seed.owner_a.resource_scope,
+                metadata={},
+            )
         )
-    )
+    else:
+        await reconciler.reconcile_restart(NOW)
     async with seed.factory() as session:
+        private_run = await PrivateRunRepository(session).get(
+            scope=seed.owner_a.resource_scope,
+            run_id=scenario.run_id,
+        )
         occurrence = await ScheduledTaskRunRepository(session).get(seed.owner_a.resource_scope, scenario.occurrence_id)
         task = await ScheduledTaskRepository(session).get(seed.owner_a.resource_scope, scenario.task_id)
+    assert private_run is not None and private_run.error == private_error
     assert occurrence is not None and occurrence.status == occurrence_status
+    assert occurrence.error_code == error_code
+    assert occurrence.error_message == public_error_message
+    assert private_error not in occurrence.error_message
     assert task is not None and task.status == task_status and task.run_count == 1
 
 

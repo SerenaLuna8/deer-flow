@@ -41,6 +41,9 @@ _RESTART_RUN_ERROR = "Gateway restarted before automation run completion"
 _RESTART_ERROR_MESSAGE = "The automation run was interrupted by a Gateway restart."
 _MISSING_RUN_ERROR_CODE = "AUTOMATION_RUN_MISSING"
 _MISSING_RUN_ERROR_MESSAGE = "The admitted automation run could not be found."
+_RUN_FAILED_ERROR_MESSAGE = "The automation run failed."
+_RUN_TIMEOUT_ERROR_MESSAGE = "The automation run timed out."
+_RUN_INTERRUPTED_ERROR_MESSAGE = "The automation run was interrupted."
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,13 +409,21 @@ class AutomationReconciler:
         if run.status == "success":
             return _Outcome("success", None, None)
         if run.status == "error":
-            return _Outcome("failed", "AUTOMATION_RUN_FAILED", run.error)
+            return _Outcome(
+                "failed",
+                "AUTOMATION_RUN_FAILED",
+                _RUN_FAILED_ERROR_MESSAGE,
+            )
         if run.status == "timeout":
-            return _Outcome("failed", "AUTOMATION_RUN_TIMEOUT", run.error)
+            return _Outcome(
+                "failed",
+                "AUTOMATION_RUN_TIMEOUT",
+                _RUN_TIMEOUT_ERROR_MESSAGE,
+            )
         return _Outcome(
             "interrupted",
             "AUTOMATION_RUN_INTERRUPTED",
-            run.error or "The automation run was interrupted.",
+            _RUN_INTERRUPTED_ERROR_MESSAGE,
         )
 
     @staticmethod

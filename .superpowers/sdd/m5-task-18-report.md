@@ -34,7 +34,7 @@ read or written.
 
 ```text
 cd backend && uv run pytest tests/ -q
-7662 passed, 869 skipped, 10 warnings in 115.57s
+7662 passed, 872 skipped, 10 warnings in 106.77s
 
 cd backend && make test-blocking-io
 41 passed in 11.20s
@@ -62,13 +62,10 @@ passed:
 ```text
 cd backend && POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/postgres \
   uv run pytest <fixed eight M1-M5 integration files> -q
-32 passed in 9.56s; 0 skipped
+32 passed in 9.54s; 0 skipped
 
-# Task 16 fresh-install smoke
-1 passed in 0.87s; 0 skipped
-
-# Task 16 legacy dry-run/execute/idempotency smoke
-1 passed in 1.06s; 0 skipped
+# Task 16 fresh-install plus legacy dry-run/execute/idempotency smokes
+2 passed in 1.30s; 0 skipped
 ```
 
 The fixed file list was exactly: M1 cutover, project isolation, M2 governance,
@@ -77,7 +74,7 @@ and M5 Automation migration.
 
 ### Operations
 
-A dedicated `deerflow_test_task18_ops` database was created in the same isolated
+A dedicated `deerflow_test_task18_repair_ops` database was created in the same isolated
 cluster, initialized to `0013_project_automation_finalize`, inspected, and dropped.
 A temporary non-secret minimal `config.yaml` was used only for doctor and removed
 immediately afterward.
@@ -129,8 +126,9 @@ exit 0, no matches
 
 ## Self-review
 
-- No production behavior, database state machine, API, migration implementation, or
-  frontend runtime code changed in Task 18.
+- The initial Task 18 release-candidate documentation pass changed no production
+  behavior, database state machine, API, migration implementation, or frontend runtime
+  code. The final-review repair below changes only public reconciliation error mapping.
 - Current documentation says release candidate awaiting independent Task 18 review;
   it does not claim M5 complete, 5/8, or 62.5% as current state. Those values remain
   only in the conditional completion contract.
@@ -140,3 +138,47 @@ exit 0, no matches
 - Examples expose no private titles/prompts, owner-map content, or full identifiers.
 - M6 remains responsible for independent Workers, durable SSE, generic jobs/retries,
   quotas, audit, and general backup/restore; M7-M8 remain open.
+
+## Whole-branch final-review repair wave
+
+The independent whole-branch review reported zero Critical findings and two Important
+findings:
+
+1. `PrivateRunRecord.error` was copied into public Automation occurrence history by
+   `_outcome_for_run`, which could expose provider output or private prompt content.
+2. The root/backend contributor guides still described an older PostgreSQL release gate,
+   and the backend command list omitted `migrate-automations`.
+
+### Reconciliation privacy TDD
+
+The regression test covers completion and restart reconciliation for all three terminal
+failure states. Each case writes `provider secret sk-private
+prompt=customer-confidential` only to the private run record and requires a stable public
+error code plus a fixed safe message on the occurrence.
+
+```text
+# RED
+6 failed; every occurrence exposed the injected private provider text
+
+# GREEN
+6 passed in 1.69s
+
+# Complete reconciliation file
+18 passed in 3.97s
+```
+
+Production reconciliation now maps `run_failed`, `run_timeout`, and `run_interrupted` to
+fixed public-safe messages. It does not read `run.error` when constructing the public
+occurrence outcome, while the original private run record retains its diagnostic text.
+
+### Contributor-guide repair
+
+- Root and backend `AGENTS.md` now list the exact eight M1-M5 PostgreSQL release-gate
+  files/domains.
+- The guidance distinguishes routine local skips from required release evidence with an
+  isolated `POSTGRES_TEST_URL` and zero skips.
+- The backend command list now includes `make migrate-automations ARGS="--dry-run ..."`.
+
+All fresh verification counts in this report are from the post-repair tree. M5 remains a
+release candidate awaiting re-review; this report does not claim M5 complete, 5/8, or
+62.5%.

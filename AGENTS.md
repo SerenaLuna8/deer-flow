@@ -169,10 +169,10 @@ These apply repo-wide; module guides own the module-specific detail.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **PostgreSQL release gate** — `.github/workflows/project-foundation-postgres-tests.yml`
-  固定运行 M1 cutover、M1 isolation、M2 governance、M3 shared-assets、M4 private-work 和 M4 migration
-  六个真实 PostgreSQL 集成文件；每个
-  测试使用临时 `deerflow_test_*` 数据库。缺少 `POSTGRES_TEST_URL` 只能在本地明确 skip，
-  CI 必须在进入 pytest 前硬失败。
+  固定运行 M1 cutover、project isolation、M2 governance、M3 shared-assets、M4 private-work、
+  M4 private-work migration、M5 project Automation 和 M5 Automation migration 八个真实 PostgreSQL
+  集成文件；每个测试使用临时 `deerflow_test_*` 数据库。缺少 `POSTGRES_TEST_URL` 只能在本地日常
+  测试中明确 skip，M1–M5 release evidence 必须提供该变量并保持 0 skip；CI 必须在进入 pytest 前硬失败。
 - **M4 private-work cutover 运维** — `migrate-private-work` 使用显式 owner UUID→active project UUID
   map；先 dry-run，再在停止 Gateway/Scheduler/channel/embedded writers 的维护窗口 execute，随后运行
   `make check-db` 与 M1–M4 probes。当前 runnable-first CLI 不写 `--backup-dir`、不消费
