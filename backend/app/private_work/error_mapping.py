@@ -10,7 +10,10 @@ from app.private_work.errors import (
     PrivateWorkError,
     PrivateWorkForbidden,
     PrivateWorkInvalid,
+    PrivateWorkMcpQuotaExceeded,
     PrivateWorkNotFound,
+    PrivateWorkRunQuotaExceeded,
+    PrivateWorkStorageQuotaExceeded,
     PrivateWorkTooLarge,
     PrivateWorkUnavailable,
 )
@@ -22,6 +25,9 @@ _PRIVATE_WORK_ERROR_TYPES = (
     PrivateWorkAssetStale,
     PrivateWorkCutover,
     PrivateWorkTooLarge,
+    PrivateWorkStorageQuotaExceeded,
+    PrivateWorkRunQuotaExceeded,
+    PrivateWorkMcpQuotaExceeded,
     PrivateWorkInvalid,
     PrivateWorkUnavailable,
 )
@@ -41,5 +47,5 @@ def private_work_http_exception(error: PrivateWorkError) -> HTTPException:
             "message": error_type.public_message,
             "request_id": error.request_id,
         },
-        headers={"Retry-After": "1"} if status_code == 503 else None,
+        headers={"Retry-After": "1"} if status_code in {429, 503} else None,
     )

@@ -392,7 +392,7 @@ async def test_private_thread_service_branch_uses_database_authority_copy_hook_o
     assert branch.metadata["workspace_clone_mode"] == "current_thread_authority_copy"
     assert branch.metadata["branch_source_head_checkpoint_id"] == checkpoint_id
     assert branch.metadata["branch_parent_visible_tail_message_id"] == "assistant-tail"
-    assert hook.calls == [(seed.owner_a_scope, source.thread_id, branch.thread_id)]
+    assert hook.calls == [(seed.owner_a, source.thread_id, branch.thread_id)]
     assert branch_saver.public_get_calls == 0
     assert len(branch_saver.locked_get_configs) == 2
     assert branch_saver.locked_get_configs[0]["configurable"]["checkpoint_id"] == checkpoint_id
@@ -500,7 +500,7 @@ async def test_private_thread_metadata_only_head_keeps_visible_assistant_turn_cu
         expected_source_version=source.version,
     )
 
-    assert hook.calls == [(seed.owner_a_scope, source.thread_id, branch.thread_id)]
+    assert hook.calls == [(seed.owner_a, source.thread_id, branch.thread_id)]
     assert branch.metadata["workspace_clone_mode"] == "current_thread_authority_copy"
     assert branch.metadata["branch_parent_visible_tail_message_id"] == "assistant-visible"
     assert branch.metadata["branch_source_head_checkpoint_id"] == latest["configurable"]["checkpoint_id"]

@@ -9,6 +9,9 @@ PRIVATE_WORK_ERROR_STATUS = {
     "PRIVATE_WORK_ASSET_STALE": 409,
     "PRIVATE_WORK_CUTOVER": 409,
     "PRIVATE_WORK_TOO_LARGE": 413,
+    "PROJECT_STORAGE_QUOTA_EXCEEDED": 429,
+    "PROJECT_RUN_QUOTA_EXCEEDED": 429,
+    "PROJECT_MCP_QUOTA_EXCEEDED": 429,
     "PRIVATE_WORK_INVALID": 422,
     "PRIVATE_WORK_UNAVAILABLE": 503,
 }
@@ -51,6 +54,21 @@ class PrivateWorkCutover(PrivateWorkError):
 class PrivateWorkTooLarge(PrivateWorkError):
     code = "PRIVATE_WORK_TOO_LARGE"
     public_message = "Private work payload is too large."
+
+
+class PrivateWorkStorageQuotaExceeded(PrivateWorkError):
+    code = "PROJECT_STORAGE_QUOTA_EXCEEDED"
+    public_message = "Project storage quota was exceeded."
+
+
+class PrivateWorkRunQuotaExceeded(PrivateWorkError):
+    code = "PROJECT_RUN_QUOTA_EXCEEDED"
+    public_message = "Project concurrent Run quota was exceeded."
+
+
+class PrivateWorkMcpQuotaExceeded(PrivateWorkError):
+    code = "PROJECT_MCP_QUOTA_EXCEEDED"
+    public_message = "Project MCP call quota was exceeded."
 
 
 class PrivateWorkInvalid(PrivateWorkError):

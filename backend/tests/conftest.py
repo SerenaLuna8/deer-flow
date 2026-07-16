@@ -44,6 +44,17 @@ _executor_mock.get_background_task_result = MagicMock()
 sys.modules["deerflow.subagents.executor"] = _executor_mock
 
 
+@pytest.fixture(autouse=True)
+def m6_audit_hmac_environment(monkeypatch):
+    """Install the stable deployment key required by M6 process wiring."""
+
+    monkeypatch.setenv("DEER_FLOW_AUDIT_ACTIVE_KEY_ID", "test-audit-v1")
+    monkeypatch.setenv(
+        "DEER_FLOW_AUDIT_KEYRING_JSON",
+        '{"test-audit-v1":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}',
+    )
+
+
 @pytest.fixture(scope="session")
 def postgres_admin_url() -> str:
     """Return a maintenance URL without ever logging credentials."""

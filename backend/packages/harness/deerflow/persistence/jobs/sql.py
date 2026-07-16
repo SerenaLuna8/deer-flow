@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.jobs.model import DeadJobRow, JobAttemptRow, JobRow
+from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
 JobType = Literal["private_run", "automation_run", "retention_purge"]
 RetrySafety = Literal["safe", "unknown", "unsafe"]
@@ -273,6 +274,44 @@ class JobRepository:
             raise JobIdempotencyConflict("job idempotency authority conflict")
         return existing.id, False
 
+    async def _lock_authority(
+        self,
+        project_id: uuid.UUID,
+        owner_user_id: str | None,
+    ) -> bool:
+        """Lock Project -> Membership before any terminal Job/Run mutation."""
+
+        project = await self.session.scalar(sa.select(ProjectRow.id).where(ProjectRow.id == project_id).with_for_update(of=ProjectRow))
+        if project is None:
+            return False
+        if owner_user_id is None:
+            return True
+        membership = await self.session.scalar(
+            sa.select(ProjectMembershipRow.id)
+            .where(
+                ProjectMembershipRow.project_id == project_id,
+                ProjectMembershipRow.user_id == owner_user_id,
+            )
+            .with_for_update(of=ProjectMembershipRow)
+        )
+        return membership is not None
+
+    async def _lock_job_authority(self, job_id: uuid.UUID) -> bool:
+        coordinates = (
+            await self.session.execute(
+                sa.select(
+                    JobRow.project_id,
+                    JobRow.owner_user_id,
+                ).where(JobRow.id == job_id)
+            )
+        ).one_or_none()
+        if coordinates is None:
+            return False
+        return await self._lock_authority(
+            coordinates.project_id,
+            coordinates.owner_user_id,
+        )
+
     async def enqueue(self, request: EnqueueJob) -> uuid.UUID:
         job_id, _created = await self._enqueue(request)
         return job_id
@@ -416,31 +455,65 @@ class JobRepository:
                 JobRow.lease_expires_at <= claimed_at,
             ),
         )
+        skipped_ids: set[uuid.UUID] = set()
         for _ in range(100):
-            row = (
-                await self.session.execute(
-                    sa.select(JobRow)
-                    .where(
-                        JobRow.job_type.in_(job_types),
-                        claimable,
-                    )
-                    .order_by(
-                        JobRow.priority.desc(),
-                        JobRow.available_at,
-                        JobRow.created_at,
-                        JobRow.id,
-                    )
-                    .with_for_update(of=JobRow, skip_locked=True)
-                    .limit(1)
+            candidate_statement = (
+                sa.select(
+                    JobRow.id,
+                    JobRow.project_id,
+                    JobRow.owner_user_id,
                 )
-            ).scalar_one_or_none()
-            if row is None:
+                .where(
+                    JobRow.job_type.in_(job_types),
+                    claimable,
+                )
+                .order_by(
+                    JobRow.priority.desc(),
+                    JobRow.available_at,
+                    JobRow.created_at,
+                    JobRow.id,
+                )
+                .limit(1)
+            )
+            if skipped_ids:
+                candidate_statement = candidate_statement.where(JobRow.id.not_in(skipped_ids))
+            candidate = (await self.session.execute(candidate_statement)).one_or_none()
+            if candidate is None:
                 return None
+
+            savepoint = await self.session.begin_nested()
+            try:
+                if not await self._lock_authority(
+                    candidate.project_id,
+                    candidate.owner_user_id,
+                ):
+                    await savepoint.rollback()
+                    return None
+                row = (
+                    await self.session.execute(
+                        sa.select(JobRow)
+                        .where(
+                            JobRow.id == candidate.id,
+                            JobRow.job_type.in_(job_types),
+                            claimable,
+                        )
+                        .with_for_update(of=JobRow, skip_locked=True)
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    await savepoint.rollback()
+                    skipped_ids.add(candidate.id)
+                    continue
+                await savepoint.commit()
+            except BaseException:
+                if savepoint.is_active:
+                    await savepoint.rollback()
+                raise
 
             if row.status in {"queued", "retry_wait"} and row.cancel_requested_at is not None:
                 await self._settle_unowned_cancel(row, now=claimed_at)
                 await self.session.flush()
-                continue
+                return None
 
             if row.status in {"leased", "running"}:
                 if row.retry_safety != "safe":
@@ -459,11 +532,11 @@ class JobRepository:
                         now=claimed_at,
                     )
                     await self.session.flush()
-                    continue
+                    return None
                 if row.cancel_requested_at is not None:
                     await self._settle_unowned_cancel(row, now=claimed_at)
                     await self.session.flush()
-                    continue
+                    return None
                 if row.attempt_count >= row.max_attempts:
                     owner_ref = self._owner_ref(row.owner_user_id)
                     await self._finish_current_attempt(
@@ -479,7 +552,7 @@ class JobRepository:
                         now=claimed_at,
                     )
                     await self.session.flush()
-                    continue
+                    return None
                 await self._finish_current_attempt(
                     row,
                     outcome="lease_lost",
@@ -624,6 +697,8 @@ class JobRepository:
         """Settle a requested cancellation only while no Worker owns it."""
 
         settled_at = self._now(now)
+        if not await self._lock_job_authority(job_id):
+            return False
         row = (
             await self.session.execute(
                 sa.select(JobRow)
@@ -652,6 +727,8 @@ class JobRepository:
         now: datetime | None,
     ) -> bool:
         settled_at = self._now(now)
+        if not await self._lock_job_authority(job_id):
+            return False
         token_hash = _lease_token_hash(lease_token)
         result = await self.session.execute(
             sa.update(JobRow)
@@ -733,6 +810,8 @@ class JobRepository:
         failed_at = self._now(now)
         if not public_error_code or len(public_error_code) > 64:
             raise ValueError("public_error_code must be between 1 and 64 characters")
+        if not await self._lock_job_authority(job_id):
+            return False
         token_hash = _lease_token_hash(lease_token)
         row = (
             await self.session.execute(

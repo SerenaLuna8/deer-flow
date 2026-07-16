@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import Any, TypeVar, cast
+from typing import Any, Protocol, TypeVar, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -13,7 +14,7 @@ from langgraph.checkpoint.base import (
     CheckpointMetadata,
     CheckpointTuple,
 )
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,9 +33,35 @@ from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
 from deerflow.persistence.private_work.model import PrivateArtifactRow, PrivateFileRow
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 PRIVATE_SCOPE_MARKER = "deerflow_private_scope"
 _T = TypeVar("_T")
+
+
+class PrivateCheckpointQuotaPort(Protocol):
+    async def release_file(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+        request_id: str,
+    ) -> None: ...
+
+
+class _NoopPrivateCheckpointQuota:
+    async def release_file(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+        request_id: str,
+    ) -> None:
+        del session, scope, file_id, size, request_id
 
 
 def _drop_marker(value: object) -> object:
@@ -54,9 +81,12 @@ class ProjectScopedCheckpointer:
         self,
         raw_saver: BaseCheckpointSaver,
         session_factory: async_sessionmaker[AsyncSession],
+        *,
+        quota: PrivateCheckpointQuotaPort | None = None,
     ) -> None:
         self._raw = raw_saver
         self._session_factory = session_factory
+        self._quota = quota or _NoopPrivateCheckpointQuota()
         try:
             self._owner_loop = asyncio.get_running_loop()
         except RuntimeError as exc:
@@ -68,6 +98,7 @@ class ProjectScopedCheckpointer:
             self._session_factory,
             require_issued_private_work_context(context),
             self._owner_loop,
+            self._quota,
         )
 
 
@@ -78,12 +109,14 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         session_factory: async_sessionmaker[AsyncSession],
         context: PrivateWorkContext,
         owner_loop: asyncio.AbstractEventLoop,
+        quota: PrivateCheckpointQuotaPort,
     ) -> None:
         super().__init__(serde=raw_saver.serde)
         self._raw = raw_saver
         self._session_factory = session_factory
         self._context = context
         self._owner_loop = owner_loop
+        self._quota = quota
         self._revalidator = PrivateWorkRevalidator()
         self._authorization_boundary: object | None = None
 
@@ -362,6 +395,30 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                         thread_id=thread_id,
                         expected_version=record.version,
                     )
+                    ready_files = (
+                        (
+                            await session.execute(
+                                select(PrivateFileRow)
+                                .where(
+                                    PrivateFileRow.project_id == context.project_id,
+                                    PrivateFileRow.owner_user_id == str(context.user_id),
+                                    PrivateFileRow.thread_id == thread_id,
+                                    PrivateFileRow.status == "ready",
+                                )
+                                .with_for_update(of=PrivateFileRow)
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    for file_row in ready_files:
+                        await self._quota.release_file(
+                            session,
+                            context.resource_scope,
+                            file_id=file_row.id,
+                            size=file_row.size,
+                            request_id=context.request_id,
+                        )
                     await session.execute(
                         update(PrivateFileRow)
                         .where(

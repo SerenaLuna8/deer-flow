@@ -13,20 +13,24 @@ from app.automations.dispatcher import (
     AutomationDefinitionRef,
     AutomationDispatcher,
 )
-from app.automations.errors import AutomationActiveRun
+from app.automations.errors import AutomationActiveRun, AutomationConcurrencyLimit
 from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.reconciliation import AutomationReconciler
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.service import QuotaService
 from app.reliability.execution import (
     AgentExecutionResult,
     PrivateRunJobHandler,
     PrivateRunJobTerminalPort,
 )
+from app.reliability.owner_refs import AuditHmacKeyring
 from app.reliability.workers import WorkerRegistry
 from app.worker.service import JobLeaseAuthority
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.jobs.sql import JobRepository, JobTerminalEvent
 from deerflow.persistence.scheduled_tasks import (
     ScheduledTaskCreate,
@@ -150,6 +154,65 @@ async def test_occurrence_run_job_commit_together(
             "automation_run",
             admitted.occurrence.id,
         )
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_automation_admission_enforces_shared_project_run_quota_atomically(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    keyring = AuditHmacKeyring.from_environment()
+    quota = ProjectQuotaEnforcer(
+        QuotaService(
+            seed.factory,
+            QuotaConfig(),
+            source_ref_hasher=keyring.quota_source_ref,
+        )
+    )
+    dispatcher = AutomationDispatcher(seed.factory, quota=quota)
+    try:
+        tasks = [
+            await _create_due_task(
+                seed,
+                task_id=f"m6-quota-{uuid.uuid4().hex[:20]}",
+            )
+            for _ in range(4)
+        ]
+        for task in tasks[:3]:
+            await dispatcher.admit_occurrence(
+                _definition(seed, task),
+                scheduled_for=NOW,
+            )
+        with pytest.raises(AutomationConcurrencyLimit):
+            await dispatcher.admit_occurrence(
+                _definition(seed, tasks[3]),
+                scheduled_for=NOW,
+            )
+
+        async with seed.factory() as session:
+            reserved = await session.scalar(
+                text(
+                    """SELECT reserved FROM project_usage_counters
+                       WHERE project_id=:project_id
+                         AND dimension='concurrent_runs'
+                         AND bucket='lifetime'"""
+                ),
+                {"project_id": seed.owner_a.project_id},
+            )
+            run_count = await session.scalar(
+                text("SELECT count(*) FROM runs WHERE project_id=:project_id"),
+                {"project_id": seed.owner_a.project_id},
+            )
+            rejected_occurrence = await session.scalar(
+                text("SELECT count(*) FROM scheduled_task_runs WHERE task_id=:task_id"),
+                {"task_id": tasks[3].id},
+            )
+        assert reserved == 3
+        assert run_count == 3
+        assert rejected_occurrence == 0
     finally:
         await seed.engine.dispose()
 

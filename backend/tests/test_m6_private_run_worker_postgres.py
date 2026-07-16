@@ -10,6 +10,7 @@ from langchain_core.messages import BaseMessage
 from sqlalchemy import text
 from support.m4_private_threads import seed_m4_thread_database
 
+from app.private_work.errors import PrivateWorkMcpQuotaExceeded
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import (
     PrivateRunCreate,
@@ -144,6 +145,104 @@ async def test_private_run_handler_reuses_exact_run_snapshot_and_checkpoint(
                 )
             ).one()
         assert tuple(row) == ("success", "succeeded", None)
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_mcp_quota_rejection_stays_retry_safe_before_remote_dispatch(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+
+    class RejectMcpQuota:
+        async def consume_mcp_dispatch(self, context, *, dispatch_id):
+            del dispatch_id
+            raise PrivateWorkMcpQuotaExceeded(context.request_id)
+
+        async def reserve_file(self, session, context, *, file_id, size):
+            del session, context, file_id, size
+
+        async def release_file(self, session, scope, *, file_id, size, request_id):
+            del session, scope, file_id, size, request_id
+
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-mcp-quota-safe-{uuid.uuid4()}",
+        )
+        async with seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).begin_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=admitted.run.run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+            )
+        boundary = PrivateRunExecutionBoundary(
+            seed.factory,
+            context=seed.owner_a,
+            claim=claim,
+            quota=RejectMcpQuota(),
+        )
+
+        with pytest.raises(PrivateWorkMcpQuotaExceeded):
+            await boundary.before_mcp_tool_dispatch()
+
+        assert boundary.ambiguous_side_effect is False
+        async with seed.factory() as session:
+            retry_safety = await session.scalar(
+                text("SELECT retry_safety FROM jobs WHERE id=:job_id"),
+                {"job_id": claim.job_id},
+            )
+        assert retry_safety == "safe"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_mcp_quota_failure_keeps_stable_public_job_code(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+
+    class Executor:
+        async def execute(self, execution, _authority):
+            raise PrivateWorkMcpQuotaExceeded(execution.context.request_id)
+
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-mcp-quota-code-{uuid.uuid4()}",
+        )
+        settlement = await PrivateRunJobHandler(
+            seed.factory,
+            executor=Executor(),
+        )(
+            claim,
+            JobLeaseAuthority(seed.factory, claim, lease_seconds=90),
+        )
+        assert settlement.outcome.public_error_code == "PROJECT_MCP_QUOTA_EXCEEDED"
+        await settlement.commit()
+
+        async with seed.factory() as session:
+            state = (
+                await session.execute(
+                    text(
+                        """SELECT j.status,j.retry_safety,j.public_error_code,r.status
+                           FROM jobs j JOIN runs r ON r.job_id=j.id
+                           WHERE j.id=:job_id"""
+                    ),
+                    {"job_id": admitted.job.job_id},
+                )
+            ).one()
+        assert tuple(state) == (
+            "retry_wait",
+            "safe",
+            "PROJECT_MCP_QUOTA_EXCEEDED",
+            "pending",
+        )
     finally:
         await seed.engine.dispose()
 
@@ -1220,7 +1319,7 @@ async def test_cancel_requested_before_terminal_is_persisted_as_interrupted(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_cancel_requested_after_success_terminal_wins_during_takeover(
+async def test_success_terminal_wins_over_late_cancel_during_takeover(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
@@ -1277,7 +1376,7 @@ async def test_cancel_requested_after_success_terminal_wins_during_takeover(
         await settlement.commit()
 
         assert executor_calls == 0
-        assert settlement.outcome.status == "cancelled"
+        assert settlement.outcome.status == "succeeded"
         async with seed.factory() as session:
             states = (
                 await session.execute(
@@ -1289,6 +1388,16 @@ async def test_cancel_requested_after_success_terminal_wins_during_takeover(
                     {"run_id": admitted.run.run_id},
                 )
             ).one()
-        assert tuple(states) == ("interrupted", "cancelled")
+        assert tuple(states) == ("success", "succeeded")
+        terminal = (
+            await PostgresStreamBridge(seed.factory).read_after(
+                seed.owner_a_scope,
+                admitted.run.thread_id,
+                cursor=0,
+                limit=10,
+                run_id=admitted.run.run_id,
+            )
+        )[-1]
+        assert terminal.data == {"status": "success"}
     finally:
         await seed.engine.dispose()

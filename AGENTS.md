@@ -92,8 +92,10 @@ occurrence 再进入 M4 private run admission，已 admitted 的 run 在 crash r
 绝不自动重放。M6 当前已实现通用 durable job、独立 Worker、Worker-only private Run、Automation
 原子 admission、独立 Scheduler、PostgreSQL durable stream writer/reader 与 terminal invariant、Gateway
 SSE reconnect 和按 account/project/thread 隔离的前端 cursor/dedupe，以及项目配额的原子
-counter/append-only ledger、平台默认值收紧、80% 单次阈值和 dry-run/execute reconciliation core；成员、
-存储、并发 Run 与 MCP 边界的强制接线、完整审计和通用备份恢复仍待后续 M6 task。
+counter/append-only ledger、平台默认值收紧、80% 单次阈值和 dry-run/execute reconciliation core。成员加入/
+退出、文件 finalize/delete/branch/finalization/Thread delete、private/Automation Run admission 与所有终态、实际
+MCP dispatch 均已在原业务事务边界执行 quota；429 使用稳定错误与 `Retry-After`，已运行任务不因后续收紧而中断。
+完整审计和通用备份恢复仍待后续 M6 task。
 里程碑进度仍为 5/8（62.5%），因为 M6 尚未整体关闭；M6–M8
 尚未交付，因此当前仍不能
 作为完整多用户 SaaS 发布。

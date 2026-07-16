@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Protocol
 
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,8 +26,32 @@ from app.private_work.run_repository import (
 )
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 TERMINAL_PRIVATE_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
+
+
+class PrivateRunQuotaPort(Protocol):
+    async def release_concurrent_run(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        request_id: str,
+    ) -> None: ...
+
+
+class _NoopPrivateRunQuota:
+    async def release_concurrent_run(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        request_id: str,
+    ) -> None:
+        del session, scope, run_id, request_id
 
 
 class PrivateRunService:
@@ -35,10 +60,13 @@ class PrivateRunService:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
+        *,
+        quota: PrivateRunQuotaPort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._revalidator = PrivateWorkRevalidator()
         self._automation_reconciler = AutomationReconciler(session_factory)
+        self._quota = quota or _NoopPrivateRunQuota()
 
     @staticmethod
     async def _require_thread(
@@ -197,6 +225,13 @@ class PrivateRunService:
                     job_id=record.job_id,
                     reason=reason,
                 )
+                if cancel_result in {"cancelled", "terminal"}:
+                    await self._quota.release_concurrent_run(
+                        session,
+                        context.resource_scope,
+                        run_id=run_id,
+                        request_id=context.request_id,
+                    )
             if cancel_result in {"cancelled", "terminal"}:
                 await self._automation_reconciler.handle_run_completion(
                     SimpleNamespace(run_id=run_id),

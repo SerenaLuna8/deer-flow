@@ -11,6 +11,8 @@ from functools import partial
 from app.automations.cutover import AutomationCutoverGuard
 from app.automations.reconciliation import AutomationReconciler
 from app.private_work.checkpointer import ProjectScopedCheckpointer
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.service import QuotaService
 from app.reliability.cutover import ReliabilityCutoverGuard
 from app.reliability.execution import (
     PrivateRunJobHandler,
@@ -21,6 +23,7 @@ from app.reliability.owner_refs import AuditHmacKeyring
 from app.reliability.workers import WorkerRegistry
 from app.worker.service import JobHandler, WorkerService
 from deerflow.config import get_app_config
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence import close_engine, get_session_factory, init_engine
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.runtime import make_store
@@ -50,7 +53,15 @@ async def run_worker(
             datetime.now(UTC),
         )
         audit_keyring = AuditHmacKeyring.from_environment()
-        terminal_port = PrivateRunJobTerminalPort()
+        quota_config = getattr(config, "quotas", None) or QuotaConfig()
+        quota_enforcer = ProjectQuotaEnforcer(
+            QuotaService(
+                session_factory,
+                quota_config,
+                source_ref_hasher=audit_keyring,
+            )
+        )
+        terminal_port = PrivateRunJobTerminalPort(quota=quota_enforcer)
 
         async def reconcile_deferred_automation_terminals() -> None:
             if not terminal_port.take_automation_reconciliation_pending():
@@ -79,6 +90,7 @@ async def run_worker(
             project_checkpointer = ProjectScopedCheckpointer(
                 raw_checkpointer,
                 session_factory,
+                quota=quota_enforcer,
             )
             executor = RunAgentPrivateExecutor(
                 session_factory,
@@ -90,6 +102,7 @@ async def run_worker(
                     session_factory,
                     max_trace_content=config.run_events.max_trace_content,
                 ),
+                quota=quota_enforcer,
             )
             private_run_handler = PrivateRunJobHandler(
                 session_factory,
@@ -98,6 +111,7 @@ async def run_worker(
                 retry_max_seconds=config.worker.retry_max_seconds,
                 job_repository_builder=repository_builder,
                 project_checkpointer=project_checkpointer,
+                quota=quota_enforcer,
             )
             active_handlers = {
                 "private_run": private_run_handler,

@@ -261,6 +261,56 @@ async def test_session_pool_tool_wrapping():
 
 
 @pytest.mark.asyncio
+async def test_session_pool_counts_actual_dispatch_before_failed_remote_call():
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel
+
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        value: int
+
+    class Boundary:
+        def __init__(self) -> None:
+            self.dispatches = 0
+
+        async def before_mcp_tool_dispatch(self) -> None:
+            self.dispatches += 1
+
+    original_tool = StructuredTool(
+        name="remote_act",
+        description="Act remotely",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(side_effect=RuntimeError("remote failed"))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+    boundary = Boundary()
+    runtime = MagicMock()
+    runtime.context = {
+        "thread_id": "thread-actual-dispatch",
+        "__authorization_boundary": boundary,
+    }
+    runtime.config = {}
+
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm):
+        wrapped = _make_session_pool_tool(
+            original_tool,
+            "remote",
+            {"transport": "streamable_http", "url": "https://example.test/mcp"},
+        )
+        with pytest.raises(RuntimeError, match="remote failed"):
+            await wrapped.coroutine(runtime=runtime, value=1)
+
+    assert boundary.dispatches == 1
+    mock_session.call_tool.assert_awaited_once_with("act", {"value": 1})
+
+
+@pytest.mark.asyncio
 async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
     """Stdio MCP subprocesses should write relative and temp outputs under user-data."""
     from langchain_core.tools import StructuredTool

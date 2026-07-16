@@ -22,6 +22,7 @@ from app.private_work.asset_runtime import PrivateAssetRuntime
 from app.private_work.authorization import PrivateRunAuthorizationBoundary
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext
+from app.private_work.errors import PrivateWorkMcpQuotaExceeded
 from app.private_work.file_finalizer import PrivateFileFinalizer
 from app.private_work.run_admission import (
     AdmittedPrivateRun,
@@ -58,6 +59,7 @@ from deerflow.persistence.jobs.sql import (
     JobTerminalEvent,
 )
 from deerflow.persistence.private_work.model import PrivateFileRow
+from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
@@ -150,11 +152,98 @@ class PrivateRunExecutor(Protocol):
     ) -> AgentExecutionResult: ...
 
 
+class PrivateRunExecutionQuotaPort(Protocol):
+    async def release_concurrent_run(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        request_id: str,
+    ) -> None: ...
+
+
+class _NoopPrivateRunExecutionQuota:
+    async def release_concurrent_run(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        request_id: str,
+    ) -> None:
+        del session, scope, run_id, request_id
+
+
+class PrivateRunAgentQuotaPort(Protocol):
+    async def consume_mcp_dispatch(
+        self,
+        context: PrivateWorkContext,
+        *,
+        dispatch_id: uuid.UUID,
+    ) -> None: ...
+
+    async def reserve_file(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+    ) -> None: ...
+
+    async def release_file(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+        request_id: str,
+    ) -> None: ...
+
+
+class _NoopPrivateRunAgentQuota:
+    async def consume_mcp_dispatch(
+        self,
+        context: PrivateWorkContext,
+        *,
+        dispatch_id: uuid.UUID,
+    ) -> None:
+        del context, dispatch_id
+
+    async def reserve_file(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+    ) -> None:
+        del session, context, file_id, size
+
+    async def release_file(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+        request_id: str,
+    ) -> None:
+        del session, scope, file_id, size, request_id
+
+
 class PrivateRunJobTerminalPort:
     """Atomically converge an unowned private job, Run, and staging files."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        quota: PrivateRunExecutionQuotaPort | None = None,
+    ) -> None:
         self._automation_reconciliation_pending = asyncio.Event()
+        self._quota = quota or _NoopPrivateRunExecutionQuota()
 
     def take_automation_reconciliation_pending(self) -> bool:
         if not self._automation_reconciliation_pending.is_set():
@@ -174,13 +263,24 @@ class PrivateRunJobTerminalPort:
             return
         if event.owner_user_id is None or event.run_id is None:
             raise RuntimeError("private job terminal authority is incomplete")
+        project_exists = await session.scalar(sa.select(ProjectRow.id).where(ProjectRow.id == event.project_id).with_for_update(of=ProjectRow))
+        membership_version = await session.scalar(
+            sa.select(ProjectMembershipRow.version)
+            .where(
+                ProjectMembershipRow.project_id == event.project_id,
+                ProjectMembershipRow.user_id == event.owner_user_id,
+            )
+            .with_for_update(of=ProjectMembershipRow)
+        )
+        if project_exists is None or membership_version is None:
+            raise RuntimeError("private job terminal membership is missing")
         run_status = "interrupted" if event.status == "cancelled" else "error"
         run_error = event.cancel_reason if event.status == "cancelled" else event.public_error_code
         finalization_status = sa.case(
             (RunRow.finalization_status == "finalizing", "failed"),
             else_=RunRow.finalization_status,
         )
-        await session.execute(
+        terminalized = await session.execute(
             sa.update(RunRow)
             .where(
                 RunRow.project_id == event.project_id,
@@ -199,6 +299,17 @@ class PrivateRunJobTerminalPort:
                 updated_at=event.occurred_at,
             )
         )
+        if terminalized.rowcount == 1:
+            await self._quota.release_concurrent_run(
+                session,
+                PrivateResourceScope(
+                    project_id=str(event.project_id),
+                    owner_user_id=event.owner_user_id,
+                    membership_version=membership_version,
+                ),
+                run_id=event.run_id,
+                request_id="worker-job-terminal",
+            )
         if event.job_type == "automation_run":
             if event.occurrence_id is None:
                 raise RuntimeError("automation job terminal authority is incomplete")
@@ -365,12 +476,14 @@ class PrivateRunExecutionBoundary:
         *,
         context: PrivateWorkContext,
         claim: JobClaim,
+        quota: PrivateRunAgentQuotaPort | None = None,
     ) -> None:
         if claim.run_id is None:
             raise ValueError("private execution claim requires a Run")
         self._factory = session_factory
         self._context = context
         self._claim = claim
+        self._quota = quota or _NoopPrivateRunAgentQuota()
         self._authorization = PrivateRunAuthorizationBoundary(
             session_factory,
             project_id=context.project_id,
@@ -485,6 +598,19 @@ class PrivateRunExecutionBoundary:
         )
 
     async def before_mcp_call(self) -> None:
+        # Discovery/materialization is read-only.  The exact remote dispatch
+        # hook below owns both quota consumption and the retry-safety fence.
+        await self._check("before_mcp_call")
+
+    async def before_mcp_tool_dispatch(self) -> None:
+        await self._check("before_mcp_call")
+        await self._quota.consume_mcp_dispatch(
+            self._context,
+            dispatch_id=uuid.uuid4(),
+        )
+        # Quota rejection happens before this durable unknown-side-effect
+        # marker, so it remains a stable, retry-safe public failure.  Once the
+        # marker commits the caller immediately invokes the remote MCP tool.
         await self._check(
             "before_mcp_call",
             ambiguous_side_effect=True,
@@ -583,6 +709,7 @@ class RunAgentPrivateExecutor:
         asset_runtime: PrivateAssetRuntime | None = None,
         agent_factory: Any | None = None,
         runner=run_agent,
+        quota: PrivateRunAgentQuotaPort | None = None,
     ) -> None:
         self._factory = session_factory
         self._app_config = app_config
@@ -593,6 +720,7 @@ class RunAgentPrivateExecutor:
         self._asset_runtime = asset_runtime or PrivateAssetRuntime(session_factory)
         self._agent_factory = agent_factory or self._default_agent_factory()
         self._runner = runner
+        self._quota = quota or _NoopPrivateRunAgentQuota()
 
     @staticmethod
     def _default_agent_factory():
@@ -663,6 +791,7 @@ class RunAgentPrivateExecutor:
             self._factory,
             context=execution.context,
             claim=claim,
+            quota=self._quota,
         )
         admitted = self._admitted(execution, claim)
         private_runtime = None
@@ -705,7 +834,7 @@ class RunAgentPrivateExecutor:
                     authorization_boundary=boundary,
                 ),
                 PrivateSandboxFileProjection(self._factory),
-                PrivateFileFinalizer(self._factory),
+                PrivateFileFinalizer(self._factory, quota=self._quota),
                 mounts=mounts,
             )
             run_manager = RunManager()
@@ -795,6 +924,8 @@ class RunAgentPrivateExecutor:
             raise
         except (TransientExecutionError, AmbiguousExternalSideEffect):
             raise
+        except PrivateWorkMcpQuotaExceeded as error:
+            raise TransientExecutionError(error.code) from None
         except AuthorizationRevoked:
             if boundary.lease_lost:
                 raise TransientExecutionError(
@@ -840,6 +971,7 @@ class PrivateRunJobHandler:
         retry_max_seconds: int = 300,
         job_repository_builder=JobRepository,
         project_checkpointer: ProjectScopedCheckpointer | None = None,
+        quota: PrivateRunExecutionQuotaPort | None = None,
     ) -> None:
         if retry_initial_seconds < 1 or retry_max_seconds < retry_initial_seconds:
             raise ValueError("invalid private Run retry policy")
@@ -849,6 +981,7 @@ class PrivateRunJobHandler:
         self._retry_max_seconds = retry_max_seconds
         self._job_repository_builder = job_repository_builder
         self._project_checkpointer = project_checkpointer
+        self._quota = quota or _NoopPrivateRunExecutionQuota()
         self._snapshots = RunSnapshotRepository(session_factory)
         self._events = DbRunEventStore(session_factory)
 
@@ -859,13 +992,28 @@ class PrivateRunJobHandler:
         )
 
     @staticmethod
-    def _claim_scope(claim: JobClaim) -> PrivateResourceScope:
+    async def _claim_scope(
+        session: AsyncSession,
+        claim: JobClaim,
+    ) -> PrivateResourceScope:
         if claim.scope.owner_user_id is None:
             raise LeaseLost(claim.job_id)
+        project_id = claim.scope.project_id
+        project_exists = await session.scalar(sa.select(ProjectRow.id).where(ProjectRow.id == project_id).with_for_update(of=ProjectRow))
+        membership_version = await session.scalar(
+            sa.select(ProjectMembershipRow.version)
+            .where(
+                ProjectMembershipRow.project_id == project_id,
+                ProjectMembershipRow.user_id == claim.scope.owner_user_id,
+            )
+            .with_for_update(of=ProjectMembershipRow)
+        )
+        if project_exists is None or membership_version is None:
+            raise LeaseLost(claim.job_id)
         return PrivateResourceScope(
-            project_id=str(claim.scope.project_id),
+            project_id=str(project_id),
             owner_user_id=claim.scope.owner_user_id,
-            membership_version=0,
+            membership_version=membership_version,
         )
 
     async def _begin(
@@ -875,6 +1023,7 @@ class PrivateRunJobHandler:
         PrivateRunExecution | None,
         bool,
         AgentExecutionResult | None,
+        PrivateResourceScope,
     ]:
         if claim.job_type not in {"private_run", "automation_run"} or claim.run_id is None or claim.scope.owner_user_id is None or (claim.job_type == "automation_run" and claim.occurrence_id is None):
             raise LeaseLost(claim.job_id)
@@ -883,6 +1032,7 @@ class PrivateRunJobHandler:
         except ValueError:
             raise LeaseLost(claim.job_id) from None
         async with self._factory() as session, session.begin():
+            claim_scope = await self._claim_scope(session, claim)
             try:
                 project = await resolve_project_context_in_transaction(
                     session,
@@ -895,12 +1045,12 @@ class PrivateRunJobHandler:
                 project.require(Capability.SHARED_ASSETS_EXECUTE)
             except (ProjectNotFound, ProjectForbidden):
                 state = await self._runs(session).begin_execution(
-                    scope=self._claim_scope(claim),
+                    scope=claim_scope,
                     run_id=claim.run_id,
                     job_id=claim.job_id,
                     lease_token=claim.lease_token,
                 )
-                return None, True, None
+                return None, True, None, claim_scope
             context = PrivateWorkContext.from_project(project)
             runs = self._runs(session)
             state = await runs.begin_execution(
@@ -920,6 +1070,7 @@ class PrivateRunJobHandler:
                     None,
                     state.cancel_requested,
                     self._terminal_result(terminal),
+                    context.resource_scope,
                 )
             assets = await self._snapshots.list_assets_in_session(
                 session,
@@ -998,6 +1149,7 @@ class PrivateRunJobHandler:
             ),
             state.cancel_requested,
             None,
+            context.resource_scope,
         )
 
     @staticmethod
@@ -1036,6 +1188,7 @@ class PrivateRunJobHandler:
         *,
         scope: PrivateResourceScope,
         ambiguous_side_effect: bool = False,
+        durable_terminal: bool = False,
     ) -> JobSettlement:
         outcome = JobOutcome(result.status, result.public_error_code)
 
@@ -1043,17 +1196,33 @@ class PrivateRunJobHandler:
             try:
                 settled_run = None
                 async with self._factory() as session, session.begin():
+                    locked_scope = await self._claim_scope(session, claim)
+                    if locked_scope.project_id != scope.project_id or locked_scope.owner_user_id != scope.owner_user_id:
+                        raise LeaseLost(claim.job_id)
                     settled_run = await self._runs(session).settle_execution(
-                        scope=scope,
+                        scope=locked_scope,
                         run_id=claim.run_id or "",
                         job_id=claim.job_id,
                         lease_token=claim.lease_token,
                         outcome=result.status,
                         public_error_code=result.public_error_code,
                         ambiguous_side_effect=ambiguous_side_effect,
+                        cancel_preempts_outcome=not durable_terminal,
                         retry_initial_seconds=self._retry_initial_seconds,
                         retry_max_seconds=self._retry_max_seconds,
                     )
+                    if settled_run.status in {
+                        "success",
+                        "error",
+                        "timeout",
+                        "interrupted",
+                    }:
+                        await self._quota.release_concurrent_run(
+                            session,
+                            locked_scope,
+                            run_id=settled_run.run_id,
+                            request_id="worker-private-run",
+                        )
                 if claim.job_type == "automation_run" and settled_run is not None:
                     from types import SimpleNamespace
 
@@ -1082,7 +1251,7 @@ class PrivateRunJobHandler:
         authority: JobLeaseAuthority,
     ) -> JobSettlement:
         try:
-            execution, cancel_requested, recovered_terminal = await self._begin(
+            execution, cancel_requested, recovered_terminal, settlement_scope = await self._begin(
                 claim,
             )
         except LeaseLost:
@@ -1093,18 +1262,17 @@ class PrivateRunJobHandler:
             # settlement.  Let the durable lease expire for exact-scope retry.
             raise LeaseLost(claim.job_id) from None
         if recovered_terminal is not None:
-            if cancel_requested or authority.cancel_requested:
-                recovered_terminal = AgentExecutionResult.cancelled()
             return self._settlement(
                 claim,
                 recovered_terminal,
-                scope=self._claim_scope(claim),
+                scope=settlement_scope,
+                durable_terminal=True,
             )
         if execution is None:
             return self._settlement(
                 claim,
                 AgentExecutionResult.cancelled(),
-                scope=self._claim_scope(claim),
+                scope=settlement_scope,
             )
         authority.bind_heartbeat_callback(lambda: self._heartbeat(claim, execution.context))
         if cancel_requested or authority.cancel_requested:
@@ -1119,6 +1287,8 @@ class PrivateRunJobHandler:
             raise
         except TransientExecutionError as error:
             result = AgentExecutionResult.failed(error.public_error_code)
+        except PrivateWorkMcpQuotaExceeded as error:
+            result = AgentExecutionResult.failed(error.code)
         except AmbiguousExternalSideEffect:
             return self._settlement(
                 claim,

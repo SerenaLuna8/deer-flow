@@ -37,7 +37,7 @@ from deerflow.runtime.private_scope import PrivateResourceScope
 class BranchAuthorityCopyHook(Protocol):
     async def copy_branch_authority(
         self,
-        scope: PrivateResourceScope,
+        context: PrivateWorkContext,
         source_thread_id: str,
         target_thread_id: str,
         *,
@@ -346,7 +346,7 @@ class PrivateThreadService:
                         raise
                     if selection.workspace_clone_mode == "current_thread_authority_copy" and self._branch_copy_hook is not None:
                         await self._branch_copy_hook.copy_branch_authority(
-                            context.resource_scope,
+                            context,
                             source_thread_id,
                             target_thread_id,
                             session=session,

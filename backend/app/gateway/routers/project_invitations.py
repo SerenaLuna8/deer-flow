@@ -19,7 +19,11 @@ from app.gateway.auth.invitation_rate_limit import (
     hash_rate_limit_key,
 )
 from app.gateway.csrf_middleware import is_allowed_auth_origin, is_secure_request
-from app.gateway.deps import get_current_user_from_request, project_session
+from app.gateway.deps import (
+    get_current_user_from_request,
+    get_project_quota_enforcer,
+    project_session,
+)
 from app.gateway.routers.auth import _get_client_ip
 from app.gateway.routers.project_governance import (
     GOVERNANCE_DOMAIN_ERRORS,
@@ -157,7 +161,11 @@ def _redeem_error_response(
     request: Request,
 ) -> JSONResponse:
     status_code, detail = governance_error(exc, request_id)
-    response = JSONResponse(status_code=status_code, content={"detail": detail})
+    response = JSONResponse(
+        status_code=status_code,
+        content={"detail": detail},
+        headers={"Retry-After": "1"} if status_code == 429 else None,
+    )
     _clear_claim_cookie(response, request)
     return response
 
@@ -311,6 +319,7 @@ async def redeem_invitation(
     request: Request,
     identity: tuple[uuid.UUID, str, str] = Depends(authenticated_invitation_identity),
     session: AsyncSession = Depends(project_session),
+    quota=Depends(get_project_quota_enforcer),
 ):
     user_id, user_email, request_id = identity
     rate_limit = InvitationRateLimitRepository(session)
@@ -327,7 +336,10 @@ async def redeem_invitation(
         if not signed:
             raise ProjectInvitationInvalid()
         invitation_claim = claim_signer().verify(signed, now)
-        redeemed: RedeemedInvitation = await InvitationService(InvitationRepository(session)).redeem(user_id, user_email, invitation_claim, now)
+        redeemed: RedeemedInvitation = await InvitationService(
+            InvitationRepository(session),
+            quota=quota,
+        ).redeem(user_id, user_email, invitation_claim, now)
     except (ProjectInvitationInvalid, ProjectInvitationConflict, ProjectValidationFailed) as exc:
         return _redeem_error_response(exc, request_id, request)
     except GOVERNANCE_DOMAIN_ERRORS as exc:

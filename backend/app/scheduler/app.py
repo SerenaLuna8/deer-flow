@@ -11,7 +11,10 @@ from app.automations.dispatcher import AutomationDispatcher
 from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.ownership import AutomationSchedulerOwnership
 from app.automations.reconciliation import AutomationReconciler
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.service import QuotaService
 from app.reliability.cutover import ReliabilityCutoverGuard
+from app.reliability.owner_refs import AuditHmacKeyring
 from app.scheduler.service import ScheduledTaskService
 from deerflow.config import get_app_config
 from deerflow.persistence import (
@@ -72,6 +75,14 @@ async def run_scheduler(
         if engine is None:
             raise RuntimeError("scheduler persistence engine is unavailable")
         ownership = AutomationSchedulerOwnership(engine)
+        audit_keyring = AuditHmacKeyring.from_environment()
+        quota_enforcer = ProjectQuotaEnforcer(
+            QuotaService(
+                session_factory,
+                config.quotas,
+                source_ref_hasher=audit_keyring,
+            )
+        )
         occurrences = AutomationOccurrenceService(
             session_factory,
             max_concurrent_runs=config.scheduler.max_concurrent_runs,
@@ -81,6 +92,7 @@ async def run_scheduler(
             dispatcher=AutomationDispatcher(
                 session_factory,
                 max_concurrent_runs=config.scheduler.max_concurrent_runs,
+                quota=quota_enforcer,
             ),
             reconciler=AutomationReconciler(session_factory),
             poll_interval_seconds=config.scheduler.poll_interval_seconds,

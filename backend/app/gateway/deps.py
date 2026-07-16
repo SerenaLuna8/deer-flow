@@ -280,27 +280,55 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
+        from app.quotas.integration import ProjectQuotaEnforcer
+        from app.quotas.service import QuotaService
+        from app.reliability.owner_refs import AuditHmacKeyring
+        from deerflow.config.quota_config import QuotaConfig
+
+        audit_keyring = AuditHmacKeyring.from_environment()
+        quota_config = getattr(config, "quotas", None) or QuotaConfig()
+        project_quota_enforcer = ProjectQuotaEnforcer(
+            QuotaService(
+                sf,
+                quota_config,
+                source_ref_hasher=audit_keyring,
+            )
+        )
+        app.state.project_quota_enforcer = project_quota_enforcer
         from app.private_work.checkpointer import ProjectScopedCheckpointer
 
         app.state.private_work_cutover_guard = PrivateWorkCutoverGuard(sf)
         app.state.project_scoped_checkpointer = ProjectScopedCheckpointer(
             app.state._raw_checkpointer,
             sf,
+            quota=project_quota_enforcer,
         )
         from app.private_work.connection_service import ProjectConnectionService
         from app.private_work.file_service import PrivateFileService
         from app.private_work.file_streaming import PrivateFileStreamer
         from app.private_work.memory_service import PrivateMemoryService
+        from app.private_work.run_admission import PrivateRunAdmissionService
         from app.private_work.run_service import PrivateRunService
         from app.private_work.thread_service import PrivateThreadService
         from deerflow.persistence.channel_connections import ChannelConnectionRepository
 
+        app.state.private_file_service = PrivateFileService(
+            sf,
+            quota=project_quota_enforcer,
+        )
         app.state.private_thread_service = PrivateThreadService(
             sf,
             app.state.project_scoped_checkpointer,
+            branch_copy_hook=app.state.private_file_service,
         )
-        app.state.private_run_service = PrivateRunService(sf)
-        app.state.private_file_service = PrivateFileService(sf)
+        app.state.private_run_admission_service = PrivateRunAdmissionService(
+            sf,
+            quota=project_quota_enforcer,
+        )
+        app.state.private_run_service = PrivateRunService(
+            sf,
+            quota=project_quota_enforcer,
+        )
         app.state.private_file_streamer = PrivateFileStreamer(sf)
         app.state.project_memory_service = PrivateMemoryService(sf)
         app.state.channel_connection_repo = ChannelConnectionRepository(sf)
@@ -358,6 +386,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.automation_dispatcher = AutomationDispatcher(
             sf,
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
+            quota=project_quota_enforcer,
         )
         app.state.automation_scheduler_enabled = effective_scheduler_config.enabled
 
@@ -493,6 +522,13 @@ def get_automation_scheduler_enabled(request: Request) -> bool:
     value = getattr(request.app.state, "automation_scheduler_enabled", None)
     if type(value) is not bool:
         raise automation_http_exception(AutomationUnavailable(get_current_trace_id() or generate_trace_id()))
+    return value
+
+
+def get_project_quota_enforcer(request: Request):
+    value = getattr(request.app.state, "project_quota_enforcer", None)
+    if value is None:
+        raise HTTPException(status_code=503, detail="Project quota service not available")
     return value
 
 

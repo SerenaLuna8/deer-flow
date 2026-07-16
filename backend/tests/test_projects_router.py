@@ -19,8 +19,14 @@ from app.projects.errors import ProjectDatabaseUnavailable
 from app.projects.models import ProjectRole, ProjectView
 
 
+class _NoopQuota:
+    async def reserve_member(self, *_args, **_kwargs) -> None:
+        return None
+
+
 def _client() -> TestClient:
     app = FastAPI()
+    app.state.project_quota_enforcer = _NoopQuota()
     app.include_router(projects.router)
 
     async def fake_session():
@@ -92,6 +98,7 @@ def test_project_response_capabilities_follow_declaration_order_and_hide_private
 
 def test_project_router_requires_authentication() -> None:
     app = FastAPI()
+    app.state.project_quota_enforcer = _NoopQuota()
     app.include_router(projects.router)
 
     async def fake_session():
@@ -147,6 +154,7 @@ async def test_project_api_postgres_full_authorization_and_personal_state(
     users = {name: uuid.uuid4() for name in ("admin", "editor", "runner", "viewer", "outsider", "system_admin")}
     identity = {"user_id": users["admin"]}
     app = FastAPI()
+    app.state.project_quota_enforcer = _NoopQuota()
     app.include_router(projects.router)
 
     async def request_session():

@@ -491,6 +491,8 @@ def _make_session_pool_tool(
         if tool_interceptors:
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
+            from deerflow.sandbox.sandbox import check_authorization_boundary
+
             async def base_handler(request: MCPToolCallRequest) -> Any:
                 # Preserve interceptor-injected headers for stdio MCP calls by
                 # forwarding them through MCP call meta.
@@ -500,6 +502,10 @@ def _make_session_pool_tool(
                         kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
                         logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
+                await check_authorization_boundary(
+                    getattr(runtime, "context", None),
+                    "before_mcp_tool_dispatch",
+                )
                 return await session.call_tool(
                     request.name,
                     request.args,
@@ -523,6 +529,12 @@ def _make_session_pool_tool(
             )
             call_tool_result = await handler(request)
         else:
+            from deerflow.sandbox.sandbox import check_authorization_boundary
+
+            await check_authorization_boundary(
+                getattr(runtime, "context", None),
+                "before_mcp_tool_dispatch",
+            )
             call_tool_result = await session.call_tool(
                 original_name,
                 arguments,

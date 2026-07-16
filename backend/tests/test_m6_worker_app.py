@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.quotas.models import QuotaSourceRef
 from app.worker import app as worker_app
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.worker_config import WorkerConfig
 from deerflow.persistence.jobs.sql import JobOwnerRef
 
@@ -25,6 +27,7 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         worker=WorkerConfig(enabled=True),
         database=object(),
         run_events=SimpleNamespace(max_trace_content=1024),
+        quotas=QuotaConfig(),
     )
     session_factory = object()
     captured: dict[str, object] = {}
@@ -60,7 +63,7 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
             )
 
     class TerminalPort:
-        def __init__(self) -> None:
+        def __init__(self, **_kwargs) -> None:
             self.pending = True
             captured["terminal_port"] = self
 
@@ -158,6 +161,10 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         def job_owner_ref(_owner):
             return JobOwnerRef(key_id="test", hmac_hex="a" * 64)
 
+        @staticmethod
+        def quota_source_ref(_payload):
+            return QuotaSourceRef(key_id="test", hmac_hex="b" * 64)
+
     monkeypatch.setattr(worker_app, "AuditHmacKeyring", Keyring)
     monkeypatch.setattr(
         worker_app,
@@ -172,7 +179,7 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
     monkeypatch.setattr(
         worker_app,
         "ProjectScopedCheckpointer",
-        lambda raw, factory: (raw, factory),
+        lambda raw, factory, **_kwargs: (raw, factory),
     )
     monkeypatch.setattr(
         worker_app,

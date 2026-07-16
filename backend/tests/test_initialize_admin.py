@@ -26,6 +26,11 @@ from app.gateway.auth.config import AuthConfig, set_auth_config
 _TEST_SECRET = "test-secret-key-initialize-admin-min-32"
 
 
+class _NoopQuota:
+    async def reserve_member(self, session, context, *, membership_id, membership_version):
+        del session, context, membership_id, membership_version
+
+
 @asynccontextmanager
 async def _noop_lifespan(_app):
     yield
@@ -59,6 +64,7 @@ def client(_setup_auth):
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
+    app.state.project_quota_enforcer = _NoopQuota()
 
     from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import close_engine, init_engine
@@ -82,7 +88,17 @@ def _init_payload(**extra):
 
 
 def _request() -> Request:
-    return Request({"type": "http", "method": "POST", "path": "/api/v1/auth/initialize", "headers": []})
+    app = MagicMock()
+    app.state.project_quota_enforcer = _NoopQuota()
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/initialize",
+            "headers": [],
+            "app": app,
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -451,6 +467,7 @@ def test_initialize_bootstrap_failure_is_sanitized_and_does_not_issue_session(cl
     assert "access_token" not in response.cookies
     assert "postgresql" not in response.text
     bootstrap.assert_awaited_once()
+    assert bootstrap.await_args.kwargs["quota"] is client.app.state.project_quota_enforcer
 
 
 @pytest.mark.asyncio
@@ -472,6 +489,7 @@ async def test_concurrent_initialize_creates_exactly_one_admin_and_default_proje
     await init_engine(DatabaseConfig(url=migrated_postgres_database_url))
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
+    app.state.project_quota_enforcer = _NoopQuota()
     payloads = (
         {"email": "first-admin@example.com", "password": "Str0ng!First99"},
         {"email": "second-admin@example.com", "password": "Str0ng!Second99"},
@@ -546,6 +564,7 @@ async def test_failed_initialize_can_recover_through_real_setup_bootstrap(migrat
     await init_engine(DatabaseConfig(url=migrated_postgres_database_url))
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
+    app.state.project_quota_enforcer = _NoopQuota()
     payload = _init_payload()
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:

@@ -834,7 +834,7 @@ Expected: PASS under concurrent PostgreSQL sessions。
 
 **Interfaces:** 成员邀请/加入前 reserve member；文件 finalize 前 reserve storage，删除后 release；Run admission reserve concurrent，任何 terminal只 release一次；每个实际 MCP dispatch 前 consume daily call。
 
-- [ ] **Step 1: 写 integration RED tests**
+- [x] **Step 1: 写 integration RED tests**
 
 ```python
 async def test_run_quota_released_once_after_worker_retry(admit_three_runs, worker):
@@ -850,7 +850,7 @@ async def test_storage_rejects_finalize_without_orphaning_blob(upload_over_limit
 
 覆盖 hard-limit stable error/Retry-After、80% event、member并发 race、MCP失败也计实际 dispatch、正在运行任务不被新下调中断。
 
-- [ ] **Step 2: 观察 RED**
+- [x] **Step 2: 观察 RED**
 
 ```bash
 cd backend
@@ -859,7 +859,7 @@ uv run pytest tests/test_m6_quota_integration_postgres.py tests/test_project_mem
 
 Expected: FAIL because domain mutations尚未调用 quota port。
 
-- [ ] **Step 3: 把 reserve/consume 纳入现有事务**
+- [x] **Step 3: 把 reserve/consume 纳入现有事务**
 
 ```python
 async with sessions.begin() as session:
@@ -869,7 +869,7 @@ async with sessions.begin() as session:
 
 所有 idempotency key 由 server authority ID 派生；不得接受客户端 key 或在 commit 后补记 ledger。
 
-- [ ] **Step 4: 验证并提交**
+- [x] **Step 4: 验证并提交**
 
 ```bash
 cd backend
@@ -1235,7 +1235,7 @@ Expected: PASS；journal gap或认证失败时 restore fail closed。
 - Test: `backend/tests/test_m6_process_readiness.py`
 - Test: `tests/test_m6_makefile_contract.py`
 
-**Interfaces:** `migrate-reliability --dry-run` 产生脱敏 inventory且不写；execute要求 maintenance acknowledgment、备份 proof、M4/M5 markers、零 active local execution、quota/stream/job/recovery probes，先到0014、backfill/reconcile、probe后到0015并写 singleton marker。`make dev/start/up` 启动 Gateway + Worker + 可选 Scheduler；readiness分别暴露 role/worker fleet/scheduler ownership/cutover，不泄露 PID/lock secret。
+**Interfaces:** `migrate-reliability --dry-run` 产生脱敏 inventory且不写；execute要求 maintenance acknowledgment、备份 proof、M4/M5 markers、零 active local execution、quota/stream/job/recovery probes，先到0014、backfill/reconcile、probe后到0015并写 singleton marker。Quota backfill不得只写 aggregate adjustment：它必须为每个 active membership、非零 ready file 和待终态 Run 写入与在线 source key 完全一致的 synthetic exact reservation，再使 counter 收敛；这样迁移前资源首次 remove/delete/terminal 也能精确 release。`make dev/start/up` 启动 Gateway + Worker + 可选 Scheduler；readiness分别暴露 role/worker fleet/scheduler ownership/cutover，不泄露 PID/lock secret。
 
 - [ ] **Step 1: 写 migration/orchestration RED tests**
 
@@ -1253,6 +1253,8 @@ async def test_marker_written_only_after_all_probes(pass_until_recovery_probe):
 ```
 
 覆盖 retry/resume ledger、fail-before-DDL finalize、Gateway/Worker/Scheduler role命令、worker缺失 readiness false、scheduler disabled合法、Docker health/dependency、configuration redaction。
+
+同文件必须覆盖迁移前 member/file/Run 的逐资源 synthetic reservation，并在 cutover 后真实执行 remove/delete/terminal，断言 exact release 成功且 counter/ledger 不重复；只有 aggregate reconcile row 时测试必须失败。
 
 - [ ] **Step 2: 观察 RED**
 

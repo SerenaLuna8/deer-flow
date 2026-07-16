@@ -38,7 +38,11 @@ from app.gateway.auth.oidc_state import (
 )
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, generate_csrf_token, is_secure_request
-from app.gateway.deps import get_current_user_from_request, get_local_provider
+from app.gateway.deps import (
+    get_current_user_from_request,
+    get_local_provider,
+    get_project_quota_enforcer,
+)
 from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
 from deerflow.config.auth_config import OIDCProviderConfig
 from deerflow.persistence.engine import get_engine, get_session_factory
@@ -629,7 +633,10 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
             from app.projects.bootstrap import bootstrap_default_project
 
             async with factory() as session:
-                await bootstrap_default_project(session)
+                await bootstrap_default_project(
+                    session,
+                    quota=get_project_quota_enforcer(request),
+                )
     except ProjectBootstrapFailed as exc:
         raise HTTPException(status_code=503, detail={"code": exc.code, "message": "Project bootstrap failed"}) from None
     except ProjectDatabaseUnavailable:

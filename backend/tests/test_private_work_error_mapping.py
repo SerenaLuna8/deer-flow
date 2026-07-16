@@ -10,7 +10,10 @@ from app.private_work.errors import (
     PrivateWorkError,
     PrivateWorkForbidden,
     PrivateWorkInvalid,
+    PrivateWorkMcpQuotaExceeded,
     PrivateWorkNotFound,
+    PrivateWorkRunQuotaExceeded,
+    PrivateWorkStorageQuotaExceeded,
     PrivateWorkTooLarge,
     PrivateWorkUnavailable,
 )
@@ -25,6 +28,9 @@ from app.private_work.errors import (
         (PrivateWorkAssetStale, 409, "PRIVATE_WORK_ASSET_STALE", "Private work asset is stale."),
         (PrivateWorkCutover, 409, "PRIVATE_WORK_CUTOVER", "Private work cutover is not complete."),
         (PrivateWorkTooLarge, 413, "PRIVATE_WORK_TOO_LARGE", "Private work payload is too large."),
+        (PrivateWorkStorageQuotaExceeded, 429, "PROJECT_STORAGE_QUOTA_EXCEEDED", "Project storage quota was exceeded."),
+        (PrivateWorkRunQuotaExceeded, 429, "PROJECT_RUN_QUOTA_EXCEEDED", "Project concurrent Run quota was exceeded."),
+        (PrivateWorkMcpQuotaExceeded, 429, "PROJECT_MCP_QUOTA_EXCEEDED", "Project MCP call quota was exceeded."),
         (PrivateWorkInvalid, 422, "PRIVATE_WORK_INVALID", "Private work request is invalid."),
         (PrivateWorkUnavailable, 503, "PRIVATE_WORK_UNAVAILABLE", "Private work is unavailable."),
     ],
@@ -37,7 +43,7 @@ def test_private_work_error_mapping_is_stable_and_redacted(error_type: type[Exce
 
     assert mapped.status_code == status
     assert mapped.detail == {"code": code, "message": message, "request_id": "req-123"}
-    if status == 503:
+    if status in {429, 503}:
         assert mapped.headers == {"Retry-After": "1"}
     else:
         assert mapped.headers is None

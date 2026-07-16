@@ -9,10 +9,14 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gateway.deps import get_current_user_from_request, project_session
+from app.gateway.deps import (
+    get_current_user_from_request,
+    get_project_quota_enforcer,
+    project_session,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context
-from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
+from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectMemberQuotaExceeded, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
 from app.projects.models import CreateProject, ProjectChanges, ProjectPage, ProjectRole, ProjectView
 from app.projects.repository import ProjectRepository
 from app.projects.service import ProjectService
@@ -33,7 +37,7 @@ class ProjectRoute(APIRoute):
 
 
 router = APIRouter(prefix="/api/projects", tags=["projects"], route_class=ProjectRoute)
-DOMAIN_ERRORS = (ProjectNotFound, ProjectForbidden, ProjectSlugConflict, ProjectValidationFailed, ProjectDatabaseUnavailable)
+DOMAIN_ERRORS = (ProjectNotFound, ProjectForbidden, ProjectSlugConflict, ProjectMemberQuotaExceeded, ProjectValidationFailed, ProjectDatabaseUnavailable)
 
 
 class CreateProjectRequest(BaseModel):
@@ -93,12 +97,17 @@ def _raise_domain(exc: Exception) -> None:
         ProjectNotFound: (404, "PROJECT_NOT_FOUND"),
         ProjectForbidden: (403, "PROJECT_FORBIDDEN"),
         ProjectSlugConflict: (409, "PROJECT_SLUG_CONFLICT"),
+        ProjectMemberQuotaExceeded: (429, "PROJECT_MEMBER_QUOTA_EXCEEDED"),
         ProjectValidationFailed: (422, "PROJECT_VALIDATION_FAILED"),
         ProjectDatabaseUnavailable: (503, "DATABASE_UNAVAILABLE"),
     }
     for error_type, (status_code, code) in mapping.items():
         if isinstance(exc, error_type):
-            raise HTTPException(status_code, detail={"code": code, "message": str(exc)}) from None
+            raise HTTPException(
+                status_code,
+                detail={"code": code, "message": str(exc)},
+                headers={"Retry-After": "1"} if status_code == 429 else None,
+            ) from None
     raise exc
 
 
@@ -107,9 +116,9 @@ async def authenticated_project_identity(user=Depends(get_current_user_from_requ
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
-async def create_project(body: CreateProjectRequest, identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity), session: AsyncSession = Depends(project_session)):
+async def create_project(body: CreateProjectRequest, identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity), session: AsyncSession = Depends(project_session), quota=Depends(get_project_quota_enforcer)):
     user_id, request_id = identity
-    service = ProjectService(ProjectRepository(session))
+    service = ProjectService(ProjectRepository(session, quota=quota))
     try:
         context = await service.create(user_id, CreateProject(**body.model_dump()), request_id)
         return _response(await service.get(context))

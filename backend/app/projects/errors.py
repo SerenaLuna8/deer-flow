@@ -57,6 +57,13 @@ class ProjectMembershipVersionConflict(Exception):
         super().__init__("Project membership changed")
 
 
+class ProjectMemberQuotaExceeded(Exception):
+    code = "project_member_quota_exceeded"
+
+    def __init__(self) -> None:
+        super().__init__("Project member quota was exceeded")
+
+
 class ProjectDeletionStateConflict(Exception):
     code = "project_deletion_state_conflict"
 

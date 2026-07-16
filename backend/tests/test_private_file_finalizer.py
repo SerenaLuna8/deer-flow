@@ -290,6 +290,65 @@ async def test_finalizer_authorizes_then_atomically_supersedes_and_creates_artif
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_finalizer_releases_superseded_file_and_reserves_promoted_file_in_one_transaction(
+    finalizer_seed,
+) -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizer
+    from app.private_work.sandbox_files import AuthorityManifest, PrivateFileRunScope
+    from app.quotas.integration import ProjectQuotaEnforcer
+    from app.quotas.service import QuotaService
+    from app.reliability.owner_refs import AuditHmacKeyring
+    from deerflow.config.quota_config import QuotaConfig
+
+    seed, thread_id, run_id, old = finalizer_seed
+    keyring = AuditHmacKeyring.from_environment()
+    enforcer = ProjectQuotaEnforcer(
+        QuotaService(
+            seed.factory,
+            QuotaConfig(default_storage_bytes_limit=10),
+            source_ref_hasher=keyring.quota_source_ref,
+        )
+    )
+    async with seed.factory() as session, session.begin():
+        await enforcer.reserve_file(
+            session,
+            seed.owner_a,
+            file_id=old.id,
+            size=old.size,
+        )
+
+    result = await PrivateFileFinalizer(
+        seed.factory,
+        quota=enforcer,
+    ).finalize(
+        PrivateFileRunScope(seed.owner_a, thread_id=thread_id, run_id=run_id),
+        AuthorityManifest(entries=(_manifest_entry(old),)),
+        MemorySecureSandbox({"/mnt/user-data/workspace/draft.txt": b"new"}),
+    )
+
+    assert len(result.files) == 1
+    async with seed.factory() as session:
+        state = (
+            await session.execute(
+                text(
+                    """SELECT reserved,
+                              (SELECT count(*) FROM project_usage_ledger
+                               WHERE project_id=:project_id
+                                 AND dimension='storage_bytes'
+                                 AND source_kind='release') AS releases
+                       FROM project_usage_counters
+                       WHERE project_id=:project_id
+                         AND dimension='storage_bytes'
+                         AND bucket='lifetime'"""
+                ),
+                {"project_id": seed.owner_a.project_id},
+            )
+        ).one()
+    assert tuple(state) == (3, 1)
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_finalizer_persists_unpresented_output_without_creating_artifact(finalizer_seed) -> None:
     from app.private_work.file_finalizer import PrivateFileFinalizer
     from app.private_work.sandbox_files import AuthorityManifest, PrivateFileRunScope

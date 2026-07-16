@@ -7,11 +7,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
     PrivateWorkError,
     PrivateWorkInvalid,
@@ -38,6 +39,7 @@ from deerflow.persistence.private_work.model import (
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 _SCAN_ROOTS = (
     ("/mnt/user-data/workspace", "workspace", "workspace"),
@@ -71,6 +73,50 @@ class FinalizationResult:
     workspace_changes: dict[str, list[str]] | None
 
 
+class PrivateFileFinalizationQuotaPort(Protocol):
+    async def reserve_file(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+    ) -> None: ...
+
+    async def release_file(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+        request_id: str,
+    ) -> None: ...
+
+
+class _NoopPrivateFileFinalizationQuota:
+    async def reserve_file(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+    ) -> None:
+        del session, context, file_id, size
+
+    async def release_file(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+        request_id: str,
+    ) -> None:
+        del session, scope, file_id, size, request_id
+
+
 class PrivateFileFinalizer:
     """Commit verified workspace/output changes before a private Run terminates."""
 
@@ -79,9 +125,11 @@ class PrivateFileFinalizer:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         limits: PrivateFileLimits | None = None,
+        quota: PrivateFileFinalizationQuotaPort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._limits = limits or PrivateFileLimits()
+        self._quota = quota or _NoopPrivateFileFinalizationQuota()
         self._revalidator = PrivateWorkRevalidator()
 
     @staticmethod
@@ -444,6 +492,21 @@ class PrivateFileFinalizer:
             current_by_path = {row.logical_path: row for row in current_rows}
             old_rows = [current_by_path[path] for path in touched_paths if path in current_by_path]
             old_by_path = {row.logical_path: row for row in old_rows}
+            for row in old_rows:
+                await self._quota.release_file(
+                    session,
+                    run_scope.resource_scope,
+                    file_id=row.id,
+                    size=row.size,
+                    request_id=run_scope.context.request_id,
+                )
+            for item in staged:
+                await self._quota.reserve_file(
+                    session,
+                    run_scope.context,
+                    file_id=item.id,
+                    size=item.size,
+                )
             deleted_ids: list[uuid.UUID] = []
             for row in old_rows:
                 row.status = "deleted"

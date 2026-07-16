@@ -1539,6 +1539,11 @@ worker:
 # ============================================================================
 # Platform defaults and hard deployment ceilings. Per-project values may be
 # lower, but never exceed the matching max_* field.
+# Gateway, Worker, and Scheduler also require DEER_FLOW_AUDIT_ACTIVE_KEY_ID and
+# canonical 32-byte DEER_FLOW_AUDIT_KEYRING_JSON so quota source references stay
+# stable across processes/restarts without persisting raw authority identifiers.
+# During rotation every role must receive the same retained old+new key set;
+# keep old key material until no retained ledger/audit row references its ID.
 quotas:
   default_member_limit: 20
   default_storage_bytes_limit: 5368709120

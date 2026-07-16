@@ -15,7 +15,11 @@ from app.gateway.auth_middleware import _is_public
 from app.gateway.deps import project_session
 from app.gateway.routers import project_invitations
 from app.projects.capabilities import Capability
-from app.projects.errors import ProjectForbidden, ProjectNotFound
+from app.projects.errors import (
+    ProjectForbidden,
+    ProjectMemberQuotaExceeded,
+    ProjectNotFound,
+)
 from app.projects.invitation_models import (
     CreatedInvitation,
     InvitationClaim,
@@ -46,6 +50,7 @@ def _invitation() -> InvitationView:
 
 def _app() -> FastAPI:
     app = FastAPI()
+    app.state.project_quota_enforcer = object()
     app.include_router(project_invitations.router)
 
     async def fake_session():
@@ -331,3 +336,31 @@ def test_redeem_validates_authenticated_email_and_always_clears_cookie(monkeypat
         assert "Max-Age=0" in cookie
         assert "Path=/api/project-invitations" in cookie
     assert [call.args[1] for call in redeem.await_args_list] == ["member@example.com"] * 2
+
+
+def test_redeem_member_quota_returns_stable_429_and_retry_after(monkeypatch) -> None:
+    signer = Mock()
+    signer.verify.return_value = InvitationClaim(INVITATION_ID, "c" * 64)
+    monkeypatch.setattr(project_invitations, "claim_signer", lambda: signer)
+    monkeypatch.setattr(
+        project_invitations.InvitationRateLimitRepository,
+        "admit_attempt",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        project_invitations.InvitationService,
+        "redeem",
+        AsyncMock(side_effect=ProjectMemberQuotaExceeded()),
+    )
+    client = TestClient(_app())
+    client.cookies.set(
+        "project_invitation_claim",
+        "signed-cookie",
+        path="/api/project-invitations",
+    )
+
+    response = client.post("/api/project-invitations/redeem")
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "1"
+    assert response.json()["detail"]["code"] == "PROJECT_MEMBER_QUOTA_EXCEEDED"

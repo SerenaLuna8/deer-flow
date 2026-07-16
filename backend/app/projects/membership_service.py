@@ -4,6 +4,9 @@ import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.authorization import (
     AUTHORIZATION_REVOKED_REASON,
@@ -16,8 +19,32 @@ from app.projects.errors import ProjectMembershipVersionConflict, ProjectNotFoun
 from app.projects.membership_models import MembershipView
 from app.projects.membership_repository import MembershipRepository
 from app.projects.models import ProjectRole
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 logger = logging.getLogger(__name__)
+
+
+class MembershipQuotaPort(Protocol):
+    async def release_member(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        membership_id: uuid.UUID,
+        membership_version: int,
+    ) -> None: ...
+
+
+class _NoopMembershipQuota:
+    async def release_member(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        membership_id: uuid.UUID,
+        membership_version: int,
+    ) -> None:
+        del session, scope, membership_id, membership_version
 
 
 class MembershipService:
@@ -29,12 +56,14 @@ class MembershipService:
         authorization: object = PrivateRunAuthorizationService,
         retention: object = PrivateWorkRetentionService,
         notify_local_cancellation: Callable[[tuple[str, ...], str], object] | None = None,
+        quota: MembershipQuotaPort | None = None,
     ):
         self.repository = repository
         self._clock = clock or (lambda: datetime.now(UTC))
         self._authorization = authorization
         self._retention = retention
         self._notifier = notify_local_cancellation
+        self._quota = quota or _NoopMembershipQuota()
 
     async def list_members(self, context: ProjectContext) -> tuple[MembershipView, ...]:
         context.require(Capability.PROJECT_READ)
@@ -103,6 +132,7 @@ class MembershipService:
 
     async def _end(self, context: ProjectContext, project, target, *, status: str) -> tuple[MembershipView, tuple[str, ...]]:
         ended_at = self._clock()
+        active_version = target.version
         await self._retention.freeze_owner(
             self.repository.session,
             project_id=project.id,
@@ -123,6 +153,16 @@ class MembershipService:
             ended_at=ended_at,
             retention_until=ended_at + timedelta(days=30),
             ended_by_user_id=context.user_id,
+        )
+        await self._quota.release_member(
+            self.repository.session,
+            PrivateResourceScope(
+                project_id=str(project.id),
+                owner_user_id=str(target.user_id),
+                membership_version=active_version,
+            ),
+            membership_id=target.id,
+            membership_version=active_version,
         )
         return result, run_ids
 

@@ -8,7 +8,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gateway.deps import get_run_manager, project_session
+from app.gateway.deps import (
+    get_project_quota_enforcer,
+    get_run_manager,
+    project_session,
+)
 from app.gateway.routers.project_governance import (
     GOVERNANCE_DOMAIN_ERRORS,
     GovernanceRoute,
@@ -118,12 +122,14 @@ async def remove_member(
     body: MembershipVersionRequest,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
     session: AsyncSession = Depends(project_session),
+    quota=Depends(get_project_quota_enforcer),
 ):
     try:
         context = await _context(project_id, identity, session)
         view = await MembershipService(
             MembershipRepository(session),
             notify_local_cancellation=_cancellation_notifier(request),
+            quota=quota,
         ).remove(
             context,
             membership_id,
@@ -141,12 +147,14 @@ async def leave_project(
     body: MembershipVersionRequest,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
     session: AsyncSession = Depends(project_session),
+    quota=Depends(get_project_quota_enforcer),
 ):
     try:
         context = await _context(project_id, identity, session)
         view = await MembershipService(
             MembershipRepository(session),
             notify_local_cancellation=_cancellation_notifier(request),
+            quota=quota,
         ).leave(
             context,
             body.version,

@@ -4,7 +4,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 import sqlalchemy as sa
 from sqlalchemy.exc import DBAPIError
@@ -47,6 +47,7 @@ from app.private_work.errors import (
     PrivateWorkError,
     PrivateWorkForbidden,
     PrivateWorkNotFound,
+    PrivateWorkRunQuotaExceeded,
     PrivateWorkUnavailable,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
@@ -98,6 +99,25 @@ from deerflow.scheduler.schedules import next_scheduled_occurrence
 
 _DISPATCH_REQUEST_ID = "automation-dispatch"
 _OCCURRENCE_NAMESPACE = uuid.UUID("54f6732f-c6d5-5db6-8d4e-f166b4f3d014")
+
+
+class AutomationQuotaPort(Protocol):
+    async def reserve_concurrent_run(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        run: PrivateRunRecord,
+    ) -> None: ...
+
+
+class _NoopAutomationQuota:
+    async def reserve_concurrent_run(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        run: PrivateRunRecord,
+    ) -> None:
+        del session, context, run
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +281,7 @@ class AutomationDispatcher:
         clock: Callable[[], datetime] | None = None,
         retry_delay: timedelta = timedelta(seconds=30),
         max_concurrent_runs: int = 3,
+        quota: AutomationQuotaPort | None = None,
     ) -> None:
         if retry_delay <= timedelta(0):
             raise ValueError("retry_delay must be positive")
@@ -272,6 +293,7 @@ class AutomationDispatcher:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._retry_delay = retry_delay
         self._max_concurrent_runs = max_concurrent_runs
+        self._quota = quota or _NoopAutomationQuota()
         self._revalidator = PrivateWorkRevalidator()
         self._resolver = ProjectAssetResolver(session_factory)
         self._snapshots = RunSnapshotRepository(session_factory)
@@ -603,6 +625,11 @@ class AutomationDispatcher:
                     run=run,
                     job=job,
                     created=True,
+                )
+                await self._quota.reserve_concurrent_run(
+                    session,
+                    context,
+                    run,
                 )
                 await self._after_job_attached(session, result)
                 return result
@@ -1057,6 +1084,8 @@ class AutomationDispatcher:
             ),
         ):
             return AutomationConflict(_DISPATCH_REQUEST_ID)
+        if isinstance(error, PrivateWorkRunQuotaExceeded):
+            return AutomationConcurrencyLimit(_DISPATCH_REQUEST_ID)
         if isinstance(
             error,
             (

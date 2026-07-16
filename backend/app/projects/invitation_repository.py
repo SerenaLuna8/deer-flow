@@ -315,6 +315,25 @@ class InvitationRepository:
             role=role,
         )
 
+    async def lock_membership(
+        self,
+        project_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> ProjectMembershipRow:
+        membership = (
+            await self.session.execute(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == project_id,
+                    ProjectMembershipRow.user_id == str(user_id),
+                )
+                .with_for_update(of=ProjectMembershipRow)
+            )
+        ).scalar_one_or_none()
+        if membership is None:
+            raise ProjectInvitationInvalid()
+        return membership
+
     @staticmethod
     def _view(invitation: ProjectInvitationRow) -> InvitationView:
         try:

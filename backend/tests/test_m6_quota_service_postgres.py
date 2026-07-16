@@ -22,6 +22,7 @@ from app.quotas.models import (
     _issue_quota_compensation_authority,
 )
 from app.quotas.service import QuotaService
+from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.config.quota_config import QuotaConfig
 
 
@@ -35,6 +36,74 @@ def _compensation(seed, *, reason: str = "run_terminal") -> QuotaCompensationAut
         seed.owner_a_scope,
         reason=reason,
     )
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_exact_reservation_survives_active_hmac_key_rotation(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    keys = {"audit-old": b"o" * 32, "audit-new": b"n" * 32}
+    old_service = QuotaService(
+        seed.factory,
+        QuotaConfig(),
+        source_ref_hasher=AuditHmacKeyring(
+            active_key_id="audit-old",
+            _keys=keys,
+        ),
+    )
+    new_service = QuotaService(
+        seed.factory,
+        QuotaConfig(),
+        source_ref_hasher=AuditHmacKeyring(
+            active_key_id="audit-new",
+            _keys=keys,
+        ),
+    )
+    key = f"run:{uuid.uuid4()}"
+    try:
+        reserved = await old_service.reserve_new_session(
+            seed.owner_a,
+            "concurrent_runs",
+            1,
+            key,
+        )
+        replay = await new_service.reserve_new_session(
+            seed.owner_a,
+            "concurrent_runs",
+            1,
+            key,
+        )
+        released = await new_service.release_new_session(
+            _compensation(seed),
+            "concurrent_runs",
+            1,
+            key,
+        )
+
+        assert reserved.created is True
+        assert replay.created is False
+        assert replay.reserved == 1
+        assert released.reserved == 0
+        async with seed.factory() as session:
+            key_ids = tuple(
+                (
+                    await session.execute(
+                        text(
+                            """SELECT source_ref_key_id
+                               FROM project_usage_ledger
+                               WHERE project_id=:project_id
+                                 AND dimension='concurrent_runs'
+                               ORDER BY id"""
+                        ),
+                        {"project_id": seed.owner_a.project_id},
+                    )
+                ).scalars()
+            )
+        assert key_ids == ("audit-old", "audit-new")
+    finally:
+        await seed.engine.dispose()
 
 
 @pytest.mark.postgres

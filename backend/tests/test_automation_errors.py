@@ -59,6 +59,7 @@ def test_automation_error_mapping(
         "message": error.public_message,
         "request_id": "req",
     }
+    assert (response.headers or {}).get("Retry-After") == ("1" if status_code == 429 else None)
 
 
 def test_automation_error_mapping_rejects_unknown_subclasses() -> None:

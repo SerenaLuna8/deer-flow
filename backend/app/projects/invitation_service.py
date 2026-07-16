@@ -4,11 +4,14 @@ import hashlib
 import secrets
 import uuid
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from email_validator import EmailNotValidError, validate_email
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.context import PrivateWorkContext
 from app.private_work.retention import PrivateWorkRetentionService
-from app.projects.capabilities import Capability
+from app.projects.capabilities import Capability, capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectValidationFailed
 from app.projects.invitation_models import (
@@ -20,6 +23,29 @@ from app.projects.invitation_models import (
 )
 from app.projects.invitation_repository import InvitationRepository
 from app.projects.models import ProjectRole
+
+
+class InvitationQuotaPort(Protocol):
+    async def reserve_member(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        membership_id: uuid.UUID,
+        membership_version: int,
+    ) -> None: ...
+
+
+class _NoopInvitationQuota:
+    async def reserve_member(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        membership_id: uuid.UUID,
+        membership_version: int,
+    ) -> None:
+        del session, context, membership_id, membership_version
 
 
 def hash_invitation_token(token: str) -> str:
@@ -45,9 +71,11 @@ class InvitationService:
         repository: InvitationRepository,
         *,
         retention: object = PrivateWorkRetentionService,
+        quota: InvitationQuotaPort | None = None,
     ):
         self.repository = repository
         self._retention = retention
+        self._quota = quota or _NoopInvitationQuota()
 
     async def create(
         self,
@@ -143,6 +171,27 @@ class InvitationService:
                 invitation,
                 user_id=user_id,
                 now=now,
+            )
+            membership = await self.repository.lock_membership(
+                project.id,
+                user_id,
+            )
+            issued_context = PrivateWorkContext.from_project(
+                ProjectContext(
+                    user_id=user_id,
+                    project_id=project.id,
+                    membership_id=membership.id,
+                    role=result.role,
+                    capabilities=capabilities_for(result.role),
+                    membership_version=membership.version,
+                    request_id="invitation-redeem",
+                )
+            )
+            await self._quota.reserve_member(
+                self.repository.session,
+                issued_context,
+                membership_id=membership.id,
+                membership_version=membership.version,
             )
             await self._retention.restore_owner(
                 self.repository.session,

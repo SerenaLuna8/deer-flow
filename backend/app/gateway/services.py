@@ -44,6 +44,7 @@ from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import (
     PrivateWorkCutover,
     PrivateWorkError,
+    PrivateWorkUnavailable,
 )
 from app.private_work.run_admission import (
     PrivateRunAdmissionServerContext,
@@ -994,11 +995,14 @@ async def start_private_run(
 ) -> RunRecord:
     """Persist a private Run plus durable job; execution belongs to Worker."""
 
-    del request
     if admission_service is None:
-        from deerflow.persistence.engine import get_session_factory
-
-        admission_service = PrivateRunAdmissionService(get_session_factory())
+        admission_service = getattr(
+            request.app.state,
+            "private_run_admission_service",
+            None,
+        )
+        if not isinstance(admission_service, PrivateRunAdmissionService):
+            raise PrivateWorkUnavailable(context.request_id)
     sanitized_config, _checkpoint_control = _normalize_run_checkpoint_inputs(
         body,
         thread_id,

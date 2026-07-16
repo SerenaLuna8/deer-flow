@@ -1304,7 +1304,7 @@ async def test_branch_authority_streams_bounded_hash_validation_and_copies_paylo
     event.listen(seed.engine.sync_engine, "before_cursor_execute", capture_statement)
     try:
         await PrivateFileService(seed.factory).copy_thread_files(
-            seed.owner_a_scope,
+            seed.owner_a,
             source_thread_id,
             target_thread_id,
         )
@@ -1390,7 +1390,7 @@ async def test_branch_authority_holds_chunk_locks_between_validation_and_server_
     )
     copy_task = asyncio.create_task(
         PrivateFileService(pausing_factory).copy_thread_files(
-            seed.owner_a_scope,
+            seed.owner_a,
             source_thread_id,
             target_thread_id,
         )

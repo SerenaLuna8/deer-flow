@@ -23,6 +23,7 @@ from app.private_work.run_repository import PrivateRunCreate, PrivateRunReposito
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.private_work.thread_service import PrivateThreadService
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
 from deerflow.runtime.events.store.db import DbRunEventStore
@@ -55,6 +56,7 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
         ),
         stream_bridge=None,
         scheduler=SchedulerConfig(min_once_delay_seconds=73),
+        quotas=QuotaConfig(),
     )
     session_factory = MagicMock(name="session_factory")
 
@@ -165,6 +167,7 @@ async def test_project_private_events_survive_langgraph_runtime_rebuild(
             max_trace_content=654,
         ),
         stream_bridge=None,
+        quotas=QuotaConfig(),
     )
     thread_id = "private-runtime-rebuild-thread"
     run_id = "private-runtime-rebuild-run"

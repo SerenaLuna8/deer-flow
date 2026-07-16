@@ -12,7 +12,7 @@ import uuid
 from collections.abc import AsyncIterable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from sqlalchemy import delete, insert, literal, select
 from sqlalchemy.exc import DBAPIError
@@ -44,6 +44,7 @@ from deerflow.persistence.private_work.file_repository import (
     PrivateFileRepository,
 )
 from deerflow.persistence.private_work.model import PrivateFileChunkRow, PrivateFileRow
+from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -76,6 +77,50 @@ class PrivateUpload:
     source_file_id: uuid.UUID | None = None
 
 
+class PrivateFileQuotaPort(Protocol):
+    async def reserve_file(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+    ) -> None: ...
+
+    async def release_file(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+        request_id: str,
+    ) -> None: ...
+
+
+class _NoopPrivateFileQuota:
+    async def reserve_file(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+    ) -> None:
+        del session, context, file_id, size
+
+    async def release_file(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        file_id: uuid.UUID,
+        size: int,
+        request_id: str,
+    ) -> None:
+        del session, scope, file_id, size, request_id
+
+
 class PrivateFileService:
     """Application transaction boundary for PostgreSQL-authoritative files."""
 
@@ -84,10 +129,12 @@ class PrivateFileService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         conversion_temp_root: Path | None = None,
+        quota: PrivateFileQuotaPort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._revalidator = PrivateWorkRevalidator()
         self._conversion_temp_root = conversion_temp_root
+        self._quota = quota or _NoopPrivateFileQuota()
 
     @staticmethod
     def _media_type(value: str, request_id: str) -> str:
@@ -172,6 +219,12 @@ class PrivateFileService:
         try:
             async with self._session_factory() as session, session.begin():
                 await self._revalidator.require(session, context, Capability.PRIVATE_WORK_CREATE, lock=True)
+                await self._quota.reserve_file(
+                    session,
+                    context,
+                    file_id=file_id,
+                    size=expected_size,
+                )
                 return await PrivateFileRepository(session).finalize(
                     scope=context.resource_scope,
                     thread_id=thread_id,
@@ -402,8 +455,19 @@ class PrivateFileService:
         async with self._session_factory() as session, session.begin():
             await self._revalidator.require(session, context, Capability.PRIVATE_WORK_CREATE, lock=True)
             repository = PrivateFileRepository(session)
-            return tuple(
-                [
+            finalized: list[PrivateFileRecord] = []
+            for file_record, (file_size, whole_sha256) in zip(
+                staged,
+                totals,
+                strict=True,
+            ):
+                await self._quota.reserve_file(
+                    session,
+                    context,
+                    file_id=file_record.id,
+                    size=file_size,
+                )
+                finalized.append(
                     await repository.finalize(
                         scope=context.resource_scope,
                         thread_id=thread_id,
@@ -411,9 +475,8 @@ class PrivateFileService:
                         expected_size=file_size,
                         expected_sha256=whole_sha256,
                     )
-                    for file_record, (file_size, whole_sha256) in zip(staged, totals, strict=True)
-                ]
-            )
+                )
+            return tuple(finalized)
 
     async def _finalize_many_at_commit_point(
         self,
@@ -560,11 +623,28 @@ class PrivateFileService:
                     Capability.PRIVATE_WORK_READ_OWN,
                     lock=True,
                 )
-                return await PrivateFileRepository(session).mark_deleted(
+                repository = PrivateFileRepository(session)
+                current = await repository.get(
+                    scope=context.resource_scope,
+                    thread_id=thread_id,
+                    file_id=file_id,
+                    lock=True,
+                )
+                if current is None or current.status != "ready":
+                    raise PrivateFileConflict
+                deleted = await repository.mark_deleted(
                     scope=context.resource_scope,
                     thread_id=thread_id,
                     file_id=file_id,
                 )
+                await self._quota.release_file(
+                    session,
+                    context.resource_scope,
+                    file_id=file_id,
+                    size=current.size,
+                    request_id=context.request_id,
+                )
+                return deleted
         except PrivateFileConflict:
             raise PrivateWorkNotFound(context.request_id) from None
         except PrivateWorkError:
@@ -574,14 +654,14 @@ class PrivateFileService:
 
     async def copy_branch_authority(
         self,
-        scope: PrivateResourceScope,
+        context: PrivateWorkContext,
         source_thread_id: str,
         target_thread_id: str,
         *,
         session: AsyncSession | None = None,
     ) -> None:
         await self.copy_thread_files(
-            scope,
+            context,
             source_thread_id,
             target_thread_id,
             session=session,
@@ -589,7 +669,7 @@ class PrivateFileService:
 
     async def copy_thread_files(
         self,
-        source_scope: PrivateResourceScope,
+        context: PrivateWorkContext,
         source_thread_id: str,
         target_thread_id: str,
         *,
@@ -597,32 +677,45 @@ class PrivateFileService:
     ) -> None:
         """Copy only ready file/chunk authority; artifacts remain Run-owned."""
 
+        context = require_issued_private_work_context(context)
         if session is None:
             async with self._session_factory() as owned_session, owned_session.begin():
+                await self._revalidator.require(
+                    owned_session,
+                    context,
+                    Capability.PRIVATE_WORK_CREATE,
+                    lock=True,
+                )
                 await self._copy_thread_files_in_session(
                     owned_session,
-                    source_scope,
+                    context,
                     source_thread_id,
                     target_thread_id,
                 )
             return
+        await self._revalidator.require(
+            session,
+            context,
+            Capability.PRIVATE_WORK_CREATE,
+            lock=True,
+        )
         await self._copy_thread_files_in_session(
             session,
-            source_scope,
+            context,
             source_thread_id,
             target_thread_id,
         )
 
-    @staticmethod
     async def _copy_thread_files_in_session(
+        self,
         session: AsyncSession,
-        scope: PrivateResourceScope,
+        context: PrivateWorkContext,
         source_thread_id: str,
         target_thread_id: str,
     ) -> None:
         try:
-            project_id = uuid.UUID(scope.project_id)
-            owner_user_id = str(uuid.UUID(scope.owner_user_id))
+            project_id = uuid.UUID(str(context.project_id))
+            owner_user_id = str(uuid.UUID(str(context.user_id)))
         except (TypeError, ValueError):
             raise PrivateFileConflict from None
         if source_thread_id == target_thread_id:
@@ -692,6 +785,12 @@ class PrivateFileService:
                 created_at=source.created_at,
                 updated_at=source.updated_at,
             )
+            await self._quota.reserve_file(
+                session,
+                context,
+                file_id=target.id,
+                size=target.size,
+            )
             session.add(target)
             copies.append((source, target))
         await session.flush()
@@ -753,6 +852,52 @@ class PrivateFileService:
         except (TypeError, ValueError):
             return
         async with self._session_factory() as session, session.begin():
+            # Compensation follows the same frozen order as foreground work:
+            # Project -> Membership -> Thread -> File -> quota counter.
+            project = await session.scalar(select(ProjectRow.id).where(ProjectRow.id == project_id).with_for_update(of=ProjectRow))
+            membership = await session.scalar(
+                select(ProjectMembershipRow.id)
+                .where(
+                    ProjectMembershipRow.project_id == project_id,
+                    ProjectMembershipRow.user_id == owner_user_id,
+                )
+                .with_for_update(of=ProjectMembershipRow)
+            )
+            if project is None or membership is None:
+                raise PrivateWorkUnavailable("branch-authority-rollback")
+            await session.execute(
+                select(ThreadMetaRow.thread_id)
+                .where(
+                    ThreadMetaRow.project_id == project_id,
+                    ThreadMetaRow.owner_user_id == owner_user_id,
+                    ThreadMetaRow.thread_id == target_thread_id,
+                )
+                .with_for_update(of=ThreadMetaRow)
+            )
+            rows = (
+                (
+                    await session.execute(
+                        select(PrivateFileRow)
+                        .where(
+                            PrivateFileRow.project_id == project_id,
+                            PrivateFileRow.owner_user_id == owner_user_id,
+                            PrivateFileRow.thread_id == target_thread_id,
+                            PrivateFileRow.status == "ready",
+                        )
+                        .with_for_update(of=PrivateFileRow)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                await self._quota.release_file(
+                    session,
+                    scope,
+                    file_id=row.id,
+                    size=row.size,
+                    request_id="branch-authority-rollback",
+                )
             await session.execute(
                 delete(PrivateFileRow).where(
                     PrivateFileRow.project_id == project_id,

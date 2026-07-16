@@ -14,7 +14,11 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.projects.bootstrap import bootstrap_default_project
-from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
+from app.projects.errors import (
+    ProjectBootstrapFailed,
+    ProjectDatabaseUnavailable,
+    ProjectMemberQuotaExceeded,
+)
 from app.projects.models import BootstrapStatus
 from deerflow.persistence.bootstrap import (
     _filesystem_has_legacy_private_source,
@@ -504,6 +508,53 @@ async def test_default_bootstrap_states_idempotency_and_concurrency(migrated_pos
                 JOIN projects p ON p.id=m.project_id WHERE p.slug='default-project'""")
                 )
             ).scalar_one() == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_default_bootstrap_reserves_initial_membership_atomically(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin_id = str(uuid.uuid4())
+
+    class RejectMemberReservation:
+        async def reserve_member(
+            self,
+            session,
+            context,
+            *,
+            membership_id,
+            membership_version,
+        ) -> None:
+            assert session.in_transaction()
+            assert str(context.user_id) == admin_id
+            assert context.project_id is not None
+            assert context.membership_id == membership_id
+            assert context.membership_version == membership_version == 1
+            raise ProjectMemberQuotaExceeded()
+
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                    (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,'quota-admin@example.com','system_admin',:now,false,0)"""
+                ),
+                {"id": admin_id, "now": datetime.now(UTC)},
+            )
+        async with factory() as session:
+            with pytest.raises(ProjectMemberQuotaExceeded):
+                await bootstrap_default_project(
+                    session,
+                    quota=RejectMemberReservation(),
+                )
+        async with engine.connect() as connection:
+            assert (await connection.scalar(text("SELECT count(*) FROM projects"))) == 0
+            assert (await connection.scalar(text("SELECT count(*) FROM project_memberships"))) == 0
     finally:
         await engine.dispose()
 

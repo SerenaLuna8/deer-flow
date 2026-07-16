@@ -12,13 +12,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from app.quotas.models import QuotaSourceRef
 from deerflow.persistence.jobs.sql import JobOwnerRef
 
 _ACTIVE_KEY_ID_ENV = "DEER_FLOW_AUDIT_ACTIVE_KEY_ID"
 _KEYRING_JSON_ENV = "DEER_FLOW_AUDIT_KEYRING_JSON"
 _KEY_BYTES = 32
-_KEY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,254}")
+_KEY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 _JOB_OWNER_DOMAIN = b"deerflow.m6.job-owner-ref.v1\x00"
+_QUOTA_SOURCE_DOMAIN = b"deerflow.m6.quota-source-ref-hmac.v1\x00"
 
 
 class AuditHmacKeyringInvalid(Exception):
@@ -101,3 +103,37 @@ class AuditHmacKeyring:
             key_id=self.active_key_id,
             hmac_hex=digest,
         )
+
+    def quota_source_ref(self, payload: bytes) -> QuotaSourceRef:
+        if type(payload) is not bytes or not payload:
+            raise ValueError("quota source reference requires bytes")
+        digest = hmac.new(
+            self._keys[self.active_key_id],
+            _QUOTA_SOURCE_DOMAIN + payload,
+            hashlib.sha256,
+        ).hexdigest()
+        return QuotaSourceRef(
+            key_id=self.active_key_id,
+            hmac_hex=digest,
+        )
+
+    def quota_source_refs(self, payload: bytes) -> tuple[QuotaSourceRef, ...]:
+        """Return the active ref first, then every retained rotation ref."""
+
+        if type(payload) is not bytes or not payload:
+            raise ValueError("quota source reference requires bytes")
+        key_ids = (self.active_key_id, *sorted(set(self._keys) - {self.active_key_id}))
+        return tuple(
+            QuotaSourceRef(
+                key_id=key_id,
+                hmac_hex=hmac.new(
+                    self._keys[key_id],
+                    _QUOTA_SOURCE_DOMAIN + payload,
+                    hashlib.sha256,
+                ).hexdigest(),
+            )
+            for key_id in key_ids
+        )
+
+    def __call__(self, payload: bytes) -> QuotaSourceRef:
+        return self.quota_source_ref(payload)

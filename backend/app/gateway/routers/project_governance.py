@@ -9,6 +9,7 @@ from app.projects.errors import (
     ProjectDeletionStateConflict,
     ProjectForbidden,
     ProjectLastAdmin,
+    ProjectMemberQuotaExceeded,
     ProjectMembershipVersionConflict,
     ProjectNotFound,
     ProjectValidationFailed,
@@ -23,6 +24,7 @@ GOVERNANCE_DOMAIN_ERRORS = (
     ProjectNotFound,
     ProjectForbidden,
     ProjectLastAdmin,
+    ProjectMemberQuotaExceeded,
     ProjectMembershipVersionConflict,
     ProjectInvitationConflict,
     ProjectInvitationInvalid,
@@ -68,6 +70,12 @@ def governance_error(exc: Exception, request_id: str) -> tuple[int, dict[str, st
             "Project membership does not allow this operation",
         ),
         (ProjectLastAdmin, 409, "PROJECT_LAST_ADMIN", "Project must keep an active admin"),
+        (
+            ProjectMemberQuotaExceeded,
+            429,
+            "PROJECT_MEMBER_QUOTA_EXCEEDED",
+            "Project member quota was exceeded",
+        ),
         (
             ProjectMembershipVersionConflict,
             409,
@@ -117,4 +125,8 @@ def governance_error_detail(code: str, message: str, request_id: str) -> dict[st
 
 def raise_governance_error(exc: Exception, request_id: str) -> None:
     status_code, detail = governance_error(exc, request_id)
-    raise HTTPException(status_code, detail=detail) from None
+    raise HTTPException(
+        status_code,
+        detail=detail,
+        headers={"Retry-After": "1"} if status_code == 429 else None,
+    ) from None

@@ -46,6 +46,7 @@ def automation_http_exception(error: AutomationError) -> HTTPException:
             "message": error_type.public_message,
             "request_id": error.request_id,
         },
+        headers=({"Retry-After": "1"} if AUTOMATION_ERROR_STATUS[error_type.code] == 429 else None),
     )
 
 

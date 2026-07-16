@@ -498,7 +498,15 @@ class PrivateAgentRuntime:
                 if selected is None:
                     raise PrivateWorkAssetStale("unknown")
                 if authorization_boundary is not None:
-                    await authorization_boundary.before_mcp_call()
+                    dispatch_check = getattr(
+                        authorization_boundary,
+                        "before_mcp_tool_dispatch",
+                        None,
+                    )
+                    if callable(dispatch_check):
+                        await dispatch_check()
+                    else:
+                        await authorization_boundary.before_mcp_call()
                 result = await selected.ainvoke(dict(arguments))
                 PrivateAgentRuntime._assert_mcp_result_secret_free(
                     result,

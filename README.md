@@ -993,7 +993,9 @@ scheduler ownership lock and only admits jobs. Disabling polling leaves the proj
 and manual trigger available; manual trigger uses the same atomic occurrence/Run/job
 path. PostgreSQL durable stream writing/reading, terminal uniqueness, Gateway SSE reconnect,
 frontend cursor/dedupe, and the atomic project quota core are implemented. Member, storage,
-concurrent-Run, and MCP enforcement wiring, complete audit, and general backup/restore remain later M6 work.
+concurrent-Run, and actual MCP-dispatch quota enforcement are also wired across Gateway,
+Worker, and Scheduler with stable 429/`Retry-After` responses. Complete audit and general
+backup/restore remain later M6 work.
 
 The project-scoped backend API is available at
 `/api/projects/{project_id}/automations`. It provides strict create, list, read,

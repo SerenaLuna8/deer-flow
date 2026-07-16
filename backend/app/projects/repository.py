@@ -5,6 +5,7 @@ import json
 import re
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -15,6 +16,32 @@ from app.projects.context import ProjectContext
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
 from app.projects.models import CreateProject, ProjectChanges, ProjectPage, ProjectRole, ProjectView
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+
+if TYPE_CHECKING:
+    from app.private_work.context import PrivateWorkContext
+
+
+class ProjectCreateQuotaPort(Protocol):
+    async def reserve_member(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        membership_id: uuid.UUID,
+        membership_version: int,
+    ) -> None: ...
+
+
+class _NoopProjectCreateQuota:
+    async def reserve_member(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        membership_id: uuid.UUID,
+        membership_version: int,
+    ) -> None:
+        del session, context, membership_id, membership_version
 
 
 def _constraint_name(exc: BaseException) -> str | None:
@@ -60,8 +87,14 @@ def _decode_cursor(value: str) -> tuple[bool, datetime | None, datetime, uuid.UU
 
 
 class ProjectRepository:
-    def __init__(self, session: AsyncSession):
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        quota: ProjectCreateQuotaPort | None = None,
+    ):
         self.session = session
+        self._quota = quota or _NoopProjectCreateQuota()
 
     async def create_with_admin(self, user_id: uuid.UUID, command: CreateProject, request_id: str) -> ProjectContext:
         project = ProjectRow(
@@ -79,13 +112,30 @@ class ProjectRepository:
                 membership.project_id = project.id
                 self.session.add(membership)
                 await self.session.flush()
+                context = ProjectContext(
+                    user_id,
+                    project.id,
+                    membership.id,
+                    ProjectRole.ADMIN,
+                    capabilities_for(ProjectRole.ADMIN),
+                    membership.version,
+                    request_id,
+                )
+                from app.private_work.context import PrivateWorkContext
+
+                await self._quota.reserve_member(
+                    self.session,
+                    PrivateWorkContext.from_project(context),
+                    membership_id=membership.id,
+                    membership_version=membership.version,
+                )
         except IntegrityError as exc:
             if _constraint_name(exc) == "uq_projects_slug":
                 raise ProjectSlugConflict() from None
             raise ProjectDatabaseUnavailable() from None
         except DBAPIError:
             raise ProjectDatabaseUnavailable() from None
-        return ProjectContext(user_id, project.id, membership.id, ProjectRole.ADMIN, capabilities_for(ProjectRole.ADMIN), membership.version, request_id)
+        return context
 
     def _scope(self, context: ProjectContext):
         if not isinstance(context, ProjectContext):

@@ -543,10 +543,13 @@ class PrivateRunRepository:
         outcome: Literal["succeeded", "cancelled", "failed"],
         public_error_code: str | None = None,
         ambiguous_side_effect: bool = False,
+        cancel_preempts_outcome: bool = True,
         retry_initial_seconds: int = 2,
         retry_max_seconds: int = 300,
         now: datetime | None = None,
     ) -> PrivateRunRecord:
+        if type(cancel_preempts_outcome) is not bool:
+            raise PrivateRunConflict
         settled_at = now or datetime.now(UTC)
         token_hash = self._lease_token_hash(lease_token)
         job, run = await self._locked_job_run(
@@ -578,7 +581,7 @@ class PrivateRunRepository:
                 run.authorization_cancel_requested_at,
             )
         )
-        if cancel_requested:
+        if cancel_requested and cancel_preempts_outcome:
             outcome = "cancelled"
             public_error_code = None
 

@@ -50,7 +50,7 @@ class QuotaService:
         *,
         source_ref_hasher: QuotaSourceRefHasher,
     ) -> None:
-        if type(config) is not QuotaConfig or not callable(source_ref_hasher):
+        if type(config) is not QuotaConfig or not (callable(source_ref_hasher) or callable(getattr(source_ref_hasher, "quota_source_ref", None))):
             raise TypeError("quota service configuration is invalid")
         self._sessions = session_factory
         self._config = config
@@ -317,19 +317,42 @@ class QuotaService:
         operation: str,
         key: str,
     ) -> QuotaSourceRef:
-        value = self._source_ref_hasher(
-            self._source_payload(
-                project_id=project_id,
-                owner_user_id=owner_user_id,
-                dimension=dimension,
-                bucket=bucket,
-                operation=operation,
-                key=key,
-            )
+        return self._source_refs(
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            dimension=dimension,
+            bucket=bucket,
+            operation=operation,
+            key=key,
+        )[0]
+
+    def _source_refs(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        dimension: QuotaDimension,
+        bucket: str,
+        operation: str,
+        key: str,
+    ) -> tuple[QuotaSourceRef, ...]:
+        payload = self._source_payload(
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            dimension=dimension,
+            bucket=bucket,
+            operation=operation,
+            key=key,
         )
-        if type(value) is not QuotaSourceRef:
+        all_refs = getattr(self._source_ref_hasher, "quota_source_refs", None)
+        if callable(all_refs):
+            values = all_refs(payload)
+        else:
+            active = self._source_ref_hasher(payload) if callable(self._source_ref_hasher) else self._source_ref_hasher.quota_source_ref(payload)
+            values = (active,)
+        if type(values) is not tuple or not values or any(type(value) is not QuotaSourceRef for value in values) or len({(value.key_id, value.hmac_hex) for value in values}) != len(values):
             raise TypeError("quota source_ref_hasher returned an invalid value")
-        return value
+        return values
 
     @staticmethod
     def _threshold_reached(*, usage: int, limit: int, threshold: float) -> bool:
@@ -424,7 +447,7 @@ class QuotaService:
         repository = QuotaRepository(session)
         counter = await repository.lock_counter(project_id, selected, bucket)
         limit = await self.effective_limit(session, project_id, selected)
-        source_ref = self._source_ref(
+        source_refs = self._source_refs(
             project_id=project_id,
             owner_user_id=owner_user_id,
             dimension=selected,
@@ -432,16 +455,23 @@ class QuotaService:
             operation=operation,
             key=key,
         )
-        idempotency_key = self._idempotency_digest(source_ref=source_ref)
-        existing = await repository.ledger_entry(
-            project_id,
-            selected,
-            idempotency_key,
-        )
+        source_ref = source_refs[0]
+        existing_matches = []
+        for candidate in source_refs:
+            existing = await repository.ledger_entry(
+                project_id,
+                selected,
+                self._idempotency_digest(source_ref=candidate),
+            )
+            if existing is not None:
+                existing_matches.append((candidate, existing))
+        if len(existing_matches) > 1:
+            raise QuotaConflict("quota idempotency authority conflict")
         expected_delta = -amount if operation == "release" else amount
-        if existing is not None:
+        if existing_matches:
+            existing_ref, existing = existing_matches[0]
             valid_kinds = {operation, f"{operation}_threshold"}
-            if existing.bucket != bucket or existing.delta != expected_delta or existing.source_kind not in valid_kinds or existing.source_ref_key_id != source_ref.key_id or existing.source_ref_hmac != source_ref.hmac_hex:
+            if existing.bucket != bucket or existing.delta != expected_delta or existing.source_kind not in valid_kinds or existing.source_ref_key_id != existing_ref.key_id or existing.source_ref_hmac != existing_ref.hmac_hex:
                 raise QuotaConflict("quota idempotency authority conflict")
             return QuotaMutation(
                 dimension=selected,
@@ -455,7 +485,7 @@ class QuotaService:
 
         before = counter.used + counter.reserved
         if operation == "release":
-            reserve_ref = self._source_ref(
+            reserve_refs = self._source_refs(
                 project_id=project_id,
                 owner_user_id=owner_user_id,
                 dimension=selected,
@@ -463,11 +493,18 @@ class QuotaService:
                 operation="reserve",
                 key=key,
             )
-            reservation = await repository.ledger_entry(
-                project_id,
-                selected,
-                self._idempotency_digest(source_ref=reserve_ref),
-            )
+            reservation_matches = []
+            for candidate in reserve_refs:
+                reservation = await repository.ledger_entry(
+                    project_id,
+                    selected,
+                    self._idempotency_digest(source_ref=candidate),
+                )
+                if reservation is not None:
+                    reservation_matches.append((candidate, reservation))
+            if len(reservation_matches) != 1:
+                raise QuotaConflict("quota release requires its exact reservation")
+            reserve_ref, reservation = reservation_matches[0]
             if (
                 reservation is None
                 or reservation.bucket != bucket
@@ -498,7 +535,7 @@ class QuotaService:
             source_kind=(f"{operation}_threshold" if threshold_crossed else operation),
             source_ref_key_id=source_ref.key_id,
             source_ref_hmac=source_ref.hmac_hex,
-            idempotency_key=idempotency_key,
+            idempotency_key=self._idempotency_digest(source_ref=source_ref),
             request_id=None,
             occurred_at=occurred_at,
         )
