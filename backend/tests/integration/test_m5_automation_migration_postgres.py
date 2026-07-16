@@ -117,6 +117,12 @@ async def _wait_for_pending_source_lock(
 async def test_legacy_migration_reaches_head_with_receipts_and_is_idempotent(
     m5_legacy_database: M5LegacyMigrationDatabase,
 ) -> None:
+    before_dry_run = await m5_legacy_database.snapshot()
+    assert before_dry_run.control_relations == {
+        "automation_migration_runs": False,
+        "automation_migration_ledger": False,
+        "automation_cutover_state": False,
+    }
     dry_run = await run_automation_migration(
         m5_legacy_database.url,
         owner_map=m5_legacy_database.owner_map,
@@ -126,8 +132,7 @@ async def test_legacy_migration_reaches_head_with_receipts_and_is_idempotent(
     assert dry_run.counts == m5_legacy_database.expected_counts
     assert dry_run.cutover_complete is False
     assert dry_run.noop is False
-    assert await m5_legacy_database.current_revision() == ("0011_private_artifact_tombstone")
-    assert await _automation_control_state(m5_legacy_database) == (0, 0, None)
+    assert await m5_legacy_database.snapshot() == before_dry_run
 
     executed = await run_automation_migration(
         m5_legacy_database.url,
@@ -267,33 +272,46 @@ async def test_invalid_missing_conflicting_maps_and_relations_fail_before_expand
 ) -> None:
     seed = m5_legacy_database.seed
     canonical_item = next(iter(m5_legacy_database.owner_map.values()))
+    initial = await m5_legacy_database.snapshot()
+    assert initial.control_relations == {
+        "automation_migration_runs": False,
+        "automation_migration_ledger": False,
+        "automation_cutover_state": False,
+    }
     invalid_maps = (
-        {},
-        {
-            **m5_legacy_database.owner_map,
-            str(uuid.uuid4()): canonical_item,
-        },
-        {
-            str(seed.owner_a.user_id): {
-                "project_id": str(seed.project_b_owner_a.project_id),
-                "fresh_thread_agent": {
-                    "asset_id": str(seed.project_b_agent_id),
-                    "scope": "project",
+        ("missing", {}),
+        (
+            "extra_conflicting_owner",
+            {
+                **m5_legacy_database.owner_map,
+                str(uuid.uuid4()): canonical_item,
+            },
+        ),
+        (
+            "reuse_thread_cross_scope",
+            {
+                str(seed.owner_a.user_id): {
+                    "project_id": str(seed.project_b_owner_a.project_id),
+                    "fresh_thread_agent": {
+                        "asset_id": str(seed.project_b_agent_id),
+                        "scope": "project",
+                    },
                 },
-            }
-        },
+            },
+        ),
     )
-    for owner_map in invalid_maps:
+    for case, owner_map in invalid_maps:
+        before_failure = await m5_legacy_database.snapshot()
         with pytest.raises(AutomationMigrationError):
             await run_automation_migration(
                 m5_legacy_database.url,
                 owner_map=owner_map,
                 backup_dir=m5_legacy_database.backup_dir,
-                execute=False,
+                execute=True,
             )
-        assert await m5_legacy_database.current_revision() == ("0011_private_artifact_tombstone")
-        assert await _automation_control_state(m5_legacy_database) == (0, 0, None)
+        assert await m5_legacy_database.snapshot() == before_failure, case
 
+    before_parse_failure = await m5_legacy_database.snapshot()
     with pytest.raises(AutomationMigrationError, match="owner map is invalid"):
         await run_automation_migration(
             m5_legacy_database.url,
@@ -301,7 +319,7 @@ async def test_invalid_missing_conflicting_maps_and_relations_fail_before_expand
             backup_dir=m5_legacy_database.backup_dir,
             execute=True,
         )
-    assert await _automation_control_state(m5_legacy_database) == (0, 0, None)
+    assert await m5_legacy_database.snapshot() == before_parse_failure
 
     async with m5_legacy_database.engine.begin() as connection:
         await connection.execute(
@@ -311,6 +329,7 @@ async def test_invalid_missing_conflicting_maps_and_relations_fail_before_expand
                 WHERE id='m5-legacy-success'"""
             )
         )
+    before_relation_failure = await m5_legacy_database.snapshot()
     with pytest.raises(AutomationMigrationError, match="orphan automation run"):
         await run_automation_migration(
             m5_legacy_database.url,
@@ -318,8 +337,31 @@ async def test_invalid_missing_conflicting_maps_and_relations_fail_before_expand
             backup_dir=m5_legacy_database.backup_dir,
             execute=True,
         )
-    assert await m5_legacy_database.current_revision() == ("0011_private_artifact_tombstone")
-    assert await _automation_control_state(m5_legacy_database) == (0, 0, None)
+    assert await m5_legacy_database.snapshot() == before_relation_failure
+
+
+@pytest.mark.asyncio
+async def test_legacy_snapshot_detects_source_mutation_and_restoration(
+    m5_legacy_database: M5LegacyMigrationDatabase,
+) -> None:
+    before = await m5_legacy_database.snapshot()
+    async with m5_legacy_database.engine.begin() as connection:
+        await connection.execute(
+            text(
+                """UPDATE scheduled_tasks SET title='snapshot mutation probe'
+                WHERE id='m5-legacy-fresh'"""
+            )
+        )
+    assert await m5_legacy_database.snapshot() != before
+
+    async with m5_legacy_database.engine.begin() as connection:
+        await connection.execute(
+            text(
+                """UPDATE scheduled_tasks SET title='Legacy fresh'
+                WHERE id='m5-legacy-fresh'"""
+            )
+        )
+    assert await m5_legacy_database.snapshot() == before
 
 
 @pytest.mark.asyncio

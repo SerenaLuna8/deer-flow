@@ -31,6 +31,7 @@ from app.gateway.routers import project_automations
 from app.private_work.context import PrivateWorkContext
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.projects.context import ProjectContext, resolve_project_context
+from deerflow.persistence.automations.migration_digest import canonical_digest
 from deerflow.persistence.bootstrap import _get_alembic_config, bootstrap_schema
 from deerflow.persistence.scheduled_task_runs import (
     ScheduledTaskRunCreate,
@@ -77,6 +78,14 @@ async def isolated_m5_database(admin_url: str) -> AsyncIterator[M5Database]:
 
 
 @dataclass(frozen=True, slots=True)
+class M5LegacyDatabaseSnapshot:
+    revision: str
+    content_fingerprint: str
+    schema_fingerprint: str
+    control_relations: dict[str, bool]
+
+
+@dataclass(frozen=True, slots=True)
 class M5LegacyMigrationDatabase:
     """A real 0011 Automation source inside one disposable PostgreSQL DB."""
 
@@ -103,6 +112,133 @@ class M5LegacyMigrationDatabase:
             revision,
         )
 
+    async def control_relations(self) -> dict[str, bool]:
+        """Preserve the distinction between absent and present-empty controls."""
+
+        names = (
+            "automation_migration_runs",
+            "automation_migration_ledger",
+            "automation_cutover_state",
+        )
+        async with self.engine.connect() as connection:
+            return {
+                name: (
+                    await connection.scalar(
+                        text("SELECT to_regclass(:name) IS NOT NULL"),
+                        {"name": name},
+                    )
+                )
+                is True
+                for name in names
+            }
+
+    async def legacy_content_fingerprint(self) -> str:
+        """Hash all 0011 Automation source rows and referenced M4 authority."""
+
+        async with self.engine.connect() as connection:
+            source: dict[str, object] = {}
+            for table in ("scheduled_tasks", "scheduled_task_runs"):
+                columns = tuple(
+                    (
+                        await connection.execute(
+                            text(
+                                """SELECT column_name
+                                FROM information_schema.columns
+                                WHERE table_schema=current_schema()
+                                  AND table_name=:table
+                                ORDER BY ordinal_position"""
+                            ),
+                            {"table": table},
+                        )
+                    ).scalars()
+                )
+                projection = ",".join(f'"{column}"' for column in columns)
+                rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f'SELECT {projection} FROM "{table}" ORDER BY id'  # noqa: S608 - fixed test table allowlist
+                            )
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                source[table] = {
+                    "columns": columns,
+                    "rows": [dict(row) for row in rows],
+                }
+
+            thread_columns = tuple(
+                (
+                    await connection.execute(
+                        text(
+                            """SELECT column_name
+                            FROM information_schema.columns
+                            WHERE table_schema=current_schema()
+                              AND table_name='threads_meta'
+                            ORDER BY ordinal_position"""
+                        )
+                    )
+                ).scalars()
+            )
+            thread_projection = ",".join(f'"{column}"' for column in thread_columns)
+            thread_rows = (
+                (
+                    await connection.execute(
+                        text(
+                            f"""SELECT {thread_projection} FROM threads_meta
+                            WHERE thread_id IN (:reuse_thread,:history_thread)
+                            ORDER BY thread_id"""  # noqa: S608 - fixed metadata projection
+                        ),
+                        {
+                            "reuse_thread": self.reuse_thread_id,
+                            "history_thread": self.history_thread_id,
+                        },
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            run_columns = tuple(
+                (
+                    await connection.execute(
+                        text(
+                            """SELECT column_name
+                            FROM information_schema.columns
+                            WHERE table_schema=current_schema()
+                              AND table_name='runs'
+                            ORDER BY ordinal_position"""
+                        )
+                    )
+                ).scalars()
+            )
+            run_projection = ",".join(f'"{column}"' for column in run_columns)
+            run_rows = (
+                (
+                    await connection.execute(
+                        text(
+                            f"""SELECT {run_projection} FROM runs
+                            WHERE run_id=:run_id ORDER BY run_id"""  # noqa: S608 - fixed metadata projection
+                        ),
+                        {"run_id": self.history_run_id},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            source["referenced_m4_authority"] = {
+                "threads_meta": {
+                    "columns": thread_columns,
+                    "rows": [dict(row) for row in thread_rows],
+                },
+                "runs": {
+                    "columns": run_columns,
+                    "rows": [dict(row) for row in run_rows],
+                },
+            }
+        return canonical_digest(source)
+
     async def schema_fingerprint(self) -> str:
         """Hash finalization-visible schema objects, excluding table data."""
 
@@ -126,17 +262,21 @@ class M5LegacyMigrationDatabase:
             constraints = (
                 await connection.execute(
                     text(
-                        """SELECT conrelid::regclass::text,conname,contype,
-                                  pg_get_constraintdef(oid,true)
-                        FROM pg_constraint
-                        WHERE connamespace=current_schema()::regnamespace
-                          AND conrelid IN
-                            ('scheduled_tasks'::regclass,
-                             'scheduled_task_runs'::regclass,
-                             'automation_migration_runs'::regclass,
-                             'automation_migration_ledger'::regclass,
-                             'automation_cutover_state'::regclass)
-                        ORDER BY conrelid::regclass::text,conname"""
+                        """SELECT relation.relname,con.conname,
+                                  con.contype,
+                                  pg_get_constraintdef(con.oid,true)
+                        FROM pg_constraint con
+                        JOIN pg_class relation
+                          ON relation.oid=con.conrelid
+                        JOIN pg_namespace namespace
+                          ON namespace.oid=relation.relnamespace
+                        WHERE namespace.nspname=current_schema()
+                          AND relation.relname IN
+                            ('scheduled_tasks','scheduled_task_runs',
+                             'automation_migration_runs',
+                             'automation_migration_ledger',
+                             'automation_cutover_state')
+                        ORDER BY relation.relname,con.conname"""
                     )
                 )
             ).all()
@@ -180,6 +320,14 @@ class M5LegacyMigrationDatabase:
             sort_keys=True,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    async def snapshot(self) -> M5LegacyDatabaseSnapshot:
+        return M5LegacyDatabaseSnapshot(
+            revision=await self.current_revision(),
+            content_fingerprint=await self.legacy_content_fingerprint(),
+            schema_fingerprint=await self.schema_fingerprint(),
+            control_relations=await self.control_relations(),
+        )
 
 
 def _m5_owner_map_item(
@@ -741,6 +889,7 @@ __all__ = [
     "M5Actor",
     "M5App",
     "M5Database",
+    "M5LegacyDatabaseSnapshot",
     "M5LegacyMigrationDatabase",
     "M5Seed",
     "M5_NOW",

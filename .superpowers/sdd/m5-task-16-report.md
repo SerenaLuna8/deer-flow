@@ -101,3 +101,74 @@ Every focused and combined PostgreSQL run completed with zero skips.
   invalid external relation.
 - CI order remains hard-fail for missing `POSTGRES_TEST_URL` before pytest, and
   its pytest token list is exact.
+
+## Independent-review repairs
+
+The independent review found two Important weaknesses in the `0011` zero-write
+evidence. Both were repaired in test/support scope; the stronger tests did not
+expose a production defect.
+
+### Complete before/after snapshots
+
+`M5LegacyDatabaseSnapshot` now records all four independently useful facts:
+
+- exact Alembic revision;
+- a canonical digest of every column and row in `scheduled_tasks` and
+  `scheduled_task_runs`, plus every column of the referenced `threads_meta`
+  and `runs` authority rows;
+- the existing full schema fingerprint (columns, constraints, indexes, and
+  triggers), now safe to evaluate at `0011` without casting absent relations
+  to `regclass`;
+- an explicit per-relation `to_regclass(...) IS NOT NULL` result.
+
+The three actual `0012` control relations were confirmed directly from the
+revision and asserted by exact name:
+
+```text
+automation_migration_runs = absent
+automation_migration_ledger = absent
+automation_cutover_state = absent
+```
+
+Absent controls are no longer folded into the same value as present-but-empty
+tables. The positive dry-run and every `0011` failure compare the complete
+snapshot before and after the operation.
+
+### Execute-path semantic failures
+
+Missing owner map, extra/conflicting owner map, and reuse-Thread cross-scope
+map are all normally parsed inputs and now each call `execute=True`. Every case
+must fail at `0011` while revision, source/relation content, schema, and all
+three control-relation existence states remain byte-for-byte equivalent. The
+invalid UUID parse check remains an additional parser boundary, not a
+substitute for these semantic execute failures.
+
+### Review-fix RED/GREEN evidence
+
+The snapshot contract was mutation-tested under real PostgreSQL. A temporary
+revision-only content fingerprint failed to notice a committed source-title
+mutation:
+
+```text
+FAILED test_legacy_snapshot_detects_source_mutation_and_restoration
+assert snapshot_after_mutation != snapshot_before
+1 failed
+```
+
+After hashing the complete source and referenced authority rows, the same test
+passed and also proved that restoring the exact source restores the exact
+snapshot (`1 passed`). Final review-fix verification:
+
+```text
+# Strengthened Task 16 file, twice
+7 passed in 3.13s
+7 passed in 3.15s
+
+# Migration unit, CLI, and PostgreSQL schema suites
+62 passed in 12.00s
+
+# Exact M1-M5 eight-file PostgreSQL release gate
+32 passed in 10.79s
+```
+
+All PostgreSQL runs completed with zero skips.
