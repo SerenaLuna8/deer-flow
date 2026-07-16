@@ -108,3 +108,55 @@ the explicit instruction not to perform Task 11 in this change.
 
 No blocking Task 10 concern remains. Operational prose and milestone-wide release claims remain
 deliberately deferred to Task 11.
+
+## Independent review repair — finalize receipts, source locks, and 0013 resume
+
+The post-implementation review found four Important fail-closed gaps. This separate repair keeps
+the work inside Task 10 and supersedes the earlier report's per-domain transaction and pre-ledger
+run-identity details:
+
+1. A crash after revision 0013 committed but before the last cutover-marker write could not resume,
+   because the ordinary path tried to rebuild a migration plan from the deliberately lossy final
+   schema. Revision 0013 with an incomplete marker now has a dedicated receipt-only recovery path.
+   It locks both Automation tables, rechecks M4, the exact marker and migration run, both ledgers and
+   counts, actual final target digests and relations, the owner-map digest, and the final schema;
+   only then may it write the final marker. Target or receipt tamper fails closed, while a completed
+   second rerun is an accurate no-op.
+2. Revision 0013 previously trusted the ledger target digests without recomputing actual targets.
+   The migration runner and revision now share one dependency-light canonical projection/digest
+   contract. The revision recomputes both target digests before destructive DDL and also verifies the
+   full normalized 0012 source fingerprint, so a change to a legal legacy-only field is not silently
+   discarded.
+3. Staging previously committed separate domain transactions without source-table locks. Execute now
+   takes `SHARE ROW EXCLUSIVE` locks on both source tables and, in the same protected transaction,
+   re-inventories, replans, verifies the stable fingerprint, writes or validates both domain receipts,
+   probes relations, completes the run, and records `migration_ready`. Revision 0013 takes the same
+   lock before its final receipt probes and DDL. A real second-connection test proves a legacy update
+   blocks during staging and, if it commits between staging and finalize, is detected without stale
+   overwrite or column removal.
+4. Source schemas are now exact revision-specific allowlists for 0011, 0012, and final 0013 rather
+   than required-column subsets. The 0012 raw digest projects every allowed legacy and expanded
+   column. Any unknown column fails dry-run and execute before control-table or target writes.
+
+Strict review-repair RED was recorded with eight failures: target tamper reached DDL, the post-0013
+crash rerun tried the legacy fingerprint path, post-0013 target tamper was misclassified, a concurrent
+legacy update was not blocked, and all four 0011/0012 task/run unknown-column cases were accepted.
+The same eight fault-injection cases now pass.
+
+### Repair verification
+
+| Gate | Result |
+| --- | ---: |
+| Eight review-driven fault-injection cases | 8 passed |
+| Complete migration and M5 schema suites | 31 passed |
+| Task 10 migration/CLI/setup/check-db/doctor suite | 135 passed |
+| Expanded Tasks 1–10 Automation + bootstrap + check-db + real M4 migration gate | 406 passed |
+| Targeted Ruff check/format and compileall during repair | passed |
+| `git diff --check` during repair | passed |
+
+The atomic transaction intentionally changes one old injected-failure expectation: a failure before
+the second domain now rolls back the new run and first ledger together. Partial-domain compatibility
+is still covered by constructing a valid previously committed 0012 task receipt and proving the new
+runner resumes it safely. A failure before the first ledger leaves no durable run identity, so a later
+reviewed owner map may proceed; once any receipt exists, the map and stable source digest remain
+pinned. Task 11 work remains excluded.

@@ -12,6 +12,12 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
+from deerflow.persistence.automations.migration_digest import (
+    canonical_digest,
+    expanded_select_sql,
+    target_select_sql,
+)
+
 revision: str = "0013_project_automation_finalize"
 down_revision: str | Sequence[str] | None = "0012_project_automation_expand"
 branch_labels: str | Sequence[str] | None = None
@@ -56,6 +62,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql
 """
+
+
+def _lock_automation_sources(connection: Connection) -> None:
+    connection.execute(sa.text("LOCK TABLE scheduled_tasks, scheduled_task_runs IN SHARE ROW EXCLUSIVE MODE"))
 
 
 def _is_empty_automation_domain(connection: Connection) -> bool:
@@ -165,6 +175,51 @@ def _assert_source_target_counts(connection: Connection) -> None:
             raise RuntimeError("automation migration required: target row count probe failed")
 
 
+def _assert_target_digests(connection: Connection) -> None:
+    migration_run_id = _migration_ready_run_id(connection)
+    ledgers = {
+        row.domain: row
+        for row in connection.execute(
+            sa.text(
+                """SELECT domain,target_digest,target_row_count
+                FROM automation_migration_ledger
+                WHERE migration_run_id=:migration_run_id AND status='complete'"""
+            ),
+            {"migration_run_id": migration_run_id},
+        )
+    }
+    if set(ledgers) != AUTOMATION_LEDGER_DOMAINS:
+        raise RuntimeError("automation migration required: domain ledgers incomplete")
+    for domain in sorted(AUTOMATION_LEDGER_DOMAINS):
+        rows = [dict(row) for row in connection.execute(sa.text(target_select_sql(domain))).mappings()]
+        ledger = ledgers[domain]
+        if len(rows) != int(ledger.target_row_count) or canonical_digest(rows) != ledger.target_digest:
+            raise RuntimeError("automation migration required: target digest probe failed")
+
+
+def _assert_source_fingerprint(connection: Connection) -> None:
+    migration_run_id = _migration_ready_run_id(connection)
+    source_fingerprint = connection.execute(
+        sa.text(
+            """SELECT source_fingerprint FROM automation_migration_runs
+            WHERE id=:migration_run_id"""
+        ),
+        {"migration_run_id": migration_run_id},
+    ).scalar_one_or_none()
+    ledger_sources = set(
+        connection.execute(
+            sa.text(
+                """SELECT source_fingerprint FROM automation_migration_ledger
+                WHERE migration_run_id=:migration_run_id"""
+            ),
+            {"migration_run_id": migration_run_id},
+        ).scalars()
+    )
+    rows = {domain: [dict(row) for row in connection.execute(sa.text(expanded_select_sql(domain))).mappings()] for domain in ("scheduled_tasks", "scheduled_task_runs")}
+    if source_fingerprint is None or ledger_sources != {source_fingerprint} or canonical_digest(rows) != source_fingerprint:
+        raise RuntimeError("automation migration required: source fingerprint probe failed")
+
+
 def _assert_scope_agent_thread_run_relations(connection: Connection) -> None:
     invalid_task = connection.execute(
         sa.text(
@@ -245,6 +300,8 @@ def _assert_finalize_ready(connection: Connection) -> None:
     _assert_marker_stage(connection, "migration_ready")
     _assert_domain_ledgers_complete(connection)
     _assert_source_target_counts(connection)
+    _assert_target_digests(connection)
+    _assert_source_fingerprint(connection)
     _assert_scope_agent_thread_run_relations(connection)
 
 
@@ -496,6 +553,7 @@ def _record_final_schema_probe(connection: Connection) -> None:
 
 def upgrade() -> None:
     connection = op.get_bind()
+    _lock_automation_sources(connection)
     _assert_finalize_ready(connection)
 
     for index in (

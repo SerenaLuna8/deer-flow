@@ -557,40 +557,36 @@ async def test_staged_rerun_rejects_target_tamper_and_source_fingerprint_change(
 async def test_partial_domain_ledger_resumes_without_treating_unwritten_domain_as_tamper(
     postgres_database_url: str,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
     _write_backup_proof(scenario.backup_dir)
-    original_write = migrate_automations._write_domain_ledger
-
-    async def stop_before_occurrence_domain(connection, *, migration_run_id, plan, domain):
-        if domain == "scheduled_task_runs":
-            raise AutomationMigrationError("injected domain stop")
-        await original_write(
-            connection,
-            migration_run_id=migration_run_id,
-            plan=plan,
-            domain=domain,
-        )
-
-    monkeypatch.setattr(migrate_automations, "_write_domain_ledger", stop_before_occurrence_domain)
-    with pytest.raises(AutomationMigrationError, match="injected domain stop"):
-        await run_automation_migration(
-            postgres_database_url,
-            owner_map=scenario.owner_map,
-            backup_dir=scenario.backup_dir,
-            execute=True,
-        )
-
     engine = create_async_engine(postgres_database_url)
     try:
-        async with engine.connect() as connection:
+        await asyncio.to_thread(
+            command.upgrade,
+            _get_alembic_config(engine),
+            "0012_project_automation_expand",
+        )
+        targets = normalize_owner_map(scenario.owner_map)
+        async with engine.begin() as connection:
+            inventory = await migrate_automations._collect_inventory_connection(connection)
+            plan = await migrate_automations._preflight(connection, inventory, targets)
+            run_id = await migrate_automations._migration_run_id(
+                connection,
+                plan=plan,
+                owner_map_digest=migrate_automations._owner_map_digest(targets),
+            )
+            await migrate_automations._write_domain_ledger(
+                connection,
+                migration_run_id=run_id,
+                plan=plan,
+                domain="scheduled_tasks",
+            )
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0012_project_automation_expand"
             assert set((await connection.execute(text("SELECT domain FROM automation_migration_ledger"))).scalars()) == {"scheduled_tasks"}
     finally:
         await engine.dispose()
 
-    monkeypatch.setattr(migrate_automations, "_write_domain_ledger", original_write)
     resumed = await run_automation_migration(
         postgres_database_url,
         owner_map=scenario.owner_map,
@@ -604,7 +600,7 @@ async def test_partial_domain_ledger_resumes_without_treating_unwritten_domain_a
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_staging_run_identity_rejects_owner_map_change_before_first_ledger(
+async def test_atomic_staging_rolls_back_before_first_ledger(
     postgres_database_url: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -626,6 +622,15 @@ async def test_staging_run_identity_rejects_owner_map_change_before_first_ledger
         )
     monkeypatch.setattr(migrate_automations, "_write_domain_ledger", original_write)
 
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0012_project_automation_expand"
+            assert await connection.scalar(text("SELECT count(*) FROM automation_migration_runs")) == 0
+            assert await connection.scalar(text("SELECT count(*) FROM automation_migration_ledger")) == 0
+    finally:
+        await engine.dispose()
+
     changed_map = {
         str(scenario.seed.owner_a.user_id): {
             "project_id": str(scenario.seed.owner_a.project_id),
@@ -635,13 +640,350 @@ async def test_staging_run_identity_rejects_owner_map_change_before_first_ledger
             },
         }
     }
-    with pytest.raises(AutomationMigrationError, match="owner map digest conflicts"):
+    completed = await run_automation_migration(
+        postgres_database_url,
+        owner_map=changed_map,
+        backup_dir=scenario.backup_dir,
+        execute=True,
+    )
+    assert completed.cutover_complete is True
+
+
+async def _stage_until_before_finalize(
+    database_url: str,
+    scenario: _LegacyScenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_upgrade = migrate_automations._upgrade_database
+
+    async def stop_before_finalize(engine, revision: str) -> None:
+        if revision == "head":
+            raise AutomationMigrationError("injected finalize stop")
+        await original_upgrade(engine, revision)
+
+    monkeypatch.setattr(migrate_automations, "_upgrade_database", stop_before_finalize)
+    with pytest.raises(AutomationMigrationError, match="injected finalize stop"):
         await run_automation_migration(
-            postgres_database_url,
-            owner_map=changed_map,
+            database_url,
+            owner_map=scenario.owner_map,
             backup_dir=scenario.backup_dir,
             execute=True,
         )
+    monkeypatch.setattr(migrate_automations, "_upgrade_database", original_upgrade)
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_finalize_rechecks_actual_target_digest_before_destructive_ddl(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    await _stage_until_before_finalize(
+        postgres_database_url,
+        scenario,
+        monkeypatch,
+    )
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE scheduled_tasks SET title='legal relation, tampered value'
+                    WHERE id='legacy-fresh'"""
+                )
+            )
+        config = _get_alembic_config(engine)
+        with pytest.raises(RuntimeError, match="target digest"):
+            await asyncio.to_thread(command.upgrade, config, "head")
+
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0012_project_automation_expand"
+            columns = set(
+                (
+                    await connection.execute(
+                        text(
+                            """SELECT column_name FROM information_schema.columns
+                            WHERE table_schema=current_schema()
+                              AND table_name='scheduled_tasks'"""
+                        )
+                    )
+                ).scalars()
+            )
+            assert "user_id" in columns
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_final_schema_pre_marker_crash_resumes_by_revalidating_receipts_only(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    original_mark = migrate_automations._mark_cutover_complete
+
+    async def fail_marker_write(*_args, **_kwargs) -> None:
+        raise AutomationMigrationError("injected marker write failure")
+
+    monkeypatch.setattr(migrate_automations, "_mark_cutover_complete", fail_marker_write)
+    with pytest.raises(AutomationMigrationError, match="injected marker write failure"):
+        await run_automation_migration(
+            postgres_database_url,
+            owner_map=scenario.owner_map,
+            backup_dir=scenario.backup_dir,
+            execute=True,
+        )
+    monkeypatch.setattr(migrate_automations, "_mark_cutover_complete", original_mark)
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            marker = (
+                await connection.execute(
+                    text(
+                        """SELECT stage,final_schema_probe_complete,cutover_at
+                        FROM automation_cutover_state WHERE id=1"""
+                    )
+                )
+            ).one()
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013_project_automation_finalize"
+            assert marker.stage == "migration_ready"
+            assert marker.final_schema_probe_complete is True
+            assert marker.cutover_at is None
+    finally:
+        await engine.dispose()
+
+    resumed = await run_automation_migration(
+        postgres_database_url,
+        owner_map=scenario.owner_map,
+        backup_dir=scenario.backup_dir,
+        execute=True,
+    )
+    assert resumed.cutover_complete is True
+    assert resumed.noop is False
+
+    noop = await run_automation_migration(
+        postgres_database_url,
+        owner_map=scenario.owner_map,
+        backup_dir=scenario.backup_dir,
+        execute=True,
+    )
+    assert noop.cutover_complete is True
+    assert noop.noop is True
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_final_schema_resume_rejects_target_tamper_without_rebuilding_lossy_source(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    original_mark = migrate_automations._mark_cutover_complete
+
+    async def fail_marker_write(*_args, **_kwargs) -> None:
+        raise AutomationMigrationError("injected marker write failure")
+
+    monkeypatch.setattr(migrate_automations, "_mark_cutover_complete", fail_marker_write)
+    with pytest.raises(AutomationMigrationError, match="injected marker write failure"):
+        await run_automation_migration(
+            postgres_database_url,
+            owner_map=scenario.owner_map,
+            backup_dir=scenario.backup_dir,
+            execute=True,
+        )
+    monkeypatch.setattr(migrate_automations, "_mark_cutover_complete", original_mark)
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE scheduled_tasks SET title='final target tamper'
+                    WHERE id='legacy-fresh'"""
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    with pytest.raises(AutomationMigrationError, match="target digest"):
+        await run_automation_migration(
+            postgres_database_url,
+            owner_map=scenario.owner_map,
+            backup_dir=scenario.backup_dir,
+            execute=True,
+        )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_execute_locks_legacy_writers_and_finalize_rejects_post_stage_drift(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    engine = create_async_engine(postgres_database_url)
+    try:
+        config = _get_alembic_config(engine)
+        await asyncio.to_thread(
+            command.upgrade,
+            config,
+            "0012_project_automation_expand",
+        )
+    finally:
+        await engine.dispose()
+
+    domain_entered = asyncio.Event()
+    release_domain = asyncio.Event()
+    staging_committed = asyncio.Event()
+    allow_finalize = asyncio.Event()
+    original_write = migrate_automations._write_domain_ledger
+    original_execute = migrate_automations._execute_staging
+
+    async def pause_first_domain(connection, *, migration_run_id, plan, domain):
+        if domain == "scheduled_tasks":
+            domain_entered.set()
+            await release_domain.wait()
+        await original_write(
+            connection,
+            migration_run_id=migration_run_id,
+            plan=plan,
+            domain=domain,
+        )
+
+    async def pause_after_staging(*args, **kwargs):
+        result = await original_execute(*args, **kwargs)
+        staging_committed.set()
+        await allow_finalize.wait()
+        return result
+
+    monkeypatch.setattr(migrate_automations, "_write_domain_ledger", pause_first_domain)
+    monkeypatch.setattr(migrate_automations, "_execute_staging", pause_after_staging)
+    migration_task = asyncio.create_task(
+        run_automation_migration(
+            postgres_database_url,
+            owner_map=scenario.owner_map,
+            backup_dir=scenario.backup_dir,
+            execute=True,
+        )
+    )
+    update_engine = create_async_engine(postgres_database_url)
+
+    async def concurrent_legacy_update() -> None:
+        async with update_engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE scheduled_tasks
+                    SET assistant_id='concurrent legacy writer'
+                    WHERE id='legacy-fresh' AND user_id=:owner"""
+                ),
+                {"owner": str(scenario.seed.owner_a.user_id)},
+            )
+
+    update_task = None
+    try:
+        await asyncio.wait_for(domain_entered.wait(), timeout=5)
+        update_task = asyncio.create_task(concurrent_legacy_update())
+        await asyncio.sleep(0.1)
+        assert update_task.done() is False
+
+        release_domain.set()
+        await asyncio.wait_for(staging_committed.wait(), timeout=5)
+        await asyncio.wait_for(update_task, timeout=5)
+        allow_finalize.set()
+        with pytest.raises(AutomationMigrationError):
+            await asyncio.wait_for(migration_task, timeout=10)
+    finally:
+        release_domain.set()
+        allow_finalize.set()
+        for task in (update_task, migration_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (update_task, migration_task) if task is not None),
+            return_exceptions=True,
+        )
+        await update_engine.dispose()
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0012_project_automation_expand"
+            assert await connection.scalar(text("SELECT assistant_id FROM scheduled_tasks WHERE id='legacy-fresh'")) == "concurrent legacy writer"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("revision", "table"),
+    (
+        ("0011", "scheduled_tasks"),
+        ("0011", "scheduled_task_runs"),
+        ("0012", "scheduled_tasks"),
+        ("0012", "scheduled_task_runs"),
+    ),
+)
+async def test_unknown_legacy_source_column_fails_dry_run_and_execute_without_writes(
+    postgres_database_url: str,
+    tmp_path: Path,
+    revision: str,
+    table: str,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    engine = create_async_engine(postgres_database_url)
+    try:
+        if revision == "0012":
+            config = _get_alembic_config(engine)
+            await asyncio.to_thread(
+                command.upgrade,
+                config,
+                "0012_project_automation_expand",
+            )
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    f'ALTER TABLE "{table}" ADD COLUMN private_shadow TEXT'  # noqa: S608 - fixed parametrized allowlist
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    for execute in (False, True):
+        with pytest.raises(AutomationMigrationError, match="schema is unsupported"):
+            await run_automation_migration(
+                postgres_database_url,
+                owner_map=scenario.owner_map,
+                backup_dir=scenario.backup_dir,
+                execute=execute,
+            )
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            expected_revision = "0012_project_automation_expand" if revision == "0012" else "0011_private_artifact_tombstone"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == expected_revision
+            if revision == "0012":
+                assert await connection.scalar(text("SELECT count(*) FROM automation_migration_runs")) == 0
+                assert await connection.scalar(text("SELECT count(*) FROM automation_migration_ledger")) == 0
+                assert await connection.scalar(text("SELECT count(*) FROM automation_cutover_state")) == 0
+            else:
+                assert await connection.scalar(text("SELECT to_regclass('automation_migration_runs')")) is None
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.postgres

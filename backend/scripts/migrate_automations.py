@@ -13,7 +13,6 @@ import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -22,6 +21,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
+from deerflow.persistence.automations.migration_digest import (
+    AUTOMATION_EXPANDED_COLUMNS,
+    AUTOMATION_LEGACY_COLUMNS,
+    AUTOMATION_TARGET_COLUMNS,
+    canonical_digest,
+    canonical_value,
+)
 from deerflow.persistence.bootstrap import _get_alembic_config
 
 
@@ -111,95 +117,12 @@ _FINAL_REVISION = "0013_project_automation_finalize"
 _DRY_RUN_REVISIONS = frozenset({_PRE_EXPAND_REVISION, _EXPAND_REVISION, _FINAL_REVISION})
 _EXECUTE_REVISIONS = frozenset({_PRE_EXPAND_REVISION, _EXPAND_REVISION})
 
-_LEGACY_TASK_COLUMNS = (
-    "id",
-    "user_id",
-    "thread_id",
-    "context_mode",
-    "assistant_id",
-    "title",
-    "prompt",
-    "schedule_type",
-    "schedule_spec",
-    "timezone",
-    "status",
-    "overlap_policy",
-    "next_run_at",
-    "last_run_at",
-    "last_run_id",
-    "last_thread_id",
-    "last_error",
-    "lease_owner",
-    "lease_expires_at",
-    "run_count",
-    "created_at",
-    "updated_at",
-)
-_LEGACY_RUN_COLUMNS = (
-    "id",
-    "task_id",
-    "thread_id",
-    "run_id",
-    "scheduled_for",
-    "trigger",
-    "status",
-    "error",
-    "started_at",
-    "finished_at",
-    "created_at",
-)
-_TARGET_TASK_COLUMNS = (
-    "id",
-    "project_id",
-    "owner_user_id",
-    "thread_id",
-    "context_mode",
-    "agent_asset_id",
-    "agent_scope",
-    "title",
-    "prompt",
-    "schedule_type",
-    "schedule_spec",
-    "timezone",
-    "status",
-    "overlap_policy",
-    "next_run_at",
-    "last_run_at",
-    "last_outcome",
-    "last_error_code",
-    "run_count",
-    "version",
-    "frozen_at",
-    "deleted_at",
-    "created_at",
-    "updated_at",
-)
-_TARGET_RUN_COLUMNS = (
-    "id",
-    "project_id",
-    "owner_user_id",
-    "task_id",
-    "task_version",
-    "occurrence_key",
-    "manual_idempotency_hash",
-    "scheduled_for",
-    "trigger",
-    "status",
-    "thread_id",
-    "run_id",
-    "resolved_membership_id",
-    "resolved_membership_version",
-    "launch_attempt_count",
-    "lease_owner",
-    "lease_expires_at",
-    "next_attempt_at",
-    "error_code",
-    "error_message",
-    "started_at",
-    "finished_at",
-    "created_at",
-    "updated_at",
-)
+_LEGACY_TASK_COLUMNS = AUTOMATION_LEGACY_COLUMNS["scheduled_tasks"]
+_LEGACY_RUN_COLUMNS = AUTOMATION_LEGACY_COLUMNS["scheduled_task_runs"]
+_TARGET_TASK_COLUMNS = AUTOMATION_TARGET_COLUMNS["scheduled_tasks"]
+_TARGET_RUN_COLUMNS = AUTOMATION_TARGET_COLUMNS["scheduled_task_runs"]
+_EXPANDED_TASK_COLUMNS = AUTOMATION_EXPANDED_COLUMNS["scheduled_tasks"]
+_EXPANDED_RUN_COLUMNS = AUTOMATION_EXPANDED_COLUMNS["scheduled_task_runs"]
 _TASK_STATUSES = frozenset({"enabled", "paused", "running", "completed", "failed", "cancelled"})
 _RUN_STATUSES = frozenset({"queued", "running", "success", "failed", "skipped", "interrupted"})
 _TERMINAL_RUN_STATUSES = frozenset({"success", "failed", "skipped", "interrupted", "cancelled", "rejected"})
@@ -282,30 +205,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="operator-managed external backup and restore proof directory",
     )
     return parser
-
-
-def _canonical_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(key): _canonical_value(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
-    if isinstance(value, (list, tuple)):
-        return [_canonical_value(item) for item in value]
-    if isinstance(value, (datetime, date, uuid.UUID)):
-        return str(value)
-    if isinstance(value, bytes):
-        return {
-            "sha256": hashlib.sha256(value).hexdigest(),
-            "size": len(value),
-        }
-    return value
-
-
-def _digest_json(value: object) -> str:
-    encoded = json.dumps(
-        _canonical_value(value),
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def render_inventory(inventory: AutomationInventory) -> str:
@@ -418,26 +317,19 @@ async def _collect_inventory_connection(
 ) -> AutomationInventory:
     task_columns = await _table_columns(connection, "scheduled_tasks")
     run_columns = await _table_columns(connection, "scheduled_task_runs")
-    if "user_id" in task_columns:
-        if not set(_LEGACY_TASK_COLUMNS) <= task_columns or not set(_LEGACY_RUN_COLUMNS) <= run_columns:
-            raise AutomationMigrationError("legacy Automation schema is unsupported")
-        task_projection = ",".join(f'"{column}"' for column in _LEGACY_TASK_COLUMNS)
-        run_projection = ",".join(f'"{column}"' for column in _LEGACY_RUN_COLUMNS)
-    else:
-        if not set(_TARGET_TASK_COLUMNS) <= task_columns or not set(_TARGET_RUN_COLUMNS) <= run_columns:
-            raise AutomationMigrationError("legacy Automation schema is unsupported")
-        task_projection = """
-            id,owner_user_id AS user_id,thread_id,context_mode,
-            NULL::varchar(128) AS assistant_id,title,prompt,schedule_type,
-            schedule_spec,timezone,status,overlap_policy,next_run_at,last_run_at,
-            NULL::varchar(64) AS last_run_id,NULL::varchar(64) AS last_thread_id,
-            last_error_code AS last_error,NULL::varchar(128) AS lease_owner,
-            NULL::timestamptz AS lease_expires_at,run_count,created_at,updated_at
-        """
-        run_projection = """
-            id,task_id,thread_id,run_id,scheduled_for,trigger,status,
-            error_code AS error,started_at,finished_at,created_at
-        """
+    schemas = (
+        (_LEGACY_TASK_COLUMNS, _LEGACY_RUN_COLUMNS),
+        (_EXPANDED_TASK_COLUMNS, _EXPANDED_RUN_COLUMNS),
+        (_TARGET_TASK_COLUMNS, _TARGET_RUN_COLUMNS),
+    )
+    projections = next(
+        ((task_schema, run_schema) for task_schema, run_schema in schemas if task_columns == set(task_schema) and run_columns == set(run_schema)),
+        None,
+    )
+    if projections is None:
+        raise AutomationMigrationError("legacy Automation schema is unsupported")
+    task_projection = ",".join(f'"{column}"' for column in projections[0])
+    run_projection = ",".join(f'"{column}"' for column in projections[1])
     task_rows = tuple(
         dict(row)
         for row in (
@@ -466,7 +358,7 @@ async def _collect_inventory_connection(
             .all()
         )
     )
-    source_fingerprint = _digest_json({"scheduled_tasks": task_rows, "scheduled_task_runs": run_rows})
+    source_fingerprint = canonical_digest({"scheduled_tasks": task_rows, "scheduled_task_runs": run_rows})
     return AutomationInventory(
         source_fingerprint=source_fingerprint,
         task_rows=task_rows,
@@ -779,7 +671,7 @@ async def _validate_legacy_task_history(
 
 
 def _occurrence_key(row: Mapping[str, object]) -> str:
-    return _digest_json(
+    return canonical_digest(
         {
             "legacy_id": row.get("id"),
             "task_id": row.get("task_id"),
@@ -796,11 +688,10 @@ def _stable_source_fingerprint(
 ) -> str:
     """Hash source semantics after deterministic migration normalizations.
 
-    The staged write intentionally clears unsupported legacy pointers and may
-    normalize a running task to paused. Hash those fields in their planned
-    form so an interrupted 0012 rerun sees the same source fingerprint, while
-    changes to source content such as title, prompt, schedule, or status still
-    conflict.
+    Revision 0012 adds nullable target columns and staging fills them. Overlay
+    every deterministic target field while retaining every legacy-only source
+    field, so 0011, pristine 0012, and a partially staged 0012 database produce
+    one receipt without hiding changes to legacy source semantics.
     """
 
     task_targets = {row.source_key: row.values for row in task_plans}
@@ -809,17 +700,17 @@ def _stable_source_fingerprint(
     for row in inventory.task_rows:
         normalized = dict(row)
         target = task_targets[str(row["id"])]
-        for column in ("thread_id", "status", "next_run_at"):
+        for column in _TARGET_TASK_COLUMNS:
             normalized[column] = target[column]
         tasks.append(normalized)
     runs: list[dict[str, object]] = []
     for row in inventory.run_rows:
         normalized = dict(row)
         target = run_targets[str(row["id"])]
-        for column in ("thread_id", "run_id"):
+        for column in _TARGET_RUN_COLUMNS:
             normalized[column] = target[column]
         runs.append(normalized)
-    return _digest_json({"scheduled_tasks": tasks, "scheduled_task_runs": runs})
+    return canonical_digest({"scheduled_tasks": tasks, "scheduled_task_runs": runs})
 
 
 async def _build_validated_plan(
@@ -997,7 +888,7 @@ def build_migration_plan(
 
 
 def _owner_map_digest(targets: Sequence[AutomationOwnerTarget]) -> str:
-    return _digest_json(
+    return canonical_digest(
         [
             {
                 "owner_user_id": target.owner_user_id,
@@ -1095,7 +986,7 @@ async def _assert_existing_targets_compatible(
             raise AutomationMigrationError("migration ledger conflicts")
         for actual, expected in zip(actual_rows, expected_rows, strict=True):
             for column in columns:
-                if actual[column] is not None and _canonical_value(actual[column]) != _canonical_value(expected[column]):
+                if actual[column] is not None and canonical_value(actual[column]) != canonical_value(expected[column]):
                     raise AutomationMigrationError("migration ledger conflicts")
 
 
@@ -1138,6 +1029,12 @@ async def _assert_source_fingerprint(
     if inventory.source_fingerprint != expected:
         raise AutomationMigrationError("legacy source fingerprint changed")
     return inventory
+
+
+async def _lock_automation_sources(connection: AsyncConnection) -> None:
+    """Block legacy Automation writers for the protected migration snapshot."""
+
+    await connection.execute(text("LOCK TABLE scheduled_tasks, scheduled_task_runs IN SHARE ROW EXCLUSIVE MODE"))
 
 
 async def _migration_run_id(
@@ -1198,7 +1095,7 @@ def _domain_plan(
 
 def _domain_target_digest(plan: AutomationMigrationPlan, domain: str) -> str:
     rows, _columns = _domain_plan(plan, domain)
-    return _digest_json([dict(row.values) for row in rows])
+    return canonical_digest([dict(row.values) for row in rows])
 
 
 async def _actual_domain_digest(
@@ -1221,7 +1118,7 @@ async def _actual_domain_digest(
             .all()
         )
     )
-    return len(rows), _digest_json(rows)
+    return len(rows), canonical_digest(rows)
 
 
 async def _write_task_target(
@@ -1230,7 +1127,7 @@ async def _write_task_target(
 ) -> None:
     values = dict(row.values)
     values["schedule_spec"] = json.dumps(
-        _canonical_value(values["schedule_spec"]),
+        canonical_value(values["schedule_spec"]),
         separators=(",", ":"),
         sort_keys=True,
     )
@@ -1410,25 +1307,27 @@ async def _execute_staging(
 ) -> uuid.UUID:
     owner_map_digest = _owner_map_digest(plan.owner_targets)
     async with engine.begin() as connection:
-        await _validate_existing_marker(
+        await _lock_automation_sources(connection)
+        locked_inventory = await _collect_inventory_connection(connection)
+        locked_plan = await _preflight(
             connection,
-            source_fingerprint=plan.source_fingerprint,
-            owner_map_digest=owner_map_digest,
+            locked_inventory,
+            plan.owner_targets,
         )
+        if locked_plan.source_fingerprint != plan.source_fingerprint:
+            raise AutomationMigrationError("legacy source fingerprint changed")
         run_id = await _migration_run_id(
             connection,
-            plan=plan,
+            plan=locked_plan,
             owner_map_digest=owner_map_digest,
         )
-    for domain in ("scheduled_tasks", "scheduled_task_runs"):
-        async with engine.begin() as connection:
+        for domain in ("scheduled_tasks", "scheduled_task_runs"):
             await _write_domain_ledger(
                 connection,
                 migration_run_id=run_id,
-                plan=plan,
+                plan=locked_plan,
                 domain=domain,
             )
-    async with engine.begin() as connection:
         await _scope_relation_probe(connection)
         domains = set(
             (
@@ -1503,6 +1402,231 @@ async def _mark_cutover_complete(
         raise AutomationMigrationError("automation cutover marker is incomplete")
 
 
+_FINAL_TASK_CONSTRAINTS = frozenset(
+    {
+        "uq_scheduled_tasks_private_scope",
+        "fk_scheduled_tasks_project",
+        "fk_scheduled_tasks_owner",
+        "fk_scheduled_tasks_project_membership",
+        "fk_scheduled_tasks_private_thread",
+        "fk_scheduled_tasks_agent_asset",
+        "ck_scheduled_tasks_context_mode",
+        "ck_scheduled_tasks_schedule_type",
+        "ck_scheduled_tasks_status",
+        "ck_scheduled_tasks_overlap_policy",
+        "ck_scheduled_tasks_thread_mode",
+        "ck_scheduled_tasks_agent_scope",
+        "ck_scheduled_tasks_version",
+        "ck_scheduled_tasks_run_count",
+        "ck_scheduled_tasks_last_outcome",
+    }
+)
+_FINAL_RUN_CONSTRAINTS = frozenset(
+    {
+        "uq_scheduled_task_runs_occurrence",
+        "fk_scheduled_task_runs_project",
+        "fk_scheduled_task_runs_owner",
+        "fk_scheduled_task_runs_task",
+        "fk_scheduled_task_runs_private_thread",
+        "fk_scheduled_task_runs_private_run",
+        "ck_scheduled_task_runs_trigger",
+        "ck_scheduled_task_runs_status",
+        "ck_scheduled_task_runs_run_requires_thread",
+        "ck_scheduled_task_runs_attempt_count",
+        "ck_scheduled_task_runs_task_version",
+    }
+)
+_FINAL_RUN_INDEXES = frozenset(
+    {
+        "uq_scheduled_task_runs_manual_idempotency",
+        "ix_scheduled_task_runs_active_occurrence",
+        "ix_scheduled_task_runs_history",
+    }
+)
+_FINAL_TRIGGERS = frozenset(
+    {
+        "trg_scheduled_tasks_agent_project",
+        "trg_agents_scheduled_task_project",
+    }
+)
+
+
+async def _assert_final_schema(connection: AsyncConnection) -> None:
+    task_columns = await _table_columns(connection, "scheduled_tasks")
+    run_columns = await _table_columns(connection, "scheduled_task_runs")
+    if task_columns != set(_TARGET_TASK_COLUMNS) or run_columns != set(_TARGET_RUN_COLUMNS):
+        raise AutomationMigrationError("automation final schema probe failed")
+    nullable_rows = (
+        await connection.execute(
+            text(
+                """SELECT table_name,column_name,is_nullable
+                FROM information_schema.columns
+                WHERE table_schema=current_schema()
+                  AND table_name IN ('scheduled_tasks','scheduled_task_runs')"""
+            )
+        )
+    ).all()
+    nullable = {(row.table_name, row.column_name): row.is_nullable == "YES" for row in nullable_rows}
+    required = {
+        "scheduled_tasks": {
+            "project_id",
+            "owner_user_id",
+            "agent_asset_id",
+            "agent_scope",
+            "version",
+        },
+        "scheduled_task_runs": {
+            "project_id",
+            "owner_user_id",
+            "task_version",
+            "occurrence_key",
+            "launch_attempt_count",
+            "updated_at",
+        },
+    }
+    if any(nullable.get((table, column), True) for table, columns in required.items() for column in columns):
+        raise AutomationMigrationError("automation final schema probe failed")
+    constraints = {
+        table: set(
+            (
+                await connection.execute(
+                    text(
+                        """SELECT conname FROM pg_constraint
+                        WHERE conrelid=CAST(:table AS regclass)"""
+                    ),
+                    {"table": table},
+                )
+            ).scalars()
+        )
+        for table in ("scheduled_tasks", "scheduled_task_runs")
+    }
+    if not _FINAL_TASK_CONSTRAINTS <= constraints["scheduled_tasks"] or not (_FINAL_RUN_CONSTRAINTS <= constraints["scheduled_task_runs"]):
+        raise AutomationMigrationError("automation final schema probe failed")
+    indexes = set(
+        (
+            await connection.execute(
+                text(
+                    """SELECT indexname FROM pg_indexes
+                    WHERE schemaname=current_schema()
+                      AND tablename='scheduled_task_runs'"""
+                )
+            )
+        ).scalars()
+    )
+    triggers = set(
+        (
+            await connection.execute(
+                text(
+                    """SELECT trigger_name FROM information_schema.triggers
+                    WHERE trigger_schema=current_schema()
+                      AND trigger_name IN
+                        ('trg_scheduled_tasks_agent_project',
+                         'trg_agents_scheduled_task_project')"""
+                )
+            )
+        ).scalars()
+    )
+    if not _FINAL_RUN_INDEXES <= indexes or triggers != _FINAL_TRIGGERS:
+        raise AutomationMigrationError("automation final schema probe failed")
+
+
+async def _resume_final_cutover(
+    engine: AsyncEngine,
+    *,
+    targets: Sequence[AutomationOwnerTarget],
+    complete_marker: bool,
+) -> AutomationInventory:
+    """Validate immutable 0013 receipts and optionally finish only the marker."""
+
+    async with engine.begin() as connection:
+        await _lock_automation_sources(connection)
+        if await _current_revision(connection) != _FINAL_REVISION:
+            raise AutomationMigrationError("automation finalize revision is incomplete")
+        await _assert_m4_cutover_complete(connection)
+        marker = (
+            await connection.execute(
+                text(
+                    """SELECT stage,migration_run_id,empty_domain_probe_complete,
+                              final_schema_probe_complete,cutover_at
+                    FROM automation_cutover_state WHERE id=1 FOR UPDATE"""
+                )
+            )
+        ).one_or_none()
+        if marker is None or marker.stage != "migration_ready" or marker.migration_run_id is None or marker.empty_domain_probe_complete is not False or marker.final_schema_probe_complete is not True or marker.cutover_at is not None:
+            raise AutomationMigrationError("automation cutover marker is incomplete")
+        run = (
+            await connection.execute(
+                text(
+                    """SELECT mode,status,source_fingerprint,owner_map_digest,
+                              source_task_count,source_run_count,
+                              source_probe_complete,scope_relation_probe_complete,
+                              completed_at
+                    FROM automation_migration_runs WHERE id=:run_id"""
+                ),
+                {"run_id": marker.migration_run_id},
+            )
+        ).one_or_none()
+        if (
+            run is None
+            or run.mode != "execute"
+            or run.status != "completed"
+            or run.completed_at is None
+            or run.source_probe_complete is not True
+            or run.scope_relation_probe_complete is not True
+            or run.owner_map_digest != _owner_map_digest(targets)
+        ):
+            raise AutomationMigrationError("automation migration receipt conflicts")
+        ledgers = {
+            row.domain: row
+            for row in (
+                await connection.execute(
+                    text(
+                        """SELECT domain,source_fingerprint,target_digest,status,
+                                  source_row_count,target_row_count
+                        FROM automation_migration_ledger
+                        WHERE migration_run_id=:run_id"""
+                    ),
+                    {"run_id": marker.migration_run_id},
+                )
+            )
+        }
+        if set(ledgers) != {"scheduled_tasks", "scheduled_task_runs"}:
+            raise AutomationMigrationError("migration ledger is incomplete")
+        inventory = await _collect_inventory_connection(connection)
+        expected_counts = {
+            "scheduled_tasks": int(run.source_task_count),
+            "scheduled_task_runs": int(run.source_run_count),
+        }
+        rows_by_domain = {
+            "scheduled_tasks": inventory.task_rows,
+            "scheduled_task_runs": inventory.run_rows,
+        }
+        for domain, rows in rows_by_domain.items():
+            ledger = ledgers[domain]
+            expected_count = expected_counts[domain]
+            if (
+                ledger.status != "complete"
+                or ledger.source_fingerprint != run.source_fingerprint
+                or int(ledger.source_row_count) != expected_count
+                or int(ledger.target_row_count) != expected_count
+                or len(rows) != expected_count
+                or canonical_digest(rows) != ledger.target_digest
+            ):
+                raise AutomationMigrationError("migration target digest conflicts")
+        await _scope_relation_probe(connection)
+        await _assert_final_schema(connection)
+        if complete_marker:
+            await _mark_cutover_complete(
+                connection,
+                uuid.UUID(str(marker.migration_run_id)),
+            )
+        return AutomationInventory(
+            source_fingerprint=run.source_fingerprint,
+            task_rows=inventory.task_rows,
+            run_rows=inventory.run_rows,
+        )
+
+
 def _normalize_targets(
     owner_map: Mapping[str, object] | Sequence[AutomationOwnerTarget],
 ) -> tuple[AutomationOwnerTarget, ...]:
@@ -1558,6 +1682,36 @@ async def run_automation_migration(
             )
         if revision not in _DRY_RUN_REVISIONS:
             raise AutomationMigrationError("unsupported database revision")
+        if revision == _FINAL_REVISION:
+            if execute and not await asyncio.to_thread(
+                _has_operator_backup_proof,
+                backup_dir,
+            ):
+                raise AutomationMigrationError("operator backup proof is required")
+            inventory = await _resume_final_cutover(
+                engine,
+                targets=targets,
+                complete_marker=execute,
+            )
+            if not execute:
+                return AutomationMigrationReport(
+                    mode="dry-run",
+                    counts=inventory.counts,
+                    status_counts=inventory.status_counts,
+                    source_key_hash=inventory.source_fingerprint[:12],
+                    cutover_complete=False,
+                    empty_install=False,
+                )
+            async with engine.connect() as connection:
+                complete, empty_install = await _automation_cutover_state(connection)
+            if not complete or empty_install:
+                raise AutomationMigrationError("automation cutover marker is incomplete")
+            return _completed_report(
+                mode="execute",
+                inventory=inventory,
+                empty_install=False,
+                noop=False,
+            )
 
         inventory = await _collect_inventory(engine)
         async with engine.connect() as connection:
@@ -1580,9 +1734,6 @@ async def run_automation_migration(
             await _upgrade_database(engine, _EXPAND_REVISION)
             await engine.dispose()
             engine = create_async_engine(database_url)
-            await _assert_source_fingerprint(engine, inventory.source_fingerprint)
-            async with engine.connect() as connection:
-                plan = await _preflight(connection, inventory, targets)
 
         if inventory.empty:
             await _upgrade_database(engine, "head")

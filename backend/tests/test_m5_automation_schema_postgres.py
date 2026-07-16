@@ -16,6 +16,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from support.m4_private_threads import seed_m4_thread_database
 
+from deerflow.persistence.automations.migration_digest import (
+    canonical_digest,
+    expanded_select_sql,
+    target_select_sql,
+)
 from deerflow.persistence.base import Base
 from deerflow.persistence.bootstrap import _get_alembic_config, bootstrap_schema
 
@@ -208,6 +213,7 @@ def test_m5_finalize_validates_readiness_before_any_ddl(
         drop_index=lambda *_args, **_kwargs: mutations.append("drop_index"),
     )
     monkeypatch.setattr(migration, "op", fake_op)
+    monkeypatch.setattr(migration, "_lock_automation_sources", lambda _connection: None)
 
     def fail_before_ddl(_connection) -> None:
         raise RuntimeError("automation finalize prerequisites are incomplete")
@@ -491,7 +497,6 @@ async def test_cross_project_agent_fails_finalize_before_destructive_ddl(
         )
 
         migration_run_id = uuid.uuid4()
-        digest = "d" * 64
         async with engine.begin() as connection:
             await connection.execute(
                 text(
@@ -513,6 +518,14 @@ async def test_cross_project_agent_fails_finalize_before_destructive_ddl(
                     "agent_id": seed.project_b_agent_id,
                 },
             )
+            task_digest = canonical_digest([dict(row) for row in (await connection.execute(text(target_select_sql("scheduled_tasks")))).mappings()])
+            run_digest = canonical_digest([])
+            source_digest = canonical_digest(
+                {
+                    "scheduled_tasks": [dict(row) for row in (await connection.execute(text(expanded_select_sql("scheduled_tasks")))).mappings()],
+                    "scheduled_task_runs": [],
+                }
+            )
             await connection.execute(
                 text(
                     """INSERT INTO automation_migration_runs
@@ -520,9 +533,13 @@ async def test_cross_project_agent_fails_finalize_before_destructive_ddl(
                      source_task_count,source_run_count,source_probe_complete,
                      scope_relation_probe_complete,completed_at)
                     VALUES
-                    (:id,'execute','completed',:digest,:digest,1,0,true,true,now())"""
+                    (:id,'execute','completed',:source,:owner_map,1,0,true,true,now())"""
                 ),
-                {"id": migration_run_id, "digest": digest},
+                {
+                    "id": migration_run_id,
+                    "source": source_digest,
+                    "owner_map": "d" * 64,
+                },
             )
             await connection.execute(
                 text(
@@ -530,10 +547,15 @@ async def test_cross_project_agent_fails_finalize_before_destructive_ddl(
                     (migration_run_id,domain,source_fingerprint,target_digest,
                      status,source_row_count,target_row_count)
                     VALUES
-                    (:id,'scheduled_tasks',:digest,:digest,'complete',1,1),
-                    (:id,'scheduled_task_runs',:digest,:digest,'complete',0,0)"""
+                    (:id,'scheduled_tasks',:source,:task_target,'complete',1,1),
+                    (:id,'scheduled_task_runs',:source,:run_target,'complete',0,0)"""
                 ),
-                {"id": migration_run_id, "digest": digest},
+                {
+                    "id": migration_run_id,
+                    "source": source_digest,
+                    "task_target": task_digest,
+                    "run_target": run_digest,
+                },
             )
             await connection.execute(
                 text(
