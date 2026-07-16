@@ -1,0 +1,932 @@
+"""Lease-authorized private Run execution for the independent Worker."""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import logging
+import re
+import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any, Literal, Protocol
+
+import sqlalchemy as sa
+from langchain_core.messages import BaseMessage
+from langchain_core.messages.utils import convert_to_messages
+from langgraph.types import Command
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.private_work.asset_runtime import PrivateAssetRuntime
+from app.private_work.authorization import PrivateRunAuthorizationBoundary
+from app.private_work.checkpointer import ProjectScopedCheckpointer
+from app.private_work.context import PrivateWorkContext
+from app.private_work.file_finalizer import PrivateFileFinalizer
+from app.private_work.run_admission import (
+    AdmittedPrivateRun,
+    PersistedRunSnapshot,
+)
+from app.private_work.run_repository import (
+    PrivateRunExecutionLeaseLost,
+    PrivateRunRecord,
+    PrivateRunRepository,
+)
+from app.private_work.sandbox_files import (
+    PrivateFileRunScope,
+    PrivateRunFileAuthority,
+    PrivateSandboxFileProjection,
+)
+from app.private_work.snapshot_repository import RunSnapshotRepository
+from app.projects.capabilities import Capability
+from app.projects.context import resolve_project_context_in_transaction
+from app.projects.errors import ProjectForbidden, ProjectNotFound
+from app.reliability.jobs import AdmittedJobRecord, private_run_idempotency_key
+from app.worker.service import (
+    JobLeaseAuthority,
+    JobOutcome,
+    JobSettlement,
+    LeaseLost,
+)
+from deerflow.persistence.jobs.sql import (
+    JobClaim,
+    JobRepository,
+    JobTerminalEvent,
+)
+from deerflow.persistence.private_work.model import PrivateFileRow
+from deerflow.persistence.run.model import RunRow
+from deerflow.runtime import (
+    DisconnectMode,
+    RunContext,
+    RunManager,
+    RunStatus,
+    run_agent,
+)
+from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.runtime.user_context import (
+    reset_current_user,
+    reset_runtime_storage_user_id,
+    set_current_user,
+    set_runtime_storage_user_id,
+)
+from deerflow.sandbox.sandbox import AuthorizationRevoked
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
+
+_PUBLIC_ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+logger = logging.getLogger(__name__)
+
+
+class TransientExecutionError(RuntimeError):
+    """A public-safe failure before an ambiguous external side effect."""
+
+    def __init__(self, public_error_code: str) -> None:
+        if _PUBLIC_ERROR_CODE.fullmatch(public_error_code) is None:
+            raise ValueError("transient execution error requires a public code")
+        self.public_error_code = public_error_code
+        super().__init__(public_error_code)
+
+
+class AmbiguousExternalSideEffect(RuntimeError):
+    """Execution may have crossed an external side-effect boundary."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentExecutionResult:
+    status: Literal["succeeded", "cancelled", "failed"]
+    public_error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        JobOutcome(self.status, self.public_error_code)
+
+    @classmethod
+    def succeeded(cls) -> AgentExecutionResult:
+        return cls("succeeded")
+
+    @classmethod
+    def cancelled(cls) -> AgentExecutionResult:
+        return cls("cancelled")
+
+    @classmethod
+    def failed(cls, public_error_code: str) -> AgentExecutionResult:
+        return cls("failed", public_error_code)
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateRunExecution:
+    context: PrivateWorkContext
+    run: PrivateRunRecord
+    snapshot: PersistedRunSnapshot
+    checkpoint_namespace: str
+    graph_input: object
+    command: object | None
+    config: dict[str, Any]
+    interrupt_before: list[str] | Literal["*"] | None
+    interrupt_after: list[str] | Literal["*"] | None
+    stream_mode: list[str]
+    stream_subgraphs: bool
+    resume_from_checkpoint: bool = False
+
+
+class PrivateRunExecutor(Protocol):
+    async def execute(
+        self,
+        execution: PrivateRunExecution,
+        authority: JobLeaseAuthority,
+    ) -> AgentExecutionResult: ...
+
+
+class PrivateRunJobTerminalPort:
+    """Atomically converge an unowned private job, Run, and staging files."""
+
+    async def job_terminalized(
+        self,
+        session: AsyncSession,
+        event: JobTerminalEvent,
+    ) -> None:
+        if event.job_type != "private_run":
+            return
+        if event.owner_user_id is None or event.run_id is None:
+            raise RuntimeError("private job terminal authority is incomplete")
+        run_status = "interrupted" if event.status == "cancelled" else "error"
+        run_error = event.cancel_reason if event.status == "cancelled" else event.public_error_code
+        finalization_status = sa.case(
+            (RunRow.finalization_status == "finalizing", "failed"),
+            else_=RunRow.finalization_status,
+        )
+        await session.execute(
+            sa.update(RunRow)
+            .where(
+                RunRow.project_id == event.project_id,
+                RunRow.owner_user_id == event.owner_user_id,
+                RunRow.run_id == event.run_id,
+                RunRow.job_id == event.job_id,
+                RunRow.status.in_(("pending", "running")),
+            )
+            .values(
+                status=run_status,
+                error=run_error,
+                execution_lease_token_hash=None,
+                execution_lease_expires_at=None,
+                execution_heartbeat_at=None,
+                finalization_status=finalization_status,
+                updated_at=event.occurred_at,
+            )
+        )
+        await session.execute(
+            sa.delete(PrivateFileRow).where(
+                PrivateFileRow.project_id == event.project_id,
+                PrivateFileRow.owner_user_id == event.owner_user_id,
+                PrivateFileRow.created_by_run_id == event.run_id,
+                PrivateFileRow.status == "staging",
+            )
+        )
+
+
+class LeaseAuthorizedStreamBridge:
+    """Guard every Worker-side stream mutation with current Run authority."""
+
+    def __init__(self, bridge: Any, boundary: PrivateRunExecutionBoundary) -> None:
+        self._bridge = bridge
+        self._boundary = boundary
+
+    @property
+    def supports_cross_process(self) -> bool:
+        return bool(getattr(self._bridge, "supports_cross_process", False))
+
+    async def publish(self, run_id: str, event: str, data: Any) -> None:
+        await self._boundary.before_stream_publish()
+        await self._bridge.publish(run_id, event, data)
+
+    async def publish_end(self, run_id: str) -> None:
+        await self._boundary.before_stream_terminal()
+        await self._bridge.publish_end(run_id)
+
+    def subscribe(self, *args, **kwargs):
+        return self._bridge.subscribe(*args, **kwargs)
+
+    async def cleanup(self, run_id: str, *, delay: float = 0) -> None:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        if await self._boundary.stream_cleanup_allowed():
+            await self._bridge.cleanup(run_id, delay=0)
+
+
+class PrivateRunExecutionBoundary:
+    """Combine member authorization with the current job/run lease proof."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        context: PrivateWorkContext,
+        claim: JobClaim,
+    ) -> None:
+        if claim.run_id is None:
+            raise ValueError("private execution claim requires a Run")
+        self._factory = session_factory
+        self._context = context
+        self._claim = claim
+        self._authorization = PrivateRunAuthorizationBoundary(
+            session_factory,
+            project_id=context.project_id,
+            owner_user_id=str(context.user_id),
+            run_id=claim.run_id,
+        )
+        self._abort_event: asyncio.Event | None = None
+        self._lease_lost = False
+        self._authorization_revoked = False
+        self._cancel_requested = False
+        self._ambiguous_side_effect = False
+
+    @property
+    def execution_job_id(self) -> uuid.UUID:
+        return self._claim.job_id
+
+    @property
+    def lease_lost(self) -> bool:
+        return self._lease_lost
+
+    @property
+    def authorization_revoked(self) -> bool:
+        return self._authorization_revoked
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self._cancel_requested
+
+    @property
+    def ambiguous_side_effect(self) -> bool:
+        return self._ambiguous_side_effect
+
+    def bind_abort_event(self, abort_event: asyncio.Event) -> None:
+        if self._abort_event is not None and self._abort_event is not abort_event:
+            raise RuntimeError("execution boundary abort event is already bound")
+        self._abort_event = abort_event
+        self._authorization.bind_abort_event(abort_event)
+
+    def request_local_cancel(self) -> None:
+        self._cancel_requested = True
+        if self._abort_event is not None:
+            self._abort_event.set()
+
+    async def _check(
+        self,
+        authorization_method: str,
+        *,
+        ambiguous_side_effect: bool = False,
+        allow_cancel: bool = False,
+    ) -> None:
+        try:
+            await getattr(self._authorization, authorization_method)()
+        except AuthorizationRevoked:
+            self._authorization_revoked = True
+            if self._abort_event is not None:
+                self._abort_event.set()
+            raise
+        try:
+            async with self._factory() as session, session.begin():
+                repository = PrivateRunRepository(session)
+                if ambiguous_side_effect:
+                    cancel_requested = await repository.mark_execution_side_effect_unknown(
+                        scope=self._context.resource_scope,
+                        run_id=self._claim.run_id or "",
+                        job_id=self._claim.job_id,
+                        lease_token=self._claim.lease_token,
+                    )
+                else:
+                    cancel_requested = await repository.assert_execution_active(
+                        scope=self._context.resource_scope,
+                        run_id=self._claim.run_id or "",
+                        job_id=self._claim.job_id,
+                        lease_token=self._claim.lease_token,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._lease_lost = True
+            if self._abort_event is not None:
+                self._abort_event.set()
+            raise AuthorizationRevoked from None
+        if cancel_requested:
+            self.request_local_cancel()
+            if not allow_cancel:
+                raise AuthorizationRevoked
+        if ambiguous_side_effect:
+            self._ambiguous_side_effect = True
+
+    async def before_model_call(self) -> None:
+        await self._check("before_model_call")
+
+    async def before_tool_call(self) -> None:
+        await self._check(
+            "before_tool_call",
+            ambiguous_side_effect=True,
+        )
+
+    async def before_mcp_call(self) -> None:
+        await self._check(
+            "before_mcp_call",
+            ambiguous_side_effect=True,
+        )
+
+    async def before_sandbox_write(self) -> None:
+        await self._check(
+            "before_sandbox_write",
+            ambiguous_side_effect=True,
+        )
+
+    async def before_sandbox_exec(self) -> None:
+        await self._check(
+            "before_sandbox_exec",
+            ambiguous_side_effect=True,
+        )
+
+    async def before_sandbox_restore(self) -> None:
+        # Restoring a deterministic private snapshot into an ephemeral
+        # sandbox is retry-safe, but sandbox acquisition still requires the
+        # current durable execution token.
+        await self._check("before_sandbox_write")
+
+    async def before_checkpoint_read(self) -> None:
+        await self._check("before_checkpoint_read")
+
+    async def before_checkpoint_write(self) -> None:
+        await self._check("before_checkpoint_write")
+
+    async def before_stream_publish(self) -> None:
+        await self._check("before_checkpoint_write")
+
+    async def before_stream_terminal(self) -> None:
+        await self._check(
+            "before_checkpoint_write",
+            allow_cancel=True,
+        )
+
+    async def stream_cleanup_allowed(self) -> bool:
+        try:
+            async with self._factory() as session, session.begin():
+                return await PrivateRunRepository(session).stream_cleanup_allowed(
+                    scope=self._context.resource_scope,
+                    run_id=self._claim.run_id or "",
+                    job_id=self._claim.job_id,
+                )
+        except Exception:
+            return False
+
+    async def before_file_finalization(self) -> None:
+        await self._check(
+            "before_file_finalization",
+            ambiguous_side_effect=True,
+        )
+
+    async def before_file_finalization_in_session(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Validate file/Run mutation authority in its owning transaction."""
+
+        try:
+            cancel_requested = await PrivateRunRepository(
+                session,
+            ).mark_execution_side_effect_unknown(
+                scope=self._context.resource_scope,
+                run_id=self._claim.run_id or "",
+                job_id=self._claim.job_id,
+                lease_token=self._claim.lease_token,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._lease_lost = True
+            if self._abort_event is not None:
+                self._abort_event.set()
+            raise AuthorizationRevoked from None
+        if cancel_requested:
+            self.request_local_cancel()
+            raise AuthorizationRevoked
+        self._ambiguous_side_effect = True
+
+
+class RunAgentPrivateExecutor:
+    """Production adapter that invokes ``run_agent`` only inside the Worker."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        app_config: Any,
+        bridge: Any,
+        project_checkpointer: ProjectScopedCheckpointer,
+        store: Any,
+        event_store: Any,
+        asset_runtime: PrivateAssetRuntime | None = None,
+        agent_factory: Any | None = None,
+        runner=run_agent,
+    ) -> None:
+        self._factory = session_factory
+        self._app_config = app_config
+        self._bridge = bridge
+        self._project_checkpointer = project_checkpointer
+        self._store = store
+        self._event_store = event_store
+        self._asset_runtime = asset_runtime or PrivateAssetRuntime(session_factory)
+        self._agent_factory = agent_factory or self._default_agent_factory()
+        self._runner = runner
+
+    @staticmethod
+    def _default_agent_factory():
+        from deerflow.agents.lead_agent.agent import make_lead_agent
+
+        return make_lead_agent
+
+    @staticmethod
+    def _graph_input(execution: PrivateRunExecution) -> object:
+        if execution.resume_from_checkpoint:
+            return None
+        if execution.command is not None:
+            if not isinstance(execution.command, Mapping):
+                raise TransientExecutionError("INVALID_RUN_PAYLOAD")
+            try:
+                return Command(**dict(execution.command))
+            except (TypeError, ValueError):
+                raise TransientExecutionError("INVALID_RUN_PAYLOAD") from None
+        if not isinstance(execution.graph_input, Mapping):
+            if execution.graph_input is None:
+                return {}
+            raise TransientExecutionError("INVALID_RUN_PAYLOAD")
+        graph_input = copy.deepcopy(dict(execution.graph_input))
+        messages = graph_input.get("messages")
+        if isinstance(messages, list):
+            converted: list[object] = []
+            for message in messages:
+                if isinstance(message, BaseMessage):
+                    converted.append(message)
+                    continue
+                if not isinstance(message, Mapping):
+                    converted.append(message)
+                    continue
+                try:
+                    converted.extend(convert_to_messages([dict(message)]))
+                except (TypeError, ValueError, NotImplementedError):
+                    raise TransientExecutionError("INVALID_RUN_PAYLOAD") from None
+            graph_input["messages"] = converted
+        return graph_input
+
+    @staticmethod
+    def _admitted(
+        execution: PrivateRunExecution,
+        claim: JobClaim,
+    ) -> AdmittedPrivateRun:
+        return AdmittedPrivateRun(
+            run=execution.run,
+            job=AdmittedJobRecord(
+                job_id=claim.job_id,
+                job_type="private_run",
+                project_id=execution.run.project_id,
+                owner_user_id=execution.run.owner_user_id,
+                run_id=execution.run.run_id,
+                idempotency_key=private_run_idempotency_key(
+                    execution.run.run_id,
+                ),
+                status="running",
+            ),
+            snapshot=execution.snapshot,
+            opaque_runtime_scope=execution.context.resource_scope,
+        )
+
+    async def execute(
+        self,
+        execution: PrivateRunExecution,
+        authority: JobLeaseAuthority,
+    ) -> AgentExecutionResult:
+        claim = authority.claim
+        boundary = PrivateRunExecutionBoundary(
+            self._factory,
+            context=execution.context,
+            claim=claim,
+        )
+        admitted = self._admitted(execution, claim)
+        private_runtime = None
+        file_authority = None
+        try:
+            exact_model_name = execution.run.model_name
+            if exact_model_name is None or self._app_config.get_model_config(exact_model_name) is None:
+                raise TransientExecutionError("RUN_ASSET_STALE")
+            private_runtime = await self._asset_runtime.materialize(
+                execution.context,
+                admitted,
+                authorization_boundary=boundary,
+            )
+            if private_runtime.model_ref != exact_model_name:
+                raise TransientExecutionError("RUN_ASSET_STALE")
+
+            skills_config = getattr(self._app_config, "skills", None)
+            skill_container_path = getattr(
+                skills_config,
+                "container_path",
+                None,
+            )
+            skill_root = getattr(private_runtime, "skill_root", None)
+            mounts = (
+                (
+                    RunScopedReadOnlyMount(
+                        run_id=execution.run.run_id,
+                        container_path=skill_container_path,
+                        host_path=str(skill_root),
+                    ),
+                )
+                if isinstance(skill_container_path, str) and skill_root is not None
+                else ()
+            )
+            file_authority = PrivateRunFileAuthority(
+                PrivateFileRunScope(
+                    execution.context,
+                    thread_id=execution.run.thread_id,
+                    run_id=execution.run.run_id,
+                    authorization_boundary=boundary,
+                ),
+                PrivateSandboxFileProjection(self._factory),
+                PrivateFileFinalizer(self._factory),
+                mounts=mounts,
+            )
+            run_manager = RunManager()
+            record = await run_manager.register_persisted(
+                run_id=execution.run.run_id,
+                thread_id=execution.run.thread_id,
+                assistant_id=execution.run.assistant_id,
+                on_disconnect=DisconnectMode.continue_,
+                metadata=execution.run.metadata,
+                kwargs=execution.run.kwargs,
+                multitask_strategy=execution.run.multitask_strategy,
+                model_name=exact_model_name,
+                scope=execution.context.resource_scope,
+                created_at=execution.run.created_at.isoformat(),
+            )
+            boundary.bind_abort_event(record.abort_event)
+            authority.bind_cancel_callback(boundary.request_local_cancel)
+            if authority.cancel_requested:
+                boundary.request_local_cancel()
+
+            checkpointer = self._project_checkpointer.for_context(
+                execution.context,
+            )
+            set_boundary = getattr(
+                checkpointer,
+                "set_authorization_boundary",
+                None,
+            )
+            if callable(set_boundary):
+                set_boundary(boundary)
+            run_context = RunContext(
+                checkpointer=checkpointer,
+                store=self._store,
+                event_store=self._event_store,
+                run_events_config=self._app_config.run_events,
+                thread_store=None,
+                app_config=self._app_config,
+                private_scope=execution.context.resource_scope,
+                authorization_boundary=boundary,
+                file_authority=file_authority,
+                private_agent_runtime=private_runtime,
+            )
+            owner_token = set_current_user(
+                SimpleNamespace(id=execution.run.owner_user_id),
+            )
+            storage_token = set_runtime_storage_user_id(
+                execution.run.owner_user_id,
+            )
+            try:
+                await self._runner(
+                    LeaseAuthorizedStreamBridge(self._bridge, boundary),
+                    run_manager,
+                    record,
+                    ctx=run_context,
+                    agent_factory=self._agent_factory,
+                    graph_input=self._graph_input(execution),
+                    config=copy.deepcopy(execution.config),
+                    stream_modes=list(execution.stream_mode),
+                    stream_subgraphs=execution.stream_subgraphs,
+                    interrupt_before=execution.interrupt_before,
+                    interrupt_after=execution.interrupt_after,
+                )
+            finally:
+                reset_runtime_storage_user_id(storage_token)
+                reset_current_user(owner_token)
+
+            if boundary.lease_lost:
+                raise TransientExecutionError(
+                    "EXECUTION_AUTHORITY_UNAVAILABLE",
+                )
+            if boundary.cancel_requested or boundary.authorization_revoked:
+                return AgentExecutionResult.cancelled()
+            if record.status is RunStatus.success:
+                return AgentExecutionResult.succeeded()
+            if record.status is RunStatus.interrupted:
+                return AgentExecutionResult.cancelled()
+            if boundary.ambiguous_side_effect:
+                raise AmbiguousExternalSideEffect
+            return AgentExecutionResult.failed("AGENT_EXECUTION_FAILED")
+        except asyncio.CancelledError:
+            raise
+        except (TransientExecutionError, AmbiguousExternalSideEffect):
+            raise
+        except AuthorizationRevoked:
+            if boundary.lease_lost:
+                raise TransientExecutionError(
+                    "EXECUTION_AUTHORITY_UNAVAILABLE",
+                ) from None
+            return AgentExecutionResult.cancelled()
+        except Exception:
+            if boundary.ambiguous_side_effect:
+                raise AmbiguousExternalSideEffect from None
+            raise TransientExecutionError(
+                "PRIVATE_RUN_EXECUTION_FAILED",
+            ) from None
+        finally:
+            if private_runtime is not None:
+                try:
+                    await private_runtime.aclose()
+                except Exception:
+                    logger.warning(
+                        "Failed to clean private runtime for Run %s",
+                        execution.run.run_id,
+                        exc_info=True,
+                    )
+            if file_authority is not None:
+                try:
+                    await file_authority.release()
+                except Exception:
+                    logger.warning(
+                        "Failed to release private file authority for Run %s",
+                        execution.run.run_id,
+                        exc_info=True,
+                    )
+
+
+class PrivateRunJobHandler:
+    """The sole M6 adapter from a private_run Job claim to Agent execution."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        executor: PrivateRunExecutor,
+        retry_initial_seconds: int = 2,
+        retry_max_seconds: int = 300,
+        job_repository_builder=JobRepository,
+        project_checkpointer: ProjectScopedCheckpointer | None = None,
+    ) -> None:
+        if retry_initial_seconds < 1 or retry_max_seconds < retry_initial_seconds:
+            raise ValueError("invalid private Run retry policy")
+        self._factory = session_factory
+        self._executor = executor
+        self._retry_initial_seconds = retry_initial_seconds
+        self._retry_max_seconds = retry_max_seconds
+        self._job_repository_builder = job_repository_builder
+        self._project_checkpointer = project_checkpointer
+        self._snapshots = RunSnapshotRepository(session_factory)
+
+    def _runs(self, session: AsyncSession) -> PrivateRunRepository:
+        return PrivateRunRepository(
+            session,
+            jobs=self._job_repository_builder(session),
+        )
+
+    @staticmethod
+    def _claim_scope(claim: JobClaim) -> PrivateResourceScope:
+        if claim.scope.owner_user_id is None:
+            raise LeaseLost(claim.job_id)
+        return PrivateResourceScope(
+            project_id=str(claim.scope.project_id),
+            owner_user_id=claim.scope.owner_user_id,
+            membership_version=0,
+        )
+
+    async def _begin(
+        self,
+        claim: JobClaim,
+    ) -> tuple[PrivateRunExecution | None, bool]:
+        if claim.job_type != "private_run" or claim.run_id is None or claim.scope.owner_user_id is None:
+            raise LeaseLost(claim.job_id)
+        try:
+            owner_user_id = uuid.UUID(claim.scope.owner_user_id)
+        except ValueError:
+            raise LeaseLost(claim.job_id) from None
+        async with self._factory() as session, session.begin():
+            try:
+                project = await resolve_project_context_in_transaction(
+                    session,
+                    owner_user_id,
+                    claim.scope.project_id,
+                    "worker-private-run",
+                    lock=True,
+                )
+                project.require(Capability.PRIVATE_WORK_CREATE)
+                project.require(Capability.SHARED_ASSETS_EXECUTE)
+            except (ProjectNotFound, ProjectForbidden):
+                state = await self._runs(session).begin_execution(
+                    scope=self._claim_scope(claim),
+                    run_id=claim.run_id,
+                    job_id=claim.job_id,
+                    lease_token=claim.lease_token,
+                )
+                return None, True
+            context = PrivateWorkContext.from_project(project)
+            runs = self._runs(session)
+            state = await runs.begin_execution(
+                scope=context.resource_scope,
+                run_id=claim.run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+            )
+            assets = await self._snapshots.list_assets_in_session(
+                session,
+                context,
+                state.run.run_id,
+                lock=True,
+            )
+            grants = await self._snapshots.list_mcp_grants_in_session(
+                session,
+                context,
+                state.run.run_id,
+                lock=True,
+            )
+            generations = {asset.catalog_generation for asset in assets}
+            if not assets or len(generations) != 1:
+                raise TransientExecutionError("RUN_SNAPSHOT_UNAVAILABLE")
+            snapshot = PersistedRunSnapshot(
+                assets=assets,
+                mcp_grants=grants,
+                catalog_generation=generations.pop(),
+            )
+            resume_from_checkpoint = False
+            if self._project_checkpointer is not None:
+                saver = self._project_checkpointer.for_context(context)
+                item = await saver.aget_tuple_already_authorized(
+                    {
+                        "configurable": {
+                            "thread_id": state.run.thread_id,
+                            "checkpoint_ns": "",
+                        }
+                    },
+                    session=session,
+                )
+                latest_checkpoint_id = None
+                if item is not None:
+                    raw_configurable = item.config.get("configurable")
+                    if isinstance(raw_configurable, Mapping):
+                        raw_checkpoint_id = raw_configurable.get("checkpoint_id")
+                        if isinstance(raw_checkpoint_id, str):
+                            latest_checkpoint_id = raw_checkpoint_id
+                resume_from_checkpoint = await runs.prepare_checkpoint_takeover(
+                    scope=context.resource_scope,
+                    run_id=claim.run_id,
+                    job_id=claim.job_id,
+                    attempt_id=claim.attempt_id,
+                    lease_token=claim.lease_token,
+                    latest_checkpoint_id=latest_checkpoint_id,
+                )
+
+        kwargs = state.run.kwargs
+        raw_config = kwargs.get("config")
+        config = copy.deepcopy(raw_config) if isinstance(raw_config, dict) else {}
+        if resume_from_checkpoint:
+            raw_configurable = config.get("configurable")
+            configurable = dict(raw_configurable) if isinstance(raw_configurable, Mapping) else {}
+            configurable.pop("checkpoint_id", None)
+            configurable.pop("checkpoint_map", None)
+            configurable["checkpoint_ns"] = ""
+            config["configurable"] = configurable
+        raw_stream_mode = kwargs.get("stream_mode")
+        stream_mode = [str(value) for value in raw_stream_mode] if isinstance(raw_stream_mode, list) else ["values"]
+        return (
+            PrivateRunExecution(
+                context=context,
+                run=state.run,
+                snapshot=snapshot,
+                checkpoint_namespace=state.run.run_id,
+                graph_input=(None if resume_from_checkpoint else kwargs.get("input")),
+                command=(None if resume_from_checkpoint else kwargs.get("command")),
+                config=config,
+                interrupt_before=kwargs.get("interrupt_before"),
+                interrupt_after=kwargs.get("interrupt_after"),
+                stream_mode=stream_mode,
+                stream_subgraphs=bool(kwargs.get("stream_subgraphs", False)),
+                resume_from_checkpoint=resume_from_checkpoint,
+            ),
+            state.cancel_requested,
+        )
+
+    async def _heartbeat(
+        self,
+        claim: JobClaim,
+        context: PrivateWorkContext,
+    ) -> None:
+        try:
+            async with self._factory() as session, session.begin():
+                await self._runs(session).heartbeat_execution(
+                    scope=context.resource_scope,
+                    run_id=claim.run_id or "",
+                    job_id=claim.job_id,
+                    lease_token=claim.lease_token,
+                )
+        except PrivateRunExecutionLeaseLost:
+            raise LeaseLost(claim.job_id) from None
+
+    def _settlement(
+        self,
+        claim: JobClaim,
+        result: AgentExecutionResult,
+        *,
+        scope: PrivateResourceScope,
+        ambiguous_side_effect: bool = False,
+    ) -> JobSettlement:
+        outcome = JobOutcome(result.status, result.public_error_code)
+
+        async def commit() -> None:
+            try:
+                async with self._factory() as session, session.begin():
+                    await self._runs(session).settle_execution(
+                        scope=scope,
+                        run_id=claim.run_id or "",
+                        job_id=claim.job_id,
+                        lease_token=claim.lease_token,
+                        outcome=result.status,
+                        public_error_code=result.public_error_code,
+                        ambiguous_side_effect=ambiguous_side_effect,
+                        retry_initial_seconds=self._retry_initial_seconds,
+                        retry_max_seconds=self._retry_max_seconds,
+                    )
+            except PrivateRunExecutionLeaseLost:
+                raise LeaseLost(claim.job_id) from None
+
+        return JobSettlement(outcome, commit)
+
+    async def __call__(
+        self,
+        claim: JobClaim,
+        authority: JobLeaseAuthority,
+    ) -> JobSettlement:
+        try:
+            execution, cancel_requested = await self._begin(claim)
+        except LeaseLost:
+            raise
+        except Exception:
+            # A database/authorization resolution failure before the Run lease
+            # is attached must not fall back to WorkerService's job-only
+            # settlement.  Let the durable lease expire for exact-scope retry.
+            raise LeaseLost(claim.job_id) from None
+        if execution is None:
+            return self._settlement(
+                claim,
+                AgentExecutionResult.cancelled(),
+                scope=self._claim_scope(claim),
+            )
+        authority.bind_heartbeat_callback(lambda: self._heartbeat(claim, execution.context))
+        if cancel_requested or authority.cancel_requested:
+            return self._settlement(
+                claim,
+                AgentExecutionResult.cancelled(),
+                scope=execution.context.resource_scope,
+            )
+        try:
+            result = await self._executor.execute(execution, authority)
+        except asyncio.CancelledError:
+            raise
+        except TransientExecutionError as error:
+            result = AgentExecutionResult.failed(error.public_error_code)
+        except AmbiguousExternalSideEffect:
+            return self._settlement(
+                claim,
+                AgentExecutionResult.failed("SIDE_EFFECT_STATE_UNKNOWN"),
+                scope=execution.context.resource_scope,
+                ambiguous_side_effect=True,
+            )
+        except Exception:
+            return self._settlement(
+                claim,
+                AgentExecutionResult.failed("SIDE_EFFECT_STATE_UNKNOWN"),
+                scope=execution.context.resource_scope,
+                ambiguous_side_effect=True,
+            )
+        if not isinstance(result, AgentExecutionResult):
+            result = AgentExecutionResult.failed("INVALID_AGENT_RESULT")
+        if authority.cancel_requested:
+            result = AgentExecutionResult.cancelled()
+        return self._settlement(
+            claim,
+            result,
+            scope=execution.context.resource_scope,
+        )
+
+
+__all__ = [
+    "AgentExecutionResult",
+    "AmbiguousExternalSideEffect",
+    "PrivateRunExecution",
+    "PrivateRunExecutionBoundary",
+    "PrivateRunExecutor",
+    "PrivateRunJobHandler",
+    "RunAgentPrivateExecutor",
+    "TransientExecutionError",
+]

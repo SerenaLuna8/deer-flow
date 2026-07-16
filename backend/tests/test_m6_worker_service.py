@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from app.worker.service import JobLeaseAuthority, JobOutcome, LeaseLost, WorkerService
+from app.worker.service import (
+    JobLeaseAuthority,
+    JobOutcome,
+    JobSettlement,
+    LeaseLost,
+    WorkerService,
+)
 from deerflow.config.worker_config import WorkerConfig
 from deerflow.persistence.jobs.sql import JobClaim, JobHeartbeat, JobScope
 
@@ -218,6 +224,55 @@ async def test_worker_service_heartbeats_active_job_and_honors_late_cancel() -> 
     assert cancel_seen.is_set()
     assert backend.heartbeats >= 1
     assert len(backend.cancelled) == 1
+
+
+@pytest.mark.asyncio
+async def test_late_cancel_invokes_bound_cooperative_stop_callback() -> None:
+    backend = _FakeBackend(job_count=0)
+    backend.heartbeat_result = JobHeartbeat(cancel_requested=True)
+    authority = JobLeaseAuthority(
+        _Factory(backend),
+        _claim(1),
+        lease_seconds=90,
+        repository_builder=_FakeRepository,
+    )
+    cooperative_stop = asyncio.Event()
+    authority.bind_cancel_callback(cooperative_stop.set)
+
+    await authority.heartbeat()
+
+    assert cooperative_stop.is_set()
+
+
+@pytest.mark.asyncio
+async def test_handler_owned_settlement_runs_after_job_heartbeat_stops() -> None:
+    backend = _FakeBackend(job_count=1)
+
+    async def handler(_claim, _authority):
+        while backend.heartbeats == 0:
+            await asyncio.sleep(0)
+
+        async def commit() -> None:
+            stopped_at = backend.heartbeats
+            await asyncio.sleep(0.005)
+            assert backend.heartbeats == stopped_at
+            backend.succeeded.append(_claim.job_id)
+
+        return JobSettlement(JobOutcome.succeeded(), commit)
+
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"retention_purge": handler},
+        _config(
+            heartbeat_seconds=0.001,
+            poll_interval_seconds=0.001,
+        ),
+        repository_builder=_FakeRepository,
+    )
+    await service.run_until_idle()
+
+    assert len(backend.succeeded) == 1
 
 
 @pytest.mark.asyncio

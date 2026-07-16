@@ -178,7 +178,9 @@ class PrivateSandboxFileProjection:
             run_scope.authorization_boundary,
         )
         boundary = run_scope.authorization_boundary
-        check = getattr(boundary, "before_sandbox_write", None)
+        check = getattr(boundary, "before_sandbox_restore", None)
+        if not callable(check):
+            check = getattr(boundary, "before_sandbox_write", None)
         if callable(check):
             await check()
         published: list[str] = []
@@ -298,6 +300,14 @@ class PrivateRunFileAuthority:
     async def restore(self) -> AuthorityManifest:
         if self._manifest is not None:
             return self._manifest
+        boundary = self._run_scope.authorization_boundary
+        check = getattr(boundary, "before_sandbox_restore", None)
+        if not callable(check):
+            check = getattr(boundary, "before_sandbox_write", None)
+        if callable(check):
+            # Sandbox acquisition can create a container/Pod, so authority is
+            # checked before asking the provider to allocate anything.
+            await check()
         provider = self._provider or get_sandbox_provider()
         self._provider = provider
         lease = await provider.acquire_private_async(

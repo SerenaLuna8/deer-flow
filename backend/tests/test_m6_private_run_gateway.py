@@ -5,14 +5,31 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import text
+from support.m4_private_threads import seed_m4_thread_database
 
 from app.private_work.context import PrivateWorkContext
-from app.private_work.run_admission import AdmittedPrivateRun, PersistedRunSnapshot
+from app.private_work.run_admission import (
+    AdmittedPrivateRun,
+    PersistedRunSnapshot,
+    PrivateRunAdmissionService,
+)
 from app.private_work.run_repository import PrivateRunRecord
+from app.private_work.thread_repository import (
+    PrivateThreadRepository,
+    ThreadAgentRef,
+)
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.reliability.execution import (
+    AgentExecutionResult,
+    PrivateRunJobHandler,
+)
 from app.reliability.jobs import AdmittedJobRecord, private_run_idempotency_key
+from app.reliability.workers import WorkerRegistry
+from app.worker.service import JobLeaseAuthority
+from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.runtime import RunStatus
 
 
@@ -120,7 +137,12 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
     assert "project_id" not in captured.kwargs["config"]["context"]
     assert "owner_user_id" not in captured.kwargs["config"]["context"]
     assert "non_interactive" not in captured.kwargs["config"]["context"]
-    assert captured.kwargs["command"] == {"resume": {"answer": "ok"}}
+    assert captured.kwargs["command"] == {
+        "resume": {
+            "answer": "ok",
+            "project_id": "forged-command-project",
+        }
+    }
     assert captured.kwargs["interrupt_before"] == "*"
     assert captured.kwargs["interrupt_after"] == ["after-agent"]
     assert captured.kwargs["stream_mode"] == ["values"]
@@ -148,3 +170,106 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
         services.PrivateRunAdmissionServerContext,
     )
     assert captured_server_context.non_interactive is True
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_gateway_db_worker_preserves_command_state_payload(
+    migrated_postgres_database_url: str,
+) -> None:
+    from app.gateway import services
+
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    thread_id = f"m6-command-fidelity-{uuid.uuid4()}"
+    command = {
+        "resume": {
+            "role": "tool",
+            "project_id": "state-project-value",
+            "user_id": "state-user-value",
+            "answer": "approved",
+        }
+    }
+    captured = []
+
+    class Executor:
+        async def execute(self, execution, _authority):
+            captured.append(execution)
+            return AgentExecutionResult.succeeded()
+
+    try:
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+        body = SimpleNamespace(
+            input={
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "continue",
+                        "user_id": "message-state-user",
+                    }
+                ]
+            },
+            command=command,
+            metadata={},
+            config={"configurable": {"thread_id": thread_id}},
+            context={},
+            checkpoint_id=None,
+            checkpoint=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=["values"],
+            stream_subgraphs=False,
+            interrupt_before=[],
+            interrupt_after=[],
+        )
+        record = await services.start_private_run(
+            body,
+            thread_id,
+            SimpleNamespace(),
+            seed.owner_a,
+            admission_service=PrivateRunAdmissionService(seed.factory),
+        )
+
+        worker_id = uuid.uuid4()
+        await WorkerRegistry(
+            seed.factory,
+            version="test-m6-command-fidelity",
+        ).register(worker_id, frozenset({"private_run"}), 1)
+        async with seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            claim = await jobs.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=90,
+            )
+            assert claim is not None
+            assert claim.run_id == record.run_id
+            assert await jobs.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+            )
+        settlement = await PrivateRunJobHandler(
+            seed.factory,
+            executor=Executor(),
+        )(
+            claim,
+            JobLeaseAuthority(seed.factory, claim, lease_seconds=90),
+        )
+        await settlement.commit()
+
+        assert len(captured) == 1
+        assert captured[0].command == command
+        assert captured[0].graph_input["messages"][0]["role"] == "user"
+        assert captured[0].graph_input["messages"][0]["user_id"] == ("message-state-user")
+        async with seed.factory() as session:
+            persisted_command = await session.scalar(
+                text("SELECT kwargs_json->'command' FROM runs WHERE run_id=:run_id"),
+                {"run_id": record.run_id},
+            )
+        assert persisted_command == command
+    finally:
+        await seed.engine.dispose()

@@ -186,6 +186,15 @@ async def test_admission_persists_only_typed_server_non_interactive_authority(
             thread_id,
             PrivateRunCreate(
                 kwargs={
+                    "input": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "hello",
+                                "project_id": "message-data-only",
+                            }
+                        ]
+                    },
                     "interrupt_before": "*",
                     "config": {
                         "context": {
@@ -202,6 +211,11 @@ async def test_admission_persists_only_typed_server_non_interactive_authority(
             "non_interactive": True,
         }
         assert admitted.run.kwargs["interrupt_before"] == "*"
+        assert admitted.run.kwargs["input"]["messages"][0] == {
+            "role": "user",
+            "content": "hello",
+            "project_id": "message-data-only",
+        }
     finally:
         await seed.engine.dispose()
 

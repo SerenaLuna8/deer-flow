@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import case, delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
+from deerflow.persistence.jobs.sql import JobRepository, JobScope
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
@@ -43,15 +46,37 @@ class PrivateRunRecord:
     job_id: uuid.UUID | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PrivateRunExecutionState:
+    run: PrivateRunRecord
+    cancel_requested: bool
+
+
 class PrivateRunConflict(Exception):
     """Session-bound invariant failure; public boundaries supply request IDs."""
+
+
+class PrivateRunExecutionLeaseLost(PrivateRunConflict):
+    """The supplied durable job token cannot mutate the scoped Run."""
 
 
 class PrivateRunRepository:
     """Session-bound run repository whose every statement carries private scope."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        jobs: JobRepository | None = None,
+    ) -> None:
         self.session = session
+        self.jobs = jobs or JobRepository(session)
+
+    @staticmethod
+    def _lease_token_hash(lease_token: str) -> str:
+        if not isinstance(lease_token, str) or not lease_token:
+            raise PrivateRunExecutionLeaseLost
+        return hashlib.sha256(lease_token.encode("utf-8")).hexdigest()
 
     @staticmethod
     def coordinates(scope: PrivateResourceScope) -> tuple[uuid.UUID, str]:
@@ -198,6 +223,447 @@ class PrivateRunRepository:
         row.updated_at = datetime.now(UTC)
         await self.session.flush()
         return self.record(row)
+
+    async def _locked_job_run(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+    ) -> tuple[JobRow, RunRow]:
+        project_id, owner_user_id = self.coordinates(scope)
+        job = (
+            await self.session.execute(
+                select(JobRow)
+                .where(
+                    JobRow.id == job_id,
+                    JobRow.job_type == "private_run",
+                    JobRow.project_id == project_id,
+                    JobRow.owner_user_id == owner_user_id,
+                    JobRow.run_id == run_id,
+                )
+                .with_for_update(of=JobRow)
+            )
+        ).scalar_one_or_none()
+        if job is None:
+            raise PrivateRunExecutionLeaseLost
+        run = (
+            await self.session.execute(
+                select(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.job_id == job_id,
+                    *self.predicates(scope),
+                )
+                .with_for_update(of=RunRow)
+            )
+        ).scalar_one_or_none()
+        if run is None:
+            raise PrivateRunExecutionLeaseLost
+        return job, run
+
+    @staticmethod
+    def _active_job_lease(
+        job: JobRow,
+        *,
+        token_hash: str,
+        now: datetime,
+    ) -> bool:
+        return job.status == "running" and job.lease_token_hash == token_hash and job.lease_expires_at is not None and job.lease_expires_at > now
+
+    async def begin_execution(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> PrivateRunExecutionState:
+        started_at = now or datetime.now(UTC)
+        token_hash = self._lease_token_hash(lease_token)
+        job, run = await self._locked_job_run(
+            scope=scope,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        if not self._active_job_lease(job, token_hash=token_hash, now=started_at):
+            raise PrivateRunExecutionLeaseLost
+        if run.status not in {"pending", "running"}:
+            raise PrivateRunConflict
+        if run.execution_lease_token_hash not in {None, token_hash} and (run.execution_lease_expires_at is None or run.execution_lease_expires_at > started_at):
+            raise PrivateRunExecutionLeaseLost
+        cancel_requested = any(
+            value is not None
+            for value in (
+                job.cancel_requested_at,
+                run.cancel_requested_at,
+                run.authorization_cancel_requested_at,
+            )
+        )
+        run.status = "running"
+        run.execution_lease_token_hash = token_hash
+        run.execution_lease_expires_at = job.lease_expires_at
+        run.execution_heartbeat_at = job.heartbeat_at or started_at
+        run.execution_started_at = run.execution_started_at or started_at
+        run.updated_at = started_at
+        await self.session.flush()
+        return PrivateRunExecutionState(
+            run=self.record(run),
+            cancel_requested=cancel_requested,
+        )
+
+    async def prepare_checkpoint_takeover(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+        attempt_id: uuid.UUID,
+        lease_token: str,
+        latest_checkpoint_id: str | None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Record this attempt's baseline and decide whether to resume latest.
+
+        A later attempt resumes without replaying its original input/Command
+        only when the durable checkpoint advanced beyond the previous
+        attempt's baseline.
+        """
+
+        checked_at = now or datetime.now(UTC)
+        if latest_checkpoint_id is not None and (not latest_checkpoint_id or len(latest_checkpoint_id) > 128):
+            raise PrivateRunConflict
+        token_hash = self._lease_token_hash(lease_token)
+        job, run = await self._locked_job_run(
+            scope=scope,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        if (
+            not self._active_job_lease(
+                job,
+                token_hash=token_hash,
+                now=checked_at,
+            )
+            or run.status != "running"
+            or run.execution_lease_token_hash != token_hash
+        ):
+            raise PrivateRunExecutionLeaseLost
+        attempt = (
+            await self.session.execute(
+                select(JobAttemptRow)
+                .where(
+                    JobAttemptRow.id == attempt_id,
+                    JobAttemptRow.job_id == job_id,
+                    JobAttemptRow.lease_token_hash == token_hash,
+                    JobAttemptRow.outcome.is_(None),
+                )
+                .with_for_update(of=JobAttemptRow)
+            )
+        ).scalar_one_or_none()
+        if attempt is None:
+            raise PrivateRunExecutionLeaseLost
+        previous = (
+            await self.session.execute(
+                select(
+                    JobAttemptRow.id,
+                    JobAttemptRow.checkpoint_cursor,
+                )
+                .where(
+                    JobAttemptRow.job_id == job_id,
+                    JobAttemptRow.attempt_number < attempt.attempt_number,
+                )
+                .order_by(JobAttemptRow.attempt_number.desc())
+                .limit(1)
+            )
+        ).one_or_none()
+        attempt.checkpoint_cursor = latest_checkpoint_id
+        await self.session.flush()
+        return previous is not None and latest_checkpoint_id is not None and latest_checkpoint_id != previous.checkpoint_cursor
+
+    async def heartbeat_execution(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> None:
+        heartbeat_at = now or datetime.now(UTC)
+        token_hash = self._lease_token_hash(lease_token)
+        job, run = await self._locked_job_run(
+            scope=scope,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        if (
+            not self._active_job_lease(
+                job,
+                token_hash=token_hash,
+                now=heartbeat_at,
+            )
+            or run.status != "running"
+            or run.execution_lease_token_hash != token_hash
+        ):
+            raise PrivateRunExecutionLeaseLost
+        run.execution_lease_expires_at = job.lease_expires_at
+        run.execution_heartbeat_at = job.heartbeat_at or heartbeat_at
+        run.updated_at = heartbeat_at
+        await self.session.flush()
+
+    async def assert_execution_active(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """Validate the current job/run lease without extending it.
+
+        Runtime side-effect boundaries call this read-only check immediately
+        before model, tool, MCP, sandbox, checkpoint, and file operations.  A
+        stale worker therefore cannot regain authority merely by reaching a
+        side-effect hook after its heartbeat loop has lost ownership.
+        """
+
+        checked_at = now or datetime.now(UTC)
+        token_hash = self._lease_token_hash(lease_token)
+        job, run = await self._locked_job_run(
+            scope=scope,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        if (
+            not self._active_job_lease(
+                job,
+                token_hash=token_hash,
+                now=checked_at,
+            )
+            or run.status != "running"
+            or run.execution_lease_token_hash != token_hash
+            or run.execution_lease_expires_at is None
+            or run.execution_lease_expires_at <= checked_at
+        ):
+            raise PrivateRunExecutionLeaseLost
+        return any(
+            value is not None
+            for value in (
+                job.cancel_requested_at,
+                run.cancel_requested_at,
+                run.authorization_cancel_requested_at,
+            )
+        )
+
+    async def stream_cleanup_allowed(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+    ) -> bool:
+        """Allow delayed bridge cleanup only after this logical Run ends."""
+
+        job, run = await self._locked_job_run(
+            scope=scope,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        return (job.status, run.status) in {
+            ("succeeded", "success"),
+            ("cancelled", "interrupted"),
+            ("dead", "error"),
+        }
+
+    async def mark_execution_side_effect_unknown(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """Persist the unsafe replay boundary before an external side effect."""
+
+        checked_at = now or datetime.now(UTC)
+        token_hash = self._lease_token_hash(lease_token)
+        job, run = await self._locked_job_run(
+            scope=scope,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        if (
+            not self._active_job_lease(
+                job,
+                token_hash=token_hash,
+                now=checked_at,
+            )
+            or run.status != "running"
+            or run.execution_lease_token_hash != token_hash
+            or run.execution_lease_expires_at is None
+            or run.execution_lease_expires_at <= checked_at
+        ):
+            raise PrivateRunExecutionLeaseLost
+        cancel_requested = any(
+            value is not None
+            for value in (
+                job.cancel_requested_at,
+                run.cancel_requested_at,
+                run.authorization_cancel_requested_at,
+            )
+        )
+        if not cancel_requested and job.retry_safety == "safe":
+            job.retry_safety = "unknown"
+            job.updated_at = checked_at
+            await self.session.flush()
+        return cancel_requested
+
+    async def settle_execution(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+        lease_token: str,
+        outcome: Literal["succeeded", "cancelled", "failed"],
+        public_error_code: str | None = None,
+        ambiguous_side_effect: bool = False,
+        retry_initial_seconds: int = 2,
+        retry_max_seconds: int = 300,
+        now: datetime | None = None,
+    ) -> PrivateRunRecord:
+        settled_at = now or datetime.now(UTC)
+        token_hash = self._lease_token_hash(lease_token)
+        job, run = await self._locked_job_run(
+            scope=scope,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        terminal_pair = {
+            "succeeded": ("success", "succeeded"),
+            "cancelled": ("interrupted", "cancelled"),
+        }.get(outcome)
+        if terminal_pair is not None and (run.status, job.status) == terminal_pair:
+            return self.record(run)
+        if (
+            not self._active_job_lease(
+                job,
+                token_hash=token_hash,
+                now=settled_at,
+            )
+            or run.execution_lease_token_hash != token_hash
+        ):
+            raise PrivateRunExecutionLeaseLost
+
+        cancel_requested = any(
+            value is not None
+            for value in (
+                job.cancel_requested_at,
+                run.cancel_requested_at,
+                run.authorization_cancel_requested_at,
+            )
+        )
+        if cancel_requested:
+            outcome = "cancelled"
+            public_error_code = None
+
+        if outcome == "succeeded":
+            changed = await self.jobs.settle_success(
+                job_id,
+                lease_token=lease_token,
+                now=settled_at,
+            )
+            run.status = "success"
+            run.error = None
+        elif outcome == "cancelled":
+            changed = await self.jobs.settle_cancelled(
+                job_id,
+                lease_token=lease_token,
+                now=settled_at,
+            )
+            run.status = "interrupted"
+            run.error = run.authorization_cancel_reason or run.cancel_reason
+        else:
+            if not public_error_code:
+                raise PrivateRunConflict
+            if ambiguous_side_effect:
+                job.retry_safety = "unknown"
+                await self.session.flush()
+            changed = await self.jobs.retry_or_dead(
+                job_id,
+                lease_token=lease_token,
+                public_error_code=public_error_code,
+                retry_initial_seconds=retry_initial_seconds,
+                retry_max_seconds=retry_max_seconds,
+                now=settled_at,
+            )
+            if job.status == "retry_wait":
+                run.status = "pending"
+                run.error = None
+            else:
+                run.status = "error"
+                run.error = job.public_error_code or public_error_code
+        if not changed:
+            raise PrivateRunExecutionLeaseLost
+        run.execution_lease_token_hash = None
+        run.execution_lease_expires_at = None
+        run.execution_heartbeat_at = None
+        run.updated_at = settled_at
+        await self.session.flush()
+        return self.record(run)
+
+    async def request_cancel(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        job_id: uuid.UUID,
+        reason: str,
+        now: datetime | None = None,
+    ) -> Literal["requested", "cancelled", "terminal"]:
+        requested_at = now or datetime.now(UTC)
+        job, run = await self._locked_job_run(
+            scope=scope,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        if run.thread_id != thread_id:
+            raise PrivateRunConflict
+        if run.status == "interrupted":
+            return "terminal"
+        if run.status in {"success", "error", "timeout"}:
+            raise PrivateRunConflict
+        job_scope = JobScope(job.project_id, job.owner_user_id)
+        if not await self.jobs.request_cancel(
+            job_scope,
+            job_id,
+            reason=reason,
+            now=requested_at,
+        ):
+            raise PrivateRunConflict
+        run.cancel_requested_at = run.cancel_requested_at or requested_at
+        run.cancel_reason = run.cancel_reason or reason
+        if await self.jobs.settle_requested_cancel(
+            job_scope,
+            job_id,
+            now=requested_at,
+        ):
+            run.status = "interrupted"
+            run.error = run.cancel_reason
+            run.execution_lease_token_hash = None
+            run.execution_lease_expires_at = None
+            run.execution_heartbeat_at = None
+            result: Literal["requested", "cancelled", "terminal"] = "cancelled"
+        else:
+            result = "requested"
+        run.updated_at = requested_at
+        await self.session.flush()
+        return result
 
     async def list_by_thread(
         self,

@@ -208,7 +208,10 @@ async def test_finalizer_authorizes_then_atomically_supersedes_and_creates_artif
     )
 
     seed, thread_id, run_id, old = finalizer_seed
-    boundary = SimpleNamespace(before_file_finalization=AsyncMock())
+    boundary = SimpleNamespace(
+        before_file_finalization=AsyncMock(),
+        before_file_finalization_in_session=AsyncMock(),
+    )
     sandbox = MemorySecureSandbox(
         {
             "/mnt/user-data/workspace/draft.txt": b"new" * (MIB // 3 + 5),
@@ -242,6 +245,7 @@ async def test_finalizer_authorizes_then_atomically_supersedes_and_creates_artif
     )
 
     boundary.before_file_finalization.assert_awaited_once()
+    assert boundary.before_file_finalization_in_session.await_count >= 4
     assert sandbox.order == ["scan", "scan", "scan", "scan"]
     assert sandbox.max_read == MIB
     assert len(result.files) == 2

@@ -153,5 +153,51 @@ class PrivateRunService:
         except PrivateRunConflict:
             raise PrivateWorkConflict(context.request_id) from None
 
+    async def cancel(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+        run_id: str,
+        *,
+        reason: str = "user_requested",
+    ) -> None:
+        context = require_issued_private_work_context(context)
+        try:
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_CREATE,
+                    lock=True,
+                )
+                await self._require_thread(
+                    session,
+                    context,
+                    thread_id,
+                    lock=True,
+                )
+                repository = PrivateRunRepository(session)
+                record = await repository.get(
+                    scope=context.resource_scope,
+                    run_id=run_id,
+                )
+                if record is None or record.thread_id != thread_id:
+                    raise PrivateWorkNotFound(context.request_id)
+                if record.job_id is None:
+                    raise PrivateWorkConflict(context.request_id)
+                await repository.request_cancel(
+                    scope=context.resource_scope,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    job_id=record.job_id,
+                    reason=reason,
+                )
+        except PrivateWorkError:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except PrivateRunConflict:
+            raise PrivateWorkConflict(context.request_id) from None
+
 
 __all__ = ["PrivateRunService", "TERMINAL_PRIVATE_RUN_STATUSES"]

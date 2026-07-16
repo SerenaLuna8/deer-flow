@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -207,6 +208,17 @@ class PrivateRunAdmissionService:
         if type(request) is not PrivateRunCreate or not isinstance(thread_id, str) or not thread_id or request.multitask_strategy != "reject":
             raise PrivateWorkConflict(context.request_id)
         safe_kwargs = strip_private_client_fields(request.kwargs)
+        # LangGraph state and Command payloads may legitimately contain keys
+        # such as ``role``, ``user_id``, or ``project_id`` as message/tool
+        # data.  They are never consulted as application authority; the
+        # Worker injects its immutable private scope separately.  Preserve
+        # their exact shape while continuing to recursively sanitize runtime
+        # config/context and metadata.
+        for graph_payload in ("input", "command"):
+            if graph_payload in request.kwargs:
+                safe_kwargs[graph_payload] = copy.deepcopy(
+                    request.kwargs[graph_payload],
+                )
         server_request = replace(
             request,
             assistant_id=None,

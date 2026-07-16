@@ -84,12 +84,33 @@ class PrivateFileFinalizer:
         self._limits = limits or PrivateFileLimits()
         self._revalidator = PrivateWorkRevalidator()
 
+    @staticmethod
+    async def _authorize_mutation(
+        run_scope: PrivateFileRunScope,
+        session: AsyncSession,
+    ) -> None:
+        boundary = run_scope.authorization_boundary
+        checker = getattr(
+            boundary,
+            "before_file_finalization_in_session",
+            None,
+        )
+        if callable(checker):
+            await checker(session)
+
     async def _set_run_finalization(
         self,
         run_scope: PrivateFileRunScope,
         status: str,
     ) -> None:
         async with self._session_factory() as session, session.begin():
+            await self._revalidator.require(
+                session,
+                run_scope.context,
+                Capability.PRIVATE_WORK_CREATE,
+                lock=True,
+            )
+            await self._authorize_mutation(run_scope, session)
             result = await session.execute(
                 update(RunRow)
                 .where(
@@ -215,6 +236,7 @@ class PrivateFileFinalizer:
                 Capability.PRIVATE_WORK_CREATE,
                 lock=True,
             )
+            await self._authorize_mutation(run_scope, session)
             await PrivateFileRepository(session).stage(
                 scope=run_scope.resource_scope,
                 thread_id=run_scope.thread_id,
@@ -252,6 +274,10 @@ class PrivateFileFinalizer:
                         run_scope.context,
                         Capability.PRIVATE_WORK_CREATE,
                     )
+                    await self._authorize_mutation(
+                        run_scope,
+                        session,
+                    )
                     await PrivateFileRepository(session).append_chunk(
                         scope=run_scope.resource_scope,
                         thread_id=run_scope.thread_id,
@@ -276,11 +302,14 @@ class PrivateFileFinalizer:
         if not file_ids:
             return
         async with self._session_factory() as session, session.begin():
+            # Exact compensation must remain possible after this attempt loses
+            # its lease.  It is constrained to random IDs staged by this Run.
             await session.execute(
                 delete(PrivateFileRow).where(
                     PrivateFileRow.project_id == run_scope.context.project_id,
                     PrivateFileRow.owner_user_id == str(run_scope.context.user_id),
                     PrivateFileRow.thread_id == run_scope.thread_id,
+                    PrivateFileRow.created_by_run_id == run_scope.run_id,
                     PrivateFileRow.id.in_(file_ids),
                     PrivateFileRow.status == "staging",
                 )
@@ -331,6 +360,23 @@ class PrivateFileFinalizer:
                 Capability.PRIVATE_WORK_CREATE,
                 lock=True,
             )
+            thread = (
+                await session.execute(
+                    select(ThreadMetaRow.thread_id)
+                    .where(
+                        ThreadMetaRow.project_id == run_scope.context.project_id,
+                        ThreadMetaRow.owner_user_id == str(run_scope.context.user_id),
+                        ThreadMetaRow.thread_id == run_scope.thread_id,
+                        ThreadMetaRow.deleted_at.is_(None),
+                        ThreadMetaRow.frozen_at.is_(None),
+                    )
+                    .with_for_update(of=ThreadMetaRow)
+                )
+            ).scalar_one_or_none()
+            if thread is None:
+                raise PrivateWorkUnavailable(run_scope.context.request_id)
+            # Match cancellation: project/member -> Thread -> Job -> Run.
+            await self._authorize_mutation(run_scope, session)
             run = (
                 await session.execute(
                     select(RunRow)
@@ -346,21 +392,6 @@ class PrivateFileFinalizer:
                 )
             ).scalar_one_or_none()
             if run is None:
-                raise PrivateWorkUnavailable(run_scope.context.request_id)
-            thread = (
-                await session.execute(
-                    select(ThreadMetaRow.thread_id)
-                    .where(
-                        ThreadMetaRow.project_id == run_scope.context.project_id,
-                        ThreadMetaRow.owner_user_id == str(run_scope.context.user_id),
-                        ThreadMetaRow.thread_id == run_scope.thread_id,
-                        ThreadMetaRow.deleted_at.is_(None),
-                        ThreadMetaRow.frozen_at.is_(None),
-                    )
-                    .with_for_update(of=ThreadMetaRow)
-                )
-            ).scalar_one_or_none()
-            if thread is None:
                 raise PrivateWorkUnavailable(run_scope.context.request_id)
 
             current_rows = (
@@ -597,4 +628,9 @@ class PrivateFileFinalizer:
                         tuple(staging_ids),
                     )
                 finally:
-                    await self.mark_failed(run_scope)
+                    try:
+                        await self.mark_failed(run_scope)
+                    except PrivateWorkError:
+                        # A stale task cannot mutate Run state.  The durable
+                        # job terminal hook converges finalization status.
+                        pass

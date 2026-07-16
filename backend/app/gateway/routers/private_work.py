@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from pydantic import ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
@@ -26,6 +36,7 @@ from app.private_work.checkpointer import (
 from app.private_work.context import PrivateWorkContext
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import (
+    PrivateWorkConflict,
     PrivateWorkError,
     PrivateWorkForbidden,
     PrivateWorkNotFound,
@@ -589,6 +600,52 @@ async def get_private_run(
     except PrivateWorkError as error:
         _raise_http(error)
     return _run_response(record)
+
+
+@router.post("/threads/{thread_id}/runs/{run_id}/cancel")
+async def cancel_private_run(
+    thread_id: uuid.UUID,
+    run_id: uuid.UUID,
+    request: Request,
+    wait: bool = Query(default=False),
+    action: Literal["interrupt", "rollback"] = Query(default="interrupt"),
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> Response:
+    """Persist cooperative cancellation for the durable private Run job."""
+
+    try:
+        if action != "interrupt":
+            # Durable rollback requires an explicit checkpoint restore job;
+            # silently treating it as interrupt would violate the SDK contract.
+            raise PrivateWorkConflict(context.request_id)
+        service = _run_service(request, context.request_id)
+        await service.cancel(
+            context,
+            str(thread_id),
+            str(run_id),
+        )
+        if wait:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 30.0
+            while loop.time() < deadline:
+                if await request.is_disconnected():
+                    return Response(status_code=499)
+                record = await service.get(
+                    context,
+                    str(thread_id),
+                    str(run_id),
+                )
+                if record.status in {
+                    "success",
+                    "error",
+                    "timeout",
+                    "interrupted",
+                }:
+                    return Response(status_code=status.HTTP_204_NO_CONTENT)
+                await asyncio.sleep(min(0.25, deadline - loop.time()))
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 @router.delete(

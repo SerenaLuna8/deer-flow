@@ -272,6 +272,96 @@ async def test_restore_cancelled_during_atomic_begin_aborts_returned_handle(
     assert len(sandbox.aborted) == 1
 
 
+@pytest.mark.anyio
+async def test_private_authority_checks_lease_before_sandbox_acquire() -> None:
+    from unittest.mock import AsyncMock
+
+    from app.private_work.sandbox_files import (
+        AuthorityManifest,
+        PrivateFileRunScope,
+        PrivateRunFileAuthority,
+    )
+
+    events: list[str] = []
+
+    class Boundary:
+        async def before_sandbox_restore(self) -> None:
+            events.append("authority")
+
+    base = _private_file_run_scope()
+    run_scope = PrivateFileRunScope(
+        base.context,
+        base.thread_id,
+        base.run_id,
+        Boundary(),
+    )
+    lease = SimpleNamespace(sandbox_id="lease-checked-sandbox")
+
+    async def acquire(*_args, **_kwargs):
+        events.append("acquire")
+        return lease
+
+    provider = SimpleNamespace(
+        acquire_private_async=acquire,
+        get=lambda _sandbox_id: object(),
+        release_private_async=AsyncMock(),
+    )
+    authority = PrivateRunFileAuthority(
+        run_scope,
+        SimpleNamespace(
+            restore=AsyncMock(
+                return_value=AuthorityManifest(
+                    entries=(),
+                    run_id=run_scope.run_id,
+                )
+            )
+        ),
+        SimpleNamespace(),
+        provider=provider,
+    )
+
+    await authority.restore()
+
+    assert events == ["authority", "acquire"]
+
+
+@pytest.mark.anyio
+async def test_private_authority_denial_does_not_acquire_sandbox() -> None:
+    from unittest.mock import AsyncMock
+
+    from app.private_work.sandbox_files import (
+        PrivateFileRunScope,
+        PrivateRunFileAuthority,
+    )
+    from deerflow.sandbox.sandbox import AuthorizationRevoked
+
+    class Boundary:
+        async def before_sandbox_restore(self) -> None:
+            raise AuthorizationRevoked
+
+    base = _private_file_run_scope()
+    run_scope = PrivateFileRunScope(
+        base.context,
+        base.thread_id,
+        base.run_id,
+        Boundary(),
+    )
+    provider = SimpleNamespace(
+        acquire_private_async=AsyncMock(),
+    )
+    authority = PrivateRunFileAuthority(
+        run_scope,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        provider=provider,
+    )
+
+    with pytest.raises(AuthorizationRevoked):
+        await authority.restore()
+
+    provider.acquire_private_async.assert_not_awaited()
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_private_authority_finalizer_consumes_only_registered_presented_paths(

@@ -678,7 +678,7 @@ class PrivateAssetRuntime:
         context: PrivateWorkContext,
         admitted: AdmittedPrivateRun,
         *,
-        authorization_boundary: PrivateRunAuthorizationBoundary | None = None,
+        authorization_boundary: object | None = None,
     ) -> PrivateAgentRuntime:
         context = require_issued_private_work_context(context)
         if type(admitted) is not AdmittedPrivateRun:
@@ -689,6 +689,13 @@ class PrivateAssetRuntime:
             owner_user_id=admitted.run.owner_user_id,
             run_id=admitted.run.run_id,
         )
+        before_snapshot_read = getattr(
+            authorization_boundary,
+            "before_checkpoint_read",
+            None,
+        )
+        if callable(before_snapshot_read):
+            await before_snapshot_read()
         skill_snapshots: tuple[ResolvedSkillSnapshot, ...]
         mcp_snapshots: tuple[ResolvedMcpSnapshot, ...]
         try:
@@ -705,7 +712,13 @@ class PrivateAssetRuntime:
                     run_id=admitted.run.run_id,
                     lock=True,
                 )
-                if run is None or run.thread_id != admitted.thread_id or run.status != "pending":
+                execution_job_id = getattr(
+                    authorization_boundary,
+                    "execution_job_id",
+                    None,
+                )
+                executable_status = run is not None and (run.status == "pending" or (run.status == "running" and run.job_id == admitted.job.job_id and execution_job_id == admitted.job.job_id))
+                if run is None or run.thread_id != admitted.thread_id or not executable_status:
                     raise PrivateWorkNotFound(context.request_id)
                 assets = await self._snapshots.list_assets_in_session(
                     session,

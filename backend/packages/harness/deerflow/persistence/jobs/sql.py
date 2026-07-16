@@ -125,11 +125,34 @@ class DeadJobRequeuedEvent:
     request_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class JobTerminalEvent:
+    job_id: uuid.UUID
+    project_id: uuid.UUID
+    owner_user_id: str | None = field(repr=False)
+    run_id: str | None = field(repr=False)
+    occurrence_id: str | None
+    job_type: JobType
+    status: Literal["cancelled", "dead"]
+    retry_safety: RetrySafety
+    public_error_code: str | None
+    cancel_reason: str | None
+    occurred_at: datetime
+
+
 class JobAuditPort(Protocol):
     async def dead_job_requeued(
         self,
         session: AsyncSession,
         event: DeadJobRequeuedEvent,
+    ) -> None: ...
+
+
+class JobTerminalPort(Protocol):
+    async def job_terminalized(
+        self,
+        session: AsyncSession,
+        event: JobTerminalEvent,
     ) -> None: ...
 
 
@@ -173,9 +196,11 @@ class JobRepository:
         session: AsyncSession,
         *,
         owner_ref_hasher: Callable[[str], JobOwnerRef] | None = None,
+        terminal_port: JobTerminalPort | None = None,
     ) -> None:
         self.session = session
         self._owner_ref_hasher = owner_ref_hasher
+        self._terminal_port = terminal_port
 
     @staticmethod
     def _now(value: datetime | None) -> datetime:
@@ -287,6 +312,33 @@ class JobRepository:
             raise TypeError("owner_ref_hasher must return JobOwnerRef")
         return owner_ref
 
+    async def _publish_terminal(
+        self,
+        row: JobRow,
+        *,
+        status: Literal["cancelled", "dead"],
+        public_error_code: str | None,
+        now: datetime,
+    ) -> None:
+        if self._terminal_port is None:
+            return
+        await self._terminal_port.job_terminalized(
+            self.session,
+            JobTerminalEvent(
+                job_id=row.id,
+                project_id=row.project_id,
+                owner_user_id=row.owner_user_id,
+                run_id=row.run_id,
+                occurrence_id=row.automation_occurrence_id,
+                job_type=row.job_type,
+                status=status,
+                retry_safety=row.retry_safety,
+                public_error_code=public_error_code,
+                cancel_reason=row.cancel_reason,
+                occurred_at=now,
+            ),
+        )
+
     async def _mark_dead(
         self,
         row: JobRow,
@@ -316,6 +368,12 @@ class JobRepository:
                 dead_at=now,
             )
         )
+        await self._publish_terminal(
+            row,
+            status="dead",
+            public_error_code=public_error_code,
+            now=now,
+        )
 
     async def _settle_unowned_cancel(self, row: JobRow, *, now: datetime) -> None:
         if row.status in {"leased", "running"}:
@@ -327,6 +385,12 @@ class JobRepository:
         row.heartbeat_at = None
         row.completed_at = now
         row.updated_at = now
+        await self._publish_terminal(
+            row,
+            status="cancelled",
+            public_error_code=None,
+            now=now,
+        )
 
     async def claim_next(
         self,
@@ -549,6 +613,34 @@ class JobRepository:
             )
         )
         return result.rowcount == 1
+
+    async def settle_requested_cancel(
+        self,
+        scope: JobScope,
+        job_id: uuid.UUID,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Settle a requested cancellation only while no Worker owns it."""
+
+        settled_at = self._now(now)
+        row = (
+            await self.session.execute(
+                sa.select(JobRow)
+                .where(
+                    JobRow.id == job_id,
+                    JobRow.status.in_(("queued", "retry_wait")),
+                    JobRow.cancel_requested_at.is_not(None),
+                    *self._scope_predicates(scope),
+                )
+                .with_for_update(of=JobRow)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._settle_unowned_cancel(row, now=settled_at)
+        await self.session.flush()
+        return True
 
     async def _settle_owned(
         self,

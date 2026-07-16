@@ -20,6 +20,7 @@ from support.m4_private_threads import (
 from app.gateway.deps import private_work_context
 from app.gateway.routers import private_work as private_work_router
 from app.private_work.checkpointer import PRIVATE_SCOPE_MARKER, ProjectScopedCheckpointer
+from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
@@ -466,3 +467,94 @@ async def test_run_service_revalidates_membership_capability_and_runtime_depende
     )
     assert unavailable.status_code == 503
     assert unavailable.json()["detail"]["code"] == "PRIVATE_WORK_UNAVAILABLE"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_private_run_cancel_route_settles_durable_queued_job(
+    harness: _Harness,
+) -> None:
+    thread_id = str(uuid.uuid4())
+    await _seed_thread(
+        harness.seed,
+        context=harness.seed.owner_a,
+        thread_id=thread_id,
+    )
+    admitted = await PrivateRunAdmissionService(
+        harness.seed.factory,
+    ).admit(
+        harness.seed.owner_a,
+        thread_id,
+        PrivateRunCreate(),
+    )
+
+    cancelled = await harness.request(
+        "POST",
+        f"/threads/{thread_id}/runs/{admitted.run.run_id}/cancel",
+    )
+    assert cancelled.status_code == 202
+
+    waited = await harness.request(
+        "POST",
+        f"/threads/{thread_id}/runs/{admitted.run.run_id}/cancel?wait=true",
+    )
+    assert waited.status_code == 204
+    rollback = await harness.request(
+        "POST",
+        (f"/threads/{thread_id}/runs/{admitted.run.run_id}/cancel?action=rollback"),
+    )
+    assert rollback.status_code == 409
+    assert rollback.json()["detail"]["code"] == "PRIVATE_WORK_CONFLICT"
+
+    async with harness.seed.factory() as session:
+        states = (
+            await session.execute(
+                text(
+                    """SELECT r.status,j.status
+                    FROM runs r JOIN jobs j ON j.id=r.job_id
+                    WHERE r.run_id=:run_id"""
+                ),
+                {"run_id": admitted.run.run_id},
+            )
+        ).one()
+    assert tuple(states) == ("interrupted", "cancelled")
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_private_run_cancel_rejects_non_cancel_terminal_run(
+    harness: _Harness,
+) -> None:
+    thread_id = str(uuid.uuid4())
+    await _seed_thread(
+        harness.seed,
+        context=harness.seed.owner_a,
+        thread_id=thread_id,
+    )
+    admitted = await PrivateRunAdmissionService(
+        harness.seed.factory,
+    ).admit(
+        harness.seed.owner_a,
+        thread_id,
+        PrivateRunCreate(),
+    )
+    async with harness.seed.factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE runs SET status='success' WHERE run_id=:run_id"),
+            {"run_id": admitted.run.run_id},
+        )
+        await session.execute(
+            text(
+                """UPDATE jobs SET status='succeeded',completed_at=now()
+                WHERE id=:job_id"""
+            ),
+            {"job_id": admitted.job.job_id},
+        )
+
+    response = await harness.request(
+        "POST",
+        f"/threads/{thread_id}/runs/{admitted.run.run_id}/cancel",
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "PRIVATE_WORK_CONFLICT"

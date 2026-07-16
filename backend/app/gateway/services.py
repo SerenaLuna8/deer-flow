@@ -8,6 +8,7 @@ frames, and consuming stream bridge events.  Router modules
 from __future__ import annotations
 
 import asyncio
+import copy
 import functools
 import inspect
 import json
@@ -1021,7 +1022,10 @@ async def start_private_run(
     }
     disconnect = DisconnectMode.cancel if getattr(body, "on_disconnect", "cancel") == "cancel" else DisconnectMode.continue_
     raw_command = getattr(body, "command", None)
-    persisted_command = strip_private_client_fields(raw_command) if isinstance(raw_command, Mapping) else None
+    # Command is LangGraph state, not application authority.  Preserve resume
+    # payload keys exactly; immutable project/owner scope is injected through
+    # the separately sanitized server config and Worker context.
+    persisted_command = copy.deepcopy(raw_command) if isinstance(raw_command, Mapping) else None
     raw_interrupt_before = getattr(body, "interrupt_before", None)
     raw_interrupt_after = getattr(body, "interrupt_after", None)
     persisted_interrupt_before = "*" if raw_interrupt_before == "*" else list(raw_interrupt_before or ())

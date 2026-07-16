@@ -6,9 +6,9 @@ import asyncio
 import hashlib
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,12 +56,23 @@ class JobOutcome:
         return cls.failed(public_error_code)
 
 
+@dataclass(frozen=True, slots=True)
+class JobSettlement:
+    """Handler-owned atomic settlement committed after heartbeat quiescence."""
+
+    outcome: JobOutcome
+    _commit: Callable[[], Awaitable[None]] = field(repr=False)
+
+    async def commit(self) -> None:
+        await self._commit()
+
+
 class JobHandler(Protocol):
     async def __call__(
         self,
         claim: JobClaim,
         authority: JobLeaseAuthority,
-    ) -> JobOutcome: ...
+    ) -> JobOutcome | JobSettlement: ...
 
 
 class WorkerRegistryPort(Protocol):
@@ -105,6 +116,8 @@ class JobLeaseAuthority:
         self._lease_seconds = lease_seconds
         self._cancel_requested = claim.cancel_requested
         self._invalidated = False
+        self._heartbeat_callback: Callable[[], Awaitable[None]] | None = None
+        self._cancel_callback: Callable[[], Awaitable[None] | None] | None = None
 
     @property
     def cancel_requested(self) -> bool:
@@ -112,6 +125,22 @@ class JobLeaseAuthority:
 
     def invalidate(self) -> None:
         self._invalidated = True
+
+    def bind_heartbeat_callback(
+        self,
+        callback: Callable[[], Awaitable[None]],
+    ) -> None:
+        if self._heartbeat_callback is not None:
+            raise RuntimeError("job heartbeat callback is already bound")
+        self._heartbeat_callback = callback
+
+    def bind_cancel_callback(
+        self,
+        callback: Callable[[], Awaitable[None] | None],
+    ) -> None:
+        if self._cancel_callback is not None:
+            raise RuntimeError("job cancel callback is already bound")
+        self._cancel_callback = callback
 
     async def heartbeat(self) -> None:
         if self._invalidated:
@@ -137,6 +166,24 @@ class JobLeaseAuthority:
         if self._invalidated:
             raise LeaseLost(self.claim.job_id)
         self._cancel_requested = result.cancel_requested
+        if self._heartbeat_callback is not None:
+            try:
+                await self._heartbeat_callback()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.invalidate()
+                raise LeaseLost(self.claim.job_id) from error
+        if self._cancel_requested and self._cancel_callback is not None:
+            try:
+                result = self._cancel_callback()
+                if result is not None:
+                    await result
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.invalidate()
+                raise LeaseLost(self.claim.job_id) from error
 
 
 class WorkerService:
@@ -280,18 +327,26 @@ class WorkerService:
                 await heartbeat_task
                 raise RuntimeError("job heartbeat stopped before the handler")
             try:
-                outcome = await handler_task
+                result = await handler_task
             except asyncio.CancelledError:
                 raise
             except LeaseLost:
                 raise
             except Exception:
-                outcome = JobOutcome.failed("WORKER_HANDLER_FAILED")
-            if not isinstance(outcome, JobOutcome):
-                outcome = JobOutcome.failed("INVALID_JOB_OUTCOME")
+                result = JobOutcome.failed("WORKER_HANDLER_FAILED")
+            if isinstance(result, JobSettlement):
+                outcome = result.outcome
+            elif isinstance(result, JobOutcome):
+                outcome = result
+            else:
+                result = JobOutcome.failed("INVALID_JOB_OUTCOME")
+                outcome = result
             heartbeat_stop.set()
             await heartbeat_task
-            await self._settle(claim, outcome)
+            if isinstance(result, JobSettlement):
+                await result.commit()
+            else:
+                await self._settle(claim, outcome)
         except LeaseLost:
             authority.invalidate()
             await self._stop_handler_after_lease_loss(handler_task)
@@ -471,6 +526,7 @@ __all__ = [
     "JobHandler",
     "JobLeaseAuthority",
     "JobOutcome",
+    "JobSettlement",
     "LeaseLost",
     "WorkerService",
 ]
