@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   AutomationScheduleInput,
+  detectBrowserTimezone,
   type AutomationScheduleValue,
 } from "@/components/workspace/scheduled-task-schedule-input";
 import type {
@@ -14,7 +15,11 @@ import type {
   CreateAutomationInput,
   UpdateAutomationInput,
 } from "@/core/project-automations/types";
-import { RECIPES, type RecipeTitleKey } from "@/core/scheduled-tasks/recipes";
+import {
+  RECIPES,
+  type Recipe,
+  type RecipeTitleKey,
+} from "@/core/scheduled-tasks/recipes";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -24,12 +29,6 @@ const RECIPE_TITLES: Record<RecipeTitleKey, string> = {
   news: "今日科技新闻",
   issues: "Issue 分诊",
   weekly: "每周项目报告",
-};
-
-const DEFAULT_SCHEDULE: AutomationScheduleValue = {
-  schedule_type: "cron",
-  schedule_spec: { cron: "0 9 * * *" },
-  timezone: "",
 };
 
 export type AutomationAgentOption = {
@@ -47,6 +46,39 @@ export type AutomationFormDraft = {
   agentScope: "project" | "system" | "";
   schedule: AutomationScheduleValue;
 };
+
+function validTimezone(value: string): boolean {
+  if (!value) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function applyAutomationRecipeToDraft(
+  draft: AutomationFormDraft,
+  recipe: Recipe,
+  fallbackTimezone = detectBrowserTimezone(),
+): AutomationFormDraft {
+  const currentTimezone = draft.schedule.timezone.trim();
+  const detectedTimezone = fallbackTimezone.trim();
+  return {
+    ...draft,
+    title: RECIPE_TITLES[recipe.titleKey],
+    prompt: recipe.prompt,
+    schedule: {
+      schedule_type: recipe.schedule.schedule_type,
+      schedule_spec: { ...recipe.schedule.schedule_spec },
+      timezone: validTimezone(currentTimezone)
+        ? currentTimezone
+        : validTimezone(detectedTimezone)
+          ? detectedTimezone
+          : "UTC",
+    },
+  };
+}
 
 type FormSubmission =
   | {
@@ -186,7 +218,11 @@ function initialDraft(
     threadId: initialThreadId ?? "",
     agentAssetId: "",
     agentScope: "",
-    schedule: DEFAULT_SCHEDULE,
+    schedule: {
+      schedule_type: "cron",
+      schedule_spec: { cron: "0 9 * * *" },
+      timezone: detectBrowserTimezone(),
+    },
   };
 }
 
@@ -213,6 +249,7 @@ export function AutomationForm({
   const [draft, setDraft] = useState(() =>
     initialDraft(initial, initialThreadId),
   );
+  const [scheduleRevision, setScheduleRevision] = useState(0);
   const [formError, setFormError] = useState<string | null>(null);
 
   const selectAgent = (value: string) => {
@@ -256,14 +293,12 @@ export function AutomationForm({
               type="button"
               size="sm"
               variant="outline"
-              onClick={() =>
-                setDraft((current) => ({
-                  ...current,
-                  title: RECIPE_TITLES[recipe.titleKey],
-                  prompt: recipe.prompt,
-                  schedule: recipe.schedule,
-                }))
-              }
+              onClick={() => {
+                setDraft((current) =>
+                  applyAutomationRecipeToDraft(current, recipe),
+                );
+                setScheduleRevision((current) => current + 1);
+              }}
             >
               <span aria-hidden>{recipe.icon}</span>
               {RECIPE_TITLES[recipe.titleKey]}
@@ -379,6 +414,7 @@ export function AutomationForm({
       <div className="space-y-2">
         <p className="text-sm font-medium">Schedule</p>
         <AutomationScheduleInput
+          key={scheduleRevision}
           initial={draft.schedule}
           scheduleTypeLocked={immutable}
           onChange={(schedule) =>

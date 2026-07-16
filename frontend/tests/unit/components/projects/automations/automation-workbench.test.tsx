@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { describe, expect, test } from "@rstest/core";
+import { describe, expect, rs, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  automationCanTrigger,
+  automationFeedbackForAction,
+  automationGlobalFeedback,
   AutomationWorkbench,
   settleAutomationAction,
 } from "@/components/projects/automations/automation-workbench";
@@ -66,7 +69,7 @@ describe("AutomationWorkbench", () => {
     ["unavailable", "Automation 暂时不可用，请稍后重试。", true],
   ] as const)("renders safe %s feedback", (kind, message, canRefresh) => {
     const html = renderWorkbench({
-      actionFeedback: { kind, message },
+      actionFeedback: { action: "trigger", kind, message },
       onRefresh: canRefresh ? async () => undefined : undefined,
     });
     expect(html).toContain(message);
@@ -104,5 +107,49 @@ describe("AutomationWorkbench", () => {
         throw error;
       }),
     ).resolves.toBeUndefined();
+  });
+
+  test.each([
+    ["enabled", true],
+    ["paused", true],
+    ["completed", false],
+    ["failed", false],
+    ["cancelled", false],
+  ] as const)(
+    "allows manual trigger for %s=%s and never invokes terminal callbacks during render",
+    (status, expected) => {
+      const onTrigger = rs.fn(async () => undefined);
+      const selected = { ...AUTOMATION, status };
+      const html = renderWorkbench({
+        automations: [selected],
+        selected,
+        permissions: { canRead: true, canManage: true, canExecute: true },
+        onTrigger,
+      });
+
+      expect(automationCanTrigger(status)).toBe(expected);
+      expect(html.includes(">立即运行<")).toBe(expected);
+      expect(onTrigger).not.toHaveBeenCalled();
+    },
+  );
+
+  test("scopes dialog feedback to its action and keeps only immediate actions global", () => {
+    const editFeedback = {
+      action: "update" as const,
+      kind: "conflict" as const,
+      message: "edit failed",
+    };
+    const triggerFeedback = {
+      action: "trigger" as const,
+      kind: "rate_limit" as const,
+      message: "trigger failed",
+    };
+
+    expect(automationFeedbackForAction(editFeedback, "update")).toBe(
+      editFeedback,
+    );
+    expect(automationFeedbackForAction(editFeedback, "create")).toBeNull();
+    expect(automationGlobalFeedback(editFeedback)).toBeNull();
+    expect(automationGlobalFeedback(triggerFeedback)).toBe(triggerFeedback);
   });
 });

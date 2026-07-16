@@ -36,6 +36,7 @@ rs.mock("@/core/shared-assets", () => ({
 import {
   ProjectAutomationsPage,
   automationActionFeedback,
+  automationFeedbackForProject,
   automationPermissions,
 } from "@/components/projects/automations/project-automations-page";
 import { AutomationApiError } from "@/core/project-automations/api";
@@ -51,6 +52,7 @@ import {
   useUpdateProjectAutomation,
 } from "@/core/project-automations/hooks";
 import { useProjectAutomationReadiness } from "@/core/project-automations/readiness";
+import type { AutomationReadiness } from "@/core/project-automations/types";
 import type { Project } from "@/core/projects/types";
 import { useProjectAssets } from "@/core/shared-assets";
 
@@ -90,7 +92,9 @@ function mutation() {
   return { mutateAsync: rs.fn(async () => undefined), isPending: false };
 }
 
-function prepare({ readiness = AUTOMATION_READINESS } = {}) {
+function prepare({
+  readiness = AUTOMATION_READINESS,
+}: { readiness?: AutomationReadiness } = {}) {
   rs.mocked(useProjectAutomationReadiness).mockReturnValue({
     data: readiness,
     isLoading: false,
@@ -173,8 +177,33 @@ describe("ProjectAutomationsPage", () => {
       "Automation 暂时不可用，请稍后重试。",
     ],
   ] as const)("maps %s to safe public feedback", (error, kind, message) => {
-    expect(automationActionFeedback(error)).toEqual({ kind, message });
+    expect(automationActionFeedback("update", error)).toEqual({
+      action: "update",
+      kind,
+      message,
+    });
     expect(message).not.toContain(error.message);
+  });
+
+  test("drops feedback from a previous project scope", () => {
+    const feedback = {
+      projectId: PROJECT.id,
+      feedback: {
+        action: "delete" as const,
+        kind: "conflict" as const,
+        message: "状态已更新，请刷新后重试。",
+      },
+    };
+
+    expect(automationFeedbackForProject(feedback, PROJECT.id)).toBe(
+      feedback.feedback,
+    );
+    expect(
+      automationFeedbackForProject(
+        feedback,
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      ),
+    ).toBeNull();
   });
 
   test("shows scheduler disabled while keeping manual execution available", () => {

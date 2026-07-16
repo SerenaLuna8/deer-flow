@@ -1,7 +1,7 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -31,6 +31,7 @@ import { executableProjectAgents } from "../private-work/agent-selector-dialog";
 import type { AutomationAgentOption } from "./automation-form";
 import {
   AutomationWorkbench,
+  type AutomationAction,
   type AutomationActionFeedback,
   type AutomationPermissions,
 } from "./automation-workbench";
@@ -51,11 +52,13 @@ export function automationPermissions(
 }
 
 export function automationActionFeedback(
+  action: AutomationAction,
   error: unknown,
 ): AutomationActionFeedback {
   if (error instanceof AutomationApiError) {
     if (error.status === 429 || error.code === "AUTOMATION_CONCURRENCY_LIMIT") {
       return {
+        action,
         kind: "rate_limit",
         message: "当前并发已达上限，请稍后重试。",
       };
@@ -67,18 +70,32 @@ export function automationActionFeedback(
       error.code === "AUTOMATION_NETWORK_ERROR"
     ) {
       return {
+        action,
         kind: "unavailable",
         message: "Automation 暂时不可用，请稍后重试。",
       };
     }
     if (error.status === 409) {
       return {
+        action,
         kind: "conflict",
         message: "状态已更新，请刷新后重试。",
       };
     }
   }
-  return { kind: "error", message: "操作失败，请重试。" };
+  return { action, kind: "error", message: "操作失败，请重试。" };
+}
+
+export type ScopedAutomationActionFeedback = {
+  projectId: string;
+  feedback: AutomationActionFeedback;
+};
+
+export function automationFeedbackForProject(
+  scoped: ScopedAutomationActionFeedback | null,
+  projectId: string,
+): AutomationActionFeedback | null {
+  return scoped?.projectId === projectId ? scoped.feedback : null;
 }
 
 function AutomationPageSkeleton() {
@@ -207,15 +224,30 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
   const pauseAutomation = usePauseProjectAutomation();
   const resumeAutomation = useResumeProjectAutomation();
   const triggerAutomation = useTriggerProjectAutomation();
-  const [actionFeedback, setActionFeedback] =
-    useState<AutomationActionFeedback | null>(null);
+  const [scopedActionFeedback, setScopedActionFeedback] =
+    useState<ScopedAutomationActionFeedback | null>(null);
+  const actionFeedback = automationFeedbackForProject(
+    scopedActionFeedback,
+    project.id,
+  );
 
-  const perform = async <T,>(operation: () => Promise<T>): Promise<T> => {
-    setActionFeedback(null);
+  useEffect(() => {
+    setScopedActionFeedback(null);
+  }, [project.id]);
+
+  const perform = async <T,>(
+    action: AutomationAction,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    const projectId = project.id;
+    setScopedActionFeedback(null);
     try {
       return await operation();
     } catch (error) {
-      setActionFeedback(automationActionFeedback(error));
+      setScopedActionFeedback({
+        projectId,
+        feedback: automationActionFeedback(action, error),
+      });
       throw error;
     }
   };
@@ -284,7 +316,7 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
   ].some(({ isPending }) => isPending);
 
   const refresh = async () => {
-    setActionFeedback(null);
+    setScopedActionFeedback(null);
     await Promise.all([
       listQuery.refetch(),
       selected ? runs.refetch() : undefined,
@@ -316,13 +348,13 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
       onCreate={
         permissions.canExecute
           ? (input: CreateAutomationInput) =>
-              perform(() => createAutomation.mutateAsync(input))
+              perform("create", () => createAutomation.mutateAsync(input))
           : undefined
       }
       onUpdate={
         permissions.canManage
           ? (automation, input: UpdateAutomationInput) =>
-              perform(() =>
+              perform("update", () =>
                 updateAutomation.mutateAsync({ taskId: automation.id, input }),
               )
           : undefined
@@ -330,7 +362,7 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
       onPause={
         permissions.canManage
           ? (automation) =>
-              perform(() =>
+              perform("pause", () =>
                 pauseAutomation.mutateAsync({
                   taskId: automation.id,
                   expectedVersion: automation.version,
@@ -341,7 +373,7 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
       onResume={
         permissions.canExecute
           ? (automation) =>
-              perform(() =>
+              perform("resume", () =>
                 resumeAutomation.mutateAsync({
                   taskId: automation.id,
                   expectedVersion: automation.version,
@@ -352,13 +384,15 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
       onTrigger={
         permissions.canExecute
           ? (automation) =>
-              perform(() => triggerAutomation.mutateAsync(automation.id))
+              perform("trigger", () =>
+                triggerAutomation.mutateAsync(automation.id),
+              )
           : undefined
       }
       onDelete={
         permissions.canManage
           ? (automation) =>
-              perform(() =>
+              perform("delete", () =>
                 deleteAutomation.mutateAsync({
                   taskId: automation.id,
                   expectedVersion: automation.version,
@@ -368,6 +402,7 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
       }
       onRefresh={refresh}
       onRefreshRuns={() => runs.refetch()}
+      onDismissFeedback={() => setScopedActionFeedback(null)}
     />
   );
 }

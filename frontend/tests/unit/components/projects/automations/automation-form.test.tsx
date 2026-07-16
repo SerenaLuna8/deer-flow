@@ -5,11 +5,13 @@ import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  applyAutomationRecipeToDraft,
   AutomationForm,
   buildAutomationFormSubmission,
   type AutomationFormDraft,
 } from "@/components/projects/automations/automation-form";
 import { I18nProvider } from "@/core/i18n/context";
+import { RECIPES } from "@/core/scheduled-tasks/recipes";
 
 const AGENT = {
   id: "22222222-2222-4222-8222-222222222222",
@@ -174,5 +176,65 @@ describe("AutomationForm", () => {
     );
 
     expect(source.match(/type="button"/gu)).toHaveLength(3);
+  });
+
+  test.each([
+    ["trending", "daily", "0 9 * * *"],
+    ["weekly", "weekly", "0 9 * * 1"],
+  ] as const)(
+    "applies the %s recipe schedule with the current visible timezone",
+    (recipeId, _preset, cron) => {
+      const recipe = RECIPES.find(({ id }) => id === recipeId);
+      expect(recipe).toBeDefined();
+
+      const next = applyAutomationRecipeToDraft(
+        draft({
+          schedule: {
+            schedule_type: "cron",
+            schedule_spec: { cron: "15 6 * * 2" },
+            timezone: "Europe/Berlin",
+          },
+        }),
+        recipe!,
+        "UTC",
+      );
+
+      expect(next.schedule).toEqual({
+        schedule_type: "cron",
+        schedule_spec: { cron },
+        timezone: "Europe/Berlin",
+      });
+      expect(
+        buildAutomationFormSubmission({ mode: "create", draft: next }, NOW),
+      ).toEqual(
+        expect.objectContaining({
+          ok: true,
+          input: expect.objectContaining({
+            schedule_spec: { cron },
+            timezone: "Europe/Berlin",
+          }),
+        }),
+      );
+    },
+  );
+
+  test("falls back from an invalid timezone without mutating a recipe", () => {
+    const recipe = RECIPES[0]!;
+    const original = structuredClone(recipe.schedule);
+
+    const next = applyAutomationRecipeToDraft(
+      draft({
+        schedule: {
+          schedule_type: "cron",
+          schedule_spec: { cron: "0 9 * * *" },
+          timezone: "Mars/Olympus",
+        },
+      }),
+      recipe,
+      "Asia/Tokyo",
+    );
+
+    expect(next.schedule.timezone).toBe("Asia/Tokyo");
+    expect(recipe.schedule).toEqual(original);
   });
 });

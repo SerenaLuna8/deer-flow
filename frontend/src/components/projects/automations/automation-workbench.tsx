@@ -31,10 +31,38 @@ export type AutomationPermissions = {
   canExecute: boolean;
 };
 
+export type AutomationAction =
+  | "create"
+  | "update"
+  | "pause"
+  | "resume"
+  | "trigger"
+  | "delete";
+
 export type AutomationActionFeedback = {
+  action: AutomationAction;
   kind: "conflict" | "rate_limit" | "unavailable" | "error";
   message: string;
 };
+
+export function automationCanTrigger(status: Automation["status"]): boolean {
+  return status === "enabled" || status === "paused";
+}
+
+export function automationFeedbackForAction(
+  feedback: AutomationActionFeedback | null | undefined,
+  action: AutomationAction,
+): AutomationActionFeedback | null {
+  return feedback?.action === action ? feedback : null;
+}
+
+export function automationGlobalFeedback(
+  feedback: AutomationActionFeedback | null | undefined,
+): AutomationActionFeedback | null {
+  return feedback && ["pause", "resume", "trigger"].includes(feedback.action)
+    ? feedback
+    : null;
+}
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -149,6 +177,7 @@ export function AutomationWorkbench({
   onDelete,
   onRefresh,
   onRefreshRuns,
+  onDismissFeedback,
 }: {
   projectSlug: string;
   automations: Automation[];
@@ -176,6 +205,7 @@ export function AutomationWorkbench({
   onDelete?: (automation: Automation) => MaybePromise<unknown>;
   onRefresh?: () => MaybePromise<unknown>;
   onRefreshRuns?: () => MaybePromise<unknown>;
+  onDismissFeedback?: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<
@@ -209,13 +239,42 @@ export function AutomationWorkbench({
   const canCreate = permissions.canExecute && Boolean(onCreate);
   const canEdit = permissions.canManage && Boolean(onUpdate);
   const canDelete = permissions.canManage && Boolean(onDelete);
-  const canTrigger = permissions.canExecute && Boolean(onTrigger);
+  const canTrigger =
+    permissions.canExecute &&
+    Boolean(selected && automationCanTrigger(selected.status)) &&
+    Boolean(onTrigger);
   const canPause =
     permissions.canManage && selected?.status === "enabled" && Boolean(onPause);
   const canResume =
     permissions.canExecute &&
     selected?.status === "paused" &&
     Boolean(onResume);
+  const globalFeedback = automationGlobalFeedback(actionFeedback);
+
+  const openCreate = () => {
+    onDismissFeedback?.();
+    setCreateOpen(true);
+  };
+  const closeCreate = () => {
+    setCreateOpen(false);
+    onDismissFeedback?.();
+  };
+  const openEdit = () => {
+    onDismissFeedback?.();
+    setEditOpen(true);
+  };
+  const closeEdit = () => {
+    setEditOpen(false);
+    onDismissFeedback?.();
+  };
+  const openDelete = () => {
+    onDismissFeedback?.();
+    setDeleteOpen(true);
+  };
+  const closeDelete = () => {
+    setDeleteOpen(false);
+    onDismissFeedback?.();
+  };
 
   return (
     <main className="mx-auto w-full max-w-[1440px] space-y-5 p-4 sm:p-6 lg:p-8">
@@ -232,7 +291,7 @@ export function AutomationWorkbench({
           ) : null}
         </div>
         {canCreate ? (
-          <Button type="button" onClick={() => setCreateOpen(true)}>
+          <Button type="button" onClick={openCreate}>
             <PlusIcon />
             创建 Automation
           </Button>
@@ -249,14 +308,14 @@ export function AutomationWorkbench({
         </div>
       ) : null}
 
-      {actionFeedback ? (
+      {globalFeedback ? (
         <div
           role="alert"
-          data-testid={`automation-action-${actionFeedback.kind}`}
+          data-testid={`automation-action-${globalFeedback.kind}`}
           className="border-destructive/30 bg-destructive/5 flex flex-col gap-3 rounded-xl border p-4 text-sm sm:flex-row sm:items-center sm:justify-between"
         >
-          <span>{actionFeedback.message}</span>
-          {onRefresh && actionFeedback.kind !== "rate_limit" ? (
+          <span>{globalFeedback.message}</span>
+          {onRefresh && globalFeedback.kind !== "rate_limit" ? (
             <Button
               type="button"
               size="sm"
@@ -280,11 +339,7 @@ export function AutomationWorkbench({
             创建后可按 Cron 或单次时间运行项目 Agent。
           </p>
           {canCreate ? (
-            <Button
-              className="mt-5"
-              type="button"
-              onClick={() => setCreateOpen(true)}
-            >
+            <Button className="mt-5" type="button" onClick={openCreate}>
               创建 Automation
             </Button>
           ) : null}
@@ -418,7 +473,7 @@ export function AutomationWorkbench({
                           type="button"
                           size="sm"
                           variant="outline"
-                          onClick={() => setEditOpen(true)}
+                          onClick={openEdit}
                         >
                           编辑
                         </Button>
@@ -529,7 +584,7 @@ export function AutomationWorkbench({
                             size="sm"
                             variant="destructive"
                             disabled={isMutating}
-                            onClick={() => setDeleteOpen(true)}
+                            onClick={openDelete}
                           >
                             删除
                           </Button>
@@ -628,7 +683,10 @@ export function AutomationWorkbench({
         </>
       )}
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+      <Dialog
+        open={createOpen}
+        onOpenChange={(open) => (open ? openCreate() : closeCreate())}
+      >
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>创建 Automation</DialogTitle>
@@ -637,7 +695,7 @@ export function AutomationWorkbench({
             </DialogDescription>
           </DialogHeader>
           <AutomationDialogFeedback
-            feedback={actionFeedback}
+            feedback={automationFeedbackForAction(actionFeedback, "create")}
             onRefresh={onRefresh}
           />
           {agentsLoading ? (
@@ -653,12 +711,12 @@ export function AutomationWorkbench({
               initialThreadId={initialThreadId}
               agents={agents}
               canSubmit={canCreate && !isMutating && agents.length > 0}
-              onCancel={() => setCreateOpen(false)}
+              onCancel={closeCreate}
               onSubmit={async (input) => {
                 if (!onCreate || !("context_mode" in input)) return;
                 try {
                   await onCreate(input);
-                  setCreateOpen(false);
+                  closeCreate();
                   setCreateGeneration((value) => value + 1);
                 } catch {
                   return;
@@ -669,7 +727,10 @@ export function AutomationWorkbench({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+      <Dialog
+        open={editOpen}
+        onOpenChange={(open) => (open ? openEdit() : closeEdit())}
+      >
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>编辑 Automation</DialogTitle>
@@ -678,7 +739,7 @@ export function AutomationWorkbench({
             </DialogDescription>
           </DialogHeader>
           <AutomationDialogFeedback
-            feedback={actionFeedback}
+            feedback={automationFeedbackForAction(actionFeedback, "update")}
             onRefresh={onRefresh}
           />
           {selected ? (
@@ -699,12 +760,12 @@ export function AutomationWorkbench({
                     ]
               }
               canSubmit={canEdit && !isMutating}
-              onCancel={() => setEditOpen(false)}
+              onCancel={closeEdit}
               onSubmit={async (input) => {
                 if (!onUpdate || "context_mode" in input) return;
                 try {
                   await onUpdate(selected, input);
-                  setEditOpen(false);
+                  closeEdit();
                 } catch {
                   return;
                 }
@@ -714,7 +775,10 @@ export function AutomationWorkbench({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+      <Dialog
+        open={deleteOpen}
+        onOpenChange={(open) => (open ? openDelete() : closeDelete())}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>删除 Automation</DialogTitle>
@@ -723,7 +787,7 @@ export function AutomationWorkbench({
             </DialogDescription>
           </DialogHeader>
           <AutomationDialogFeedback
-            feedback={actionFeedback}
+            feedback={automationFeedbackForAction(actionFeedback, "delete")}
             onRefresh={onRefresh}
           />
           <DialogFooter>
@@ -731,7 +795,7 @@ export function AutomationWorkbench({
               type="button"
               variant="outline"
               disabled={isMutating}
-              onClick={() => setDeleteOpen(false)}
+              onClick={closeDelete}
             >
               取消
             </Button>
@@ -743,7 +807,7 @@ export function AutomationWorkbench({
                 if (!selected || !onDelete) return;
                 try {
                   await onDelete(selected);
-                  setDeleteOpen(false);
+                  closeDelete();
                 } catch {
                   return;
                 }

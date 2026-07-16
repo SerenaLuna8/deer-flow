@@ -121,3 +121,86 @@ entry E2E boundary, so no Task 13 Playwright or feature-flag work was pulled int
 
 No blocking Task 12 concern remains. Task 13 still owns discoverability, translations, Chat entry,
 and compile-time/static gates; the broader M5 milestone remains incomplete.
+
+---
+
+## Review repair — schedule synchronization, terminal actions, and feedback lifecycle
+
+### Review intake and scope
+
+- Date: 2026-07-16
+- Review result received: 0 Critical, 2 Important, 1 Minor
+- Repair commit subject: `fix: harden project automation interactions`
+- Scope remained frontend Task 12 only. Task 13 navigation/feature-gate work, backend code,
+  milestone progress, and release status were not changed.
+
+The review findings were reproduced before implementation. Recipe selection updated the parent
+draft without updating the schedule component's mount-owned state and copied an empty recipe
+timezone. Manual trigger presentation did not inspect terminal status. A single page feedback value
+was rendered globally and in every mutation dialog without action or project identity.
+
+### Repairs
+
+- Recipe application now creates a fresh schedule value, preserves the current timezone only when
+  it is valid, falls back to the browser timezone (and finally UTC), and increments a stable schedule
+  revision so the reusable control remounts from the same value held by the parent draft. Subsequent
+  custom schedule edits continue to update the parent and are not overwritten by the recipe.
+- Manual trigger is now admitted only for `enabled` and `paused`. `completed`, `failed`, and
+  `cancelled` definitions render no manual action and cannot reach the UI callback.
+- Safe feedback now carries the originating action and project ID. Create/update/delete feedback is
+  rendered only in its matching dialog; pause/resume/trigger feedback is the only global feedback.
+  Closing a dialog, opening another action, refreshing, or changing `project.id` clears the visible
+  feedback. Late failures from a prior project remain tagged with that old project and cannot render
+  in the new scope.
+
+### Strict TDD and interaction evidence
+
+The first repair RED added recipe, five-status trigger, action-scope, and project-scope assertions.
+Before implementation, the suite reported 13 expected failures and 890 existing passes. A further
+invalid-timezone case was also demonstrated RED (1 failed, 14 passed) before adding timezone
+validation. The final focused unit result is:
+
+```text
+Task 12 focused: 3 files, 40 tests passed, 0 skipped.
+```
+
+A new Playwright fixture exercises the actual project Automation page and scoped HTTP client:
+
+- click a daily recipe and submit immediately; visible preset/timezone equal the POST body and no
+  timezone validation error appears;
+- click the weekly recipe, switch to custom Cron, edit later form fields, and confirm the visible
+  Cron/timezone still equal the POST body;
+- select all five statuses; enabled and paused send exactly two trigger requests, while all terminal
+  statuses expose no trigger action;
+- fail edit and delete, close/switch dialogs, then fail a global trigger and change project; only the
+  current action and current project show feedback.
+
+```text
+Playwright project Automation interactions: 3 tests passed.
+```
+
+### Final repair verification
+
+| Gate                                      |                                 Result |
+| ----------------------------------------- | -------------------------------------: |
+| Task 12 focused unit                      |               3 files, 40 tests passed |
+| Task 12 real interaction                  |                    3 Playwright passed |
+| Task 11 scoped client/provider regression |               8 files, 31 tests passed |
+| Fresh full frontend unit suite            | 125 files, 903 tests passed, 0 skipped |
+| `pnpm check`                              |           ESLint and TypeScript passed |
+| Repair-scoped Prettier check              |                                 passed |
+| `git diff --check`                        |                                 passed |
+
+### Repair self-review
+
+- Accessibility remains intact: all new interactions use the existing labelled form controls,
+  semantic buttons, alert roles, and Radix dialog focus/Escape/focus-return behavior. No hidden
+  terminal action remains keyboard- or pointer-reachable.
+- Stale-state review found no cross-action or cross-project rendering path: action filtering occurs
+  before presentation, project filtering occurs before the workbench receives feedback, and scope
+  change also clears retained state.
+- Recipe data is copied rather than mutated; prompt, timezone, feedback, and idempotency data are not
+  added to URLs, storage, or query data.
+- Review closure: 0 Critical, 0 Important, 0 Minor.
+
+No Task 12 review blocker remains. Task 13 and the wider M5 milestone remain incomplete.

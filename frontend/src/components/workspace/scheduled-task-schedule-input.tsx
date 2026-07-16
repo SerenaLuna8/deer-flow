@@ -54,7 +54,7 @@ const FALLBACK_TIMEZONES = [
   "America/Los_Angeles",
 ];
 
-function detectBrowserTimezone(): string {
+export function detectBrowserTimezone(): string {
   try {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     if (typeof tz === "string" && tz.length > 0) {
