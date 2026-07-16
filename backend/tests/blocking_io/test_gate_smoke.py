@@ -15,7 +15,10 @@ worse than no gate at all).
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from blockbuster import BlockingError
@@ -39,6 +42,29 @@ async def test_gate_restores_blockbuster_patches_after_exceptions() -> None:
             raise RuntimeError("boom")
 
     assert os.stat is original_stat
+
+
+async def test_gate_catches_unoffloaded_blocking_io_in_scheduler_path() -> None:
+    from app.scheduler.service import ScheduledTaskService
+
+    async def blocking_reserve_due(**_kwargs) -> None:
+        time.sleep(0.01)
+
+    service = ScheduledTaskService(
+        app=SimpleNamespace(),
+        occurrences=SimpleNamespace(
+            reserve_due=blocking_reserve_due,
+            claim_next=AsyncMock(return_value=None),
+        ),
+        dispatcher=SimpleNamespace(dispatch=AsyncMock()),
+        reconciler=SimpleNamespace(reconcile_restart=AsyncMock()),
+        poll_interval_seconds=60,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    with pytest.raises(BlockingError):
+        await service.run_once(now=service._clock())
 
 
 @pytest.mark.allow_blocking_io

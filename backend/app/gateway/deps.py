@@ -379,6 +379,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
             ownership=app.state.automation_scheduler_ownership,
         )
+        # Keep the legacy service name for its compatibility router, while the
+        # Automation names make the M5 lifecycle and task ownership explicit.
+        # Both names point at the same service; there is never a second poller.
+        app.state.automation_scheduler = app.state.scheduled_task_service
+        app.state.automation_scheduler_task = None
         app.state.automation_scheduler_enabled = effective_scheduler_config.enabled
         app.state.automation_lease_seconds = effective_scheduler_config.lease_seconds
 

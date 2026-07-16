@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -230,9 +230,17 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
 async def _start_scheduled_task_service(app: FastAPI, *, enabled: bool) -> bool:
     """Start polling only after the automation cutover boundary is open."""
 
+    active_task = getattr(app.state, "automation_scheduler_task", None)
+    if active_task is not None and not active_task.done():
+        return True
+    app.state.automation_scheduler_task = None
     if not enabled:
         return False
-    service = getattr(app.state, "scheduled_task_service", None)
+    service = getattr(
+        app.state,
+        "automation_scheduler",
+        getattr(app.state, "scheduled_task_service", None),
+    )
     guard = getattr(app.state, "automation_cutover_guard", None)
     ownership = getattr(app.state, "automation_scheduler_ownership", None)
     if service is None or guard is None or ownership is None:
@@ -260,15 +268,31 @@ async def _start_scheduled_task_service(app: FastAPI, *, enabled: bool) -> bool:
             type(error).__name__,
         )
         return False
+    task = getattr(service, "task", None)
+    if task is not None:
+        if task.done():
+            logger.warning("Automation scheduler not started: code=AUTOMATION_UNAVAILABLE")
+            return False
+        app.state.automation_scheduler_task = task
     return True
 
 
 async def _stop_scheduled_task_service(app: FastAPI) -> None:
-    service = getattr(app.state, "scheduled_task_service", None)
-    if service is None:
+    service = getattr(
+        app.state,
+        "automation_scheduler",
+        getattr(app.state, "scheduled_task_service", None),
+    )
+    task = getattr(app.state, "automation_scheduler_task", None)
+    if service is None and task is None:
         return
     try:
-        await asyncio.wait_for(service.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+        if service is not None:
+            await asyncio.wait_for(service.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+        elif task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
     except TimeoutError:
         logger.warning(
             "Automation scheduler shutdown exceeded %.1fs; proceeding with worker exit.",
@@ -279,6 +303,12 @@ async def _stop_scheduled_task_service(app: FastAPI) -> None:
             "Automation scheduler shutdown failed: error_type=%s",
             type(error).__name__,
         )
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        app.state.automation_scheduler_task = None
 
 
 @asynccontextmanager

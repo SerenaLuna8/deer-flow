@@ -137,6 +137,8 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
             assert isinstance(app.state.automation_dispatcher, AutomationDispatcher)
             assert app.state.automation_dispatcher._session_factory is session_factory
             assert isinstance(app.state.scheduled_task_service, ScheduledTaskService)
+            assert app.state.automation_scheduler is app.state.scheduled_task_service
+            assert app.state.automation_scheduler_task is None
             assert app.state.scheduled_task_service.app is app
             assert app.state.scheduled_task_service._ownership is app.state.automation_scheduler_ownership
             assert app.state.scheduled_task_repo is not None

@@ -1490,13 +1490,18 @@ run_events:
 # ============================================================================
 # Background scheduler for one-time and recurring (cron) agent runs.
 # All fields are restart-required (captured at Gateway lifespan startup).
+# As elsewhere in this file, a scalar may be a $VARIABLE reference; environment
+# values are resolved before this section is validated.
 #
-# Ownership note: scheduler.enabled=true is supported only with
-# GATEWAY_WORKERS=1. Before startup reconciliation or polling, the Gateway
+# M5 topology note: scheduler.enabled=true is supported only by one Gateway
+# process with GATEWAY_WORKERS=1. Independent Scheduler/Worker processes and
+# cross-worker run takeover belong to M6. Before reconciliation or polling,
+# the Gateway
 # must also acquire one process-lifetime PostgreSQL session advisory lock on a
 # dedicated checked-out connection. A competing Gateway fails startup closed;
-# task leases still protect crash recovery but do not replace singleton owner
-# election. Size database.pool_size/max_overflow with this reserved connection
+# occurrence admission leases still protect pre-run crash recovery but do not
+# replace singleton owner election and are not Agent/Worker execution leases.
+# Size database.pool_size/max_overflow with this reserved connection
 # in mind. The owner verifies its original backend session and existing lock
 # before every poll without reacquiring; loss permanently stops that poller.
 # scheduler.enabled=false acquires no lock or monitor, but restart reconciliation
@@ -1505,7 +1510,7 @@ run_events:
 # scheduler:
 #   enabled: false               # Master switch for the background poller
 #   poll_interval_seconds: 5     # How often to scan for due tasks
-#   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
+#   lease_seconds: 120           # Occurrence admission lease; must exceed poll interval; not a Worker execution lease
 #   max_concurrent_runs: 3       # Global cap on active scheduled runs; each poll claims only into the remaining budget
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
 scheduler:
