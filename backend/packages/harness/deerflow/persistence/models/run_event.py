@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKeyConstraint, Index, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import JSON, DateTime, ForeignKeyConstraint, Index, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from deerflow.persistence.base import Base
@@ -21,7 +21,7 @@ class RunEventRow(Base):
     user_id = synonym("owner_user_id")
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
     category: Mapped[str] = mapped_column(String(16), nullable=False)
-    # "message" | "trace" | "lifecycle"
+    # Includes message/trace/lifecycle plus M6's durable "stream" category.
     content: Mapped[str] = mapped_column(Text, default="")
     event_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
     seq: Mapped[int] = mapped_column(nullable=False)
@@ -33,6 +33,16 @@ class RunEventRow(Base):
         UniqueConstraint("project_id", "owner_user_id", "thread_id", "run_id", "seq", name="uq_run_events_private_seq"),
         Index("ix_events_thread_cat_seq", "thread_id", "category", "seq"),
         Index("ix_events_run", "thread_id", "run_id", "seq"),
+        Index(
+            "uq_run_events_stream_terminal",
+            "project_id",
+            "owner_user_id",
+            "thread_id",
+            "run_id",
+            unique=True,
+            postgresql_where=text("category = 'stream' AND event_type = 'stream.end'"),
+            sqlite_where=text("category = 'stream' AND event_type = 'stream.end'"),
+        ),
         ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_run_events_project", ondelete="RESTRICT"),
         ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_run_events_owner", ondelete="RESTRICT"),
         ForeignKeyConstraint(

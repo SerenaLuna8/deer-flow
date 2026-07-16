@@ -357,12 +357,25 @@ def _add_nullable_execution_columns() -> None:
     op.add_column("scheduled_task_runs", sa.Column("job_id", sa.Uuid(), nullable=True))
 
 
+def _add_durable_stream_terminal_invariant() -> None:
+    op.create_index(
+        "uq_run_events_stream_terminal",
+        "run_events",
+        ["project_id", "owner_user_id", "thread_id", "run_id"],
+        unique=True,
+        postgresql_where=sa.text(
+            "category = 'stream' AND event_type = 'stream.end'",
+        ),
+    )
+
+
 def upgrade() -> None:
     _create_worker_and_job_tables()
     _create_quota_tables()
     _create_audit_and_recovery_tables()
     _create_migration_control_tables()
     _add_nullable_execution_columns()
+    _add_durable_stream_terminal_invariant()
 
 
 def downgrade() -> None:

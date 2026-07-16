@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import BaseMessage
@@ -33,6 +33,12 @@ from deerflow.persistence.private_work.file_repository import (
     PrivateFileRepository,
 )
 from deerflow.runtime import RunStatus
+from deerflow.runtime.events.models import (
+    StreamLeaseProof,
+    StreamWriteAuthorityRequired,
+    StreamWriteLeaseLost,
+)
+from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 
@@ -412,12 +418,6 @@ async def test_stale_worker_cannot_publish_stream_end(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    raw_bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-        subscribe=lambda *_args, **_kwargs: None,
-    )
     try:
         admitted, claim = await _admit_and_claim(
             seed,
@@ -435,7 +435,14 @@ async def test_stale_worker_cannot_publish_stream_end(
             context=seed.owner_a,
             claim=claim,
         )
-        bridge = LeaseAuthorizedStreamBridge(raw_bridge, boundary)
+        raw_bridge = PostgresStreamBridge(seed.factory)
+        bridge = LeaseAuthorizedStreamBridge(
+            raw_bridge,
+            boundary,
+            scope=seed.owner_a.resource_scope,
+            thread_id=admitted.run.thread_id,
+            terminal_status=lambda: "success",
+        )
         async with seed.factory() as session, session.begin():
             await session.execute(
                 text("UPDATE jobs SET lease_token_hash=:other WHERE id=:job_id"),
@@ -445,8 +452,71 @@ async def test_stale_worker_cannot_publish_stream_end(
         with pytest.raises(AuthorizationRevoked):
             await bridge.publish_end(admitted.run.run_id)
 
-        raw_bridge.publish_end.assert_not_awaited()
+        frames = await raw_bridge.read_after(
+            seed.owner_a.resource_scope,
+            admitted.run.thread_id,
+            cursor=0,
+            limit=10,
+            run_id=admitted.run.run_id,
+        )
+        assert frames == ()
         assert boundary.lease_lost is True
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_durable_stream_append_revalidates_current_project_membership(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-stream-revoked-{uuid.uuid4()}",
+        )
+        async with seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).begin_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=admitted.run.run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+            )
+            await session.execute(
+                text(
+                    """UPDATE project_memberships
+                    SET status='removed',version=version+1
+                    WHERE id=:membership_id"""
+                ),
+                {"membership_id": seed.owner_a.membership_id},
+            )
+        raw_bridge = PostgresStreamBridge(seed.factory)
+        boundary = PrivateRunExecutionBoundary(
+            seed.factory,
+            context=seed.owner_a,
+            claim=claim,
+        )
+        bridge = LeaseAuthorizedStreamBridge(
+            raw_bridge,
+            boundary,
+            scope=seed.owner_a.resource_scope,
+            thread_id=admitted.run.thread_id,
+            terminal_status=lambda: "success",
+        )
+
+        with pytest.raises(AuthorizationRevoked):
+            await bridge.publish_end(admitted.run.run_id)
+
+        frames = await raw_bridge.read_after(
+            seed.owner_a.resource_scope,
+            admitted.run.thread_id,
+            cursor=0,
+            limit=10,
+            run_id=admitted.run.run_id,
+        )
+        assert frames == ()
+        assert boundary.authorization_revoked is True
     finally:
         await seed.engine.dispose()
 
@@ -882,6 +952,332 @@ async def test_revoked_membership_cancels_claim_without_invoking_agent(
         await settlement.commit()
 
         assert executor_calls == 0
+        async with seed.factory() as session:
+            states = (
+                await session.execute(
+                    text(
+                        """SELECT r.status,j.status
+                        FROM runs r JOIN jobs j ON j.id=r.job_id
+                        WHERE r.run_id=:run_id"""
+                    ),
+                    {"run_id": admitted.run.run_id},
+                )
+            ).one()
+        assert tuple(states) == ("interrupted", "cancelled")
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_worker_retry_adopts_durable_terminal_without_replaying_graph(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    executor_calls = 0
+
+    class Executor:
+        async def execute(self, _execution, _authority):
+            nonlocal executor_calls
+            executor_calls += 1
+            return AgentExecutionResult.succeeded()
+
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-terminal-takeover-{uuid.uuid4()}",
+        )
+        async with seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).begin_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=admitted.run.run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+            )
+        raw_bridge = PostgresStreamBridge(seed.factory)
+        with pytest.raises(StreamWriteAuthorityRequired):
+            await raw_bridge.publish_terminal(
+                seed.owner_a.resource_scope,
+                admitted.run.thread_id,
+                admitted.run.run_id,
+                status="success",
+            )
+        with pytest.raises(StreamWriteLeaseLost):
+            await raw_bridge.publish_terminal(
+                seed.owner_a.resource_scope,
+                admitted.run.thread_id,
+                admitted.run.run_id,
+                status="success",
+                lease=StreamLeaseProof(
+                    job_id=claim.job_id,
+                    lease_token="forged-token",
+                ),
+            )
+        authorized_bridge = LeaseAuthorizedStreamBridge(
+            raw_bridge,
+            PrivateRunExecutionBoundary(
+                seed.factory,
+                context=seed.owner_a,
+                claim=claim,
+            ),
+            scope=seed.owner_a.resource_scope,
+            thread_id=admitted.run.thread_id,
+            terminal_status=lambda: "success",
+        )
+        await authorized_bridge.publish_end(admitted.run.run_id)
+        terminal = (
+            await raw_bridge.read_after(
+                seed.owner_a.resource_scope,
+                admitted.run.thread_id,
+                cursor=0,
+                limit=10,
+                run_id=admitted.run.run_id,
+            )
+        )[-1]
+
+        settlement = await PrivateRunJobHandler(
+            seed.factory,
+            executor=Executor(),
+        )(
+            claim,
+            JobLeaseAuthority(seed.factory, claim, lease_seconds=90),
+        )
+        await settlement.commit()
+
+        assert executor_calls == 0
+        assert settlement.outcome.status == "succeeded"
+        retry_terminal = await PostgresStreamBridge(seed.factory).publish_terminal(
+            seed.owner_a_scope,
+            admitted.run.thread_id,
+            admitted.run.run_id,
+            status="success",
+        )
+        assert retry_terminal.id == terminal.id
+        assert retry_terminal.created is False
+        async with seed.factory() as session:
+            states = (
+                await session.execute(
+                    text(
+                        """SELECT r.status,j.status,
+                                  (SELECT count(*) FROM run_events e
+                                   WHERE e.run_id=r.run_id
+                                     AND e.category='stream'
+                                     AND e.event_type='stream.end')
+                           FROM runs r JOIN jobs j ON j.id=r.job_id
+                           WHERE r.run_id=:run_id"""
+                    ),
+                    {"run_id": admitted.run.run_id},
+                )
+            ).one()
+        assert tuple(states) == ("success", "succeeded", 1)
+    finally:
+        await seed.engine.dispose()
+
+
+async def _wait_for_postgres_advisory_wait(factory) -> None:
+    for _ in range(200):
+        async with factory() as session:
+            waiting = await session.scalar(
+                text(
+                    """SELECT EXISTS (
+                        SELECT 1 FROM pg_stat_activity
+                        WHERE datname=current_database()
+                          AND pid<>pg_backend_pid()
+                          AND wait_event_type='Lock'
+                          AND wait_event='advisory'
+                    )"""
+                )
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("stream append did not wait on the thread advisory lock")
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_stream_append_revalidates_lease_after_waiting_for_thread_lock(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    publish_task = None
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-stream-lease-race-{uuid.uuid4()}",
+        )
+        async with seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).begin_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=admitted.run.run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+            )
+        boundary = PrivateRunExecutionBoundary(
+            seed.factory,
+            context=seed.owner_a,
+            claim=claim,
+        )
+        bridge = LeaseAuthorizedStreamBridge(
+            PostgresStreamBridge(seed.factory),
+            boundary,
+            scope=seed.owner_a.resource_scope,
+            thread_id=admitted.run.thread_id,
+            terminal_status=lambda: "success",
+        )
+
+        async with seed.factory() as blocker, blocker.begin():
+            await blocker.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(CAST(:thread_id AS text))::bigint)"),
+                {"thread_id": admitted.run.thread_id},
+            )
+            publish_task = asyncio.create_task(
+                bridge.publish_end(admitted.run.run_id),
+            )
+            await _wait_for_postgres_advisory_wait(seed.factory)
+            async with seed.factory() as session, session.begin():
+                await session.execute(
+                    text("UPDATE jobs SET lease_token_hash=:successor WHERE id=:job_id"),
+                    {
+                        "successor": "d" * 64,
+                        "job_id": claim.job_id,
+                    },
+                )
+
+        with pytest.raises(AuthorizationRevoked):
+            await publish_task
+        frames = await PostgresStreamBridge(seed.factory).read_after(
+            seed.owner_a.resource_scope,
+            admitted.run.thread_id,
+            cursor=0,
+            limit=10,
+            run_id=admitted.run.run_id,
+        )
+        assert frames == ()
+        assert boundary.lease_lost is True
+    finally:
+        if publish_task is not None and not publish_task.done():
+            publish_task.cancel()
+            await asyncio.gather(publish_task, return_exceptions=True)
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_cancel_requested_before_terminal_is_persisted_as_interrupted(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-terminal-cancel-write-{uuid.uuid4()}",
+        )
+        async with seed.factory() as session, session.begin():
+            runs = PrivateRunRepository(session)
+            await runs.begin_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=admitted.run.run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+            )
+            assert (
+                await runs.request_cancel(
+                    scope=seed.owner_a.resource_scope,
+                    thread_id=admitted.run.thread_id,
+                    run_id=admitted.run.run_id,
+                    job_id=claim.job_id,
+                    reason="user_requested",
+                )
+                == "requested"
+            )
+        bridge = PostgresStreamBridge(seed.factory)
+        await LeaseAuthorizedStreamBridge(
+            bridge,
+            PrivateRunExecutionBoundary(
+                seed.factory,
+                context=seed.owner_a,
+                claim=claim,
+            ),
+            scope=seed.owner_a.resource_scope,
+            thread_id=admitted.run.thread_id,
+            terminal_status=lambda: "success",
+        ).publish_end(admitted.run.run_id)
+        terminal = (
+            await bridge.read_after(
+                seed.owner_a.resource_scope,
+                admitted.run.thread_id,
+                cursor=0,
+                limit=10,
+                run_id=admitted.run.run_id,
+            )
+        )[-1]
+        assert terminal.terminal is True
+        assert terminal.data == {"status": "interrupted"}
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_cancel_requested_after_success_terminal_wins_during_takeover(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    executor_calls = 0
+
+    class Executor:
+        async def execute(self, _execution, _authority):
+            nonlocal executor_calls
+            executor_calls += 1
+            return AgentExecutionResult.succeeded()
+
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-terminal-cancel-takeover-{uuid.uuid4()}",
+        )
+        async with seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).begin_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=admitted.run.run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+            )
+        await LeaseAuthorizedStreamBridge(
+            PostgresStreamBridge(seed.factory),
+            PrivateRunExecutionBoundary(
+                seed.factory,
+                context=seed.owner_a,
+                claim=claim,
+            ),
+            scope=seed.owner_a.resource_scope,
+            thread_id=admitted.run.thread_id,
+            terminal_status=lambda: "success",
+        ).publish_end(admitted.run.run_id)
+        async with seed.factory() as session, session.begin():
+            assert (
+                await PrivateRunRepository(session).request_cancel(
+                    scope=seed.owner_a.resource_scope,
+                    thread_id=admitted.run.thread_id,
+                    run_id=admitted.run.run_id,
+                    job_id=claim.job_id,
+                    reason="user_requested",
+                )
+                == "requested"
+            )
+
+        settlement = await PrivateRunJobHandler(
+            seed.factory,
+            executor=Executor(),
+        )(
+            claim,
+            JobLeaseAuthority(seed.factory, claim, lease_seconds=90),
+        )
+        await settlement.commit()
+
+        assert executor_calls == 0
+        assert settlement.outcome.status == "cancelled"
         async with seed.factory() as session:
             states = (
                 await session.execute(

@@ -130,3 +130,13 @@ class RunEventStore(abc.ABC):
         scope: PrivateResourceScope | None = None,
     ) -> int:
         """Delete all events for a specific run. Return the number of deleted events."""
+
+    async def append_stream_frame(self, *args, **kwargs):
+        """Append one durable SSE frame inside a caller-owned transaction."""
+
+        raise NotImplementedError("durable stream frames require a database event store")
+
+    async def list_stream_frames(self, *args, **kwargs):
+        """Read scoped durable SSE frames after a thread cursor."""
+
+        raise NotImplementedError("durable stream frames require a database event store")

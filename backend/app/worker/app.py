@@ -23,9 +23,10 @@ from app.worker.service import JobHandler, WorkerService
 from deerflow.config import get_app_config
 from deerflow.persistence import close_engine, get_session_factory, init_engine
 from deerflow.persistence.jobs.sql import JobRepository
-from deerflow.runtime import make_store, make_stream_bridge
+from deerflow.runtime import make_store
 from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 from deerflow.runtime.events.store.db import DbRunEventStore
+from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
 
 WORKER_VERSION = "m6"
 
@@ -70,9 +71,7 @@ async def run_worker(
         )
         active_handlers = handlers
         if active_handlers is None:
-            bridge = await stack.enter_async_context(
-                make_stream_bridge(config),
-            )
+            bridge = PostgresStreamBridge(session_factory)
             raw_checkpointer = await stack.enter_async_context(
                 make_checkpointer(config),
             )

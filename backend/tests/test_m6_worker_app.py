@@ -76,6 +76,11 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         def __init__(self, factory, **kwargs) -> None:
             captured["executor"] = (factory, kwargs)
 
+    class DurableBridge:
+        def __init__(self, factory) -> None:
+            assert factory is session_factory
+            captured["durable_bridge"] = self
+
     class Handler:
         def __init__(self, factory, **kwargs) -> None:
             captured["handler"] = (factory, kwargs)
@@ -133,6 +138,12 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
     )
     monkeypatch.setattr(worker_app, "WorkerRegistry", Registry)
     monkeypatch.setattr(worker_app, "RunAgentPrivateExecutor", Executor)
+    monkeypatch.setattr(
+        worker_app,
+        "PostgresStreamBridge",
+        DurableBridge,
+        raising=False,
+    )
     monkeypatch.setattr(worker_app, "PrivateRunJobHandler", Handler)
     monkeypatch.setattr(worker_app, "PrivateRunJobTerminalPort", TerminalPort)
     monkeypatch.setattr(worker_app, "WorkerService", Service)
@@ -148,11 +159,6 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
             return JobOwnerRef(key_id="test", hmac_hex="a" * 64)
 
     monkeypatch.setattr(worker_app, "AuditHmacKeyring", Keyring)
-    monkeypatch.setattr(
-        worker_app,
-        "make_stream_bridge",
-        lambda _config: _resource("bridge"),
-    )
     monkeypatch.setattr(
         worker_app,
         "make_checkpointer",
@@ -189,4 +195,5 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
     assert captured["automation_reconciled"] == 2
     assert captured["terminal_port"].pending is False
     assert captured["audit_keyring"] is True
+    assert captured["executor"][1]["bridge"] is captured["durable_bridge"]
     assert captured["closed"] is True

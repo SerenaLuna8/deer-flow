@@ -6,6 +6,7 @@ at ``max_trace_content`` bytes to avoid bloating the database.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
@@ -15,14 +16,30 @@ from typing import Any
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.events.models import (
+    StoredStreamFrame,
+    StreamClosed,
+    StreamCursorOutOfRange,
+    StreamFrame,
+    StreamLeaseProof,
+    StreamScopeNotFound,
+    StreamWriteAuthorityRequired,
+    StreamWriteAuthorizationRevoked,
+    StreamWriteCancelled,
+    StreamWriteLeaseLost,
+)
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
+_EXECUTABLE_ROLES = frozenset({"admin", "editor", "runner"})
 
 
 class DbRunEventStore(RunEventStore):
@@ -71,6 +88,124 @@ class DbRunEventStore(RunEventStore):
             raise ValueError("scoped parent run not found")
         return parent.project_id, parent.owner_user_id
 
+    @classmethod
+    async def _require_stream_parent_run(
+        cls,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+    ) -> tuple[uuid.UUID, str, uuid.UUID | None]:
+        project_id, owner_user_id = cls._coordinates(scope)
+        parent = (
+            await session.execute(
+                select(
+                    RunRow.project_id,
+                    RunRow.owner_user_id,
+                    RunRow.job_id,
+                ).where(
+                    RunRow.project_id == project_id,
+                    RunRow.owner_user_id == owner_user_id,
+                    RunRow.thread_id == thread_id,
+                    RunRow.run_id == run_id,
+                )
+            )
+        ).one_or_none()
+        if parent is None:
+            raise ValueError("scoped parent run not found")
+        return parent.project_id, parent.owner_user_id, parent.job_id
+
+    @staticmethod
+    def _reject_reserved_stream_write(*, event_type: str, category: str) -> None:
+        if category == "stream" or event_type == "stream.end":
+            raise ValueError(
+                "durable stream events are reserved for append_stream_frame",
+            )
+
+    @staticmethod
+    async def _authorize_stream_lease(
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        run_id: str,
+        job_id: uuid.UUID,
+        lease: StreamLeaseProof,
+    ) -> bool:
+        if type(lease) is not StreamLeaseProof or lease.job_id != job_id:
+            raise StreamWriteLeaseLost(
+                "stream lease capability does not match the Run job",
+            )
+        project = (await session.execute(select(ProjectRow).where(ProjectRow.id == project_id).with_for_update(of=ProjectRow))).scalar_one_or_none()
+        membership = (
+            await session.execute(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == project_id,
+                    ProjectMembershipRow.user_id == owner_user_id,
+                )
+                .with_for_update(of=ProjectMembershipRow)
+            )
+        ).scalar_one_or_none()
+        if project is None or project.status != "active" or project.is_suspended or membership is None or membership.status != "active" or membership.role not in _EXECUTABLE_ROLES:
+            raise StreamWriteAuthorizationRevoked(
+                "stream execution governance is no longer active",
+            )
+
+        job = (
+            await session.execute(
+                select(JobRow)
+                .where(
+                    JobRow.id == lease.job_id,
+                    JobRow.job_type.in_(("private_run", "automation_run")),
+                    JobRow.project_id == project_id,
+                    JobRow.owner_user_id == owner_user_id,
+                    JobRow.run_id == run_id,
+                )
+                .with_for_update(of=JobRow)
+            )
+        ).scalar_one_or_none()
+        run = (
+            await session.execute(
+                select(RunRow)
+                .where(
+                    RunRow.project_id == project_id,
+                    RunRow.owner_user_id == owner_user_id,
+                    RunRow.run_id == run_id,
+                    RunRow.job_id == lease.job_id,
+                )
+                .with_for_update(of=RunRow)
+            )
+        ).scalar_one_or_none()
+        checked_at = datetime.now(UTC)
+        token_hash = hashlib.sha256(
+            lease.lease_token.encode("utf-8"),
+        ).hexdigest()
+        if (
+            job is None
+            or run is None
+            or job.status != "running"
+            or job.lease_token_hash != token_hash
+            or job.lease_expires_at is None
+            or job.lease_expires_at <= checked_at
+            or run.status != "running"
+            or run.execution_lease_token_hash != token_hash
+            or run.execution_lease_expires_at is None
+            or run.execution_lease_expires_at <= checked_at
+        ):
+            raise StreamWriteLeaseLost(
+                "stream execution lease is no longer active",
+            )
+        return any(
+            value is not None
+            for value in (
+                job.cancel_requested_at,
+                run.cancel_requested_at,
+                run.authorization_cancel_requested_at,
+            )
+        )
+
     @staticmethod
     def _row_to_dict(row: RunEventRow) -> dict:
         d = row.to_dict()
@@ -116,6 +251,184 @@ class DbRunEventStore(RunEventStore):
             metadata["content_is_dict"] = True
         return db_content, metadata
 
+    @classmethod
+    def _stream_row(
+        cls,
+        row: RunEventRow,
+        *,
+        created: bool,
+    ) -> StoredStreamFrame:
+        record = cls._row_to_dict(row)
+        terminal = record["event_type"] == "stream.end"
+        return StoredStreamFrame(
+            id=str(record["seq"]),
+            thread_id=record["thread_id"],
+            run_id=record["run_id"],
+            event="end" if terminal else record["event_type"],
+            data=record["content"],
+            terminal=terminal,
+            created=created,
+        )
+
+    async def append_stream_frame(
+        self,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        frame: StreamFrame,
+        lease: StreamLeaseProof | None = None,
+    ) -> StoredStreamFrame:
+        """Append under the caller's transaction and thread advisory lock."""
+
+        if type(frame) is not StreamFrame:
+            raise TypeError("StreamFrame is required")
+        max_seq = await self._max_seq_for_thread(session, thread_id, scope)
+        try:
+            project_id, owner_user_id, job_id = await self._require_stream_parent_run(
+                session,
+                scope=scope,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
+        except ValueError:
+            raise StreamScopeNotFound("scoped stream Run was not found") from None
+        terminal = (
+            await session.execute(
+                select(RunEventRow).where(
+                    RunEventRow.project_id == project_id,
+                    RunEventRow.owner_user_id == owner_user_id,
+                    RunEventRow.thread_id == thread_id,
+                    RunEventRow.run_id == run_id,
+                    RunEventRow.category == "stream",
+                    RunEventRow.event_type == "stream.end",
+                )
+            )
+        ).scalar_one_or_none()
+        if terminal is not None:
+            if frame.terminal:
+                return self._stream_row(terminal, created=False)
+            raise StreamClosed("run stream is already terminal")
+
+        if job_id is not None and lease is None:
+            raise StreamWriteAuthorityRequired(
+                "job-owned stream append requires live execution authority",
+            )
+        if job_id is None and lease is not None:
+            raise StreamWriteAuthorityRequired(
+                "jobless stream append cannot accept a job lease",
+            )
+        cancel_requested = (
+            await self._authorize_stream_lease(
+                session,
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                run_id=run_id,
+                job_id=job_id,
+                lease=lease,
+            )
+            if job_id is not None and lease is not None
+            else False
+        )
+        if cancel_requested:
+            if not frame.terminal:
+                raise StreamWriteCancelled(
+                    "cancelled execution cannot append a data frame",
+                )
+            frame = StreamFrame.end(status="interrupted")
+
+        db_content, metadata = self._content_to_db(
+            frame.data,
+            {"stream_terminal": frame.terminal},
+        )
+        row = RunEventRow(
+            thread_id=thread_id,
+            run_id=run_id,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            event_type="stream.end" if frame.terminal else frame.event,
+            category="stream",
+            content=db_content,
+            event_metadata=metadata,
+            seq=(max_seq or 0) + 1,
+            created_at=datetime.now(UTC),
+        )
+        session.add(row)
+        await session.flush()
+        return self._stream_row(row, created=True)
+
+    async def list_stream_frames(
+        self,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        cursor: int,
+        limit: int,
+        run_id: str | None = None,
+    ) -> tuple[StoredStreamFrame, ...]:
+        if type(cursor) is not int or cursor < 0:
+            raise ValueError("stream cursor must be a non-negative integer")
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("stream limit must be between 1 and 1000")
+        project_id, owner_user_id = self._coordinates(scope)
+        thread_exists = await session.scalar(
+            select(ThreadMetaRow.thread_id).where(
+                ThreadMetaRow.project_id == project_id,
+                ThreadMetaRow.owner_user_id == owner_user_id,
+                ThreadMetaRow.thread_id == thread_id,
+            )
+        )
+        if thread_exists is None:
+            raise StreamScopeNotFound("scoped stream thread was not found")
+
+        max_seq = await session.scalar(
+            select(func.max(RunEventRow.seq)).where(
+                RunEventRow.project_id == project_id,
+                RunEventRow.owner_user_id == owner_user_id,
+                RunEventRow.thread_id == thread_id,
+            )
+        )
+        if cursor > (max_seq or 0):
+            raise StreamCursorOutOfRange("stream cursor is ahead of the event log")
+        statement = select(RunEventRow).where(
+            RunEventRow.project_id == project_id,
+            RunEventRow.owner_user_id == owner_user_id,
+            RunEventRow.thread_id == thread_id,
+            RunEventRow.category == "stream",
+            RunEventRow.seq > cursor,
+        )
+        if run_id is not None:
+            statement = statement.where(RunEventRow.run_id == run_id)
+        rows = (await session.execute(statement.order_by(RunEventRow.seq.asc()).limit(limit))).scalars()
+        return tuple(self._stream_row(row, created=False) for row in rows)
+
+    async def get_stream_terminal(
+        self,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+    ) -> StoredStreamFrame | None:
+        project_id, owner_user_id = self._coordinates(scope)
+        row = (
+            await session.execute(
+                select(RunEventRow).where(
+                    RunEventRow.project_id == project_id,
+                    RunEventRow.owner_user_id == owner_user_id,
+                    RunEventRow.thread_id == thread_id,
+                    RunEventRow.run_id == run_id,
+                    RunEventRow.category == "stream",
+                    RunEventRow.event_type == "stream.end",
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return self._stream_row(row, created=False)
+
     @staticmethod
     async def _max_seq_for_thread(
         session: AsyncSession,
@@ -153,6 +466,10 @@ class DbRunEventStore(RunEventStore):
         batch.  Currently the only caller is ``worker.run_agent`` for
         the initial ``human_message`` event (once per run).
         """
+        self._reject_reserved_stream_write(
+            event_type=event_type,
+            category=category,
+        )
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
         if scope is None:
@@ -185,6 +502,11 @@ class DbRunEventStore(RunEventStore):
     async def put_batch(self, events, *, scope=None):
         if not events:
             return []
+        for event in events:
+            self._reject_reserved_stream_write(
+                event_type=event["event_type"],
+                category=event.get("category", "trace"),
+            )
         thread_ids = {e["thread_id"] for e in events}
         if len(thread_ids) > 1:
             raise ValueError(f"put_batch requires all events to belong to the same thread; got {thread_ids!r}")

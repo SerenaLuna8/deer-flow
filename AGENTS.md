@@ -90,7 +90,8 @@ legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `sta
 project 与 owner 为 authority，Viewer 只读自己的定义与历史；自动和手动触发都先持久化唯一
 occurrence 再进入 M4 private run admission，已 admitted 的 run 在 crash recovery 中只协调终态、
 绝不自动重放。M6 当前已实现通用 durable job、独立 Worker、Worker-only private Run、Automation
-原子 admission 和独立 Scheduler；持久化 SSE、配额、完整审计和通用备份恢复仍待后续 M6 task。
+原子 admission、独立 Scheduler，以及 PostgreSQL durable stream writer/reader 与 terminal invariant；Gateway
+SSE reconnect、前端 cursor/dedupe、配额、完整审计和通用备份恢复仍待后续 M6 task。
 里程碑进度仍为 5/8（62.5%），因为 M6 尚未整体关闭；M6–M8
 尚未交付，因此当前仍不能
 作为完整多用户 SaaS 发布。

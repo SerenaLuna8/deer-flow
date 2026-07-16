@@ -1,0 +1,136 @@
+"""Typed durable stream frames stored in the unified Run event log."""
+
+from __future__ import annotations
+
+import re
+import uuid
+from dataclasses import dataclass, field
+from typing import Any
+
+_STREAM_EVENT = re.compile(r"[a-z][a-z0-9_.-]{0,31}")
+_POSITIVE_ASCII_DECIMAL = re.compile(r"[1-9][0-9]*")
+_TERMINAL_STATUSES = frozenset(
+    {
+        "cancelled",
+        "completed",
+        "error",
+        "failed",
+        "interrupted",
+        "success",
+        "timeout",
+    }
+)
+
+
+class StreamScopeNotFound(LookupError):
+    """The requested thread is absent from the supplied private scope."""
+
+
+class StreamCursorOutOfRange(ValueError):
+    """The supplied cursor is ahead of the scoped thread event log."""
+
+
+class StreamClosed(RuntimeError):
+    """A terminal frame already closes this Run stream."""
+
+
+class StreamScopeRequired(PermissionError):
+    """A private durable stream operation omitted its explicit scope."""
+
+
+class StreamWriteAuthorityRequired(PermissionError):
+    """A job-owned Run stream append omitted its live lease authority."""
+
+
+class StreamWriteAuthorizationRevoked(StreamWriteAuthorityRequired):
+    """Current project governance no longer permits stream mutation."""
+
+
+class StreamWriteLeaseLost(StreamWriteAuthorityRequired):
+    """The supplied stream lease capability is not current."""
+
+
+class StreamWriteCancelled(StreamWriteAuthorityRequired):
+    """A cancellation marker forbids another non-terminal frame."""
+
+
+@dataclass(frozen=True, slots=True)
+class StreamLeaseProof:
+    """Ephemeral raw-token capability for a job-owned stream append."""
+
+    job_id: uuid.UUID
+    lease_token: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        try:
+            normalized_job_id = uuid.UUID(str(self.job_id))
+        except (AttributeError, TypeError, ValueError):
+            raise TypeError("stream lease proof requires a UUID job ID") from None
+        if not isinstance(self.lease_token, str) or not 1 <= len(self.lease_token) <= 512:
+            raise ValueError("stream lease proof token is invalid")
+        object.__setattr__(self, "job_id", normalized_job_id)
+
+
+@dataclass(frozen=True, slots=True)
+class StreamFrame:
+    """One validated SSE frame before durable sequence assignment."""
+
+    event: str
+    data: Any
+    category: str = "stream"
+    terminal: bool = False
+
+    def __post_init__(self) -> None:
+        if self.category != "stream":
+            raise ValueError("stream frame category must be 'stream'")
+        if _STREAM_EVENT.fullmatch(self.event) is None:
+            raise ValueError("stream frame event is invalid")
+        if self.event in {"end", "stream.end"} and not self.terminal:
+            raise ValueError("stream end events are reserved for terminal frames")
+        if self.terminal and self.event != "end":
+            raise ValueError("terminal stream frame event must be 'end'")
+
+    @classmethod
+    def end(cls, *, status: str) -> StreamFrame:
+        if status not in _TERMINAL_STATUSES:
+            raise ValueError("terminal stream status is invalid")
+        return cls(event="end", data={"status": status}, terminal=True)
+
+
+@dataclass(frozen=True, slots=True)
+class StoredStreamFrame:
+    """A PostgreSQL-backed frame with a thread-monotonic decimal ID."""
+
+    id: str
+    thread_id: str
+    run_id: str
+    event: str
+    data: Any
+    category: str = "stream"
+    terminal: bool = False
+    created: bool = True
+
+    def __post_init__(self) -> None:
+        if _POSITIVE_ASCII_DECIMAL.fullmatch(self.id) is None:
+            raise ValueError("stored stream frame id must be a positive decimal")
+        StreamFrame(
+            event=self.event,
+            data=self.data,
+            category=self.category,
+            terminal=self.terminal,
+        )
+
+
+__all__ = [
+    "StoredStreamFrame",
+    "StreamClosed",
+    "StreamCursorOutOfRange",
+    "StreamFrame",
+    "StreamLeaseProof",
+    "StreamScopeRequired",
+    "StreamScopeNotFound",
+    "StreamWriteAuthorizationRevoked",
+    "StreamWriteAuthorityRequired",
+    "StreamWriteCancelled",
+    "StreamWriteLeaseLost",
+]

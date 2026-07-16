@@ -7,7 +7,7 @@ import copy
 import logging
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Literal, Protocol
@@ -68,6 +68,15 @@ from deerflow.runtime import (
     RunStatus,
     run_agent,
 )
+from deerflow.runtime.events.models import (
+    StoredStreamFrame,
+    StreamFrame,
+    StreamLeaseProof,
+    StreamWriteAuthorizationRevoked,
+    StreamWriteCancelled,
+    StreamWriteLeaseLost,
+)
+from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.user_context import (
     reset_current_user,
@@ -271,19 +280,69 @@ class PrivateRunJobTerminalPort:
 class LeaseAuthorizedStreamBridge:
     """Guard every Worker-side stream mutation with current Run authority."""
 
-    def __init__(self, bridge: Any, boundary: PrivateRunExecutionBoundary) -> None:
+    def __init__(
+        self,
+        bridge: Any,
+        boundary: PrivateRunExecutionBoundary,
+        *,
+        scope: PrivateResourceScope | None = None,
+        thread_id: str | None = None,
+        terminal_status: Callable[[], str] | None = None,
+    ) -> None:
         self._bridge = bridge
         self._boundary = boundary
+        self._scope = scope
+        self._thread_id = thread_id
+        self._terminal_status = terminal_status
 
     @property
     def supports_cross_process(self) -> bool:
         return bool(getattr(self._bridge, "supports_cross_process", False))
 
     async def publish(self, run_id: str, event: str, data: Any) -> None:
+        publish_frame = getattr(self._bridge, "publish_frame", None)
+        if callable(publish_frame) and self._scope is not None and self._thread_id is not None:
+            try:
+                await publish_frame(
+                    self._scope,
+                    self._thread_id,
+                    run_id,
+                    StreamFrame(event=event, data=data),
+                    lease=self._boundary.stream_lease_proof(),
+                )
+            except StreamWriteAuthorizationRevoked:
+                self._boundary.record_stream_authorization_revoked()
+                raise AuthorizationRevoked from None
+            except StreamWriteLeaseLost:
+                self._boundary.record_stream_lease_lost()
+                raise AuthorizationRevoked from None
+            except StreamWriteCancelled:
+                self._boundary.request_local_cancel()
+                raise AuthorizationRevoked from None
+            return
         await self._boundary.before_stream_publish()
         await self._bridge.publish(run_id, event, data)
 
     async def publish_end(self, run_id: str) -> None:
+        publish_terminal = getattr(self._bridge, "publish_terminal", None)
+        if callable(publish_terminal) and self._scope is not None and self._thread_id is not None:
+            try:
+                stored = await publish_terminal(
+                    self._scope,
+                    self._thread_id,
+                    run_id,
+                    status=(self._terminal_status() if self._terminal_status is not None else "completed"),
+                    lease=self._boundary.stream_lease_proof(),
+                )
+            except StreamWriteAuthorizationRevoked:
+                self._boundary.record_stream_authorization_revoked()
+                raise AuthorizationRevoked from None
+            except StreamWriteLeaseLost:
+                self._boundary.record_stream_lease_lost()
+                raise AuthorizationRevoked from None
+            if isinstance(stored, StoredStreamFrame) and isinstance(stored.data, Mapping) and stored.data.get("status") in {"cancelled", "interrupted"}:
+                self._boundary.request_local_cancel()
+            return
         await self._boundary.before_stream_terminal()
         await self._bridge.publish_end(run_id)
 
@@ -352,6 +411,22 @@ class PrivateRunExecutionBoundary:
 
     def request_local_cancel(self) -> None:
         self._cancel_requested = True
+        if self._abort_event is not None:
+            self._abort_event.set()
+
+    def stream_lease_proof(self) -> StreamLeaseProof:
+        return StreamLeaseProof(
+            job_id=self._claim.job_id,
+            lease_token=self._claim.lease_token,
+        )
+
+    def record_stream_lease_lost(self) -> None:
+        self._lease_lost = True
+        if self._abort_event is not None:
+            self._abort_event.set()
+
+    def record_stream_authorization_revoked(self) -> None:
+        self._authorization_revoked = True
         if self._abort_event is not None:
             self._abort_event.set()
 
@@ -681,7 +756,13 @@ class RunAgentPrivateExecutor:
             )
             try:
                 await self._runner(
-                    LeaseAuthorizedStreamBridge(self._bridge, boundary),
+                    LeaseAuthorizedStreamBridge(
+                        self._bridge,
+                        boundary,
+                        scope=execution.context.resource_scope,
+                        thread_id=execution.run.thread_id,
+                        terminal_status=lambda: str(record.status),
+                    ),
                     run_manager,
                     record,
                     ctx=run_context,
@@ -769,6 +850,7 @@ class PrivateRunJobHandler:
         self._job_repository_builder = job_repository_builder
         self._project_checkpointer = project_checkpointer
         self._snapshots = RunSnapshotRepository(session_factory)
+        self._events = DbRunEventStore(session_factory)
 
     def _runs(self, session: AsyncSession) -> PrivateRunRepository:
         return PrivateRunRepository(
@@ -789,7 +871,11 @@ class PrivateRunJobHandler:
     async def _begin(
         self,
         claim: JobClaim,
-    ) -> tuple[PrivateRunExecution | None, bool]:
+    ) -> tuple[
+        PrivateRunExecution | None,
+        bool,
+        AgentExecutionResult | None,
+    ]:
         if claim.job_type not in {"private_run", "automation_run"} or claim.run_id is None or claim.scope.owner_user_id is None or (claim.job_type == "automation_run" and claim.occurrence_id is None):
             raise LeaseLost(claim.job_id)
         try:
@@ -814,7 +900,7 @@ class PrivateRunJobHandler:
                     job_id=claim.job_id,
                     lease_token=claim.lease_token,
                 )
-                return None, True
+                return None, True, None
             context = PrivateWorkContext.from_project(project)
             runs = self._runs(session)
             state = await runs.begin_execution(
@@ -823,6 +909,18 @@ class PrivateRunJobHandler:
                 job_id=claim.job_id,
                 lease_token=claim.lease_token,
             )
+            terminal = await self._events.get_stream_terminal(
+                session,
+                scope=context.resource_scope,
+                thread_id=state.run.thread_id,
+                run_id=state.run.run_id,
+            )
+            if terminal is not None:
+                return (
+                    None,
+                    state.cancel_requested,
+                    self._terminal_result(terminal),
+                )
             assets = await self._snapshots.list_assets_in_session(
                 session,
                 context,
@@ -899,7 +997,21 @@ class PrivateRunJobHandler:
                 resume_from_checkpoint=resume_from_checkpoint,
             ),
             state.cancel_requested,
+            None,
         )
+
+    @staticmethod
+    def _terminal_result(
+        terminal: StoredStreamFrame,
+    ) -> AgentExecutionResult:
+        status = terminal.data.get("status") if isinstance(terminal.data, Mapping) else None
+        if status in {"completed", "success"}:
+            return AgentExecutionResult.succeeded()
+        if status in {"cancelled", "interrupted"}:
+            return AgentExecutionResult.cancelled()
+        if status in {"error", "failed", "timeout"}:
+            return AgentExecutionResult.failed("AGENT_EXECUTION_FAILED")
+        return AgentExecutionResult.failed("DURABLE_STREAM_TERMINAL_INVALID")
 
     async def _heartbeat(
         self,
@@ -970,7 +1082,9 @@ class PrivateRunJobHandler:
         authority: JobLeaseAuthority,
     ) -> JobSettlement:
         try:
-            execution, cancel_requested = await self._begin(claim)
+            execution, cancel_requested, recovered_terminal = await self._begin(
+                claim,
+            )
         except LeaseLost:
             raise
         except Exception:
@@ -978,6 +1092,14 @@ class PrivateRunJobHandler:
             # is attached must not fall back to WorkerService's job-only
             # settlement.  Let the durable lease expire for exact-scope retry.
             raise LeaseLost(claim.job_id) from None
+        if recovered_terminal is not None:
+            if cancel_requested or authority.cancel_requested:
+                recovered_terminal = AgentExecutionResult.cancelled()
+            return self._settlement(
+                claim,
+                recovered_terminal,
+                scope=self._claim_scope(claim),
+            )
         if execution is None:
             return self._settlement(
                 claim,
