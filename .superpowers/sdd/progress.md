@@ -22,6 +22,7 @@
 - Task 12: complete (commits `d7ba1b7b..0638dccf`, review clean after one repair wave: 0 Critical/Important/Minor; workbench interactions verified by 903 frontend unit tests and 3 Playwright scenarios).
 - Task 13: complete (commits `c3a37678..fb939173`, review clean after one repair wave: 0 Critical/Important/Minor; navigation, Chat scope, i18n and static/E2E gates verified while feature flag remains disabled).
 - Task 14: complete (commits `49671650..e7143b32`, review clean after one repair wave: 0 Critical/Important/Minor; strict Scheduler config, single-task Gateway lifecycle and blocking-I/O gates verified).
+- Task 15: complete (commits `7e735287..f48800a5`, review clean after three repair waves: 0 Critical/Important/Minor; real PostgreSQL scope/authorization/concurrency/governance/restart/ownership coverage and the exact M1–M5 seven-file CI gate verified with 25 passed, 0 skipped).
 
 ---
 
