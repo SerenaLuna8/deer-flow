@@ -2,6 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 
 import { getAPIClient } from "@/core/api";
 import { getBackendBaseURL } from "@/core/config";
+import { automationRoot } from "@/core/project-automations/query-keys";
 
 import {
   clearProjectReconnectStorage,
@@ -130,13 +131,18 @@ export async function transitionPrivateWorkScope(
   if (sameScope(previous, next)) return false;
   if (!previous) return true;
 
-  const root = privateWorkRoot(previous);
-  await queryClient.cancelQueries({ queryKey: root });
-  queryClient.removeQueries({ queryKey: root });
-  queryClient
-    .getMutationCache()
-    .findAll({ mutationKey: root })
-    .forEach((mutation) => queryClient.getMutationCache().remove(mutation));
+  const roots = [privateWorkRoot(previous), automationRoot(previous)];
+  const cancellations = roots.map((queryKey) =>
+    queryClient.cancelQueries({ queryKey }),
+  );
   registry.dispose(previous);
+  await Promise.all(cancellations);
+  for (const root of roots) {
+    queryClient.removeQueries({ queryKey: root });
+    queryClient
+      .getMutationCache()
+      .findAll({ mutationKey: root })
+      .forEach((mutation) => queryClient.getMutationCache().remove(mutation));
+  }
   return true;
 }

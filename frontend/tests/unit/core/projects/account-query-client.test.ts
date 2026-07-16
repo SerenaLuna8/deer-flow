@@ -15,6 +15,10 @@ describe("account query client", () => {
         ["account", "u1", "project", "p1", "private-work", "threads"],
         ["thread-u1-p1"],
       );
+      client.setQueryData(
+        ["account", "u1", "project", "p1", "automations", "list", 50, 0],
+        ["automation-u1-p1"],
+      );
       let capturedSignal: AbortSignal | undefined;
       const pending = client
         .fetchQuery({
@@ -40,6 +44,18 @@ describe("account query client", () => {
           "p1",
           "private-work",
           "threads",
+        ]),
+      ).toBeUndefined();
+      expect(
+        client.getQueryData([
+          "account",
+          "u1",
+          "project",
+          "p1",
+          "automations",
+          "list",
+          50,
+          0,
         ]),
       ).toBeUndefined();
       await pending;

@@ -7,6 +7,7 @@ import {
   projectReconnectStorage,
   transitionPrivateWorkScope,
 } from "@/core/private-work/scope-registry";
+import { automationRoot } from "@/core/project-automations/query-keys";
 
 const A_P1 = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -27,7 +28,7 @@ function makeSessionStorage() {
 }
 
 describe("project private-work scope registry", () => {
-  test("drops a deferred scoped mutation without recreating its old query", async () => {
+  test("drops a deferred automation mutation without recreating its old query", async () => {
     const registry = createPrivateWorkScopeRegistry();
     const access = registry.acquire(A_P1);
     const queryClient = new QueryClient();
@@ -35,15 +36,20 @@ describe("project private-work scope registry", () => {
     const deferred = new Promise<string>((resolve) => {
       resolveMutation = resolve;
     });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
     let aborted = false;
-    const queryKey = [...privateWorkRoot(A_P1), "memory", "default"];
+    const queryKey = [...automationRoot(A_P1), "list", 50, 0];
     const mutation = queryClient.getMutationCache().build(queryClient, {
-      mutationKey: [...privateWorkRoot(A_P1), "memory", "reload"],
+      mutationKey: [...automationRoot(A_P1), "mutation", "trigger"],
       mutationFn: (_variables: { expectedVersion: number }) =>
         access.runAbortable!(async (signal) => {
           signal.addEventListener("abort", () => {
             aborted = true;
           });
+          markStarted();
           return deferred;
         }),
       onSuccess: (value) => {
@@ -53,6 +59,7 @@ describe("project private-work scope registry", () => {
       },
     });
     const pending = mutation.execute({ expectedVersion: 3 });
+    await started;
     expect(mutation.state.variables).toEqual({ expectedVersion: 3 });
 
     await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
@@ -77,17 +84,21 @@ describe("project private-work scope registry", () => {
       });
     const queryClient = new QueryClient();
     queryClient.setQueryData([...privateWorkRoot(A_P1), "threads"], "old");
+    queryClient.setQueryData([...automationRoot(A_P1), "list", 50, 0], "old");
     rs.spyOn(queryClient, "cancelQueries").mockImplementation(async () => {
       order.push("cancel");
     });
 
     await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
 
-    expect(order).toEqual(["cancel", "dispose"]);
+    expect(order).toEqual(["cancel", "cancel", "dispose"]);
     expect(dispose).toHaveBeenCalledWith(A_P1);
     expect(registry.has(A_P1)).toBe(false);
     expect(
       queryClient.getQueryData([...privateWorkRoot(A_P1), "threads"]),
+    ).toBeUndefined();
+    expect(
+      queryClient.getQueryData([...automationRoot(A_P1), "list", 50, 0]),
     ).toBeUndefined();
   });
 
