@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.automations.errors import (
     AutomationActiveRun,
+    AutomationConflict,
     AutomationError,
     AutomationForbidden,
     AutomationInvalid,
@@ -280,6 +281,8 @@ class ProjectAutomationService:
                     task_id,
                     expected_version,
                 )
+                if task.status != "paused":
+                    raise AutomationConflict(context.request_id)
                 now = self._now(context.request_id)
                 await self._prepare_mutation(
                     session,
@@ -377,6 +380,8 @@ class ProjectAutomationService:
                     task_id,
                     expected_version,
                 )
+                if task.status != "enabled":
+                    raise AutomationConflict(context.request_id)
                 now = self._now(context.request_id)
                 await self._prepare_mutation(
                     session,

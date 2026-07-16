@@ -34,10 +34,10 @@ read or written.
 
 ```text
 cd backend && uv run pytest tests/ -q
-7662 passed, 872 skipped, 10 warnings in 106.77s
+7662 passed, 880 skipped, 10 warnings in 106.19s
 
 cd backend && make test-blocking-io
-41 passed in 11.20s
+41 passed in 11.30s
 
 cd backend && make lint
 All checks passed!
@@ -65,7 +65,7 @@ cd backend && POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/po
 32 passed in 9.54s; 0 skipped
 
 # Task 16 fresh-install plus legacy dry-run/execute/idempotency smokes
-2 passed in 1.30s; 0 skipped
+2 passed in 0.93s; 0 skipped
 ```
 
 The fixed file list was exactly: M1 cutover, project isolation, M2 governance,
@@ -74,7 +74,7 @@ and M5 Automation migration.
 
 ### Operations
 
-A dedicated `deerflow_test_task18_repair_ops` database was created in the same isolated
+A dedicated `deerflow_test_task18_repair2_ops` database was created in the same isolated
 cluster, initialized to `0013_project_automation_finalize`, inspected, and dropped.
 A temporary non-secret minimal `config.yaml` was used only for doctor and removed
 immediately afterward.
@@ -105,8 +105,8 @@ cd frontend && pnpm test
 126 files; 915 passed; 0 failed; 0 skipped
 
 cd frontend && pnpm test:e2e:all
-167 normal Playwright tests passed
-1 independent static-build Playwright test passed
+167 normal Playwright tests passed in 55.7s
+1 independent static-build Playwright test passed in 21.3s
 ```
 
 The unit runner required unsandboxed local-port permission after a sandbox `EPERM`;
@@ -182,3 +182,70 @@ occurrence outcome, while the original private run record retains its diagnostic
 All fresh verification counts in this report are from the post-repair tree. M5 remains a
 release candidate awaiting re-review; this report does not claim M5 complete, 5/8, or
 62.5%.
+
+## Whole-branch second final-review repair wave
+
+The second concentrated whole-branch review reported zero Critical findings and one
+Important finding. Direct service calls did not enforce the designed lifecycle edges
+`enabled -> paused` and `paused -> enabled`: `pause()` and `resume()` reached
+`_prepare_mutation()` from duplicate or terminal source states, cancelling a queued
+occurrence before rewriting the definition.
+
+### Lifecycle transition TDD
+
+The real PostgreSQL regression test covers eight invalid transitions: pause from
+`paused`, `completed`, `failed`, or `cancelled`, and resume from `enabled`, `completed`,
+`failed`, or `cancelled`. Every case snapshots the complete definition and queued
+occurrence records before the call and also verifies that the service clock is never
+read.
+
+```text
+# RED
+8 failed in 2.27s
+All eight calls committed definition writes and cancelled the queued occurrence.
+
+# GREEN
+8 passed in 2.11s
+
+# Complete service file
+46 passed in 10.45s
+
+# Stable public error and router mapping
+15 passed in 0.70s
+```
+
+The minimal production repair imports `AutomationConflict` and checks the locked task's
+source status before taking a clock snapshot, validating the target, cancelling queued
+work, or writing the definition. Invalid transitions now raise the stable
+`AUTOMATION_CONFLICT` error and roll back with byte-for-byte-equivalent repository
+records. Update and delete state handling were not changed.
+
+### Second-wave fresh full-gate evidence
+
+```text
+backend full: 7662 passed, 880 skipped, 10 warnings in 106.19s
+blocking I/O: 41 passed in 11.30s
+lint/format: clean; 1058 files formatted
+exact eight-file PostgreSQL gate: 32 passed in 9.54s; 0 skipped
+fresh/legacy migration smokes: 2 passed in 0.93s; 0 skipped
+doctor: Ready with 6 optional warnings
+check-db: healthy; current/head 0013_project_automation_finalize; Automation ready
+frontend check/format: clean
+frontend unit: 126 files; 915 passed; 0 failed or skipped
+frontend E2E: 167 dynamic passed; 1 static-build passed
+```
+
+The eight new service cases account for the full-suite skip increase from 872 to 880
+when `POSTGRES_TEST_URL` is intentionally absent. The exact PostgreSQL release gate and
+the focused lifecycle run both supplied the isolated URL and had zero skips.
+
+One failed operations setup attempt was also retained as negative evidence. A first
+`make migrate-db` invocation omitted an explicit `DATABASE_URL`; it inherited the local
+`127.0.0.1:5432/deerflow` value and failed closed. The immediately following read-only
+check showed that database still at revision `0007_project_shared_assets` with M5 tables
+absent. No revision, Automation table, or cutover-marker write occurred. The valid rerun
+then set `DATABASE_URL` explicitly to
+`127.0.0.1:55435/deerflow_test_task18_repair2_ops`; doctor and check-db passed there, and
+the temporary config and database were removed.
+
+M5 remains a release candidate awaiting another independent whole-branch review.

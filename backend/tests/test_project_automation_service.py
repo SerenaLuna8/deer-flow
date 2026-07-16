@@ -12,6 +12,7 @@ from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from app.automations.errors import (
     AutomationActiveRun,
+    AutomationConflict,
     AutomationForbidden,
     AutomationInvalid,
     AutomationNotFound,
@@ -732,6 +733,69 @@ async def test_state_mutations_reject_launching_or_running_occurrence(
     persisted = await service.get(seed.owner_context, task.id)
     assert persisted.status == task.status
     assert persisted.version == task.version
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "source_status"),
+    [
+        ("pause", "paused"),
+        ("pause", "completed"),
+        ("pause", "failed"),
+        ("pause", "cancelled"),
+        ("resume", "enabled"),
+        ("resume", "completed"),
+        ("resume", "failed"),
+        ("resume", "cancelled"),
+    ],
+)
+async def test_pause_resume_reject_invalid_source_status_without_any_write(
+    automation_service_seed: AutomationServiceSeed,
+    operation: str,
+    source_status: str,
+) -> None:
+    seed = automation_service_seed
+    service = ProjectAutomationService(seed.factory, seed.clock)
+    task = await seed.create_task(status=source_status)
+    occurrence = await seed.create_occurrence(task, status="queued")
+    async with seed.factory() as session:
+        task_before = await ScheduledTaskRepository(session).get(
+            seed.owner_context.resource_scope,
+            task.id,
+        )
+        occurrence_before = await ScheduledTaskRunRepository(session).get(
+            seed.owner_context.resource_scope,
+            occurrence.id,
+        )
+    assert task_before is not None
+    assert occurrence_before is not None
+    seed.clock.calls = 0
+
+    conflict = None
+    try:
+        if operation == "pause":
+            await service.pause(seed.owner_context, task.id, task.version)
+        else:
+            await service.resume(seed.owner_context, task.id, task.version)
+    except AutomationConflict as error:
+        conflict = error
+
+    async with seed.factory() as session:
+        task_after = await ScheduledTaskRepository(session).get(
+            seed.owner_context.resource_scope,
+            task.id,
+        )
+        occurrence_after = await ScheduledTaskRunRepository(session).get(
+            seed.owner_context.resource_scope,
+            occurrence.id,
+        )
+    assert task_after == task_before
+    assert occurrence_after == occurrence_before
+    assert seed.clock.calls == 0
+    assert conflict is not None
+    assert conflict.code == "AUTOMATION_CONFLICT"
+    assert conflict.request_id == seed.owner_context.request_id
 
 
 @pytest.mark.postgres
