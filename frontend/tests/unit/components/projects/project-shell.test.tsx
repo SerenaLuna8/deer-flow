@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { projectNavigationItems } from "@/components/projects/project-nav";
 import { ProjectShell } from "@/components/projects/project-shell";
+import { I18nProvider } from "@/core/i18n/context";
 import { CAPABILITIES, type Project } from "@/core/projects/types";
 
 const adminProject: Project = {
@@ -28,32 +29,44 @@ const adminProject: Project = {
 
 function renderShell(project: Project) {
   return renderToStaticMarkup(
-    <QueryClientProvider client={new QueryClient()}>
-      <ProjectShell
-        project={project}
-        accountEmail="member@example.com"
-        onLogout={() => undefined}
-      >
-        <p>Project content</p>
-      </ProjectShell>
-    </QueryClientProvider>,
+    <I18nProvider initialLocale="en-US">
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectShell
+          project={project}
+          accountEmail="member@example.com"
+          onLogout={() => undefined}
+        >
+          <p>Project content</p>
+        </ProjectShell>
+      </QueryClientProvider>
+    </I18nProvider>,
   );
 }
 
 describe("project shell navigation", () => {
   test("gates project Memory and Connections with private-work readiness", () => {
-    const readyItems = projectNavigationItems(adminProject, true, true);
+    const readyItems = projectNavigationItems(
+      adminProject,
+      true,
+      true,
+      false,
+      false,
+    );
 
     expect(readyItems.map((item) => item.label)).toEqual(
       expect.arrayContaining(["Chats", "Memory", "Connections"]),
     );
-    expect(projectNavigationItems(adminProject, false, true)).not.toEqual(
+    expect(
+      projectNavigationItems(adminProject, false, true, false, false),
+    ).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ label: "Memory" }),
         expect.objectContaining({ label: "Connections" }),
       ]),
     );
-    expect(projectNavigationItems(adminProject, true, false)).not.toEqual(
+    expect(
+      projectNavigationItems(adminProject, true, false, false, false),
+    ).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ label: "Memory" }),
         expect.objectContaining({ label: "Connections" }),

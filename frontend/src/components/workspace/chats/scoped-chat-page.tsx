@@ -67,6 +67,8 @@ export interface ChatRouteScope {
   canUpload: boolean;
   canDelete: boolean;
   scheduledTasksVisible: boolean;
+  scheduledTasksHref: (threadId: string) => string;
+  scheduledTasksLabel: "automations" | "scheduledTasks";
 }
 
 export type ScopedChatRouteScope = ChatRouteScope & {
@@ -92,6 +94,9 @@ export function workspaceChatRouteScope(
     canUpload: true,
     canDelete: true,
     scheduledTasksVisible: true,
+    scheduledTasksHref: (threadId) =>
+      `/workspace/scheduled-tasks?thread_id=${encodeURIComponent(threadId)}`,
+    scheduledTasksLabel: "scheduledTasks",
     goalVisible: true,
     compactVisible: true,
     branchVisible: true,
@@ -386,7 +391,14 @@ export function ScopedChatPage({
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 {!isNewThread && scope.scheduledTasksVisible && (
-                  <ThreadScheduledTasksLink threadId={threadId} />
+                  <ThreadScheduledTasksLink
+                    href={scope.scheduledTasksHref(threadId)}
+                    label={
+                      scope.scheduledTasksLabel === "automations"
+                        ? t.project.automations
+                        : t.sidebar.scheduledTasks
+                    }
+                  />
                 )}
                 <TokenUsageIndicator
                   threadId={isNewThread ? undefined : threadId}

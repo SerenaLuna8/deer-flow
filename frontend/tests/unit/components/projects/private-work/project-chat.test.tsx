@@ -11,7 +11,11 @@ import {
   projectThreadAvailability,
 } from "@/components/projects/private-work/project-chat-page";
 import { ProjectPrivateWorkCta } from "@/components/projects/project-private-work-cta";
+import { workspaceChatRouteScope } from "@/components/workspace/chats/scoped-chat-page";
+import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
 import { CAPABILITIES, type Project } from "@/core/projects/types";
+
+const THREAD_ID = "33333333-3333-4333-8333-333333333333";
 
 const project: Project = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -43,6 +47,7 @@ describe("project chat route", () => {
     expect(scope.canUpload).toBe(true);
     expect(scope.canDelete).toBe(true);
     expect(scope.scheduledTasksVisible).toBe(false);
+    expect(scope.scheduledTasksLabel).toBe("automations");
     expect(scope.goalVisible).toBe(false);
     expect(scope.compactVisible).toBe(false);
     expect(scope.branchVisible).toBe(false);
@@ -50,6 +55,68 @@ describe("project chat route", () => {
     expect(scope.sidecarVisible).toBe(true);
     expect(scope.artifactsVisible).toBe(true);
     expect(scope.followupSuggestionsEnabled).toBe(false);
+  });
+
+  test("uses only the project Automation route when every Chat entry gate is open", () => {
+    const scope = projectChatRouteScope(project, true, true, false);
+    expect(scope.scheduledTasksVisible).toBe(true);
+    expect(scope.scheduledTasksHref(THREAD_ID)).toBe(
+      `/projects/alpha/automations?thread_id=${THREAD_ID}`,
+    );
+
+    const encodedScope = projectChatRouteScope(
+      { ...project, slug: "alpha/beta" },
+      true,
+      true,
+      false,
+    );
+    const html = renderToStaticMarkup(
+      <ThreadScheduledTasksLink
+        href={encodedScope.scheduledTasksHref(THREAD_ID)}
+        label="Automations"
+      />,
+    );
+    expect(html).toContain(
+      `href="/projects/alpha%2Fbeta/automations?thread_id=${THREAD_ID}"`,
+    );
+    expect(html).not.toContain("/workspace/scheduled-tasks");
+  });
+
+  test("keeps the workspace Chat link on the legacy scheduled-task route", () => {
+    const scope = workspaceChatRouteScope(null as never);
+    expect(scope.scheduledTasksVisible).toBe(true);
+    expect(scope.scheduledTasksLabel).toBe("scheduledTasks");
+    expect(scope.scheduledTasksHref(THREAD_ID)).toBe(
+      `/workspace/scheduled-tasks?thread_id=${THREAD_ID}`,
+    );
+  });
+
+  test("allows a read-only Viewer Chat entry but fails closed for every missing gate", () => {
+    const viewer: Project = {
+      ...project,
+      role: "viewer",
+      capabilities: ["project.read", "private_work.read_own"],
+    };
+    expect(projectChatRouteScope(viewer, true, true, false)).toMatchObject({
+      scheduledTasksVisible: true,
+    });
+    expect(projectChatRouteScope(viewer, false, true, false)).toMatchObject({
+      scheduledTasksVisible: false,
+    });
+    expect(projectChatRouteScope(viewer, true, false, false)).toMatchObject({
+      scheduledTasksVisible: false,
+    });
+    expect(projectChatRouteScope(viewer, true, true, true)).toMatchObject({
+      scheduledTasksVisible: false,
+    });
+    expect(
+      projectChatRouteScope(
+        { ...viewer, capabilities: ["project.read"] },
+        true,
+        true,
+        false,
+      ),
+    ).toMatchObject({ scheduledTasksVisible: false });
   });
 
   test("viewer sees read-only guidance and never gets a create control", () => {
@@ -161,7 +228,9 @@ describe("project chat route", () => {
     expect(shared).toContain("scope.artifactsVisible");
     expect(shared).toContain("scope.sidebarTriggerVisible");
     expect(shared).toContain("scope.followupSuggestionsEnabled");
+    expect(shared).toContain("href={scope.scheduledTasksHref(threadId)}");
     expect(shared).toContain("enabled={scope.sidecarVisible !== false}");
+    expect(projectPage).toContain("useProjectAutomationReadiness");
     expect(projectPage).toContain("sidebarTriggerVisible: false");
     expect(projectPage).toContain("sidecarVisible: canRun");
     expect(projectPage).toContain("artifactsVisible: canRead");

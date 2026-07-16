@@ -305,8 +305,9 @@ describe("ProjectAutomationsPage", () => {
       "utf8",
     );
 
-    expect(route).toContain("useCurrentProject");
+    expect(route).toContain("ProjectAutomationsRouteClient");
     expect(route).not.toMatch(/useProjects|useProjectBySlug|useEnterProject/u);
+    expect(page).toContain("useCurrentProject");
     expect(page).not.toMatch(
       /core\/scheduled-tasks\/hooks|\/api\/scheduled-tasks/u,
     );

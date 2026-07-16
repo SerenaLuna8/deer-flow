@@ -1,8 +1,10 @@
-"use client";
+import { notFound } from "next/navigation";
 
-import { ProjectAutomationsPage } from "@/components/projects/automations/project-automations-page";
-import { useCurrentProject } from "@/components/projects/project-context";
+import { ProjectAutomationsRouteClient } from "@/components/projects/automations/project-automations-page";
+import { PROJECT_AUTOMATION } from "@/core/projects/features";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 export default function ProjectAutomationsRoute() {
-  return <ProjectAutomationsPage project={useCurrentProject()} />;
+  if (!PROJECT_AUTOMATION || isStaticWebsiteOnly()) notFound();
+  return <ProjectAutomationsRouteClient />;
 }

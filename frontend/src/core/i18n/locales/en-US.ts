@@ -236,6 +236,19 @@ export const enUS: Translations = {
     agentsDisabledTooltip: "Feature not enabled",
   },
 
+  project: {
+    automations: "Automations",
+  },
+
+  automation: {
+    create: "Create automation",
+    runNow: "Run now",
+    schedulerDisabled: "Scheduling is disabled",
+    migrationRequired: "Automation migration is required",
+    retry: "Retry",
+    history: "Run history",
+  },
+
   // Scheduled tasks
   scheduledTasks: {
     description: "Run tasks on a schedule and review every result.",

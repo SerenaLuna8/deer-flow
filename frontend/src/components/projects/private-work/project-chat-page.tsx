@@ -9,11 +9,22 @@ import {
   type ScopedChatRouteScope,
 } from "@/components/workspace/chats/scoped-chat-page";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import { useProjectAutomationReadiness } from "@/core/project-automations/readiness";
+import {
+  PROJECT_AUTOMATION,
+  projectAutomationEntryEnabled,
+} from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 export type ProjectChatRouteScope = Omit<ScopedChatRouteScope, "client">;
 
-export function projectChatRouteScope(project: Project): ProjectChatRouteScope {
+export function projectChatRouteScope(
+  project: Project,
+  automationReady = false,
+  automationFeatureEnabled: boolean = PROJECT_AUTOMATION,
+  staticWebsiteOnly = false,
+): ProjectChatRouteScope {
   const base = `/projects/${encodeURIComponent(project.slug)}/chats`;
   const canCreate = project.capabilities.includes("private_work.create");
   const canRun =
@@ -26,7 +37,15 @@ export function projectChatRouteScope(project: Project): ProjectChatRouteScope {
     canRun,
     canUpload: canRun,
     canDelete: canRead,
-    scheduledTasksVisible: false,
+    scheduledTasksVisible: projectAutomationEntryEnabled(
+      automationFeatureEnabled,
+      staticWebsiteOnly,
+      canRead,
+      automationReady ? "ready" : undefined,
+    ),
+    scheduledTasksHref: (threadId) =>
+      `/projects/${encodeURIComponent(project.slug)}/automations?thread_id=${encodeURIComponent(threadId)}`,
+    scheduledTasksLabel: "automations",
     goalVisible: false,
     compactVisible: false,
     branchVisible: false,
@@ -71,9 +90,29 @@ export function ProjectChatNotFound() {
 
 export function ProjectChatPage({ project }: { project: Project }) {
   const privateWork = usePrivateWorkAccess();
+  const staticWebsiteOnly = isStaticWebsiteOnly();
+  const canReadPrivateWork = project.capabilities.includes(
+    "private_work.read_own",
+  );
+  const automationReadiness = useProjectAutomationReadiness(
+    PROJECT_AUTOMATION && canReadPrivateWork && !staticWebsiteOnly,
+  );
+  const automationReady = Boolean(
+    automationReadiness.data?.status === "ready" &&
+    automationReadiness.data.project_private_work_ready &&
+    automationReadiness.data.automation_cutover_ready,
+  );
   const scope = useMemo(
-    () => ({ ...projectChatRouteScope(project), client: privateWork.client }),
-    [privateWork.client, project],
+    () => ({
+      ...projectChatRouteScope(
+        project,
+        automationReady,
+        PROJECT_AUTOMATION,
+        staticWebsiteOnly,
+      ),
+      client: privateWork.client,
+    }),
+    [automationReady, privateWork.client, project, staticWebsiteOnly],
   );
   return (
     <div className="h-[calc(100vh-3.5rem)] min-h-0 md:h-screen">

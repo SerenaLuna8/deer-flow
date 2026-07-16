@@ -174,6 +174,19 @@ export interface Translations {
     channels: string;
   };
 
+  project: {
+    automations: string;
+  };
+
+  automation: {
+    create: string;
+    runNow: string;
+    schedulerDisabled: string;
+    migrationRequired: string;
+    retry: string;
+    history: string;
+  };
+
   // Scheduled tasks
   scheduledTasks: {
     description: string;

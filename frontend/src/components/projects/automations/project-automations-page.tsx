@@ -27,6 +27,7 @@ import type { Capability, Project } from "@/core/projects/types";
 import { useProjectAssets, type ProjectAssetList } from "@/core/shared-assets";
 
 import { executableProjectAgents } from "../private-work/agent-selector-dialog";
+import { useCurrentProject } from "../project-context";
 
 import type { AutomationAgentOption } from "./automation-form";
 import {
@@ -405,4 +406,8 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
       onDismissFeedback={() => setScopedActionFeedback(null)}
     />
   );
+}
+
+export function ProjectAutomationsRouteClient() {
+  return <ProjectAutomationsPage project={useCurrentProject()} />;
 }

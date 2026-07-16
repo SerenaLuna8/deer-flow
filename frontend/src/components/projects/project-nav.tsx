@@ -4,6 +4,7 @@ import {
   ArrowLeftIcon,
   BotIcon,
   BrainCircuitIcon,
+  CalendarClockIcon,
   CableIcon,
   FolderKanbanIcon,
   KeyRoundIcon,
@@ -27,11 +28,17 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   projectPrivateWorkEntryEnabled,
   useProjectPrivateWorkReadiness,
 } from "@/core/private-work/readiness";
-import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
+import { useProjectAutomationReadiness } from "@/core/project-automations/readiness";
+import {
+  PROJECT_AUTOMATION,
+  PROJECT_PRIVATE_WORKSPACE,
+  projectAutomationEntryEnabled,
+} from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { cn } from "@/lib/utils";
@@ -39,6 +46,7 @@ import { cn } from "@/lib/utils";
 type ProjectNavigationItem = {
   href: string;
   icon: typeof FolderKanbanIcon;
+  i18nKey?: "automations";
   label: string;
 };
 
@@ -54,6 +62,9 @@ export function projectNavigationItems(
   project: Project,
   privateWorkReady = false,
   privateWorkFeatureEnabled: boolean = PROJECT_PRIVATE_WORKSPACE,
+  automationReady = false,
+  automationFeatureEnabled: boolean = PROJECT_AUTOMATION,
+  staticWebsiteOnly = false,
 ): ProjectNavigationItem[] {
   const base = `/projects/${encodeURIComponent(project.slug)}`;
   const items: ProjectNavigationItem[] = [
@@ -84,6 +95,21 @@ export function projectNavigationItems(
         label: "Connections",
       },
     );
+  }
+  if (
+    projectAutomationEntryEnabled(
+      automationFeatureEnabled,
+      staticWebsiteOnly,
+      project.capabilities.includes("private_work.read_own"),
+      automationReady ? "ready" : undefined,
+    )
+  ) {
+    items.push({
+      href: `${base}/automations`,
+      icon: CalendarClockIcon,
+      i18nKey: "automations",
+      label: "Automations",
+    });
   }
   if (project.capabilities.includes("shared_assets.read")) {
     items.push(
@@ -137,23 +163,35 @@ function ProjectNavigationLinks({
   project: Project;
   mobile?: boolean;
 }) {
+  const { t } = useI18n();
   const canReadPrivateWork = project.capabilities.includes(
     "private_work.read_own",
   );
+  const staticWebsiteOnly = isStaticWebsiteOnly();
   const readiness = useProjectPrivateWorkReadiness(
-    canReadPrivateWork && !isStaticWebsiteOnly(),
+    canReadPrivateWork && !staticWebsiteOnly,
+  );
+  const automationReadiness = useProjectAutomationReadiness(
+    PROJECT_AUTOMATION && canReadPrivateWork && !staticWebsiteOnly,
   );
   const links = projectNavigationItems(
     project,
     readiness.data?.status === "ready",
-  ).map(({ href, icon: Icon, label }) => {
+    PROJECT_PRIVATE_WORKSPACE,
+    automationReadiness.data?.status === "ready" &&
+      automationReadiness.data.project_private_work_ready &&
+      automationReadiness.data.automation_cutover_ready,
+    PROJECT_AUTOMATION,
+    staticWebsiteOnly,
+  ).map(({ href, icon: Icon, i18nKey, label }) => {
+    const visibleLabel = i18nKey ? t.project[i18nKey] : label;
     const link = (
       <Link
         href={href}
         className="hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:outline-none"
       >
         <Icon aria-hidden className="text-muted-foreground size-4" />
-        {label}
+        {visibleLabel}
       </Link>
     );
     return mobile ? (
@@ -167,7 +205,7 @@ function ProjectNavigationLinks({
         className="hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:outline-none"
       >
         <Icon aria-hidden className="text-muted-foreground size-4" />
-        {label}
+        {visibleLabel}
       </Link>
     );
   });

@@ -227,6 +227,19 @@ export const zhCN: Translations = {
     agentsDisabledTooltip: "功能未启用",
   },
 
+  project: {
+    automations: "自动化",
+  },
+
+  automation: {
+    create: "创建自动化",
+    runNow: "立即运行",
+    schedulerDisabled: "自动调度当前已关闭",
+    migrationRequired: "需要完成自动化迁移",
+    retry: "重试",
+    history: "运行历史",
+  },
+
   // 定时任务
   scheduledTasks: {
     description: "按计划自动运行任务，并查看每次执行结果。",
