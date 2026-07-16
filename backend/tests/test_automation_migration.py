@@ -998,6 +998,123 @@ async def test_execute_locks_legacy_writers_and_finalize_rejects_post_stage_drif
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_public_execute_revalidates_writer_drift_after_finalize_commits(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    staging_committed = asyncio.Event()
+    allow_finalize = asyncio.Event()
+    writer_committed = asyncio.Event()
+    original_execute = migrate_automations._execute_staging
+    original_upgrade = migrate_automations._upgrade_database
+
+    async def pause_after_staging(*args, **kwargs):
+        result = await original_execute(*args, **kwargs)
+        staging_committed.set()
+        await allow_finalize.wait()
+        return result
+
+    async def let_writer_commit_after_finalize(engine, revision: str) -> None:
+        await original_upgrade(engine, revision)
+        if revision == "head":
+            await writer_committed.wait()
+
+    monkeypatch.setattr(migrate_automations, "_execute_staging", pause_after_staging)
+    monkeypatch.setattr(migrate_automations, "_upgrade_database", let_writer_commit_after_finalize)
+
+    blocker_engine = create_async_engine(postgres_database_url)
+    blocker_connection = await blocker_engine.connect()
+    blocker_transaction = await blocker_connection.begin()
+    writer_engine = create_async_engine(postgres_database_url)
+    migration_task = asyncio.create_task(
+        run_automation_migration(
+            postgres_database_url,
+            owner_map=scenario.owner_map,
+            backup_dir=scenario.backup_dir,
+            execute=True,
+        )
+    )
+    writer_task = None
+
+    async def scheduler_writer() -> None:
+        async with writer_engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """SELECT id FROM scheduled_tasks
+                    WHERE id='legacy-fresh' FOR UPDATE"""
+                )
+            )
+            await connection.execute(
+                text(
+                    """UPDATE scheduled_tasks SET status='paused'
+                    WHERE id='legacy-fresh'"""
+                )
+            )
+        writer_committed.set()
+
+    try:
+        await asyncio.wait_for(staging_committed.wait(), timeout=10)
+        await blocker_connection.execute(text("LOCK TABLE automation_cutover_state IN ACCESS EXCLUSIVE MODE"))
+        allow_finalize.set()
+        await _wait_for_table_lock(
+            postgres_database_url,
+            table="scheduled_tasks",
+            mode="AccessExclusiveLock",
+            granted=True,
+        )
+        writer_task = asyncio.create_task(scheduler_writer())
+        await _wait_for_table_lock(
+            postgres_database_url,
+            table="scheduled_tasks",
+            mode="RowShareLock",
+            granted=False,
+        )
+        assert writer_task.done() is False
+
+        await blocker_transaction.commit()
+        await asyncio.wait_for(writer_committed.wait(), timeout=10)
+        with pytest.raises(AutomationMigrationError, match="target digest"):
+            await asyncio.wait_for(migration_task, timeout=10)
+    finally:
+        allow_finalize.set()
+        if blocker_transaction.is_active:
+            await blocker_transaction.rollback()
+        for task in (writer_task, migration_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (writer_task, migration_task) if task is not None),
+            return_exceptions=True,
+        )
+        await blocker_connection.close()
+        await blocker_engine.dispose()
+        await writer_engine.dispose()
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            marker = (
+                await connection.execute(
+                    text(
+                        """SELECT stage,final_schema_probe_complete,cutover_at
+                        FROM automation_cutover_state WHERE id=1"""
+                    )
+                )
+            ).one()
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013_project_automation_finalize"
+            assert await connection.scalar(text("SELECT status FROM scheduled_tasks WHERE id='legacy-fresh'")) == "paused"
+            assert marker.stage == "migration_ready"
+            assert marker.final_schema_probe_complete is True
+            assert marker.cutover_at is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_finalize_first_blocks_scheduler_select_for_update_before_ddl(
     postgres_database_url: str,
     tmp_path: Path,

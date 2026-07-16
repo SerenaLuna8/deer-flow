@@ -205,3 +205,72 @@ order also serialize without a cross-table deadlock.
 
 This repair changes only finalization/recovery lock acquisition, its real concurrency coverage, and
 this report. Task 11 remains excluded.
+
+## Final review repair — unify normal execute with the final marker barrier
+
+The final review found one remaining Important consistency gap. The receipt-only 0013 recovery path
+already acquired the shared fixed-order two-table `ACCESS EXCLUSIVE` barrier and revalidated every
+final receipt before writing the marker, but the ordinary non-empty execute path did not reuse it.
+After `command.upgrade(..., "head")` committed and released 0013's DDL locks, that path opened a new
+transaction, checked only the revision, and called `_mark_cutover_complete()` directly. A writer that
+had been waiting behind 0013 could therefore change a verified target row before the marker write;
+ordinary execute would report a completed cutover while a receipt-only recovery of the same state
+would reject the digest drift.
+
+The minimal repair removes the direct normal-path marker transaction. After recreating the async
+engine following Alembic's synchronous upgrade, ordinary execute now calls
+`_resume_final_cutover(..., complete_marker=True)`, exactly like final-schema recovery. One final
+transaction therefore:
+
+1. acquires `scheduled_tasks, scheduled_task_runs` in the shared fixed `ACCESS EXCLUSIVE` order;
+2. rechecks revision 0013 and the M4 cutover marker;
+3. rechecks the exact migration-ready marker, completed run, owner-map digest, both ledgers, source
+   and target counts, actual target digests, scope relations, and the final schema; and
+4. writes `cutover_complete` last while the same barrier is still held.
+
+Any writer drift now fails closed and leaves the marker incomplete. The repair reuses the existing
+receipt-only implementation and keeps the existing dispose/recreate engine lifecycle; it does not
+add a second validation contract or another engine.
+
+### Strict TDD evidence
+
+The new real PostgreSQL regression starts from revision 0011 and invokes only the public
+`run_automation_migration()` entry point. It pauses after committed staging, holds
+`automation_cutover_state` so revision 0013 retains its granted source-table locks, observes the
+scheduler writer's `RowShareLock` waiting behind 0013, then releases 0013. The writer commits its
+target change before the public runner enters the final marker transaction.
+
+RED against the previous ordinary path was the expected behavioral failure:
+
+```text
+FAILED test_public_execute_revalidates_writer_drift_after_finalize_commits
+Failed: DID NOT RAISE AutomationMigrationError
+```
+
+After the one-path repair, the same test passes. The runner raises the redacted target-digest
+conflict, the writer's legal `status='paused'` change remains committed, revision 0013 remains
+installed, and the singleton remains `migration_ready` with
+`final_schema_probe_complete=true` and `cutover_at=NULL`.
+
+### Final repair verification
+
+All PostgreSQL suites used the explicit isolated server on port 55435 and random
+`deerflow_test_*` databases.
+
+| Gate | Result |
+| --- | ---: |
+| Public finalize-first writer-drift regression | 1 passed |
+| Normal execute, crash recovery, target tamper, both writer orders, fixed lock order | 7 passed |
+| Complete Task 10 migration and M5 schema suites | 35 passed |
+| Task 10 migration/CLI/setup/check-db/doctor suite | 139 passed |
+| Comprehensive Tasks 1–10 Automation, bootstrap/check-db, and real M4 migration gate | 411 passed |
+| Full backend Ruff check | all checks passed |
+| Full backend Ruff format check | 1052 files already formatted |
+| Compileall for backend app/packages/scripts and Task 10 tests | passed |
+| Code diff whitespace check | passed |
+
+Self-review confirmed that the success, drift, recovery, and empty-install branches retain their
+existing report semantics; no private values or database URLs were added to errors or reports; the
+fixed lock order is unchanged; and no `40P01` occurred in either scheduler ordering. This repair is
+limited to Task 10 migration finalization, its regression test, and this appended report. Task 11 and
+`.superpowers/sdd/progress.md` remain untouched.

@@ -1760,15 +1760,15 @@ async def run_automation_migration(
                 noop=False,
             )
 
-        migration_run_id = await _execute_staging(engine, plan=plan)
+        await _execute_staging(engine, plan=plan)
         await _upgrade_database(engine, "head")
         await engine.dispose()
         engine = create_async_engine(database_url)
-        async with engine.begin() as connection:
-            final_revision = await _current_revision(connection)
-            if final_revision != _FINAL_REVISION:
-                raise AutomationMigrationError("automation finalize revision is incomplete")
-            await _mark_cutover_complete(connection, migration_run_id)
+        inventory = await _resume_final_cutover(
+            engine,
+            targets=targets,
+            complete_marker=True,
+        )
         async with engine.connect() as connection:
             complete, empty_install = await _automation_cutover_state(connection)
         if not complete or empty_install:
