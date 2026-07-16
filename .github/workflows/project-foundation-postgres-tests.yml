@@ -105,6 +105,7 @@ jobs:
           tests/integration/test_m4_private_work_postgres.py
           tests/integration/test_m4_private_work_migration_postgres.py
           tests/integration/test_m5_project_automation_postgres.py
+          tests/integration/test_m5_automation_migration_postgres.py
           -q
 
       - name: Run PostgreSQL scripts and project lint gates

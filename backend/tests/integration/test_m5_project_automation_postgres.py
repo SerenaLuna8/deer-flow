@@ -112,6 +112,7 @@ def test_release_workflow_has_exact_m1_to_m5_gate_after_hard_fail() -> None:
         "tests/integration/test_m4_private_work_postgres.py",
         "tests/integration/test_m4_private_work_migration_postgres.py",
         "tests/integration/test_m5_project_automation_postgres.py",
+        "tests/integration/test_m5_automation_migration_postgres.py",
     ]
     pytest_tokens = shlex.split(steps[pytest_index]["run"])
     assert pytest_tokens == ["uv", "run", "pytest", *expected_files, "-q"]
