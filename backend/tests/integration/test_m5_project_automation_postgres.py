@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shlex
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+import yaml
 from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -80,17 +82,39 @@ async def m5_app(m5_seed: M5Seed):
         await app.aclose()
 
 
-def test_release_workflow_runs_m5_after_the_postgres_url_hard_fail() -> None:
+def test_release_workflow_has_exact_m1_to_m5_gate_after_hard_fail() -> None:
     workflow_path = Path(__file__).resolve().parents[3] / ".github/workflows/project-foundation-postgres-tests.yml"
-    workflow = workflow_path.read_text(encoding="utf-8")
+    workflow = yaml.load(
+        workflow_path.read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
 
-    assert "name: M1, M2, M3, M4 and M5 PostgreSQL Gates" in workflow
-    assert "name: M1, M2, M3, M4 and M5 PostgreSQL gates" in workflow
-    assert "tests/integration/test_m5_project_automation_postgres.py" in workflow
-    hard_fail = workflow.index("name: Require PostgreSQL test administrator URL")
-    pytest_step = workflow.index("name: Run M1, M2, M3, M4 and M5 PostgreSQL isolation gates")
-    assert hard_fail < pytest_step
-    assert 'if [ -z "${POSTGRES_TEST_URL:-}" ]; then' in workflow
+    # BaseLoader intentionally keeps YAML 1.1 words such as `on` as strings.
+    # SafeLoader would silently turn this workflow key into boolean True.
+    assert "on" in workflow
+    assert workflow["name"] == "M1, M2, M3, M4 and M5 PostgreSQL Gates"
+    job = workflow["jobs"]["postgres-release-gates"]
+    assert job["name"] == "M1, M2, M3, M4 and M5 PostgreSQL gates"
+    steps = job["steps"]
+    step_names = [step.get("name") for step in steps]
+    assert step_names.count("Require PostgreSQL test administrator URL") == 1
+    assert step_names.count("Run M1, M2, M3, M4 and M5 PostgreSQL isolation gates") == 1
+    hard_fail_index = next(index for index, step in enumerate(steps) if step.get("name") == "Require PostgreSQL test administrator URL")
+    pytest_index = next(index for index, step in enumerate(steps) if step.get("name") == "Run M1, M2, M3, M4 and M5 PostgreSQL isolation gates")
+    assert hard_fail_index < pytest_index
+    assert 'if [ -z "${POSTGRES_TEST_URL:-}" ]; then' in steps[hard_fail_index]["run"]
+
+    expected_files = [
+        "tests/integration/test_m1_postgres_cutover.py",
+        "tests/integration/test_project_isolation_postgres.py",
+        "tests/integration/test_m2_project_governance_postgres.py",
+        "tests/integration/test_m3_shared_assets_postgres.py",
+        "tests/integration/test_m4_private_work_postgres.py",
+        "tests/integration/test_m4_private_work_migration_postgres.py",
+        "tests/integration/test_m5_project_automation_postgres.py",
+    ]
+    pytest_tokens = shlex.split(steps[pytest_index]["run"])
+    assert pytest_tokens == ["uv", "run", "pytest", *expected_files, "-q"]
 
 
 @pytest.mark.asyncio
@@ -99,34 +123,33 @@ async def test_project_api_is_project_owner_and_capability_scoped(
 ) -> None:
     seed = m5_app.seed
     owner_project = seed.project_for("owner_a")
+    other_project = seed.project_for("owner_a_project_b")
     target = seed.task_for("owner_a")
-    matrix = (
-        ("owner_a", 200),
-        ("owner_b", 404),
-        ("project_b_owner", 404),
-        ("system_admin", 404),
+    other_project_target = seed.task_for("owner_a_project_b")
+    owner_b_task = seed.task_for("owner_b")
+    viewer_task = seed.task_for("viewer")
+    assert seed.actor("owner_a").user_id == seed.actor("owner_a_project_b").user_id
+    assert owner_project != other_project
+
+    detail_matrix = (
+        (owner_project, target.id, "owner_a", 200),
+        (other_project, other_project_target.id, "owner_a_project_b", 200),
+        (owner_project, other_project_target.id, "owner_a", 404),
+        (other_project, target.id, "owner_a_project_b", 404),
+        (owner_project, owner_b_task.id, "owner_b", 200),
+        (owner_project, owner_b_task.id, "owner_a", 404),
+        (owner_project, target.id, "owner_b", 404),
+        (owner_project, viewer_task.id, "viewer", 200),
+        (owner_project, target.id, "viewer", 404),
+        (owner_project, target.id, "system_admin", 404),
     )
-    for actor, expected_status in matrix:
+    for project_id, task_id, actor, expected_status in detail_matrix:
         response = await m5_app.request(
             "GET",
-            f"/api/projects/{owner_project}/automations/{target.id}",
+            f"/api/projects/{project_id}/automations/{task_id}",
             actor=actor,
         )
-        assert response.status_code == expected_status
-
-    viewer_task = seed.task_for("viewer")
-    viewer_read = await m5_app.request(
-        "GET",
-        f"/api/projects/{owner_project}/automations/{viewer_task.id}",
-        actor="viewer",
-    )
-    assert viewer_read.status_code == 200
-    admin_cross_owner = await m5_app.request(
-        "GET",
-        f"/api/projects/{owner_project}/automations/{seed.task_for('owner_b').id}",
-        actor="owner_a",
-    )
-    assert admin_cross_owner.status_code == 404
+        assert response.status_code == expected_status, (project_id, task_id, actor)
 
     first_page = await m5_app.request(
         "GET",
@@ -149,7 +172,19 @@ async def test_project_api_is_project_owner_and_capability_scoped(
         f"/api/projects/{owner_project}/automations",
         actor="owner_b",
     )
-    assert [item["id"] for item in owner_b_list.json()["items"]] == [seed.task_for("owner_b").id]
+    assert [item["id"] for item in owner_b_list.json()["items"]] == [owner_b_task.id]
+    other_project_list = await m5_app.request(
+        "GET",
+        f"/api/projects/{other_project}/automations",
+        actor="owner_a_project_b",
+    )
+    assert [item["id"] for item in other_project_list.json()["items"]] == [other_project_target.id]
+    viewer_list = await m5_app.request(
+        "GET",
+        f"/api/projects/{owner_project}/automations",
+        actor="viewer",
+    )
+    assert [item["id"] for item in viewer_list.json()["items"]] == [viewer_task.id]
     hidden_list = await m5_app.request(
         "GET",
         f"/api/projects/{owner_project}/automations",
@@ -157,55 +192,106 @@ async def test_project_api_is_project_owner_and_capability_scoped(
     )
     assert hidden_list.status_code == 404
 
-    cross_update = await m5_app.request(
-        "PATCH",
-        f"/api/projects/{owner_project}/automations/{target.id}",
-        actor="owner_b",
-        json={"expected_version": target.version, "title": "forbidden"},
+    history_matrix = (
+        (owner_project, target.id, "owner_a", 200),
+        (other_project, other_project_target.id, "owner_a_project_b", 200),
+        (owner_project, other_project_target.id, "owner_a", 404),
+        (owner_project, owner_b_task.id, "owner_a", 404),
+        (owner_project, owner_b_task.id, "owner_b", 200),
+        (owner_project, viewer_task.id, "viewer", 200),
+        (owner_project, target.id, "viewer", 404),
+        (owner_project, target.id, "system_admin", 404),
     )
-    cross_delete = await m5_app.request(
-        "DELETE",
-        f"/api/projects/{owner_project}/automations/{target.id}",
-        actor="owner_b",
-        json={"expected_version": target.version},
-    )
-    assert cross_update.status_code == cross_delete.status_code == 404
-    async with seed.factory() as session, session.begin():
-        unchanged = await ScheduledTaskRepository(session).get(
-            seed.context("owner_a").resource_scope,
-            target.id,
+    for project_id, task_id, actor, expected_status in history_matrix:
+        response = await m5_app.request(
+            "GET",
+            f"/api/projects/{project_id}/automations/{task_id}/runs?limit=10&offset=0",
+            actor=actor,
         )
-    assert unchanged is not None
-    assert unchanged.title == target.title
-    assert unchanged.deleted_at is None
+        assert response.status_code == expected_status, (project_id, task_id, actor)
+        if task_id == target.id and actor == "owner_a":
+            assert [item["id"] for item in response.json()["items"]] == [seed.history_record().id]
 
-    history = await m5_app.request(
-        "GET",
-        f"/api/projects/{owner_project}/automations/{target.id}/runs?limit=10&offset=0",
-        actor="owner_a",
+    reverse_matrix = (
+        (owner_project, seed.threads["owner_a"], "owner_a", [target.id]),
+        (other_project, seed.threads["owner_a_project_b"], "owner_a_project_b", [other_project_target.id]),
+        (owner_project, seed.threads["owner_a_project_b"], "owner_a", []),
+        (owner_project, seed.threads["owner_b"], "owner_a", []),
+        (owner_project, seed.threads["owner_b"], "owner_b", [owner_b_task.id]),
+        (owner_project, seed.threads["viewer"], "viewer", [viewer_task.id]),
+        (owner_project, seed.threads["owner_a"], "viewer", []),
     )
-    hidden_history = await m5_app.request(
-        "GET",
-        f"/api/projects/{owner_project}/automations/{target.id}/runs?limit=10&offset=0",
-        actor="owner_b",
-    )
-    assert history.status_code == 200
-    assert [item["id"] for item in history.json()["items"]] == [seed.history_record().id]
-    assert hidden_history.status_code == 404
-
-    reverse = await m5_app.request(
+    for project_id, thread_id, actor, expected_ids in reverse_matrix:
+        response = await m5_app.request(
+            "GET",
+            f"/api/projects/{project_id}/automations/threads/{thread_id}",
+            actor=actor,
+        )
+        assert response.status_code == 200, (project_id, thread_id, actor)
+        assert [item["id"] for item in response.json()["items"]] == expected_ids
+    system_reverse = await m5_app.request(
         "GET",
         f"/api/projects/{owner_project}/automations/threads/{seed.threads['owner_a']}",
-        actor="owner_a",
+        actor="system_admin",
     )
-    hidden_reverse = await m5_app.request(
-        "GET",
-        f"/api/projects/{owner_project}/automations/threads/{seed.threads['owner_a']}",
-        actor="owner_b",
+    assert system_reverse.status_code == 404
+
+    update_target = await seed.create_task(
+        "owner_a",
+        task_id="m5-api-owner-update",
+        next_run_at=M5_NOW + timedelta(days=1),
     )
-    assert [item["id"] for item in reverse.json()["items"]] == [target.id]
-    assert hidden_reverse.status_code == 200
-    assert hidden_reverse.json()["items"] == []
+    update_matrix = (
+        (owner_project, update_target.id, "owner_a", 200),
+        (owner_project, other_project_target.id, "owner_a", 404),
+        (owner_project, owner_b_task.id, "owner_a", 404),
+        (owner_project, viewer_task.id, "viewer", 403),
+        (owner_project, target.id, "system_admin", 404),
+    )
+    for project_id, task_id, actor, expected_status in update_matrix:
+        response = await m5_app.request(
+            "PATCH",
+            f"/api/projects/{project_id}/automations/{task_id}",
+            actor=actor,
+            json={"expected_version": 1, "title": f"updated-by-{actor}"},
+        )
+        assert response.status_code == expected_status, (project_id, task_id, actor)
+        if task_id == update_target.id:
+            assert response.json()["title"] == "updated-by-owner_a"
+            assert response.json()["version"] == 2
+
+    delete_target = await seed.create_task(
+        "owner_a",
+        task_id="m5-api-owner-delete",
+        next_run_at=M5_NOW + timedelta(days=1),
+    )
+    delete_matrix = (
+        (owner_project, other_project_target.id, "owner_a", 404),
+        (owner_project, owner_b_task.id, "owner_a", 404),
+        (owner_project, viewer_task.id, "viewer", 403),
+        (owner_project, target.id, "system_admin", 404),
+        (owner_project, delete_target.id, "owner_a", 200),
+    )
+    for project_id, task_id, actor, expected_status in delete_matrix:
+        response = await m5_app.request(
+            "DELETE",
+            f"/api/projects/{project_id}/automations/{task_id}",
+            actor=actor,
+            json={"expected_version": 1},
+        )
+        assert response.status_code == expected_status, (project_id, task_id, actor)
+    async with seed.factory() as session, session.begin():
+        updated = await ScheduledTaskRepository(session).get(
+            seed.context("owner_a").resource_scope,
+            update_target.id,
+        )
+        deleted = await session.get(ScheduledTaskRow, delete_target.id)
+    assert updated is not None
+    assert updated.title == "updated-by-owner_a"
+    assert deleted is not None
+    assert deleted.project_id == seed.context("owner_a").project_id
+    assert deleted.owner_user_id == str(seed.context("owner_a").user_id)
+    assert deleted.deleted_at == M5_NOW
 
     viewer_trigger = await m5_app.request(
         "POST",
@@ -376,6 +462,30 @@ async def test_composite_foreign_keys_reject_cross_scope_task_thread_and_run(
     m5_seed: M5Seed,
 ) -> None:
     owner_task = m5_seed.task_for("owner_a")
+    same_owner_other_project_task = m5_seed.task_for("owner_a_project_b")
+    owner_context = m5_seed.context("owner_a")
+    same_owner_other_project_context = m5_seed.context("owner_a_project_b")
+    assert owner_context.user_id == same_owner_other_project_context.user_id
+    assert same_owner_other_project_context.user_id == m5_seed.m4.project_b_owner_a.user_id
+    assert owner_context.project_id != same_owner_other_project_context.project_id
+    assert same_owner_other_project_context.project_id == m5_seed.m4.project_b_owner_a.project_id
+    assert owner_task.owner_user_id == same_owner_other_project_task.owner_user_id
+    assert owner_task.project_id != same_owner_other_project_task.project_id
+    async with m5_seed.factory() as session:
+        repository = ScheduledTaskRepository(session)
+        assert (
+            await repository.get(
+                owner_context.resource_scope,
+                same_owner_other_project_task.id,
+            )
+            is None
+        )
+        visible_other_project_task = await repository.get(
+            same_owner_other_project_context.resource_scope,
+            same_owner_other_project_task.id,
+        )
+    assert visible_other_project_task == same_owner_other_project_task
+
     cross_task_request = ScheduledTaskRunCreate(
         occurrence_id="m5-cross-task",
         task_id=owner_task.id,
@@ -387,7 +497,7 @@ async def test_composite_foreign_keys_reject_cross_scope_task_thread_and_run(
         status="queued",
         created_at=M5_NOW,
     )
-    for actor_name in ("owner_b", "project_b_owner"):
+    for actor_name in ("owner_b", "owner_a_project_b", "project_b_owner"):
         with pytest.raises(IntegrityError):
             async with m5_seed.factory() as session, session.begin():
                 await ScheduledTaskRunRepository(session).create(
@@ -400,9 +510,10 @@ async def test_composite_foreign_keys_reject_cross_scope_task_thread_and_run(
         owner_task,
         occurrence_id="m5-constraint-occurrence",
     )
-    with pytest.raises(IntegrityError):
-        async with m5_seed.factory() as session, session.begin():
-            await session.execute(ScheduledTaskRunRow.__table__.update().where(ScheduledTaskRunRow.id == occurrence.id).values(thread_id=m5_seed.threads["owner_b"]))
+    for actor_name in ("owner_b", "owner_a_project_b"):
+        with pytest.raises(IntegrityError):
+            async with m5_seed.factory() as session, session.begin():
+                await session.execute(ScheduledTaskRunRow.__table__.update().where(ScheduledTaskRunRow.id == occurrence.id).values(thread_id=m5_seed.threads[actor_name]))
 
     second_thread = str(uuid.uuid4())
     second_run = str(uuid.uuid4())

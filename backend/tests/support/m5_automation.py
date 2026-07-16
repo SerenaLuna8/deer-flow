@@ -279,6 +279,12 @@ async def seed_m5_database(database: M5Database) -> M5Seed:
                 ),
                 m4.viewer,
             ),
+            "owner_a_project_b": await _resolved_actor(
+                database,
+                name="owner-a-project-b",
+                user_id=m4.project_b_owner_a.user_id,
+                project_id=m4.project_b_owner_a.project_id,
+            ),
             "project_b_owner": await _resolved_actor(
                 database,
                 name="project-b-owner",
@@ -296,6 +302,8 @@ async def seed_m5_database(database: M5Database) -> M5Seed:
 
         owner_thread_id = str(uuid.uuid4())
         owner_b_thread_id = str(uuid.uuid4())
+        viewer_thread_id = str(uuid.uuid4())
+        owner_a_project_b_thread_id = str(uuid.uuid4())
         async with database.factory() as session, session.begin():
             threads = PrivateThreadRepository(session)
             await threads.create(
@@ -308,13 +316,28 @@ async def seed_m5_database(database: M5Database) -> M5Seed:
                 thread_id=owner_b_thread_id,
                 agent=ThreadAgentRef(m4.project_agent_id, "project"),
             )
+            await threads.create(
+                scope=actors["viewer"].private_context.resource_scope,  # type: ignore[union-attr]
+                thread_id=viewer_thread_id,
+                agent=ThreadAgentRef(m4.project_agent_id, "project"),
+            )
+            await threads.create(
+                scope=actors["owner_a_project_b"].private_context.resource_scope,  # type: ignore[union-attr]
+                thread_id=owner_a_project_b_thread_id,
+                agent=ThreadAgentRef(m4.project_b_agent_id, "project"),
+            )
 
         provisional = M5Seed(
             database=database,
             m4=m4,
             actors=actors,
             tasks={},
-            threads={"owner_a": owner_thread_id, "owner_b": owner_b_thread_id},
+            threads={
+                "owner_a": owner_thread_id,
+                "owner_b": owner_b_thread_id,
+                "viewer": viewer_thread_id,
+                "owner_a_project_b": owner_a_project_b_thread_id,
+            },
             history=None,
         )
         tasks = {
@@ -334,11 +357,22 @@ async def seed_m5_database(database: M5Database) -> M5Seed:
                 "owner_b",
                 task_id="m5-owner-b-primary",
                 next_run_at=M5_NOW + timedelta(days=1),
+                context_mode="reuse_thread",
+                thread_id=owner_b_thread_id,
             ),
             "viewer": await provisional.create_task(
                 "viewer",
                 task_id="m5-viewer-primary",
                 next_run_at=M5_NOW + timedelta(days=1),
+                context_mode="reuse_thread",
+                thread_id=viewer_thread_id,
+            ),
+            "owner_a_project_b": await provisional.create_task(
+                "owner_a_project_b",
+                task_id="m5-owner-a-project-b-primary",
+                next_run_at=M5_NOW + timedelta(days=1),
+                context_mode="reuse_thread",
+                thread_id=owner_a_project_b_thread_id,
             ),
             "project_b_owner": await provisional.create_task(
                 "project_b_owner",
