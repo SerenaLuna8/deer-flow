@@ -19,6 +19,7 @@
 - Task 9: complete (commits `b37646d8..fa03d8b5`, review clean after one repair wave: 0 Critical/Important/Minor; strict project API and expand-only read adapter verified with cutover fail-close).
 - Task 10: complete (commits `8be51d15..bb0fea12`, release review clean after four repair waves: 0 Critical/Important/Minor; staged migration, receipts, lock ordering, fail-before-DDL validation and marker-last recovery verified).
 - Task 11: complete (commits `b2d09e66..27989302`, review clean after one repair wave: 0 Critical/Important/Minor; scoped client, cache ownership and retry-stable manual idempotency verified by 863 frontend tests).
+- Task 12: complete (commits `d7ba1b7b..0638dccf`, review clean after one repair wave: 0 Critical/Important/Minor; workbench interactions verified by 903 frontend unit tests and 3 Playwright scenarios).
 
 ---
 
