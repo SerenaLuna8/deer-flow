@@ -10,7 +10,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from app.automations.cutover import AutomationCutoverGuard
-from app.automations.errors import AutomationCutover, AutomationUnavailable
+from app.automations.errors import (
+    AutomationCutover,
+    AutomationMigrationRequired,
+    AutomationUnavailable,
+)
 from deerflow.persistence.revisions import RevisionAncestry
 
 
@@ -161,6 +165,49 @@ async def test_legacy_guard_closes_only_after_m5_marker_completion(
                 request_id="legacy",
             ).require_legacy_open()
     assert captured.value.request_id == "legacy"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_legacy_mutation_guard_freezes_at_expand_and_closes_at_cutover(
+    seed: M4ThreadSeed,
+) -> None:
+    await _set_automation_marker(seed, "migration_ready")
+    async with seed.factory() as session:
+        with pytest.raises(AutomationMigrationRequired) as expanded:
+            await AutomationCutoverGuard.for_session(
+                session,
+                request_id="legacy-mutation",
+            ).require_legacy_mutation_open()
+    assert expanded.value.request_id == "legacy-mutation"
+
+    await _set_automation_marker(seed, "cutover_complete")
+    async with seed.factory() as session:
+        with pytest.raises(AutomationCutover):
+            await AutomationCutoverGuard.for_session(
+                session,
+                request_id="legacy-mutation",
+            ).require_legacy_mutation_open()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_missing_expand_marker_row_still_freezes_legacy_mutation(
+    seed: M4ThreadSeed,
+) -> None:
+    async with seed.engine.begin() as connection:
+        await connection.execute(text("DELETE FROM automation_cutover_state WHERE id=1"))
+
+    async with seed.factory() as session:
+        await AutomationCutoverGuard.for_session(
+            session,
+            request_id="legacy-read",
+        ).require_legacy_open()
+        with pytest.raises(AutomationMigrationRequired):
+            await AutomationCutoverGuard.for_session(
+                session,
+                request_id="legacy-write",
+            ).require_legacy_mutation_open()
 
 
 @pytest.mark.postgres

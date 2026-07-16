@@ -985,6 +985,15 @@ Current MVP limits:
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
+The project-scoped backend API is available at
+`/api/projects/{project_id}/automations`. It provides strict create, list, read,
+update, pause, resume, delete, manual-trigger, run-history, thread-filter, and
+readiness endpoints. Manual trigger requires a UUID `Idempotency-Key`; disabling
+background polling does not disable manual runs. During the M5 expand window the
+legacy read routes remain outside the mutation freeze, while legacy mutations
+return a migration-required conflict; after cutover every legacy route rejects
+requests in favor of the project API.
+
 ## Terminal Workbench (TUI)
 
 `deerflow` is a terminal-native workbench for people who live in the shell. It runs **embedded** over `DeerFlowClient` — no Gateway, frontend, nginx, or Docker required — while honoring the same `config.yaml`, checkpointer, skills, memory, MCP, and sandbox settings as the rest of DeerFlow.

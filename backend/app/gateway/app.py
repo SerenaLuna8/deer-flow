@@ -29,6 +29,7 @@ from app.gateway.routers import (
     models,
     private_work,
     project_assets,
+    project_automations,
     project_connections,
     project_invitations,
     project_lifecycle,
@@ -526,6 +527,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(project_lifecycle.router)
     app.include_router(project_assets.catalog_router)
     app.include_router(project_assets.project_router)
+    # Readiness must precede the dynamic /{task_id} project Automation route.
+    app.include_router(project_automations.readiness_router)
+    app.include_router(project_automations.router)
     app.include_router(private_work.router)
     app.include_router(project_memory.router)
     app.include_router(project_connections.router)

@@ -13,6 +13,7 @@ from pydantic import Field
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from app.gateway import deps
+from app.gateway.automation_schemas import AutomationRoute, StrictAutomationRequest
 from app.gateway.deps import (
     get_current_user_from_request,
     private_work_context,
@@ -23,6 +24,7 @@ from app.gateway.private_work_schemas import (
     StrictPrivateWorkRequest,
     strip_client_authority_fields,
 )
+from app.gateway.routers import project_automations
 from app.private_work.context import PrivateWorkContext
 from app.projects.errors import ProjectDatabaseUnavailable
 
@@ -171,3 +173,14 @@ def test_client_authority_fields_are_stripped_recursively() -> None:
         "items": [{"value": 2}],
         "tuple_items": ({"value": 3},),
     }
+
+
+def test_project_automation_uses_its_own_strict_route_and_split_readiness_router() -> None:
+    assert project_automations.router.route_class is AutomationRoute
+    assert project_automations.readiness_router.route_class is AutomationRoute
+    assert issubclass(project_automations.AutomationCreateRequest, StrictAutomationRequest)
+
+    readiness_paths = {route.path for route in project_automations.readiness_router.routes}
+    data_paths = {route.path for route in project_automations.router.routes}
+    assert readiness_paths == {"/api/projects/{project_id}/automations/readiness"}
+    assert "/api/projects/{project_id}/automations/readiness" not in data_paths

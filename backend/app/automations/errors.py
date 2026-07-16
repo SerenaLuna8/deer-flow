@@ -10,6 +10,7 @@ AUTOMATION_ERROR_STATUS = {
     "AUTOMATION_VERSION_CONFLICT": 409,
     "AUTOMATION_ACTIVE_RUN": 409,
     "AUTOMATION_ONCE_EXPIRED": 409,
+    "AUTOMATION_MIGRATION_REQUIRED": 409,
     "AUTOMATION_CUTOVER": 409,
     "AUTOMATION_CONCURRENCY_LIMIT": 429,
     "AUTOMATION_UNAVAILABLE": 503,
@@ -60,6 +61,11 @@ class AutomationOnceExpired(AutomationError):
     public_message = "Automation one-time schedule has expired."
 
 
+class AutomationMigrationRequired(AutomationError):
+    code = "AUTOMATION_MIGRATION_REQUIRED"
+    public_message = "Automation migration is required before legacy changes."
+
+
 class AutomationCutover(AutomationError):
     code = "AUTOMATION_CUTOVER"
     public_message = "Automation cutover is not complete."
@@ -84,6 +90,7 @@ __all__ = [
     "AutomationError",
     "AutomationForbidden",
     "AutomationInvalid",
+    "AutomationMigrationRequired",
     "AutomationNotFound",
     "AutomationOnceExpired",
     "AutomationUnavailable",

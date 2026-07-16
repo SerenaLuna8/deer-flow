@@ -13,12 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.automations.errors import (
     AutomationActiveRun,
     AutomationConcurrencyLimit,
+    AutomationConflict,
     AutomationError,
     AutomationForbidden,
     AutomationInvalid,
     AutomationNotFound,
     AutomationUnavailable,
 )
+from app.automations.models import AutomationRunView
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
@@ -33,6 +35,7 @@ from app.projects.capabilities import Capability
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.scheduled_task_runs import (
     ACTIVE_OCCURRENCE_STATUSES,
+    TERMINAL_OCCURRENCE_STATUSES,
     ScheduledTaskRunCreate,
     ScheduledTaskRunRecord,
     ScheduledTaskRunRepository,
@@ -54,6 +57,12 @@ RUN_NAMESPACE = uuid.UUID("a58150d1-9869-55b1-8cbe-cd30e6edba05")
 class ManualReservation:
     occurrence: ScheduledTaskRunRecord
     created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ManualDispatchClaim:
+    occurrence: ScheduledTaskRunRecord
+    claimed: bool
 
 
 def scheduled_occurrence_key(task_id: str, scheduled_for: datetime) -> str:
@@ -359,6 +368,152 @@ class AutomationOccurrenceService:
         except Exception as error:
             self._raise_mapped(error, "scheduler")
 
+    async def claim_manual_occurrence(
+        self,
+        context: PrivateWorkContext,
+        occurrence_id: str,
+        *,
+        now: datetime,
+        lease_owner: str,
+        lease_seconds: int,
+    ) -> ManualDispatchClaim:
+        """Claim exactly one scoped idempotent manual reservation.
+
+        The unlocked first read discovers the task coordinate without taking
+        an occurrence lock. The authoritative lock sequence remains project ->
+        membership -> task -> occurrence. Existing launching/running/terminal
+        rows are returned without dispatch ownership so a replay cannot launch
+        the same reservation twice.
+        """
+
+        context = self._issued_context(context)
+        now = self._validated_now(now, context.request_id)
+        if not isinstance(occurrence_id, str) or not occurrence_id or len(occurrence_id) > 64:
+            raise AutomationInvalid(context.request_id)
+        if not isinstance(lease_owner, str) or not lease_owner or len(lease_owner) > 128:
+            raise AutomationInvalid(context.request_id)
+        if type(lease_seconds) is not int or lease_seconds < 1:
+            raise AutomationInvalid(context.request_id)
+        try:
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.AUTOMATION_MANAGE_OWN,
+                    Capability.PRIVATE_WORK_CREATE,
+                    Capability.SHARED_ASSETS_EXECUTE,
+                    lock=True,
+                )
+                occurrences = ScheduledTaskRunRepository(session)
+                discovered = await occurrences.get(
+                    context.resource_scope,
+                    occurrence_id,
+                )
+                if discovered is None or discovered.trigger != "manual":
+                    raise AutomationNotFound(context.request_id)
+                if discovered.status in TERMINAL_OCCURRENCE_STATUSES:
+                    return ManualDispatchClaim(discovered, False)
+
+                task = await ScheduledTaskRepository(session).lock_active(
+                    context.resource_scope,
+                    discovered.task_id,
+                )
+                if task is None:
+                    raise AutomationNotFound(context.request_id)
+                occurrence = await occurrences.get(
+                    context.resource_scope,
+                    occurrence_id,
+                    lock=True,
+                )
+                if occurrence is None or occurrence.task_id != task.id or occurrence.trigger != "manual":
+                    raise AutomationNotFound(context.request_id)
+                if occurrence.status in TERMINAL_OCCURRENCE_STATUSES or occurrence.status in {"launching", "running"}:
+                    return ManualDispatchClaim(occurrence, False)
+                if occurrence.status != "queued":
+                    raise AutomationConflict(context.request_id)
+                if task.status not in {"enabled", "paused"}:
+                    raise AutomationNotFound(context.request_id)
+                claimed = await occurrences.claim(
+                    context.resource_scope,
+                    occurrence.id,
+                    now=now,
+                    lease_owner=lease_owner,
+                    lease_expires_at=now + timedelta(seconds=lease_seconds),
+                )
+                if claimed is None:
+                    current = await occurrences.get(
+                        context.resource_scope,
+                        occurrence.id,
+                        lock=True,
+                    )
+                    if current is not None and (current.status in TERMINAL_OCCURRENCE_STATUSES or current.status in {"launching", "running"}):
+                        return ManualDispatchClaim(current, False)
+                    raise AutomationConflict(context.request_id)
+                return ManualDispatchClaim(claimed, True)
+        except Exception as error:
+            self._raise_mapped(error, context.request_id)
+
+    async def get(
+        self,
+        context: PrivateWorkContext,
+        occurrence_id: str,
+    ) -> AutomationRunView:
+        context = self._issued_context(context)
+        if not isinstance(occurrence_id, str) or not occurrence_id or len(occurrence_id) > 64:
+            raise AutomationNotFound(context.request_id)
+        try:
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_READ_OWN,
+                )
+                record = await ScheduledTaskRunRepository(session).get(
+                    context.resource_scope,
+                    occurrence_id,
+                )
+                if record is None:
+                    raise AutomationNotFound(context.request_id)
+                return self._run_view(record)
+        except Exception as error:
+            self._raise_mapped(error, context.request_id)
+
+    async def list(
+        self,
+        context: PrivateWorkContext,
+        task_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[AutomationRunView, ...]:
+        context = self._issued_context(context)
+        if not isinstance(task_id, str) or not task_id or len(task_id) > 64:
+            raise AutomationNotFound(context.request_id)
+        if type(limit) is not int or type(offset) is not int or not 1 <= limit <= 100 or offset < 0:
+            raise AutomationInvalid(context.request_id)
+        try:
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_READ_OWN,
+                )
+                task = await ScheduledTaskRepository(session).get(
+                    context.resource_scope,
+                    task_id,
+                )
+                if task is None:
+                    raise AutomationNotFound(context.request_id)
+                records = await ScheduledTaskRunRepository(session).list_by_task(
+                    context.resource_scope,
+                    task_id,
+                    limit=limit,
+                    offset=offset,
+                )
+                return tuple(self._run_view(record) for record in records)
+        except Exception as error:
+            self._raise_mapped(error, context.request_id)
+
     @staticmethod
     async def _acquire_admission_lock(session: AsyncSession) -> None:
         await session.execute(
@@ -400,6 +555,24 @@ class AutomationOccurrenceService:
         return now.astimezone(UTC)
 
     @staticmethod
+    def _run_view(record: ScheduledTaskRunRecord) -> AutomationRunView:
+        return AutomationRunView(
+            id=record.id,
+            automation_id=record.task_id,
+            automation_version=record.task_version,
+            scheduled_for=record.scheduled_for,
+            trigger=record.trigger,  # type: ignore[arg-type]
+            status=record.status,  # type: ignore[arg-type]
+            thread_id=record.thread_id,
+            run_id=record.run_id,
+            error_code=record.error_code,
+            started_at=record.started_at,
+            finished_at=record.finished_at,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+    @staticmethod
     def _issued_context(context: PrivateWorkContext) -> PrivateWorkContext:
         try:
             return require_issued_private_work_context(context)
@@ -429,6 +602,7 @@ __all__ = [
     "AutomationOccurrenceService",
     "FRESH_THREAD_NAMESPACE",
     "ManualReservation",
+    "ManualDispatchClaim",
     "RUN_NAMESPACE",
     "deterministic_run_id",
     "deterministic_thread_id",

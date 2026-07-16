@@ -8,7 +8,11 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.automations.errors import AutomationCutover, AutomationUnavailable
+from app.automations.errors import (
+    AutomationCutover,
+    AutomationMigrationRequired,
+    AutomationUnavailable,
+)
 from deerflow.persistence.automations import AutomationCutoverStateRow
 from deerflow.persistence.private_work.model import PrivateWorkCutoverStateRow
 from deerflow.persistence.revisions import REVISION_ANCESTRY, RevisionAncestry
@@ -19,6 +23,7 @@ AUTOMATION_REQUIRED_REVISION = "0013_project_automation_finalize"
 
 @dataclass(frozen=True, slots=True)
 class _MarkerState:
+    exists: bool
     complete: bool
 
 
@@ -68,7 +73,7 @@ class AutomationCutoverGuard:
     async def _read_private_marker(session: AsyncSession) -> _MarkerState:
         table = await session.scalar(text("SELECT to_regclass('private_work_cutover_state')"))
         if table is None:
-            return _MarkerState(complete=False)
+            return _MarkerState(exists=False, complete=False)
         row = (
             await session.execute(
                 select(
@@ -77,13 +82,16 @@ class AutomationCutoverGuard:
                 ).where(PrivateWorkCutoverStateRow.id == 1)
             )
         ).one_or_none()
-        return _MarkerState(complete=(row is not None and row.stage == "cutover_complete" and row.cutover_at is not None))
+        return _MarkerState(
+            exists=True,
+            complete=(row is not None and row.stage == "cutover_complete" and row.cutover_at is not None),
+        )
 
     @staticmethod
     async def _read_automation_marker(session: AsyncSession) -> _MarkerState:
         table = await session.scalar(text("SELECT to_regclass('automation_cutover_state')"))
         if table is None:
-            return _MarkerState(complete=False)
+            return _MarkerState(exists=False, complete=False)
         row = (
             await session.execute(
                 select(
@@ -93,7 +101,10 @@ class AutomationCutoverGuard:
                 ).where(AutomationCutoverStateRow.id == 1)
             )
         ).one_or_none()
-        return _MarkerState(complete=(row is not None and row.stage == "cutover_complete" and row.final_schema_probe_complete is True and row.cutover_at is not None))
+        return _MarkerState(
+            exists=True,
+            complete=(row is not None and row.stage == "cutover_complete" and row.final_schema_probe_complete is True and row.cutover_at is not None),
+        )
 
     async def require_legacy_open(self) -> None:
         try:
@@ -103,6 +114,19 @@ class AutomationCutoverGuard:
             raise AutomationUnavailable(self.request_id) from None
         if marker.complete:
             raise AutomationCutover(self.request_id)
+
+    async def require_legacy_mutation_open(self) -> None:
+        """Freeze legacy writes as soon as the expand schema is present."""
+
+        try:
+            async with self._session() as session:
+                marker = await self._read_automation_marker(session)
+        except SQLAlchemyError:
+            raise AutomationUnavailable(self.request_id) from None
+        if marker.complete:
+            raise AutomationCutover(self.request_id)
+        if marker.exists:
+            raise AutomationMigrationRequired(self.request_id)
 
     async def require_project_open(self) -> None:
         try:

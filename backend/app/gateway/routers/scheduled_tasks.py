@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
@@ -15,6 +15,8 @@ from app.gateway.deps import (
     get_scheduled_task_run_repo,
     get_scheduled_task_service,
     get_thread_store,
+    require_legacy_automation_mutation_open,
+    require_legacy_automation_open,
 )
 from deerflow.scheduler.schedules import (
     next_run_at as compute_next_run_at,
@@ -24,7 +26,11 @@ from deerflow.scheduler.schedules import (
     validate_timezone,
 )
 
-router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
+router = APIRouter(
+    prefix="/api",
+    tags=["scheduled-tasks"],
+    dependencies=[Depends(require_legacy_automation_open)],
+)
 
 
 def _ensure_task_mutable(task: dict[str, Any]) -> None:
@@ -64,7 +70,10 @@ async def list_scheduled_tasks(request: Request):
     return await repo.list_by_user(str(user.id))
 
 
-@router.post("/scheduled-tasks")
+@router.post(
+    "/scheduled-tasks",
+    dependencies=[Depends(require_legacy_automation_mutation_open)],
+)
 @require_permission("threads", "write")
 async def create_scheduled_task(request: Request, body: ScheduledTaskCreateRequest):
     config = get_config()
@@ -136,7 +145,10 @@ async def get_scheduled_task(task_id: str, request: Request):
     return task
 
 
-@router.patch("/scheduled-tasks/{task_id}")
+@router.patch(
+    "/scheduled-tasks/{task_id}",
+    dependencies=[Depends(require_legacy_automation_mutation_open)],
+)
 @require_permission("threads", "write")
 async def update_scheduled_task(task_id: str, request: Request, body: ScheduledTaskUpdateRequest):
     config = get_config()
@@ -215,7 +227,10 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
     return updated
 
 
-@router.post("/scheduled-tasks/{task_id}/pause")
+@router.post(
+    "/scheduled-tasks/{task_id}/pause",
+    dependencies=[Depends(require_legacy_automation_mutation_open)],
+)
 @require_permission("threads", "write")
 async def pause_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
@@ -232,7 +247,10 @@ async def pause_scheduled_task(task_id: str, request: Request):
     return updated
 
 
-@router.post("/scheduled-tasks/{task_id}/resume")
+@router.post(
+    "/scheduled-tasks/{task_id}/resume",
+    dependencies=[Depends(require_legacy_automation_mutation_open)],
+)
 @require_permission("threads", "write")
 async def resume_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
@@ -249,7 +267,10 @@ async def resume_scheduled_task(task_id: str, request: Request):
     return updated
 
 
-@router.post("/scheduled-tasks/{task_id}/trigger")
+@router.post(
+    "/scheduled-tasks/{task_id}/trigger",
+    dependencies=[Depends(require_legacy_automation_mutation_open)],
+)
 @require_permission("threads", "write")
 async def trigger_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
@@ -268,7 +289,10 @@ async def trigger_scheduled_task(task_id: str, request: Request):
     return {"id": task_id, "triggered": True}
 
 
-@router.delete("/scheduled-tasks/{task_id}")
+@router.delete(
+    "/scheduled-tasks/{task_id}",
+    dependencies=[Depends(require_legacy_automation_mutation_open)],
+)
 @require_permission("threads", "write")
 async def delete_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)

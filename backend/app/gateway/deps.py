@@ -29,6 +29,12 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.automations.error_mapping import automation_http_exception
+from app.automations.errors import (
+    AutomationError,
+    AutomationNotFound,
+    AutomationUnavailable,
+)
 from app.private_work.context import PrivateWorkContext
 from app.private_work.cutover import PrivateWorkCutoverGuard
 from app.private_work.error_mapping import private_work_http_exception
@@ -323,6 +329,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from app.automations.ownership import AutomationSchedulerOwnership
         from app.automations.readiness import AutomationReadinessService
         from app.automations.reconciliation import AutomationReconciler
+        from app.automations.service import ProjectAutomationService
         from app.scheduler import ScheduledTaskService
         from deerflow.config.scheduler_config import SchedulerConfig
 
@@ -339,6 +346,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         else:
             app.state.automation_scheduler_ownership = AutomationSchedulerOwnership(persistence_engine)
         app.state.automation_cutover_guard = AutomationCutoverGuard(sf)
+        app.state.automation_service = ProjectAutomationService(sf)
         app.state.automation_readiness_service = AutomationReadinessService(scheduler_status_provider=lambda: app.state.scheduled_task_service.status)
         app.state.automation_occurrence_service = AutomationOccurrenceService(
             sf,
@@ -359,6 +367,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
             ownership=app.state.automation_scheduler_ownership,
         )
+        app.state.automation_scheduler_enabled = effective_scheduler_config.enabled
+        app.state.automation_lease_seconds = effective_scheduler_config.lease_seconds
 
         # GATEWAY_WORKERS remains a cheap local topology guard. The dedicated
         # PostgreSQL session lock is the authoritative cross-process owner and
@@ -474,6 +484,53 @@ def get_private_work_cutover_guard(request: Request) -> PrivateWorkCutoverGuard:
     ):
         raise HTTPException(status_code=503, detail="Private work cutover guard not available")
     return cast(PrivateWorkCutoverGuard, value)
+
+
+def get_automation_cutover_guard(request: Request):
+    value = getattr(request.app.state, "automation_cutover_guard", None)
+    if value is None or not hasattr(value, "require_project_open"):
+        raise automation_http_exception(AutomationUnavailable(get_current_trace_id() or generate_trace_id()))
+    return value
+
+
+def _automation_state_dependency(
+    request: Request,
+    attr: str,
+):
+    value = getattr(request.app.state, attr, None)
+    if value is None:
+        raise automation_http_exception(AutomationUnavailable(get_current_trace_id() or generate_trace_id()))
+    return value
+
+
+def get_automation_service(request: Request):
+    return _automation_state_dependency(request, "automation_service")
+
+
+def get_automation_occurrence_service(request: Request):
+    return _automation_state_dependency(request, "automation_occurrence_service")
+
+
+def get_automation_dispatcher(request: Request):
+    return _automation_state_dependency(request, "automation_dispatcher")
+
+
+def get_automation_readiness_service(request: Request):
+    return _automation_state_dependency(request, "automation_readiness_service")
+
+
+def get_automation_scheduler_enabled(request: Request) -> bool:
+    value = getattr(request.app.state, "automation_scheduler_enabled", None)
+    if type(value) is not bool:
+        raise automation_http_exception(AutomationUnavailable(get_current_trace_id() or generate_trace_id()))
+    return value
+
+
+def get_automation_lease_seconds(request: Request) -> int:
+    value = getattr(request.app.state, "automation_lease_seconds", None)
+    if type(value) is not int or value < 1:
+        raise automation_http_exception(AutomationUnavailable(get_current_trace_id() or generate_trace_id()))
+    return value
 
 
 def get_checkpointer(request: Request) -> Checkpointer:
@@ -664,6 +721,57 @@ async def private_work_context(
         raise private_work_http_exception(PrivateWorkUnavailable(request_id)) from None
     except PrivateWorkError as exc:
         raise private_work_http_exception(exc) from None
+
+
+async def automation_context(
+    project_id: uuid.UUID,
+    user=Depends(get_current_user_from_request),
+    session: AsyncSession = Depends(project_session),
+) -> PrivateWorkContext:
+    """Resolve project authority while exposing only Automation errors."""
+
+    request_id = get_current_trace_id() or generate_trace_id()
+    try:
+        user_id = uuid.UUID(str(user.id))
+    except (AttributeError, TypeError, ValueError):
+        raise automation_http_exception(AutomationNotFound(request_id)) from None
+    try:
+        project = await resolve_project_context(
+            session,
+            user_id,
+            project_id,
+            request_id,
+        )
+        return PrivateWorkContext.from_project(project)
+    except ProjectNotFound:
+        raise automation_http_exception(AutomationNotFound(request_id)) from None
+    except ProjectDatabaseUnavailable:
+        raise automation_http_exception(AutomationUnavailable(request_id)) from None
+
+
+async def require_legacy_automation_open(request: Request) -> None:
+    try:
+        await get_automation_cutover_guard(request).require_legacy_open()
+    except AutomationError as error:
+        raise automation_http_exception(error) from None
+
+
+async def require_legacy_automation_mutation_open(request: Request) -> None:
+    try:
+        await get_automation_cutover_guard(request).require_legacy_mutation_open()
+    except AutomationError as error:
+        raise automation_http_exception(error) from None
+
+
+async def require_project_automation_open(
+    request: Request,
+    context: PrivateWorkContext = Depends(automation_context),
+) -> None:
+    del context
+    try:
+        await get_automation_cutover_guard(request).require_project_open()
+    except AutomationError as error:
+        raise automation_http_exception(error) from None
 
 
 async def require_legacy_private_open(
