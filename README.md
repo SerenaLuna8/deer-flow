@@ -399,8 +399,9 @@ dry-run 只输出脱敏 counts 与稳定 source hash，不升级 schema、不写
 目录。execute 固定按 0008 expand、分域 ledger、0009 finalize、0010/0011、最后
 `cutover_complete` marker 的顺序执行；同一已完成 cutover 再执行会直接 no-op。
 
-M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、
-M7 legacy source/API 清理和 M8 完整发布验收均未完成，因此 DeerFlow 仍不能作为完整多用户 SaaS 发布。
+M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation
+已形成等待 Task 18 独立终审的 release candidate；M6 Worker/SSE/配额/审计/通用备份恢复、
+M7 legacy source/API 清理和 M8 完整发布验收仍未交付，因此 DeerFlow 仍不能作为完整多用户 SaaS 发布。
 
 #### M3 共享资产迁移与 credential 轮换
 
@@ -964,26 +965,31 @@ All dict-returning methods are validated against Gateway Pydantic response model
 
 ## Scheduled Tasks
 
-DeerFlow now includes a first-class scheduled-task MVP in the workspace.
+The M5 release candidate adds project Automation at
+`/projects/{project_slug}/automations`. Each definition and occurrence is private to
+the authenticated account and entered project. Admins, Editors, and Runners with the
+server-issued capability can create, edit, pause, resume, manually trigger, inspect,
+and delete their own Automations. Viewers can only inspect their own definitions and
+run history.
 
-Current MVP capabilities:
+Project Automation supports `once` and five-field `cron` schedules, a fixed `skip`
+overlap policy, and either a reused private thread or a fresh private thread per run.
+Every automatic or manual trigger reserves a durable occurrence before normal private
+run admission. Once admitted, a run that is interrupted by a process crash is recorded
+and reconciled but is never replayed automatically.
 
-- Manage tasks at `/workspace/scheduled-tasks`
-- Choose whether each scheduled task reuses a thread or creates a fresh thread per run
-- Support `once` and `cron` schedules
-- Run background scheduled executions as non-interactive DeerFlow runs (`ask_clarification` is not exposed there)
-- Use `skip` overlap behavior for due cron executions that collide with an active run on the same reused thread
-- Pause, resume, trigger, inspect history, and delete tasks
-- Execute scheduled work through the normal DeerFlow run lifecycle
-
-Current MVP limits:
+Current limits:
 
 - No conversation-created `schedule_task` tool yet
 - No text-only notification jobs
 - No channel or GitHub dispatch targets
 - No `interval` schedule type in this first cut
 
-Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
+Enable background polling with `config.yaml -> scheduler.enabled`. M5 supports one
+Gateway (`GATEWAY_WORKERS=1`) holding the PostgreSQL scheduler ownership lock. Disabling
+polling leaves the project API and manual trigger available; manual trigger uses the
+same durable occurrence and private-run path. Independent Workers, durable SSE,
+generic jobs/retries, quotas, audit, and general backup/restore remain M6 work.
 
 The project-scoped backend API is available at
 `/api/projects/{project_id}/automations`. It provides strict create, list, read,
@@ -992,7 +998,9 @@ readiness endpoints. Manual trigger requires a UUID `Idempotency-Key`; disabling
 background polling does not disable manual runs. During the M5 expand window the
 legacy read routes remain outside the mutation freeze, while legacy mutations
 return a migration-required conflict; after cutover every legacy route rejects
-requests in favor of the project API.
+requests in favor of the project API. The M5 release candidate is awaiting its
+independent Task 18 review and is not yet a complete releasable multi-user SaaS;
+M6-M8 remain open.
 
 ## Terminal Workbench (TUI)
 

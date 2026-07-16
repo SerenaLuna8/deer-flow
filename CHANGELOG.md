@@ -5,6 +5,25 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **project automation:** Prepare the M5 release candidate with project- and
+  owner-scoped Automation definitions and durable occurrences, Viewer read-only
+  history, manual idempotent triggers, private-run admission, crash reconciliation,
+  and staged legacy migration.
+- **scheduler:** Add single-Gateway PostgreSQL scheduler ownership controlled by
+  `scheduler.enabled`; disabling automatic polling keeps project Automation APIs and
+  manual triggers available.
+- **frontend:** Add account/project-scoped Automation workbench, cache isolation,
+  capability gates, and independent static-build browser coverage.
+
+The candidate still awaits the Task 18 independent review. Independent Workers,
+durable SSE, generic jobs/retries, quotas, audit, general backup/restore, legacy
+cleanup, and final release acceptance remain in M6-M8, so this is not yet a complete
+releasable multi-user SaaS.
+
 ## [2.0.0] — 2026-06-15
 
 DeerFlow 2.0 is a ground-up rewrite around a "super agent" harness with

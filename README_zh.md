@@ -212,8 +212,9 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    fail closed。完整操作与故障决策见
    [M4 private-work migration runbook](docs/operations/m4-private-work-migration.md)。
 
-   M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、
-   M7 legacy 清理和 M8 完整发布验收尚未完成，因此仍不能作为完整多用户 SaaS 发布。
+   M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation
+   已形成等待 Task 18 独立终审的 release candidate；M6 Worker/SSE/配额/审计/通用备份恢复、
+   M7 legacy 清理和 M8 完整发布验收仍未交付，因此仍不能作为完整多用户 SaaS 发布。
 
    共享资产迁移和 credential 轮换只通过显式命令执行，不会在应用启动时自动运行。
    `DATABASE_URL` 指向资产权威 PostgreSQL 数据库；主密钥只从环境变量读取，数据库仅保存
@@ -827,26 +828,30 @@ client.clear_goal("thread-1")
 
 ## 定时任务 (Scheduled Tasks)
 
-DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled-task）MVP。
+M5 release candidate 在 `/projects/{project_slug}/automations` 提供项目 Automation。
+每个 definition 和 occurrence 都按认证账号与当前项目双重隔离。具备服务端下发能力的
+Admin、Editor 和 Runner 可以创建、编辑、暂停、恢复、手动触发、查看和删除自己的
+Automation；Viewer 只能查看自己的 definition 和运行历史。
 
-当前 MVP 能力：
+项目 Automation 支持 `once` 和五字段 `cron`，固定使用 `skip` overlap policy，并可选择
+复用私有 thread 或每次创建新的私有 thread。自动和手动触发都会先持久化唯一 occurrence，
+再进入正常的项目私有 run admission。run 一旦 admitted，进程崩溃后只会记录并协调终态，
+不会自动重放可能已经发生的副作用。
 
-- 在 `/workspace/scheduled-tasks` 管理任务
-- 每个定时任务可以选择复用同一个 thread，也可以选择每次运行新建一个 thread
-- 支持 `once` 和 `cron` 两种调度方式
-- 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）
-- 当到期的 cron 执行与同一复用 thread 上的活跃 run 冲突时，采用 `skip` 的重叠处理策略
-- 支持暂停、恢复、手动触发、查看历史和删除任务
-- 定时任务通过正常的 DeerFlow run 生命周期执行
-
-当前 MVP 限制：
+当前限制：
 
 - 暂时还没有可在对话中创建任务的 `schedule_task` 工具
 - 没有纯文本通知任务
 - 没有渠道或 GitHub 分发目标
 - 第一版没有 `interval` 调度类型
 
-通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
+通过 `config.yaml -> scheduler.enabled` 开启后台轮询。M5 只支持一个 Gateway
+（`GATEWAY_WORKERS=1`）持有 PostgreSQL scheduler ownership lock；关闭轮询不影响项目 API
+和手动触发，手动触发仍使用同一 durable occurrence 与 private-run 链路。独立 Worker、持久化
+SSE、通用 jobs/retries、配额、审计和通用备份恢复属于 M6。
+
+项目 API 位于 `/api/projects/{project_id}/automations`。M5 release candidate 仍在等待 Task 18
+独立终审，M6-M8 也仍未交付，因此当前不能作为完整可发布的多用户 SaaS。
 
 ## 终端工作台 (TUI)
 

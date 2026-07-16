@@ -16,7 +16,9 @@ M4 保留现有 LangGraph runtime、流式响应、输入区、文件侧栏、�
 
 M4 完成后，项目成员可以在项目内使用 M3 已发布并获准执行的 Agent、Skill 和 MCP 创建自己的私有对话。其他项目、同项目其他成员、项目 Admin 和平台 `system_admin` 均不能通过普通产品路径读取这些私有内容。
 
-M4 不交付 scheduled task、Worker 租约、持久化 SSE、配额、审计平台、备份恢复或 legacy 路径删除。上述能力分别属于 M5、M6 和 M7。
+M4 不交付 scheduled task、Worker、持久化 SSE、配额、审计平台、备份恢复或 legacy 路径删除。
+project Automation 属于 M5；独立 Worker、持久化 SSE、通用 jobs/retries、配额、审计与通用备份恢复
+属于 M6；legacy 路径删除属于 M7。
 
 当前 runnable-first 实现已经提供 project/owner scoped Chats、run、file/artifact、Memory、
 Connections、frontend cache/client、cutover guard 与真实 PostgreSQL migration gate。产品入口仍由
@@ -86,8 +88,8 @@ frontend unit 836、Playwright 156，以及 doctor/check-db、Ruff/format 全绿
 ### 3.2 非目标
 
 - Scheduled task、scheduled task run 和 automation UI；属于 M5。
-- 通用 jobs、job attempts、dead jobs、Worker 租约和至少一次任务投递；属于 M5。
-- M5 目标形态的持久化 SSE reconnect 和跨 worker stream ownership。
+- 通用 jobs、job attempts、dead jobs、独立 Worker 租约和至少一次任务投递；属于 M6。
+- 持久化 SSE reconnect 和跨 Worker stream ownership；属于 M6。
 - 项目配额、用量 ledger、审计查询和平台运营面板；属于 M6。
 - 通用数据库备份恢复、删除墓碑重放和灾难恢复演练；属于 M6。
 - 删除 legacy API、legacy filesystem 或兼容页面；属于 M7。

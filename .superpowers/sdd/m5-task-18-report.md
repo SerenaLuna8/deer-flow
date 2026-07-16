@@ -1,0 +1,142 @@
+# M5 Task 18 implementation report
+
+## Consistency RED
+
+Before documentation edits, the required scan exited 1 as expected and identified the
+stale current-status statement at
+`docs/superpowers/specs/2026-07-12-project-first-saas-design.md:16`:
+`M5 至 M8 尚未完成`.
+
+## Documentation mapping
+
+- `README.md` / `README_zh.md`: project Automation entry, Viewer read-only behavior,
+  manual trigger, single-Gateway `scheduler.enabled`, occurrence-before-admission,
+  no replay after admission, and M6 boundary.
+- root/backend/frontend `AGENTS.md`: project+owner authority, Scheduler ownership,
+  migration command, cache cancel-before-clear, Viewer constraints, and release-candidate
+  status.
+- overall/M4/M5 specs: release-candidate status and corrected M6 ownership of generic
+  jobs, independent Workers, durable SSE, quotas, audit, and general backup/restore.
+- `docs/operations/m5-automation-migration.md`: maintenance window, writer stop,
+  authenticated external backup proof, exact dry-run/execute/check commands, probes,
+  recovery, rollback boundary, and redacted logging rules.
+- `CHANGELOG.md`: unreleased M5 release-candidate summary without a completion claim.
+
+## Fresh verification
+
+All PostgreSQL verification used only
+`postgresql+asyncpg://postgres@127.0.0.1:55435/postgres`. The retained local
+cluster was created at `/tmp/deerflow_m5_pg`; every integration fixture created
+and dropped only generated `deerflow_test_*` databases. No business database was
+read or written.
+
+### Backend
+
+```text
+cd backend && uv run pytest tests/ -q
+7662 passed, 869 skipped, 10 warnings in 115.57s
+
+cd backend && make test-blocking-io
+41 passed in 11.20s
+
+cd backend && make lint
+All checks passed!
+1058 files already formatted
+
+cd backend && uvx ruff format --check .
+1058 files already formatted
+```
+
+The full-suite skips are declared environment/optional-integration skips; the fixed
+PostgreSQL release gate below had zero skips. Warnings were existing dependency
+deprecations, short test JWT-key warnings, and one intentional unknown-model-kwarg
+warning.
+
+### Real PostgreSQL and migration smokes
+
+The first isolated-cluster attempt could not create test databases because `initdb`
+had created its default superuser under the host account name. After adding the
+expected `postgres` superuser to only that isolated cluster, the required fresh rerun
+passed:
+
+```text
+cd backend && POSTGRES_TEST_URL=postgresql+asyncpg://postgres@127.0.0.1:55435/postgres \
+  uv run pytest <fixed eight M1-M5 integration files> -q
+32 passed in 9.56s; 0 skipped
+
+# Task 16 fresh-install smoke
+1 passed in 0.87s; 0 skipped
+
+# Task 16 legacy dry-run/execute/idempotency smoke
+1 passed in 1.06s; 0 skipped
+```
+
+The fixed file list was exactly: M1 cutover, project isolation, M2 governance,
+M3 shared assets, M4 private work, M4 private-work migration, M5 project Automation,
+and M5 Automation migration.
+
+### Operations
+
+A dedicated `deerflow_test_task18_ops` database was created in the same isolated
+cluster, initialized to `0013_project_automation_finalize`, inspected, and dropped.
+A temporary non-secret minimal `config.yaml` was used only for doctor and removed
+immediately afterward.
+
+```text
+make doctor
+Status: Ready (6 warning(s))
+
+make check-db
+PostgreSQL 状态: 健康
+current/head: 0013_project_automation_finalize
+Automation: ready
+```
+
+The six doctor warnings were the intentionally absent local `.env` files and four
+optional web-tool configurations; there were no required-check failures.
+
+### Frontend
+
+```text
+cd frontend && pnpm check
+exit 0
+
+cd frontend && pnpm format
+All matched files use Prettier code style!
+
+cd frontend && pnpm test
+126 files; 915 passed; 0 failed; 0 skipped
+
+cd frontend && pnpm test:e2e:all
+167 normal Playwright tests passed
+1 independent static-build Playwright test passed
+```
+
+The unit runner required unsandboxed local-port permission after a sandbox `EPERM`;
+the fresh authorized rerun passed. Playwright emitted `NO_COLOR` notices and expected
+connection-refused proxy noise for deliberately unmocked fallback requests, but both
+test commands exited 0 with the counts above.
+
+### Workspace consistency
+
+```text
+git diff --check
+exit 0, no output
+
+required M5 stale-status / old-gate / false-flag consistency scan
+exit 0, no matches
+```
+
+## Self-review
+
+- No production behavior, database state machine, API, migration implementation, or
+  frontend runtime code changed in Task 18.
+- Current documentation says release candidate awaiting independent Task 18 review;
+  it does not claim M5 complete, 5/8, or 62.5% as current state. Those values remain
+  only in the conditional completion contract.
+- The runbook includes the exact required commands, maintenance writer stop,
+  authenticated external backup proof, M1-M5 probes, recovery, and the forward-only
+  rollback boundary.
+- Examples expose no private titles/prompts, owner-map content, or full identifiers.
+- M6 remains responsible for independent Workers, durable SSE, generic jobs/retries,
+  quotas, audit, and general backup/restore; M7-M8 remain open.

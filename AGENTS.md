@@ -85,8 +85,13 @@ Memory、Connections 和 recent-work 入口仍必须同时通过服务端 readin
 暴露入口。M4 已接入 singleton
 `private_work_cutover_state` guard：final schema 且 marker 完成后开放 project private API，同时关闭
 legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run`。M4 已于
-2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁；M5 automation、M6 Worker/SSE/配额/审计/通用备份恢复、M7 legacy cleanup 和
-M8 发布验收尚未完成，因此当前仍不能作为完整多用户 SaaS 发布。
+2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation 已形成
+待 Task 18 独立终审的 release candidate：definition、occurrence、API/UI 和迁移均以认证 account、
+project 与 owner 为 authority，Viewer 只读自己的定义与历史；自动和手动触发都先持久化唯一
+occurrence 再进入 M4 private run admission，已 admitted 的 run 在 crash recovery 中只协调终态、
+绝不自动重放。M5 Scheduler 由 `scheduler.enabled` 控制并只支持单 Gateway；独立 Worker、持久化
+SSE、通用 jobs/retries、配额、审计和通用备份恢复仍属于 M6。M6–M8 尚未交付，因此当前仍不能
+作为完整多用户 SaaS 发布。
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
@@ -110,6 +115,7 @@ make migrate-db  # 升级已存在 PostgreSQL 目标库
 make migrate-sqlite ARGS="..."  # 只读预检、备份并迁移 legacy SQLite；private rows需--m4-staging-target
 make migrate-assets ARGS="--dry-run ..."  # 脱敏 inventory；execute 前必须先 dry-run
 make migrate-private-work ARGS="--dry-run ..."  # 显式 owner map 的 M4 private-work staged migration
+make migrate-automations ARGS="--dry-run ..."  # 显式 owner/Agent map 的 M5 Automation staged migration
 make rotate-credentials ARGS="--dry-run --key-id m3-next"  # 分批轮换 credential envelope
 make check-db    # 只读检查连接、Alembic head 与必需表
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)

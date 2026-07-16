@@ -154,12 +154,18 @@ server-side slug paging 或 enter。静态独立 build/browser 门禁必须同�
 项目 Automation 直达为 404、且没有 Automation 或 legacy scheduled-task API 请求。M5 只有在 Task 18
 的里程碑总门禁与独立审查完成后才算完成，当前仍不能把
 界面描述为完整多用户 SaaS。
+Automation 的所有 query/mutation key 必须同时以认证 account UUID 和 entered project UUID 开头；
+无论 account 还是 project 变化，都必须先 cancel in-flight query，再清理 scoped query、mutation、
+client 与 reconnect 状态。Viewer 仅能读取自己的 definition/history，不能显示 mutation 或 manual
+trigger 控件。当前前端是等待 Task 18 独立终审的 M5 release candidate；独立 Worker、持久化 SSE、
+通用 jobs/retries、配额、审计与通用备份恢复仍属于 M6。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie
 跨越登录流程，不写入 storage；产品不发送邀请邮件。M2 的退出/移除和删除恢复 UI 只反映
-30 天保留窗口，不代表私有数据或项目数据已被物理清除。M5 automation、M6 Worker/SSE/配额/审计/
-通用备份恢复、M7 legacy cleanup 和 M8 完整发布验收仍未完成，因此不能作为完整多用户 SaaS 发布。
+30 天保留窗口，不代表私有数据或项目数据已被物理清除。M5 仍待 Task 18 独立终审，M6 Worker/SSE/
+配额/审计/通用备份恢复、M7 legacy cleanup 和 M8 完整发布验收仍未交付，因此不能作为完整多用户
+SaaS 发布。
 
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
