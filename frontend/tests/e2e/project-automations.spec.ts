@@ -112,6 +112,190 @@ async function createAutomation(page: Page) {
   ).toBeVisible();
 }
 
+test("recipe schedule stays synchronized with visible controls and submission", async ({
+  page,
+}) => {
+  const state = await mockProjectAutomationAPI(page, [ownerAccount()]);
+  await page.goto("/projects/alpha/automations");
+
+  await page.getByRole("button", { name: "创建 Automation" }).first().click();
+  let dialog = page.getByRole("dialog", { name: "创建 Automation" });
+  await dialog
+    .getByTestId("automation-agent")
+    .selectOption(`project:${AGENT_ID}`);
+  await dialog.getByRole("button", { name: /GitHub Trending/ }).click();
+  await expect(dialog.getByTestId("schedule-preset")).toContainText("Daily");
+  const dailyTimezone = (
+    await dialog.getByTestId("schedule-timezone").innerText()
+  ).trim();
+  expect(dailyTimezone).not.toBe("");
+
+  await dialog.getByRole("button", { name: "创建 Automation" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await page.getByRole("button", { name: "创建 Automation" }).click();
+  dialog = page.getByRole("dialog", { name: "创建 Automation" });
+  await dialog
+    .getByTestId("automation-agent")
+    .selectOption(`project:${AGENT_ID}`);
+  await dialog.getByRole("button", { name: /每周项目报告/ }).click();
+  await expect(dialog.getByTestId("schedule-preset")).toContainText("Weekly");
+
+  await dialog.getByTestId("schedule-preset").click();
+  await page.getByRole("option", { name: "Custom cron" }).click();
+  await dialog
+    .getByRole("textbox", { name: "Cron expression" })
+    .fill("15 6 * * 2");
+  await dialog
+    .getByRole("textbox", { name: "Title" })
+    .fill("Custom weekly report");
+  await expect(dialog.getByTestId("schedule-preset")).toContainText(
+    "Custom cron",
+  );
+  await expect(
+    dialog.getByRole("textbox", { name: "Cron expression" }),
+  ).toHaveValue("15 6 * * 2");
+  const customTimezone = (
+    await dialog.getByTestId("schedule-timezone").innerText()
+  ).trim();
+
+  await dialog.getByRole("button", { name: "创建 Automation" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  const creates = state.requests.filter(
+    ({ method, path }) =>
+      method === "POST" &&
+      path === `/api/projects/${PROJECT_ALPHA}/automations`,
+  );
+  expect(creates).toHaveLength(2);
+  expect(creates[0]).toEqual(
+    expect.objectContaining({
+      accountId: ACCOUNT_A,
+      projectId: PROJECT_ALPHA,
+      body: expect.objectContaining({
+        schedule_spec: { cron: "0 9 * * *" },
+        timezone: dailyTimezone,
+      }),
+    }),
+  );
+  expect(creates[1]).toEqual(
+    expect.objectContaining({
+      accountId: ACCOUNT_A,
+      projectId: PROJECT_ALPHA,
+      body: expect.objectContaining({
+        title: "Custom weekly report",
+        schedule_spec: { cron: "15 6 * * 2" },
+        timezone: customTimezone,
+      }),
+    }),
+  );
+});
+
+test("manual trigger is available only for enabled and paused automations", async ({
+  page,
+}) => {
+  const tasks = [
+    automation("enabled-task", "Enabled task", "enabled"),
+    automation("paused-task", "Paused task", "paused"),
+    automation("completed-task", "Completed task", "completed"),
+    automation("failed-task", "Failed task", "failed"),
+    automation("cancelled-task", "Cancelled task", "cancelled"),
+  ];
+  const state = await mockProjectAutomationAPI(page, [
+    ownerAccount([ALPHA], { [PROJECT_ALPHA]: tasks }),
+  ]);
+  await page.goto("/projects/alpha/automations");
+
+  for (const title of ["Enabled task", "Paused task"]) {
+    await page.getByRole("button", { name: new RegExp(title) }).click();
+    await page.getByRole("button", { name: "立即运行" }).click();
+  }
+  await expect
+    .poll(() =>
+      state.requests
+        .filter(
+          ({ method, path }) => method === "POST" && path.endsWith("/trigger"),
+        )
+        .map(({ path }) => path),
+    )
+    .toEqual([
+      `/api/projects/${PROJECT_ALPHA}/automations/enabled-task/trigger`,
+      `/api/projects/${PROJECT_ALPHA}/automations/paused-task/trigger`,
+    ]);
+
+  for (const title of ["Completed task", "Failed task", "Cancelled task"]) {
+    await page.getByRole("button", { name: new RegExp(title) }).click();
+    await expect(page.getByRole("button", { name: "立即运行" })).toHaveCount(0);
+  }
+  expect(
+    state.requests
+      .filter(
+        ({ method, path }) => method === "POST" && path.endsWith("/trigger"),
+      )
+      .every(
+        ({ accountId, projectId }) =>
+          accountId === ACCOUNT_A && projectId === PROJECT_ALPHA,
+      ),
+  ).toBe(true);
+});
+
+test("failed dialog feedback clears on close, action change, and project change", async ({
+  page,
+}) => {
+  const state = await mockProjectAutomationAPI(page, [
+    ownerAccount([ALPHA, BETA], {
+      [PROJECT_ALPHA]: [automation(TASK_ALPHA, "Lifecycle task")],
+    }),
+  ]);
+  state.failNext(ACCOUNT_A, PROJECT_ALPHA, "update", {
+    status: 409,
+    code: "AUTOMATION_VERSION_CONFLICT",
+  });
+  state.failNext(ACCOUNT_A, PROJECT_ALPHA, "delete", {
+    status: 409,
+    code: "AUTOMATION_VERSION_CONFLICT",
+  });
+  state.failNext(ACCOUNT_A, PROJECT_ALPHA, "trigger", {
+    status: 409,
+    code: "AUTOMATION_VERSION_CONFLICT",
+  });
+  await page.goto("/projects/alpha/automations");
+
+  await page.getByRole("button", { name: "编辑" }).click();
+  let dialog = page.getByRole("dialog", { name: "编辑 Automation" });
+  await dialog.getByRole("button", { name: "保存修改" }).click();
+  await expect(dialog.getByText("状态已更新，请刷新后重试。")).toBeVisible();
+  await dialog.getByRole("button", { name: "取消" }).click();
+
+  await page.getByRole("button", { name: "创建 Automation" }).click();
+  dialog = page.getByRole("dialog", { name: "创建 Automation" });
+  await expect(dialog.getByText("状态已更新，请刷新后重试。")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "取消" }).click();
+
+  await page.getByRole("button", { name: "删除" }).click();
+  dialog = page.getByRole("dialog", { name: "删除 Automation" });
+  await dialog.getByRole("button", { name: "确认删除" }).click();
+  await expect(dialog.getByText("状态已更新，请刷新后重试。")).toBeVisible();
+  await dialog.getByRole("button", { name: "取消" }).click();
+
+  await page.getByRole("button", { name: "编辑" }).click();
+  dialog = page.getByRole("dialog", { name: "编辑 Automation" });
+  await expect(dialog.getByText("状态已更新，请刷新后重试。")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "取消" }).click();
+
+  await page.getByRole("button", { name: "立即运行" }).click();
+  await expect(page.getByText("状态已更新，请刷新后重试。")).toBeVisible();
+  await page.getByRole("link", { name: "返回工作空间" }).click();
+  await page
+    .getByTestId("project-card")
+    .filter({ hasText: BETA.display_name })
+    .getByRole("link", { name: "进入项目" })
+    .click();
+  await page.getByRole("link", { name: "Automations" }).click();
+  await expect(page.getByText("状态已更新，请刷新后重试。")).toHaveCount(0);
+  await expect(page.getByTestId("automation-empty")).toBeVisible();
+});
+
 test("owner lifecycle uses only project URLs for create, edit, pause, resume, manual, delete and history", async ({
   page,
 }) => {

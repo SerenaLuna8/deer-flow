@@ -241,3 +241,56 @@ pnpm test:e2e:all:
 
 Task 17 remains pending an independent base-to-head review. This section does
 not mark the task or the M5 milestone complete.
+
+## Review-repair structural RED
+
+The independent re-review found that the new eight-scenario Automation spec
+had replaced, rather than retained, three previously approved browser
+regressions. A non-destructive structural scan confirmed the gap before this
+repair changed any test code:
+
+```text
+rg -n "^test\\(" frontend/tests/e2e/project-automations.spec.ts
+  8 current tests; no recipe synchronization, manual status matrix, or
+  feedback-reset test name was present.
+
+git show 599e4216:frontend/tests/e2e/project-automations.spec.ts | rg -n "^test\\("
+  288: recipe schedule stays synchronized with visible controls and submission
+  352: manual trigger is available only for enabled and paused automations
+  380: failed dialog feedback clears on close, action change, and project change
+```
+
+This is the RED evidence for restoring those three real-browser behaviors on
+top of the current strict account UUID plus project UUID fixture. No source
+code or fixture was weakened to manufacture the failure.
+
+## Review-repair GREEN
+
+Recorded at `2026-07-16T19:18:42+08:00`.
+
+- Restored the recipe browser flow and asserted the visible Daily/Weekly/custom
+  preset, cron expression, and timezone against the two real project-scoped
+  create request bodies.
+- Restored the five-status matrix and proved that only `enabled` and `paused`
+  send manual trigger requests.
+- Restored update/delete/trigger failure feedback and proved it clears after
+  closing a dialog, changing actions, and switching projects through the same
+  SPA.
+- All state observation uses the existing `MockProjectAutomationState.requests`
+  and `failNext(accountId, projectId, action, failure)` APIs. The fixture still
+  stores definitions and runs only under `${accountId}:${projectId}`; no global
+  fallback, reload, source scan, or product test hook was added.
+
+Fresh repair verification:
+
+```text
+pnpm exec playwright test tests/e2e/project-automations.spec.ts: 11 passed
+pnpm format: passed
+pnpm check: passed
+pnpm test: 126 files, 915 passed, 0 failed, 0 skipped
+pnpm test:e2e: 167 passed
+```
+
+Only the normal Automation spec and SDD evidence/progress files changed in this
+repair, so the independent static-build configuration and fixture were not
+rerun. Task 17 remains in progress pending independent re-review.
