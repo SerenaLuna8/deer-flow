@@ -1956,6 +1956,7 @@ export async function fetchInfiniteThreadsPage(
   params: InfiniteThreadsParams,
   pageParam: number,
   pageSize: number = INFINITE_THREADS_PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<AgentThread[]> {
   const threads: AgentThread[] = [];
   let offset = pageParam;
@@ -1965,6 +1966,7 @@ export async function fetchInfiniteThreadsPage(
     const currentLimit = pageSize - threads.length;
     const response = (await apiClient.threads.search<AgentThreadState>({
       ...params,
+      ...(signal ? { signal } : {}),
       limit: currentLimit,
       offset,
     })) as AgentThread[];
@@ -2050,12 +2052,13 @@ export function useInfiniteThreads(
       params,
     ),
     initialPageParam: 0,
-    queryFn: async ({ pageParam }) =>
+    queryFn: async ({ pageParam, signal }) =>
       fetchInfiniteThreadsPage(
         privateWork.client,
         params,
         pageParam,
         INFINITE_THREADS_PAGE_SIZE,
+        signal,
       ),
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),

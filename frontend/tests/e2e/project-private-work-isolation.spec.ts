@@ -56,6 +56,27 @@ async function json(route: Route, body: unknown, status = 200) {
 }
 
 async function installScopeFixture(page: Page): Promise<ScopeState> {
+  await page.addInitScript(() => {
+    const trackedWindow = window as typeof window & {
+      __projectAbortPaths?: string[];
+    };
+    trackedWindow.__projectAbortPaths = [];
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const path = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.origin,
+      ).pathname;
+      init?.signal?.addEventListener("abort", () => {
+        trackedWindow.__projectAbortPaths?.push(path);
+      });
+      return nativeFetch(input, init);
+    };
+  });
   mockLangGraphAPI(page);
   let releaseHeldThreadResponse: () => void = () => undefined;
   let heldThreadResponse = Promise.resolve();
@@ -146,6 +167,16 @@ test("Link project switch drops a late previous-project Thread response", async 
   await betaCard.getByRole("link", { name: "进入项目" }).click();
   await page.getByRole("link", { name: "Chats", exact: true }).click();
   await expect(page.getByText("Beta Project conversation")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const trackedWindow = window as typeof window & {
+          __projectAbortPaths?: string[];
+        };
+        return trackedWindow.__projectAbortPaths ?? [];
+      }),
+    )
+    .toContain(`/api/projects/${PROJECT_ALPHA}/private-work/threads/search`);
   state.releaseHeldThreadResponse();
   await expect(page.getByText("Alpha Project conversation")).toHaveCount(0);
 });

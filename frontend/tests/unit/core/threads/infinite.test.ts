@@ -92,6 +92,23 @@ describe("getInfiniteThreadsNextPageParam", () => {
 });
 
 describe("fetchInfiniteThreadsPage", () => {
+  test("forwards the TanStack abort signal to the scoped client", async () => {
+    const search = rs.fn().mockResolvedValue([]);
+    const controller = new AbortController();
+
+    await fetchInfiniteThreadsPage(
+      { threads: { search } },
+      { sortBy: "updated_at", sortOrder: "desc" },
+      0,
+      2,
+      controller.signal,
+    );
+
+    expect(search).toHaveBeenCalledWith(
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
   test("fills a visible page while advancing offsets by raw backend rows", async () => {
     const search = rs
       .fn()

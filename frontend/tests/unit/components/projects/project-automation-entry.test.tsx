@@ -41,8 +41,8 @@ const project: Project = {
 };
 
 describe("project Automation entry", () => {
-  test("keeps the M5 compile-time entry flag disabled until the release task", () => {
-    expect(PROJECT_AUTOMATION).toBe(false);
+  test("enables the M5 compile-time entry only after the release gates", () => {
+    expect(PROJECT_AUTOMATION).toBe(true);
   });
 
   test("opens the entry only when feature, static, capability and readiness gates agree", () => {
@@ -98,13 +98,21 @@ describe("project Automation entry", () => {
     ).not.toContainEqual(expect.objectContaining({ label: "Automations" }));
   });
 
-  test("returns server-side not-found for the disabled direct URL", async () => {
-    await expect(async () => ProjectAutomationsRoute()).rejects.toMatchObject({
-      code: "NEXT_NOT_FOUND",
-    });
+  test("renders the enabled direct URL while retaining the static server gate", () => {
+    expect(ProjectAutomationsRoute()).toBeDefined();
+    const routeSource = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/app/projects/[project_slug]/automations/page.tsx",
+      ),
+      "utf8",
+    );
+    expect(routeSource).toContain(
+      "if (!PROJECT_AUTOMATION || isStaticWebsiteOnly()) notFound();",
+    );
   });
 
-  test("ties the Playwright suite to the canonical compile-time flag", () => {
+  test("runs the Playwright release suite without an environment bypass", () => {
     const source = readFileSync(
       resolve(process.cwd(), "tests/e2e/project-automations.spec.ts"),
       "utf8",
@@ -113,9 +121,7 @@ describe("project Automation entry", () => {
     expect(source).toContain(
       'import { PROJECT_AUTOMATION } from "@/core/projects/features";',
     );
-    expect(source).toMatch(
-      /test\.skip\(\s*!PROJECT_AUTOMATION,\s*"PROJECT_AUTOMATION is disabled; Task 17 enablement will restore this suite\."\s*,?\s*\);/u,
-    );
+    expect(source).not.toContain("test.skip(");
     expect(source).not.toMatch(
       /PLAYWRIGHT_PROJECT_AUTOMATION|NEXT_PUBLIC_PROJECT_AUTOMATION|process\.env/u,
     );

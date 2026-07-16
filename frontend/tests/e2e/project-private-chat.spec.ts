@@ -285,6 +285,19 @@ async function mockPrivateWork(
 test.beforeEach(async ({ page }) => {
   mockLangGraphAPI(page, { suggestionsEnabled: true });
   await mockProjectContext(page);
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/automations/readiness`,
+    (route) =>
+      json(route, {
+        status: "ready",
+        code: "AUTOMATION_READY",
+        scheduler_enabled: true,
+        scheduler_status: "running",
+        project_private_work_ready: true,
+        automation_cutover_ready: true,
+        request_id: "req-automation-ready",
+      }),
+  );
 });
 
 test("project detail loads history and streams without legacy private-work calls", async ({
@@ -315,6 +328,11 @@ test("project detail loads history and streams without legacy private-work calls
   await expect(page.getByText("Previous project question")).toBeVisible();
   await expect(page.getByRole("button", { name: "Submit" })).toBeVisible();
   await expect(page.getByTestId("add-attachments-button")).toBeVisible();
+  const automationLink = page.getByLabel("Automations");
+  await expect(automationLink).toHaveAttribute(
+    "href",
+    `/projects/research-lab/automations?thread_id=${THREAD_ID}`,
+  );
   await expect(page.getByText("Scheduled tasks")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /sidecar/i })).toHaveCount(0);
 

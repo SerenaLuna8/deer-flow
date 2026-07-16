@@ -18,9 +18,14 @@ describe("workspace capability pages", () => {
   it.each([
     [ToolsPage, "MCP"],
     [SkillsPage, "Skill"],
-  ] as const)("renders legacy system assets as read-only compatibility views", (Page, kind) => {
-    const element = Page() as ReactElement<{ kind: "Agent" | "Skill" | "MCP" }>;
-    expect(element.type).toBe(LegacySystemAssetsCompatibility);
-    expect(element.props.kind).toBe(kind);
-  });
+  ] as const)(
+    "renders legacy system assets as read-only compatibility views",
+    (Page, kind) => {
+      const element = Page() as ReactElement<{
+        kind: "Agent" | "Skill" | "MCP";
+      }>;
+      expect(element.type).toBe(LegacySystemAssetsCompatibility);
+      expect(element.props.kind).toBe(kind);
+    },
+  );
 });

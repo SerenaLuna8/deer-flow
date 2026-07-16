@@ -33,6 +33,21 @@ test("thread search query refreshes so IM-created sessions appear in the sidebar
   expect(options.refetchOnWindowFocus).toBe(false);
 });
 
+test("thread search forwards the TanStack abort signal to the scoped client", async () => {
+  const search = rs.fn().mockResolvedValue([]);
+  const options = buildThreadsSearchQueryOptions(
+    { threads: { search } },
+    DEFAULT_THREAD_SEARCH_PARAMS,
+  );
+  const controller = new AbortController();
+
+  await options.queryFn({ signal: controller.signal });
+
+  expect(search).toHaveBeenCalledWith(
+    expect.objectContaining({ signal: controller.signal }),
+  );
+});
+
 test("thread search hides sidecar threads from primary lists by default", async () => {
   const search = rs
     .fn()

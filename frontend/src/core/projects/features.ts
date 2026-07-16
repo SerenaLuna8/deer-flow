@@ -1,5 +1,5 @@
 export const PROJECT_PRIVATE_WORKSPACE = true as const;
-export const PROJECT_AUTOMATION = false as const;
+export const PROJECT_AUTOMATION = true as const;
 export const PROJECT_FIRST_MODE = true as const;
 
 export function projectAutomationEntryEnabled(

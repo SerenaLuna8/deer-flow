@@ -37,8 +37,14 @@ function privateFile(displayName: string) {
 describe("project upload adapter", () => {
   test("uploads one multipart file at a time and aggregates mapped files", async () => {
     fetchWithAuth
-      .mockResolvedValueOnce({ ok: true, json: async () => privateFile("a.txt") })
-      .mockResolvedValueOnce({ ok: true, json: async () => privateFile("b.txt") });
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => privateFile("a.txt"),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => privateFile("b.txt"),
+      });
     const { uploadFiles } = await import("@/core/uploads/api");
     const files = [
       new File(["aaaa"], "a.txt", { type: "text/plain" }),
@@ -71,11 +77,12 @@ describe("project upload adapter", () => {
         ok: true,
         json: async () => ({ success: true }),
       });
-    const { deleteUploadedFile, listUploadedFiles } = await import(
-      "@/core/uploads/api"
-    );
+    const { deleteUploadedFile, listUploadedFiles } =
+      await import("@/core/uploads/api");
 
-    await expect(listUploadedFiles(threadId, projectOptions)).resolves.toMatchObject({
+    await expect(
+      listUploadedFiles(threadId, projectOptions),
+    ).resolves.toMatchObject({
       count: 1,
       files: [{ id: fileId, filename: "notes.txt" }],
     });

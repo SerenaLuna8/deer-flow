@@ -8,6 +8,13 @@
 
 import type { Page, Route } from "@playwright/test";
 
+import type {
+  Automation,
+  AutomationReadiness,
+  AutomationRun,
+} from "@/core/project-automations/types";
+import type { Project } from "@/core/projects/types";
+
 // ---------------------------------------------------------------------------
 // Constants — deterministic IDs used across tests
 // ---------------------------------------------------------------------------
@@ -1224,4 +1231,448 @@ function fulfillRunStreamValues(route: Route, values: Record<string, unknown>) {
     contentType: "text/event-stream",
     body,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Project Automation mock
+// ---------------------------------------------------------------------------
+
+export type MockProjectAutomationAccount = {
+  id: string;
+  email: string;
+  projects: Project[];
+  automations?: Record<string, Automation[]>;
+};
+
+export type MockProjectAutomationRequest = {
+  accountId: string;
+  projectId: string;
+  method: string;
+  path: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown> | null;
+};
+
+type MockAutomationAction =
+  | "create"
+  | "update"
+  | "pause"
+  | "resume"
+  | "trigger"
+  | "delete";
+
+type MockAutomationFailure = {
+  status: number;
+  code:
+    | "AUTOMATION_VERSION_CONFLICT"
+    | "AUTOMATION_CONCURRENCY_LIMIT"
+    | "AUTOMATION_UNAVAILABLE";
+};
+
+type DeferredAutomationList = {
+  started: Promise<void>;
+  release: () => void;
+};
+
+export type MockProjectAutomationState = {
+  requests: MockProjectAutomationRequest[];
+  requestedPaths: string[];
+  abortedListScopes: Set<string>;
+  switchAccount: (accountId: string) => void;
+  getAutomations: (accountId: string, projectId: string) => Automation[];
+  getRuns: (
+    accountId: string,
+    projectId: string,
+    automationId: string,
+  ) => AutomationRun[];
+  setReadiness: (
+    accountId: string,
+    projectId: string,
+    readiness: Partial<AutomationReadiness>,
+  ) => void;
+  failNext: (
+    accountId: string,
+    projectId: string,
+    action: MockAutomationAction,
+    failure: MockAutomationFailure,
+  ) => void;
+  holdNextList: (
+    accountId: string,
+    projectId: string,
+  ) => DeferredAutomationList;
+};
+
+export function automationStoreKey(
+  accountId: string,
+  projectId: string,
+): string {
+  return `${accountId}:${projectId}`;
+}
+
+function automationRunStoreKey(scopeKey: string, automationId: string) {
+  return `${scopeKey}:${automationId}`;
+}
+
+function automationJson(route: Route, body: unknown, status = 200) {
+  return route.fulfill({
+    status,
+    contentType: "application/json",
+    body: JSON.stringify(body),
+  });
+}
+
+function automationRequestBody(route: Route): Record<string, unknown> | null {
+  try {
+    return route.request().postDataJSON() as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Installs the release-gate Automation fixture. Automation state is always
+ * selected by the authenticated account plus the project UUID parsed from the
+ * project URL. There is deliberately no global task map or legacy endpoint
+ * fallback.
+ */
+export async function mockProjectAutomationAPI(
+  page: Page,
+  accounts: MockProjectAutomationAccount[],
+): Promise<MockProjectAutomationState> {
+  await page.addInitScript(() => {
+    const trackedWindow = window as typeof window & {
+      __projectAbortPaths?: string[];
+    };
+    trackedWindow.__projectAbortPaths = [];
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const path = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        window.location.origin,
+      ).pathname;
+      init?.signal?.addEventListener("abort", () => {
+        trackedWindow.__projectAbortPaths?.push(path);
+      });
+      return nativeFetch(input, init);
+    };
+  });
+  mockLangGraphAPI(page);
+  const accountsById = new Map(
+    accounts.map((account) => [account.id, account]),
+  );
+  let currentAccountId = accounts[0]?.id ?? "";
+  const stores = new Map<string, Automation[]>();
+  const runs = new Map<string, AutomationRun[]>();
+  const readiness = new Map<string, AutomationReadiness>();
+  const failures = new Map<string, MockAutomationFailure[]>();
+  const heldLists = new Map<
+    string,
+    { started: () => void; released: Promise<void> }
+  >();
+  const requests: MockProjectAutomationRequest[] = [];
+  const requestedPaths: string[] = [];
+  const abortedListScopes = new Set<string>();
+
+  for (const account of accounts) {
+    for (const currentProject of account.projects) {
+      const key = automationStoreKey(account.id, currentProject.id);
+      stores.set(key, [...(account.automations?.[currentProject.id] ?? [])]);
+      readiness.set(key, {
+        status: "ready",
+        code: "AUTOMATION_READY",
+        scheduler_enabled: true,
+        scheduler_status: "running",
+        project_private_work_ready: true,
+        automation_cutover_ready: true,
+        request_id: `automation-ready-${account.id}-${currentProject.id}`,
+      });
+    }
+  }
+
+  page.on("request", (request) => {
+    requestedPaths.push(new URL(request.url()).pathname);
+  });
+  page.on("requestfailed", (request) => {
+    const path = new URL(request.url()).pathname;
+    const match = /\/api\/projects\/([^/]+)\/automations$/.exec(path);
+    if (match?.[1]) {
+      const record = [...requests]
+        .reverse()
+        .find(
+          (candidate) =>
+            candidate.projectId === match[1] &&
+            candidate.method === "GET" &&
+            candidate.path === path,
+        );
+      abortedListScopes.add(
+        automationStoreKey(record?.accountId ?? currentAccountId, match[1]),
+      );
+    }
+  });
+
+  const state: MockProjectAutomationState = {
+    requests,
+    requestedPaths,
+    abortedListScopes,
+    switchAccount(accountId) {
+      if (!accountsById.has(accountId)) throw new Error("Unknown mock account");
+      currentAccountId = accountId;
+    },
+    getAutomations(accountId, projectId) {
+      return stores.get(automationStoreKey(accountId, projectId)) ?? [];
+    },
+    getRuns(accountId, projectId, automationId) {
+      const scope = automationStoreKey(accountId, projectId);
+      return runs.get(automationRunStoreKey(scope, automationId)) ?? [];
+    },
+    setReadiness(accountId, projectId, value) {
+      const key = automationStoreKey(accountId, projectId);
+      readiness.set(key, { ...readiness.get(key)!, ...value });
+    },
+    failNext(accountId, projectId, action, failure) {
+      const key = `${automationStoreKey(accountId, projectId)}:${action}`;
+      failures.set(key, [...(failures.get(key) ?? []), failure]);
+    },
+    holdNextList(accountId, projectId) {
+      const key = automationStoreKey(accountId, projectId);
+      let markStarted!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      heldLists.set(key, { started: markStarted, released });
+      return { started, release };
+    },
+  };
+
+  const takeFailure = (scopeKey: string, action: MockAutomationAction) => {
+    const key = `${scopeKey}:${action}`;
+    const queue = failures.get(key) ?? [];
+    const next = queue.shift();
+    if (queue.length === 0) failures.delete(key);
+    return next;
+  };
+  const fail = (route: Route, failure: MockAutomationFailure) =>
+    automationJson(
+      route,
+      {
+        detail: {
+          code: failure.code,
+          message: "private mock detail",
+          request_id: `mock-${failure.code.toLowerCase()}`,
+        },
+      },
+      failure.status,
+    );
+
+  await page.route("**/api/v1/auth/me", (route) => {
+    const account = accountsById.get(currentAccountId);
+    if (!account) return automationJson(route, { detail: "not found" }, 404);
+    return automationJson(route, {
+      id: account.id,
+      email: account.email,
+      system_role: "user",
+      needs_setup: false,
+    });
+  });
+  await page.route(/\/api\/projects(?:\?.*)?$/, (route) => {
+    const account = accountsById.get(currentAccountId);
+    return automationJson(route, {
+      items: account?.projects ?? [],
+      next_cursor: null,
+    });
+  });
+  await page.route("**/api/projects/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const method = request.method();
+    const projectId = /^\/api\/projects\/([^/]+)/.exec(path)?.[1];
+    const account = accountsById.get(currentAccountId);
+    const currentProject = account?.projects.find(({ id }) => id === projectId);
+    if (!projectId || !currentProject) {
+      return automationJson(route, { detail: "not found" }, 404);
+    }
+    const accountId = currentAccountId;
+    const scopeKey = automationStoreKey(accountId, projectId);
+    const scopedAutomations = stores.get(scopeKey)!;
+    const base = `/api/projects/${projectId}/automations`;
+
+    if (path.endsWith("/enter")) {
+      return automationJson(route, currentProject);
+    }
+    if (path.endsWith("/private-work/readiness")) {
+      return automationJson(route, {
+        status: "ready",
+        code: "PRIVATE_WORK_READY",
+        request_id: `private-ready-${scopeKey}`,
+      });
+    }
+    if (path.endsWith("/agents") && method === "GET") {
+      return automationJson(route, {
+        system_items: [],
+        project_items: [
+          {
+            id: "20000000-0000-4000-8000-000000000001",
+            scope: "project",
+            project_id: projectId,
+            slug: "automation-agent",
+            display_name: "Automation Agent",
+            status: "active",
+            current_published_version_id:
+              "30000000-0000-4000-8000-000000000001",
+            version: 1,
+            created_by_user_id: accountId,
+            created_at: "2026-07-16T00:00:00Z",
+            updated_at: "2026-07-16T00:00:00Z",
+            capabilities: ["shared_assets.read", "shared_assets.execute"],
+            binding: null,
+          },
+        ],
+        request_id: `agents-${scopeKey}`,
+      });
+    }
+
+    if (!path.startsWith(base)) {
+      return automationJson(route, { detail: "not found" }, 404);
+    }
+    const record: MockProjectAutomationRequest = {
+      accountId,
+      projectId,
+      method,
+      path,
+      headers: request.headers(),
+      body: automationRequestBody(route),
+    };
+    requests.push(record);
+
+    if (path === `${base}/readiness` && method === "GET") {
+      return automationJson(route, readiness.get(scopeKey));
+    }
+    if (path === base && method === "GET") {
+      const held = heldLists.get(scopeKey);
+      if (held) {
+        heldLists.delete(scopeKey);
+        held.started();
+        await held.released;
+      }
+      try {
+        return await automationJson(route, { items: scopedAutomations });
+      } catch {
+        abortedListScopes.add(scopeKey);
+        return;
+      }
+    }
+    if (path === base && method === "POST") {
+      const failure = takeFailure(scopeKey, "create");
+      if (failure) return fail(route, failure);
+      const body = record.body ?? {};
+      const now = "2026-07-16T00:00:00Z";
+      const created: Automation = {
+        id: `automation-${scopedAutomations.length + 1}`,
+        thread_id: (body.thread_id as string | null | undefined) ?? null,
+        context_mode: body.context_mode as Automation["context_mode"],
+        agent_asset_id: body.agent_asset_id as string,
+        agent_scope: body.agent_scope as Automation["agent_scope"],
+        title: body.title as string,
+        prompt: body.prompt as string,
+        schedule_type: body.schedule_type as Automation["schedule_type"],
+        schedule_spec: body.schedule_spec as Record<string, unknown>,
+        timezone: body.timezone as string,
+        status: "enabled",
+        next_run_at: "2026-07-17T09:00:00Z",
+        last_run_at: null,
+        last_outcome: null,
+        last_error_code: null,
+        run_count: 0,
+        version: 1,
+        created_at: now,
+        updated_at: now,
+      };
+      scopedAutomations.push(created);
+      return automationJson(route, created, 201);
+    }
+
+    const suffix = path.slice(base.length + 1);
+    const [automationId, action] = suffix.split("/");
+    const selectedIndex = scopedAutomations.findIndex(
+      ({ id }) => id === automationId,
+    );
+    if (selectedIndex < 0 || !automationId) {
+      return automationJson(route, { detail: "not found" }, 404);
+    }
+    const selected = scopedAutomations[selectedIndex]!;
+    if (action === "runs" && method === "GET") {
+      return automationJson(route, {
+        items: runs.get(automationRunStoreKey(scopeKey, automationId)) ?? [],
+      });
+    }
+    if (action === "trigger" && method === "POST") {
+      const failure = takeFailure(scopeKey, "trigger");
+      if (failure) return fail(route, failure);
+      const now = "2026-07-16T00:00:00Z";
+      const run: AutomationRun = {
+        id: `run-${automationId}-${state.getRuns(accountId, projectId, automationId).length + 1}`,
+        automation_id: automationId,
+        automation_version: selected.version,
+        scheduled_for: now,
+        trigger: "manual",
+        status: "queued",
+        thread_id: null,
+        run_id: null,
+        error_code: null,
+        started_at: null,
+        finished_at: null,
+        created_at: now,
+        updated_at: now,
+      };
+      const runKey = automationRunStoreKey(scopeKey, automationId);
+      runs.set(runKey, [...(runs.get(runKey) ?? []), run]);
+      return automationJson(route, run);
+    }
+    if ((action === "pause" || action === "resume") && method === "POST") {
+      const failure = takeFailure(scopeKey, action);
+      if (failure) return fail(route, failure);
+      const updated: Automation = {
+        ...selected,
+        status: action === "pause" ? "paused" : "enabled",
+        version: selected.version + 1,
+      };
+      scopedAutomations[selectedIndex] = updated;
+      return automationJson(route, updated);
+    }
+    if (action === undefined && method === "PATCH") {
+      const failure = takeFailure(scopeKey, "update");
+      if (failure) return fail(route, failure);
+      const body = record.body ?? {};
+      const changes = { ...body };
+      delete changes.expected_version;
+      const updated = {
+        ...selected,
+        ...changes,
+        version: selected.version + 1,
+      } as Automation;
+      scopedAutomations[selectedIndex] = updated;
+      return automationJson(route, updated);
+    }
+    if (action === undefined && method === "DELETE") {
+      const failure = takeFailure(scopeKey, "delete");
+      if (failure) return fail(route, failure);
+      scopedAutomations.splice(selectedIndex, 1);
+      return automationJson(route, { id: automationId, deleted: true });
+    }
+    if (action === undefined && method === "GET") {
+      return automationJson(route, selected);
+    }
+    return automationJson(route, { detail: "not found" }, 404);
+  });
+
+  return state;
 }
