@@ -42,6 +42,14 @@ def _add_occurrence_expand_columns() -> None:
         type_=sa.String(20),
         existing_nullable=False,
     )
+    # Staging must be able to clear legacy synthetic Thread pointers for
+    # pre-admission skipped occurrences before the final relation probes run.
+    op.alter_column(
+        "scheduled_task_runs",
+        "thread_id",
+        existing_type=sa.String(64),
+        nullable=True,
+    )
     op.create_index(
         "ix_scheduled_task_runs_project_id",
         "scheduled_task_runs",
@@ -241,6 +249,12 @@ def downgrade() -> None:
         existing_type=sa.String(20),
         type_=sa.String(16),
         existing_nullable=False,
+    )
+    op.alter_column(
+        "scheduled_task_runs",
+        "thread_id",
+        existing_type=sa.String(64),
+        nullable=False,
     )
     for column in (
         "updated_at",

@@ -252,6 +252,37 @@ async def test_bootstrap_existing_preserves_ambiguous_admin_code(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_existing_preserves_automation_migration_instruction(monkeypatch) -> None:
+    connection = AsyncMock()
+    connection_context = MagicMock()
+    connection_context.__aenter__ = AsyncMock(return_value=connection)
+    connection_context.__aexit__ = AsyncMock(return_value=None)
+    engine = MagicMock()
+    engine.connect.return_value = connection_context
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr(setup_postgres, "_create_setup_engine", lambda _config: engine)
+
+    @asynccontextmanager
+    async def coordination_lock(_database_url):
+        yield
+
+    monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
+    monkeypatch.setattr(
+        setup_postgres,
+        "bootstrap_schema",
+        AsyncMock(side_effect=RuntimeError("automation migration required; private title must not leak")),
+    )
+
+    with pytest.raises(setup_postgres.PostgresSetupError) as exc_info:
+        await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc")
+
+    assert str(exc_info.value) == ("automation migration required; stop writers and run make migrate-automations")
+    assert "private title" not in str(exc_info.value)
+    assert "private-password" not in str(exc_info.value)
+    engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_existing_cleanup_failure_does_not_override_bootstrap_code(monkeypatch) -> None:
     connection = AsyncMock()
     connection_context = MagicMock()

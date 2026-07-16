@@ -715,6 +715,17 @@ def check_postgres(project_root: Path) -> CheckResult:
             "只读健康检查失败",
             fix="运行 make check-db 查看脱敏状态；如 revision 或表缺失，运行 make migrate-db",
         )
+    if result.get("automation_status") == "migration_required":
+        return CheckResult(
+            "PostgreSQL",
+            "fail",
+            "Automation migration_required",
+            fix=(
+                "停止 Gateway、Scheduler、channel 与 embedded writers；"
+                "先运行 make migrate-automations ARGS=\"--dry-run --owner-map <json> --backup-dir <path>\"，"
+                "再在维护窗口使用 --execute"
+            ),
+        )
     if not result.get("healthy"):
         return CheckResult(
             "PostgreSQL",
@@ -722,7 +733,10 @@ def check_postgres(project_root: Path) -> CheckResult:
             "连接、Alembic revision 或必需表检查未通过",
             fix="运行 make check-db 查看脱敏状态；如 revision 或表缺失，运行 make migrate-db",
         )
-    detail = f"{result['host']}:{result['port']}/{result['database']}, revision {result['current_revision']}"
+    detail = (
+        f"{result['host']}:{result['port']}/{result['database']}, "
+        f"revision {result['current_revision']}, Automation {result.get('automation_status', 'unavailable')}"
+    )
     return CheckResult("PostgreSQL", "ok", detail)
 
 

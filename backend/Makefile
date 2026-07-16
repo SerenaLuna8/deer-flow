@@ -43,6 +43,9 @@ migrate-assets:
 migrate-private-work:
 	PYTHONPATH=. uv run python scripts/migrate_private_work.py $(ARGS)
 
+migrate-automations:
+	PYTHONPATH=. uv run python scripts/migrate_automations.py $(ARGS)
+
 rotate-credentials:
 	PYTHONPATH=. uv run python scripts/rotate_credentials.py $(ARGS)
 

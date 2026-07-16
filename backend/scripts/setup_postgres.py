@@ -228,6 +228,11 @@ async def _bootstrap_existing(database_url: str) -> str:
     except ProjectBootstrapFailed as exc:
         primary_error = exc
         raise PostgresSetupError(exc.code) from None
+    except RuntimeError as exc:
+        primary_error = exc
+        if str(exc).startswith("automation migration required"):
+            raise PostgresSetupError("automation migration required; stop writers and run make migrate-automations") from None
+        raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None
     except Exception as exc:
         primary_error = exc
         raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None

@@ -7,6 +7,7 @@ import asyncio
 import os
 import sys
 from dataclasses import dataclass
+from typing import Literal
 
 import asyncpg
 
@@ -18,6 +19,9 @@ except ModuleNotFoundError:  # Direct ``python scripts/check_postgres.py`` execu
     from setup_postgres import _asyncpg_url, parse_target
 
 REQUIRED_TABLES: tuple[str, ...] = (
+    "automation_cutover_state",
+    "automation_migration_ledger",
+    "automation_migration_runs",
     "channel_connections",
     "channel_conversations",
     "channel_credentials",
@@ -55,10 +59,11 @@ class PostgresCheckResult:
     missing_tables: tuple[str, ...] = ()
     connected: bool = True
     error: str = ""
+    automation_status: Literal["ready", "migration_required", "unavailable"] = "unavailable"
 
     @property
     def healthy(self) -> bool:
-        return self.connected and self.revision_matches and not self.missing_tables and not self.error
+        return self.connected and self.revision_matches and not self.missing_tables and not self.error and self.automation_status == "ready"
 
 
 def get_head_revision() -> str:
@@ -84,6 +89,27 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
             list(REQUIRED_TABLES),
         )
         present = {row["table_name"] for row in rows}
+        missing_tables = tuple(sorted(set(REQUIRED_TABLES) - present))
+        automation_status: Literal["ready", "migration_required", "unavailable"] = "migration_required"
+        if (
+            not {
+                "automation_cutover_state",
+                "automation_migration_ledger",
+                "automation_migration_runs",
+            }
+            - present
+        ):
+            marker_ready = await connection.fetchval(
+                """SELECT EXISTS (
+                       SELECT 1 FROM automation_cutover_state
+                       WHERE id = 1
+                         AND stage = 'cutover_complete'
+                         AND final_schema_probe_complete = true
+                         AND cutover_at IS NOT NULL
+                   )"""
+            )
+            if current_revision == head and marker_ready:
+                automation_status = "ready"
         return PostgresCheckResult(
             host=target.host,
             port=target.port,
@@ -92,7 +118,8 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
             current_revision=current_revision,
             head_revision=head,
             revision_matches=current_revision == head,
-            missing_tables=tuple(sorted(set(REQUIRED_TABLES) - present)),
+            missing_tables=missing_tables,
+            automation_status=automation_status,
         )
     except Exception:
         return PostgresCheckResult(
@@ -124,6 +151,7 @@ def print_result(result: PostgresCheckResult) -> None:
         print(f"版本: {result.server_version}")
     print(f"当前 Alembic revision: {result.current_revision or '缺失'}")
     print(f"目标 Alembic revision: {result.head_revision or '未知'}")
+    print(f"Automation: {result.automation_status}")
     if result.missing_tables:
         print(f"缺失表: {', '.join(result.missing_tables)}")
     if result.error:

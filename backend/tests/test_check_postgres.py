@@ -13,6 +13,9 @@ def test_task5_health_check_requires_migration_ledger() -> None:
 
 def test_required_tables_exactly_cover_current_application_and_langgraph_schema() -> None:
     assert set(check_postgres.REQUIRED_TABLES) == {
+        "automation_cutover_state",
+        "automation_migration_ledger",
+        "automation_migration_runs",
         "channel_connections",
         "channel_conversations",
         "channel_credentials",
@@ -36,6 +39,14 @@ def test_required_tables_exactly_cover_current_application_and_langgraph_schema(
     }
 
 
+def test_m5_health_check_requires_automation_control_tables() -> None:
+    assert {
+        "automation_cutover_state",
+        "automation_migration_ledger",
+        "automation_migration_runs",
+    } <= set(check_postgres.REQUIRED_TABLES)
+
+
 def test_health_check_requires_complete_langgraph_schema() -> None:
     assert {
         "checkpoint_migrations",
@@ -49,7 +60,7 @@ def test_health_check_requires_complete_langgraph_schema() -> None:
 
 def _connection(*, revision: str | None = "0003_scheduled_tasks", present_tables=None):
     connection = AsyncMock()
-    connection.fetchval.side_effect = ["PostgreSQL 17.5", revision]
+    connection.fetchval.side_effect = ["PostgreSQL 17.5", revision, True]
     connection.fetch.return_value = [{"table_name": table} for table in (present_tables or check_postgres.REQUIRED_TABLES)]
     return connection
 
@@ -78,7 +89,7 @@ async def test_check_distinguishes_missing_revision_and_tables(monkeypatch) -> N
     connection = _connection(revision=None, present_tables={"users"})
     missing_relation = RuntimeError("alembic_version missing")
     missing_relation.sqlstate = "42P01"
-    connection.fetchval.side_effect = ["PostgreSQL 17.5", missing_relation]
+    connection.fetchval.side_effect = ["PostgreSQL 17.5", missing_relation, False]
     monkeypatch.setattr(check_postgres.asyncpg, "connect", AsyncMock(return_value=connection))
     monkeypatch.setattr(check_postgres, "get_head_revision", lambda: "0003_scheduled_tasks")
 
@@ -132,12 +143,41 @@ def test_check_result_contains_only_safe_connection_metadata() -> None:
         head_revision="0003_scheduled_tasks",
         revision_matches=True,
         missing_tables=(),
+        automation_status="ready",
     )
     fields = result.__dataclass_fields__
     assert "username" not in fields
     assert "password" not in fields
     assert "url" not in fields
     assert result.healthy is True
+
+
+def test_automation_status_is_public_and_bounded() -> None:
+    ready = check_postgres.PostgresCheckResult(
+        host="127.0.0.1",
+        port=5432,
+        database="deerflow_test_1_abc",
+        automation_status="ready",
+    )
+    required = check_postgres.PostgresCheckResult(
+        host="127.0.0.1",
+        port=5432,
+        database="deerflow_test_1_abc",
+        automation_status="migration_required",
+    )
+    unavailable = check_postgres.PostgresCheckResult(
+        host="127.0.0.1",
+        port=5432,
+        database="deerflow_test_1_abc",
+        connected=False,
+        automation_status="unavailable",
+    )
+
+    assert {ready.automation_status, required.automation_status, unavailable.automation_status} == {
+        "ready",
+        "migration_required",
+        "unavailable",
+    }
 
 
 def test_check_cli_returns_nonzero_for_unhealthy_result(monkeypatch, capsys) -> None:
