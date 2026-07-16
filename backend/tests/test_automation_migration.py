@@ -672,6 +672,77 @@ async def _stage_until_before_finalize(
     monkeypatch.setattr(migrate_automations, "_upgrade_database", original_upgrade)
 
 
+async def _upgrade_automation_to_head(database_url: str) -> None:
+    engine = create_async_engine(database_url)
+    try:
+        await asyncio.to_thread(
+            command.upgrade,
+            _get_alembic_config(engine),
+            "head",
+        )
+    finally:
+        await engine.dispose()
+
+
+async def _wait_for_table_lock(
+    database_url: str,
+    *,
+    table: str,
+    mode: str,
+    granted: bool,
+    timeout: float = 5,
+) -> None:
+    engine = create_async_engine(database_url)
+    deadline = asyncio.get_running_loop().time() + timeout
+    try:
+        while asyncio.get_running_loop().time() < deadline:
+            async with engine.connect() as connection:
+                found = await connection.scalar(
+                    text(
+                        """SELECT EXISTS (
+                            SELECT 1 FROM pg_locks
+                            WHERE relation=CAST(:table AS regclass)
+                              AND mode=:mode AND granted=:granted
+                              AND pid <> pg_backend_pid()
+                        )"""
+                    ),
+                    {"table": table, "mode": mode, "granted": granted},
+                )
+            if found:
+                return
+            await asyncio.sleep(0.02)
+    finally:
+        await engine.dispose()
+    raise AssertionError("expected PostgreSQL table lock was not observed")
+
+
+async def _table_lock_exists(
+    database_url: str,
+    *,
+    table: str,
+    mode: str,
+    granted: bool,
+) -> bool:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            return bool(
+                await connection.scalar(
+                    text(
+                        """SELECT EXISTS (
+                            SELECT 1 FROM pg_locks
+                            WHERE relation=CAST(:table AS regclass)
+                              AND mode=:mode AND granted=:granted
+                              AND pid <> pg_backend_pid()
+                        )"""
+                    ),
+                    {"table": table, "mode": mode, "granted": granted},
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_finalize_rechecks_actual_target_digest_before_destructive_ddl(
@@ -922,6 +993,207 @@ async def test_execute_locks_legacy_writers_and_finalize_rejects_post_stage_drif
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0012_project_automation_expand"
             assert await connection.scalar(text("SELECT assistant_id FROM scheduled_tasks WHERE id='legacy-fresh'")) == "concurrent legacy writer"
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_finalize_first_blocks_scheduler_select_for_update_before_ddl(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    await _stage_until_before_finalize(
+        postgres_database_url,
+        scenario,
+        monkeypatch,
+    )
+
+    blocker_engine = create_async_engine(postgres_database_url)
+    blocker_connection = await blocker_engine.connect()
+    blocker_transaction = await blocker_connection.begin()
+    writer_engine = create_async_engine(postgres_database_url)
+    writer_selected = asyncio.Event()
+    migration_task = None
+    writer_task = None
+
+    async def scheduler_writer() -> None:
+        async with writer_engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """SELECT id FROM scheduled_tasks
+                    WHERE id='legacy-fresh' FOR UPDATE"""
+                )
+            )
+            writer_selected.set()
+            await connection.execute(
+                text(
+                    """UPDATE scheduled_tasks SET status='paused'
+                    WHERE id='legacy-fresh'"""
+                )
+            )
+
+    try:
+        await blocker_connection.execute(text("LOCK TABLE automation_cutover_state IN ACCESS EXCLUSIVE MODE"))
+        migration_task = asyncio.create_task(_upgrade_automation_to_head(postgres_database_url))
+        await _wait_for_table_lock(
+            postgres_database_url,
+            table="scheduled_tasks",
+            mode="AccessExclusiveLock",
+            granted=True,
+        )
+        writer_task = asyncio.create_task(scheduler_writer())
+        await asyncio.sleep(0.1)
+        assert writer_selected.is_set() is False
+
+        await blocker_transaction.commit()
+        await asyncio.wait_for(migration_task, timeout=10)
+        await asyncio.wait_for(writer_task, timeout=10)
+    finally:
+        if blocker_transaction.is_active:
+            await blocker_transaction.rollback()
+        for task in (migration_task, writer_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (migration_task, writer_task) if task is not None),
+            return_exceptions=True,
+        )
+        await blocker_connection.close()
+        await blocker_engine.dispose()
+        await writer_engine.dispose()
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013_project_automation_finalize"
+            assert await connection.scalar(text("SELECT status FROM scheduled_tasks WHERE id='legacy-fresh'")) == "paused"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_scheduler_select_for_update_first_makes_finalize_wait_without_deadlock(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    await _stage_until_before_finalize(
+        postgres_database_url,
+        scenario,
+        monkeypatch,
+    )
+
+    writer_engine = create_async_engine(postgres_database_url)
+    writer_selected = asyncio.Event()
+    allow_writer_update = asyncio.Event()
+
+    async def scheduler_writer() -> None:
+        async with writer_engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """SELECT id FROM scheduled_tasks
+                    WHERE id='legacy-fresh' FOR UPDATE"""
+                )
+            )
+            writer_selected.set()
+            await allow_writer_update.wait()
+            await connection.execute(
+                text(
+                    """UPDATE scheduled_tasks SET status='paused'
+                    WHERE id='legacy-fresh'"""
+                )
+            )
+
+    writer_task = asyncio.create_task(scheduler_writer())
+    migration_task = None
+    try:
+        await asyncio.wait_for(writer_selected.wait(), timeout=5)
+        migration_task = asyncio.create_task(_upgrade_automation_to_head(postgres_database_url))
+        await _wait_for_table_lock(
+            postgres_database_url,
+            table="scheduled_tasks",
+            mode="AccessExclusiveLock",
+            granted=False,
+        )
+        assert (
+            await _table_lock_exists(
+                postgres_database_url,
+                table="scheduled_tasks",
+                mode="ShareRowExclusiveLock",
+                granted=True,
+            )
+            is False
+        )
+
+        allow_writer_update.set()
+        await asyncio.wait_for(writer_task, timeout=10)
+        with pytest.raises(RuntimeError, match="target digest"):
+            await asyncio.wait_for(migration_task, timeout=10)
+    finally:
+        allow_writer_update.set()
+        for task in (writer_task, migration_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (writer_task, migration_task) if task is not None),
+            return_exceptions=True,
+        )
+        await writer_engine.dispose()
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0012_project_automation_expand"
+            assert await connection.scalar(text("SELECT status FROM scheduled_tasks WHERE id='legacy-fresh'")) == "paused"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_finalize_lockers_use_one_fixed_two_table_order(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    first_locked = asyncio.Event()
+    release_first = asyncio.Event()
+    second_locked = asyncio.Event()
+
+    async def lock_both(*, entered: asyncio.Event, release: asyncio.Event) -> None:
+        async with engine.begin() as connection:
+            await migrate_automations._lock_automation_sources_for_finalize(connection)
+            entered.set()
+            await release.wait()
+
+    first = asyncio.create_task(lock_both(entered=first_locked, release=release_first))
+    second_release = asyncio.Event()
+    second = None
+    try:
+        await asyncio.wait_for(first_locked.wait(), timeout=5)
+        second = asyncio.create_task(lock_both(entered=second_locked, release=second_release))
+        await asyncio.sleep(0.1)
+        assert second_locked.is_set() is False
+        release_first.set()
+        await asyncio.wait_for(first, timeout=5)
+        await asyncio.wait_for(second_locked.wait(), timeout=5)
+        second_release.set()
+        await asyncio.wait_for(second, timeout=5)
+    finally:
+        release_first.set()
+        second_release.set()
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (first, second) if task is not None),
+            return_exceptions=True,
+        )
         await engine.dispose()
 
 

@@ -160,3 +160,48 @@ is still covered by constructing a valid previously committed 0012 task receipt 
 runner resumes it safely. A failure before the first ledger leaves no durable run identity, so a later
 reviewed owner map may proceed; once any receipt exists, the map and stable source digest remain
 pinned. Task 11 work remains excluded.
+
+## Second independent review repair — eliminate finalize lock upgrade deadlock
+
+The second review found one remaining Important concurrency gap. Revision 0013 first acquired
+`SHARE ROW EXCLUSIVE`, which is compatible with the `ROW SHARE` table lock taken by the scheduler's
+`SELECT ... FOR UPDATE`. The scheduler could therefore lock a row and then wait for its `UPDATE`'s
+`ROW EXCLUSIVE`, while the migration waited to upgrade to `ACCESS EXCLUSIVE` for destructive DDL.
+That wait cycle can be rejected by PostgreSQL as `40P01` instead of producing the required
+deterministic serialization.
+
+Strict TDD added three real PostgreSQL barrier tests before production changes. RED showed all three
+missing invariants: a scheduler `SELECT FOR UPDATE` crossed the migration's initial lock, a
+writer-first sequence observed the migration holding granted `ShareRowExclusiveLock` while waiting
+for `AccessExclusiveLock`, and no shared fixed-order final lock helper existed. The minimal repair is
+one shared statement:
+
+```sql
+LOCK TABLE scheduled_tasks, scheduled_task_runs IN ACCESS EXCLUSIVE MODE
+```
+
+Revision 0013 executes that statement before every probe, digest, or DDL operation and holds it to
+transaction end. The receipt-only 0013 recovery path uses the same statement before actual-target
+verification and the final marker write, preventing a pre-cutover writer from changing verified rows
+after the marker commits. Ordinary 0012 staging intentionally retains `SHARE ROW EXCLUSIVE`, because
+it performs no lock upgrade and its existing lock/transaction boundary already blocks legacy writes.
+
+GREEN proves both scheduler orderings. When migration starts first, the writer blocks at the initial
+`SELECT FOR UPDATE`, then completes after 0013 commits. When the writer starts first, migration waits
+without holding the weaker lock; after the writer commits, the migration detects target digest drift
+and stays at 0012 without destructive DDL. Two concurrent final lockers using the shared two-table
+order also serialize without a cross-table deadlock.
+
+### Second repair verification
+
+| Gate | Result |
+| --- | ---: |
+| Real PostgreSQL finalize/writer order and two-table lock tests | 3 passed |
+| Complete migration and M5 schema suites | 34 passed |
+| Task 10 migration/CLI/setup/check-db/doctor suite | 138 passed |
+| Expanded Tasks 1–10 Automation + bootstrap + check-db + real M4 migration gate | 409 passed |
+| Full backend Ruff check and format check | passed; 1052 files formatted |
+| Compileall and `git diff --check` | passed |
+
+This repair changes only finalization/recovery lock acquisition, its real concurrency coverage, and
+this report. Task 11 remains excluded.

@@ -13,6 +13,8 @@ import uuid
 from collections.abc import Mapping
 from datetime import date, datetime
 
+AUTOMATION_FINALIZE_LOCK_SQL = "LOCK TABLE scheduled_tasks, scheduled_task_runs IN ACCESS EXCLUSIVE MODE"
+
 AUTOMATION_LEGACY_COLUMNS: dict[str, tuple[str, ...]] = {
     "scheduled_tasks": (
         "id",

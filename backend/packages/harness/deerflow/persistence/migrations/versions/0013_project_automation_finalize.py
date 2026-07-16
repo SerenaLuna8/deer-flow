@@ -13,6 +13,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 from deerflow.persistence.automations.migration_digest import (
+    AUTOMATION_FINALIZE_LOCK_SQL,
     canonical_digest,
     expanded_select_sql,
     target_select_sql,
@@ -65,7 +66,7 @@ $$ LANGUAGE plpgsql
 
 
 def _lock_automation_sources(connection: Connection) -> None:
-    connection.execute(sa.text("LOCK TABLE scheduled_tasks, scheduled_task_runs IN SHARE ROW EXCLUSIVE MODE"))
+    connection.execute(sa.text(AUTOMATION_FINALIZE_LOCK_SQL))
 
 
 def _is_empty_automation_domain(connection: Connection) -> bool:

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 
 from deerflow.persistence.automations.migration_digest import (
     AUTOMATION_EXPANDED_COLUMNS,
+    AUTOMATION_FINALIZE_LOCK_SQL,
     AUTOMATION_LEGACY_COLUMNS,
     AUTOMATION_TARGET_COLUMNS,
     canonical_digest,
@@ -1037,6 +1038,14 @@ async def _lock_automation_sources(connection: AsyncConnection) -> None:
     await connection.execute(text("LOCK TABLE scheduled_tasks, scheduled_task_runs IN SHARE ROW EXCLUSIVE MODE"))
 
 
+async def _lock_automation_sources_for_finalize(
+    connection: AsyncConnection,
+) -> None:
+    """Serialize final receipt verification with all Automation writers."""
+
+    await connection.execute(text(AUTOMATION_FINALIZE_LOCK_SQL))
+
+
 async def _migration_run_id(
     connection: AsyncConnection,
     *,
@@ -1539,7 +1548,7 @@ async def _resume_final_cutover(
     """Validate immutable 0013 receipts and optionally finish only the marker."""
 
     async with engine.begin() as connection:
-        await _lock_automation_sources(connection)
+        await _lock_automation_sources_for_finalize(connection)
         if await _current_revision(connection) != _FINAL_REVISION:
             raise AutomationMigrationError("automation finalize revision is incomplete")
         await _assert_m4_cutover_complete(connection)
