@@ -318,11 +318,23 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.persistence.thread_meta import make_thread_store
 
         app.state.thread_store = make_thread_store(sf)
-        # M5 repositories are session-bound and accept only an exact private
-        # scope. The orchestration singletons all share this one factory; the
-        # legacy router never receives a user-scoped repository adapter.
-        app.state.scheduled_task_repo = None
-        app.state.scheduled_task_run_repo = None
+        # The final M5 repositories remain project+owner scoped. Legacy HTTP
+        # receives a separate read-only projection so expand/cutover
+        # compatibility cannot regain mutation, lease, or dispatch authority.
+        from app.automations.legacy_reads import LegacyAutomationReadAdapter
+
+        legacy_automation_reads = LegacyAutomationReadAdapter(sf)
+        app.state.scheduled_task_repo = legacy_automation_reads
+        app.state.scheduled_task_run_repo = legacy_automation_reads
+
+        async def close_legacy_automation_reads() -> None:
+            await legacy_automation_reads.aclose()
+            if getattr(app.state, "scheduled_task_repo", None) is legacy_automation_reads:
+                app.state.scheduled_task_repo = None
+            if getattr(app.state, "scheduled_task_run_repo", None) is legacy_automation_reads:
+                app.state.scheduled_task_run_repo = None
+
+        stack.push_async_callback(close_legacy_automation_reads)
         from app.automations.cutover import AutomationCutoverGuard
         from app.automations.dispatcher import AutomationDispatcher
         from app.automations.occurrences import AutomationOccurrenceService

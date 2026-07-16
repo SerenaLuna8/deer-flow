@@ -109,3 +109,75 @@ and deprecation notices; no gate failed and no required PostgreSQL test skipped.
 
 No blocking concern remains. The intended single commit subject is
 `feat: expose project automation API`.
+
+## P1 Review Repair — Expand Legacy Read Projection
+
+The Task 9 review found that the report's expand-read claim was not true in
+the production lifespan. Task 9 correctly refused to hand the final
+project+owner repositories to the legacy router, but set both legacy
+repository states to `None`. Consequently list/get/history/thread-alias reads
+returned 503 (or 500 in the `object()` test fixture). The test only asserted
+that list was not 409, so both failures were false positives.
+
+The repair installs one lifespan-bound `LegacyAutomationReadAdapter` as both
+legacy read dependencies and tears it down before the persistence engine. It
+has only `list_by_user`, `get`, `list_by_user_and_thread`, and
+owner-qualified `list_by_task`; it deliberately has no create/update/delete,
+claim, lease, status-write, or dispatch methods. Expand queries use the
+authenticated retained `scheduled_tasks.user_id`, and history joins the parent
+task before applying that predicate. If the adapter observes final schema
+before the cutover marker closes legacy routes, it uses exact authenticated
+`owner_user_id` and projects rows only when that owner resolves to one project;
+multiple projects fail closed to an empty view. The global legacy cutover
+dependency still runs before every endpoint, so completed cutover never
+accesses the adapter.
+
+### Repair TDD Evidence
+
+The first focused RED failed at the production wiring boundary:
+
+```text
+1 failed, 6 passed
+assert app.state.scheduled_task_repo is not None
+```
+
+After minimal lifecycle wiring, that selection passed `7 passed`. The next
+real PostgreSQL RED seeded `0012_project_automation_expand` rows and failed on
+the first authenticated list request with:
+
+```text
+AttributeError: 'LegacyAutomationReadAdapter' object has no attribute
+'list_by_user'
+1 failed, 1 passed
+```
+
+The read projection then made the real PostgreSQL suite green. Final coverage
+has three tests: exact legacy task/run DTOs for list/get/history/thread alias,
+cross-owner invisibility including direct history projection, zero-write 409
+mutations, and final-schema multi-project fail-closed behavior. Unit coverage
+also requires explicit 503 only when either adapter dependency is genuinely
+missing and spies that every cutover route stops before any adapter or
+dispatcher call.
+
+### Repair Verification
+
+All PostgreSQL commands used
+`postgresql+asyncpg://postgres@127.0.0.1:55435/postgres`; no required test
+skipped.
+
+| Gate | Result |
+| --- | ---: |
+| Final Task 9 focused routes, adapter, cutover, errors, wiring | 67 passed |
+| Legacy router/service/repository/lifecycle compatibility | 58 passed |
+| M5 Tasks 3–8 plus M2/M4 governance/private runtime | 342 passed |
+| M5 Tasks 1–2 schema/migration/repositories | 59 passed |
+| Private-work API, M4 cutover, authorization, auth middleware | 143 passed |
+| Full backend Ruff check | all checks passed |
+| Full backend Ruff format check | 1048 files already formatted |
+| `git diff --check` | clean |
+
+Repair self-review confirmed the adapter cannot mutate or dispatch, every SQL
+read carries authenticated ownership, final projection does not aggregate one
+owner across projects, history does not trust a naked task ID, lifecycle
+teardown clears both state references, and Task 10/frontend remain untouched.
+The repair is committed separately from the original Task 9 implementation.

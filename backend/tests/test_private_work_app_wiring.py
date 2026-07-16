@@ -89,6 +89,7 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
             return_value=MagicMock(),
         ),
     ):
+        legacy_read_adapter = None
         async with langgraph_runtime(app, config):
             assert isinstance(
                 app.state.private_work_cutover_guard,
@@ -138,6 +139,15 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
             assert isinstance(app.state.scheduled_task_service, ScheduledTaskService)
             assert app.state.scheduled_task_service.app is app
             assert app.state.scheduled_task_service._ownership is app.state.automation_scheduler_ownership
+            assert app.state.scheduled_task_repo is not None
+            assert app.state.scheduled_task_repo is app.state.scheduled_task_run_repo
+            legacy_read_adapter = app.state.scheduled_task_repo
+            assert legacy_read_adapter.closed is False
+
+        assert legacy_read_adapter is not None
+        assert legacy_read_adapter.closed is True
+        assert app.state.scheduled_task_repo is None
+        assert app.state.scheduled_task_run_repo is None
 
 
 @pytest.mark.postgres

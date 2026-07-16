@@ -321,7 +321,12 @@ async def list_scheduled_task_runs(
     task = await task_repo.get(task_id, user_id=str(user.id))
     if task is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    return await run_repo.list_by_task(task_id, limit=limit, offset=offset)
+    return await run_repo.list_by_task(
+        task_id,
+        user_id=str(user.id),
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/threads/{thread_id}/scheduled-tasks")
