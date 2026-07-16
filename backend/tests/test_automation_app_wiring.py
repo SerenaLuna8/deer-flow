@@ -9,9 +9,11 @@ import pytest
 from fastapi import FastAPI
 
 from app.automations.errors import AutomationCutover
+from app.channels import service as channel_service_module
+from app.gateway import app as gateway_app_module
 from app.gateway.app import (
     _start_scheduled_task_service,
-    _stop_scheduled_task_service,
+    create_app,
 )
 from app.scheduler.service import ScheduledTaskService
 
@@ -47,13 +49,74 @@ def _scheduler_app() -> tuple[FastAPI, ScheduledTaskService]:
     return app, service
 
 
-@asynccontextmanager
-async def _scheduler_lifespan(app: FastAPI):
-    await _start_scheduled_task_service(app, enabled=True)
-    try:
-        yield
-    finally:
-        await _stop_scheduled_task_service(app)
+def _production_lifespan_app(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stop_error: BaseException | None = None,
+) -> tuple[FastAPI, list[ScheduledTaskService], list[str]]:
+    app = create_app()
+    services: list[ScheduledTaskService] = []
+    order: list[str] = []
+    startup_config = SimpleNamespace(
+        log_level="INFO",
+        memory=SimpleNamespace(token_counting="char"),
+        scheduler=SimpleNamespace(enabled=True),
+    )
+
+    @asynccontextmanager
+    async def runtime_lifespan(runtime_app: FastAPI, _startup_config):
+        _, service = _scheduler_app()
+        service.app = runtime_app
+        runtime_app.state.automation_dispatcher = service._dispatcher
+        runtime_app.state.automation_scheduler = service
+        runtime_app.state.scheduled_task_service = service
+        runtime_app.state.automation_cutover_guard = SimpleNamespace(
+            require_project_open=AsyncMock(),
+        )
+        runtime_app.state.automation_scheduler_ownership = service._ownership
+        runtime_app.state.automation_scheduler_task = None
+        original_stop = service.stop
+
+        async def recording_stop() -> None:
+            order.append("scheduler-stop")
+            if stop_error is not None:
+                raise stop_error
+            await original_stop()
+
+        service.stop = AsyncMock(side_effect=recording_stop)  # type: ignore[method-assign]
+        services.append(service)
+        try:
+            yield
+        finally:
+            order.append("ownership-exit")
+            order.append("runtime-exit")
+
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    monkeypatch.setattr(gateway_app_module, "get_app_config", lambda: startup_config)
+    monkeypatch.setattr(
+        gateway_app_module,
+        "get_gateway_config",
+        lambda: SimpleNamespace(host="test", port=0, enable_docs=False),
+    )
+    monkeypatch.setattr(gateway_app_module, "configure_logging", lambda _config: None)
+    monkeypatch.setattr(gateway_app_module, "warn_if_auth_disabled_enabled", lambda: None)
+    monkeypatch.setattr(gateway_app_module, "cleanup_stale_upload_staging_files", lambda: 0)
+    monkeypatch.setattr(gateway_app_module, "_gateway_runtime_lifespan", runtime_lifespan)
+    monkeypatch.setattr(gateway_app_module, "_ensure_admin_user", AsyncMock())
+    monkeypatch.setattr(gateway_app_module.auth, "close_oidc_service", AsyncMock())
+    monkeypatch.setattr(
+        channel_service_module,
+        "start_channel_service",
+        AsyncMock(return_value=SimpleNamespace(get_status=lambda: {})),
+    )
+    monkeypatch.setattr(channel_service_module, "stop_channel_service", AsyncMock())
+    return app, services, order
+
+
+async def _stop_leaked_service(service: ScheduledTaskService) -> None:
+    task = service.task
+    if task is not None and not task.done():
+        await ScheduledTaskService.stop(service)
 
 
 @pytest.mark.asyncio
@@ -70,11 +133,14 @@ async def test_disabled_scheduler_keeps_manual_dispatcher() -> None:
 
 
 @pytest.mark.asyncio
-async def test_each_app_starts_at_most_one_poll_task_and_shutdown_awaits_it() -> None:
+async def test_each_app_starts_at_most_one_poll_task_and_shutdown_awaits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     for _ in range(2):
-        app, service = _scheduler_app()
+        app, services, order = _production_lifespan_app(monkeypatch)
 
-        async with _scheduler_lifespan(app):
+        async with app.router.lifespan_context(app):
+            service = services[0]
             first_task = app.state.automation_scheduler_task
             assert first_task is service.task
             assert isinstance(first_task, asyncio.Task)
@@ -84,8 +150,102 @@ async def test_each_app_starts_at_most_one_poll_task_and_shutdown_awaits_it() ->
             assert service.task is first_task
 
         assert app.state.automation_scheduler_task is None
+        assert app.state.automation_scheduler is None
+        assert app.state.scheduled_task_service is None
         assert service.task is None
         assert first_task.done()
+        assert order == ["scheduler-stop", "ownership-exit", "runtime-exit"]
+
+
+@pytest.mark.asyncio
+async def test_production_lifespan_stops_scheduler_before_runtime_on_body_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, services, order = _production_lifespan_app(
+        monkeypatch,
+        stop_error=RuntimeError("scheduler stop failed"),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="lifespan body failed"):
+            async with app.router.lifespan_context(app):
+                service = services[0]
+                scheduler_task = app.state.automation_scheduler_task
+                raise RuntimeError("lifespan body failed")
+
+        service.stop.assert_awaited_once_with()  # type: ignore[attr-defined]
+        assert scheduler_task.done()
+        assert order == ["scheduler-stop", "ownership-exit", "runtime-exit"]
+        assert app.state.automation_scheduler_task is None
+        assert app.state.automation_scheduler is None
+        assert app.state.scheduled_task_service is None
+    finally:
+        if services:
+            await _stop_leaked_service(services[0])
+
+
+@pytest.mark.asyncio
+async def test_production_lifespan_preserves_body_error_when_scheduler_cleanup_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, services, order = _production_lifespan_app(
+        monkeypatch,
+        stop_error=asyncio.CancelledError("scheduler stop cancelled"),
+    )
+
+    try:
+        with pytest.raises(BaseExceptionGroup) as raised:
+            async with app.router.lifespan_context(app):
+                service = services[0]
+                scheduler_task = app.state.automation_scheduler_task
+                raise RuntimeError("lifespan body failed")
+
+        assert {type(error) for error in raised.value.exceptions} == {
+            RuntimeError,
+            asyncio.CancelledError,
+        }
+        assert str(raised.value.exceptions[0]) == "lifespan body failed"
+        service.stop.assert_awaited_once_with()  # type: ignore[attr-defined]
+        assert scheduler_task.done()
+        assert order == ["scheduler-stop", "ownership-exit", "runtime-exit"]
+        assert app.state.automation_scheduler_task is None
+        assert app.state.automation_scheduler is None
+        assert app.state.scheduled_task_service is None
+    finally:
+        if services:
+            await _stop_leaked_service(services[0])
+
+
+@pytest.mark.asyncio
+async def test_production_lifespan_stops_scheduler_before_runtime_on_body_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, services, order = _production_lifespan_app(monkeypatch)
+    entered = asyncio.Event()
+
+    async def run_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            entered.set()
+            await asyncio.Future()
+
+    lifespan_task = asyncio.create_task(run_lifespan())
+    await entered.wait()
+    service = services[0]
+    scheduler_task = app.state.automation_scheduler_task
+
+    try:
+        lifespan_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await lifespan_task
+
+        service.stop.assert_awaited_once_with()  # type: ignore[attr-defined]
+        assert scheduler_task.done()
+        assert order == ["scheduler-stop", "ownership-exit", "runtime-exit"]
+        assert app.state.automation_scheduler_task is None
+        assert app.state.automation_scheduler is None
+        assert app.state.scheduled_task_service is None
+    finally:
+        await _stop_leaked_service(service)
 
 
 @pytest.mark.asyncio

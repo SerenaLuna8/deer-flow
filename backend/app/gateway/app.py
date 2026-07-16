@@ -392,32 +392,56 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
-        yield
-
-        # Cancel scheduler work before channels and before the runtime context
-        # begins draining/closing its database and checkpointer dependencies.
-        await _stop_scheduled_task_service(app)
-
+        lifespan_error: BaseException | None = None
         try:
-            await auth.close_oidc_service()
-        except Exception:
-            logger.exception("Failed to close OIDC service")
+            try:
+                yield
+            except BaseException as error:
+                lifespan_error = error
+                raise
+        finally:
+            # Cancel scheduler work before channels and before the runtime
+            # context releases ownership, stores, checkpointer, or engine.
+            # Keep cleanup cancellation visible without letting it hide an
+            # exception already propagating from the lifespan body.
+            scheduler_shutdown_error: BaseException | None = None
+            try:
+                await _stop_scheduled_task_service(app)
+            except BaseException as error:
+                scheduler_shutdown_error = error
+            finally:
+                app.state.automation_scheduler_task = None
+                app.state.automation_scheduler = None
+                app.state.scheduled_task_service = None
 
-        # Stop channel service on shutdown (bounded to prevent worker hang)
-        try:
-            from app.channels.service import stop_channel_service
+            try:
+                await auth.close_oidc_service()
+            except Exception:
+                logger.exception("Failed to close OIDC service")
 
-            await asyncio.wait_for(
-                stop_channel_service(),
-                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning(
-                "Channel service shutdown exceeded %.1fs; proceeding with worker exit.",
-                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            logger.exception("Failed to stop channel service")
+            # Stop channel service on shutdown (bounded to prevent worker hang)
+            try:
+                from app.channels.service import stop_channel_service
+
+                await asyncio.wait_for(
+                    stop_channel_service(),
+                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Channel service shutdown exceeded %.1fs; proceeding with worker exit.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.exception("Failed to stop channel service")
+
+            if scheduler_shutdown_error is not None:
+                if lifespan_error is not None:
+                    raise BaseExceptionGroup(
+                        "Gateway lifespan and scheduler shutdown both failed",
+                        [lifespan_error, scheduler_shutdown_error],
+                    ) from None
+                raise scheduler_shutdown_error
 
     logger.info("Shutting down API Gateway")
 

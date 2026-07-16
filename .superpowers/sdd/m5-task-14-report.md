@@ -81,3 +81,50 @@ The only large-matrix warning was the existing third-party Starlette `TestClient
 - `backend/AGENTS.md`, `config.example.yaml`, and this report are the only documentation changes. Milestone/progress status remains untouched.
 
 No blocking Task 14 concern remains.
+
+## Formal review remediation
+
+The Task 14 review returned `0 Critical / 1 Important`. The Important finding
+identified that scheduler shutdown followed a bare lifespan `yield`: an
+exception or cancellation in the served body skipped the statements after the
+yield, allowing the runtime context to release scheduler ownership and database
+dependencies while the poll task was still alive.
+
+The remediation keeps the production FastAPI lifespan as the authority. Its
+real `yield` is now enclosed by `try/finally`; scheduler stop runs before OIDC,
+channel, ownership, store, checkpointer, and engine teardown. The explicit poll
+task plus both service aliases are cleared unconditionally. A scheduler cleanup
+exception/cancellation cannot bypass state cleanup; if it coincides with an
+already-propagating lifespan exception, a `BaseExceptionGroup` preserves both
+failures instead of hiding the original body error.
+
+Strict TDD evidence for this review fix:
+
+```text
+RED real lifespan regression suite: 3 failed, 3 passed in 1.41s
+RED body-error plus cleanup-cancel preservation: 1 failed in 1.09s
+GREEN real lifespan regression suite: 7 passed in 1.57s
+```
+
+The tests call `app.router.lifespan_context` directly. They cover normal exit
+and repeated start, body exception with a failing scheduler stop, body task
+cancellation, and simultaneous body error plus cleanup cancellation. Each path
+asserts stop-await evidence, a finished poll task, stop-before-ownership/runtime
+ordering, and cleared app state.
+
+Fresh post-remediation verification:
+
+| Gate | Result |
+| --- | ---: |
+| Task 14 focused wiring/config/private wiring/lifespan/blocking | 30 passed |
+| Task 7 lifecycle/ownership/Gateway recovery | 23 passed |
+| Related M5 Automation + M4 private-work PostgreSQL integration | 24 passed, 0 skipped |
+| Full `make test-blocking-io` | 41 passed |
+| Full backend Ruff check | all checks passed |
+| Full backend Ruff format check | 1055 files already formatted |
+| Compileall | passed |
+| `git diff --check` | passed |
+
+The remediation changes no scheduler admission, ownership, cutover, manual API,
+migration, frontend, Task 15, or Task 16 behavior. `.superpowers/sdd/progress.md`
+remains untouched.
