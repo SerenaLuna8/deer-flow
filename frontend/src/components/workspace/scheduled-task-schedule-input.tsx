@@ -32,6 +32,8 @@ export type ScheduleValue = {
   timezone: string;
 };
 
+export type AutomationScheduleValue = ScheduleValue;
+
 const PRESETS: CronPreset[] = [
   "hourly",
   "daily",
@@ -187,6 +189,7 @@ export function ScheduledTaskScheduleInput({
       {!scheduleTypeLocked && (
         <div className="flex flex-wrap gap-2">
           <Button
+            type="button"
             variant={scheduleType === "cron" ? "default" : "outline"}
             size="sm"
             onClick={() => setScheduleType("cron")}
@@ -194,6 +197,7 @@ export function ScheduledTaskScheduleInput({
             {labels.scheduleType.cron}
           </Button>
           <Button
+            type="button"
             variant={scheduleType === "once" ? "default" : "outline"}
             size="sm"
             onClick={() => setScheduleType("once")}
@@ -256,6 +260,7 @@ export function ScheduledTaskScheduleInput({
                 return (
                   <Button
                     key={w}
+                    type="button"
                     variant={active ? "default" : "outline"}
                     size="sm"
                     onClick={() => toggleWeekday(w)}
@@ -331,3 +336,5 @@ export function ScheduledTaskScheduleInput({
     </div>
   );
 }
+
+export { ScheduledTaskScheduleInput as AutomationScheduleInput };

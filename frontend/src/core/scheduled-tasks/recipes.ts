@@ -1,4 +1,4 @@
-import type { ScheduleValue } from "@/components/workspace/scheduled-task-schedule-input";
+import type { AutomationScheduleValue } from "@/components/workspace/scheduled-task-schedule-input";
 
 export type RecipeTitleKey = "trending" | "news" | "issues" | "weekly";
 
@@ -7,7 +7,7 @@ export type Recipe = {
   icon: string;
   titleKey: RecipeTitleKey;
   prompt: string;
-  schedule: ScheduleValue;
+  schedule: AutomationScheduleValue;
 };
 
 // Front-end-only starter recipes. The schedule's timezone is left empty so the
