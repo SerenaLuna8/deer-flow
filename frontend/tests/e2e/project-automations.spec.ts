@@ -1,9 +1,15 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 import type { Automation } from "@/core/project-automations/types";
+import { PROJECT_AUTOMATION } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
+
+test.skip(
+  !PROJECT_AUTOMATION,
+  "PROJECT_AUTOMATION is disabled; Task 17 enablement will restore this suite.",
+);
 
 const ACCOUNT_ID = "90000000-0000-4000-8000-000000000001";
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";

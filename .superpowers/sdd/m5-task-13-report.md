@@ -69,7 +69,7 @@ No production code preceded the failing Task 13 tests. A later check-only import
 | Task-scoped Prettier check                             |               All matched files passed |
 | Staged `git diff --check`                              |                                 Passed |
 
-The Task 13 brief does not require Playwright. No new E2E suite was run; the requested navigation, Chat URL, direct-route, i18n, and static no-query boundaries are covered by focused unit and source-boundary tests, while the existing Task 12 Automation interaction E2E remains unchanged.
+The original Task 13 brief did not require a new Playwright suite. The initial delivery therefore left the existing Task 12 Automation interaction E2E unchanged; the independent-review repair below adds the missing compile-time suite gate and runs that file directly.
 
 ## Self-review conclusion
 
@@ -79,6 +79,61 @@ The Task 13 brief does not require Playwright. No new E2E suite was run; the req
 - **Scope safety:** project slugs and Thread IDs are encoded, Project Chat cannot generate a legacy workspace URL, and workspace behavior remains unchanged.
 - **Static behavior:** no Automation link or enabled readiness query is produced; the compile-time flag remains disabled for Task 17.
 - **Scope discipline:** no backend, progress, Task 14, or Task 17 enablement changes were made.
-- **Review findings:** 0 Critical, 0 Important, 0 Minor.
+- **Initial self-review findings:** 0 Critical, 0 Important, 0 Minor. The subsequent independent review found the E2E workflow issue repaired below.
 
-No Task 13 blocker remains. The M5 candidate is still disabled and the milestone remains incomplete.
+The initial delivery kept the M5 candidate disabled and the milestone incomplete.
+
+---
+
+## Review repair — canonical Playwright suite gate
+
+### Review intake and root cause
+
+- Review result: 0 Critical, 1 Important.
+- Important finding: the Task 12 `project-automations.spec.ts` file still visited the project Automation route unconditionally, while Task 13 correctly made that server route return 404 under `PROJECT_AUTOMATION=false`.
+- Reproduction before the repair ran all three Playwright tests; each timed out after 30 seconds waiting for Automation UI that the server-gated route could not render. The result was 3 failed, confirming the full workflow would fail while the release flag remained disabled.
+
+The root cause was test discovery not consuming the canonical compile-time release state. The server route gate was not weakened.
+
+### Repair
+
+- The Playwright file now imports `PROJECT_AUTOMATION` directly from `@/core/projects/features`; the same runtime alias pattern already exists in the project-private-work E2E suite.
+- A file-level `test.skip(!PROJECT_AUTOMATION, "PROJECT_AUTOMATION is disabled; Task 17 enablement will restore this suite.")` annotation skips all three tests while the candidate is disabled.
+- The condition is the direct negation of the canonical flag. When Task 17 changes that flag to true, the condition becomes false and the existing three tests execute without any spec edit.
+- No environment variable, copied test constant, test-only route enable, production route bypass, Task 14 change, or Task 17 enablement was added. `PROJECT_AUTOMATION` remains `false as const`.
+
+### Strict TDD evidence
+
+The review-repair RED changed only the unit/source contract:
+
+```text
+1 focused file, 6 tests: 1 expected failure and 5 passes.
+```
+
+The failure proved the Playwright file did not import the canonical flag. After the minimal E2E annotation, the source assertion was adjusted only to accept Prettier's trailing comma; final GREEN was:
+
+```text
+1 focused file, 6 tests passed.
+```
+
+The source contract requires the runtime canonical import, the exact `!PROJECT_AUTOMATION` skip semantics, and the Task 17 restoration reason. It rejects environment-variable alternatives.
+
+### Final repair verification
+
+| Gate                                          |                                 Result |
+| --------------------------------------------- | -------------------------------------: |
+| Project Automation Playwright with flag false |                    3 skipped, 0 failed |
+| Task 13 focused unit                          |               4 files, 20 tests passed |
+| Fresh full frontend unit suite                | 126 files, 912 tests passed, 0 skipped |
+| `pnpm check`                                  |           ESLint and TypeScript passed |
+| Repair-scoped Prettier check                  |                                 Passed |
+| `git diff --check`                            |                                 Passed |
+
+### Review closure
+
+- The workflow no longer tries to exercise a server-disabled surface.
+- Task 17 can restore the real E2E coverage by changing only the canonical production flag; the spec has no separate switch to drift.
+- The route remains server-gated, and the production flag remains disabled.
+- Final review-repair findings: 0 Critical, 0 Important, 0 Minor.
+
+No Task 13 review blocker remains. The M5 candidate is still disabled and the milestone remains incomplete.

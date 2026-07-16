@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, test, rs } from "@rstest/core";
 
 rs.mock("next/navigation", () => ({
@@ -99,6 +102,23 @@ describe("project Automation entry", () => {
     await expect(async () => ProjectAutomationsRoute()).rejects.toMatchObject({
       code: "NEXT_NOT_FOUND",
     });
+  });
+
+  test("ties the Playwright suite to the canonical compile-time flag", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "tests/e2e/project-automations.spec.ts"),
+      "utf8",
+    );
+
+    expect(source).toContain(
+      'import { PROJECT_AUTOMATION } from "@/core/projects/features";',
+    );
+    expect(source).toMatch(
+      /test\.skip\(\s*!PROJECT_AUTOMATION,\s*"PROJECT_AUTOMATION is disabled; Task 17 enablement will restore this suite\."\s*,?\s*\);/u,
+    );
+    expect(source).not.toMatch(
+      /PLAYWRIGHT_PROJECT_AUTOMATION|NEXT_PUBLIC_PROJECT_AUTOMATION|process\.env/u,
+    );
   });
 
   test("defines every planned Automation label in both supported locales", () => {
