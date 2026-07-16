@@ -59,15 +59,12 @@ def test_migration_cli_wraps_its_only_sync_alembic_call_in_to_thread() -> None:
 @pytest.mark.asyncio
 async def test_scheduler_poll_path_runs_under_strict_runtime_gate() -> None:
     service = ScheduledTaskService(
-        app=SimpleNamespace(),
         occurrences=SimpleNamespace(
-            reserve_due=AsyncMock(),
-            claim_next=AsyncMock(return_value=None),
+            due_definitions=AsyncMock(return_value=()),
         ),
-        dispatcher=SimpleNamespace(dispatch=AsyncMock()),
+        dispatcher=SimpleNamespace(admit_occurrence=AsyncMock()),
         reconciler=SimpleNamespace(reconcile_restart=AsyncMock()),
         poll_interval_seconds=60,
-        lease_seconds=120,
         max_concurrent_runs=3,
     )
 

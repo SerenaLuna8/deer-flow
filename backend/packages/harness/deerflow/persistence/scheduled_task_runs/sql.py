@@ -43,6 +43,7 @@ class ScheduledTaskRunRecord:
     status: str
     thread_id: str | None
     run_id: str | None
+    job_id: uuid.UUID | None
     resolved_membership_id: uuid.UUID | None
     resolved_membership_version: int | None
     launch_attempt_count: int
@@ -92,6 +93,7 @@ class ScheduledTaskRunRepository:
             status=row.status,
             thread_id=row.thread_id,
             run_id=row.run_id,
+            job_id=row.job_id,
             resolved_membership_id=row.resolved_membership_id,
             resolved_membership_version=row.resolved_membership_version,
             launch_attempt_count=row.launch_attempt_count,
@@ -166,6 +168,24 @@ class ScheduledTaskRunRepository:
     ) -> ScheduledTaskRunRecord | None:
         statement = sa.select(ScheduledTaskRunRow).where(
             ScheduledTaskRunRow.run_id == run_id,
+            *self.predicates(scope),
+        )
+        if lock:
+            statement = statement.with_for_update(of=ScheduledTaskRunRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def get_by_occurrence_key(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+        occurrence_key: str,
+        *,
+        lock: bool = False,
+    ) -> ScheduledTaskRunRecord | None:
+        statement = sa.select(ScheduledTaskRunRow).where(
+            ScheduledTaskRunRow.task_id == task_id,
+            ScheduledTaskRunRow.occurrence_key == occurrence_key,
             *self.predicates(scope),
         )
         if lock:
@@ -358,6 +378,52 @@ class ScheduledTaskRunRepository:
                     lease_owner=None,
                     lease_expires_at=None,
                     updated_at=updated_at,
+                )
+                .returning(ScheduledTaskRunRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def mark_admitted(
+        self,
+        scope: PrivateResourceScope,
+        occurrence_id: str,
+        *,
+        thread_id: str,
+        run_id: str,
+        job_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        membership_version: int,
+        admitted_at: datetime,
+    ) -> ScheduledTaskRunRecord | None:
+        """Attach the atomically-created private Run and durable job once."""
+
+        row = (
+            await self.session.execute(
+                sa.update(ScheduledTaskRunRow)
+                .where(
+                    ScheduledTaskRunRow.id == occurrence_id,
+                    ScheduledTaskRunRow.status == "launching",
+                    ScheduledTaskRunRow.thread_id.is_(None),
+                    ScheduledTaskRunRow.run_id.is_(None),
+                    ScheduledTaskRunRow.job_id.is_(None),
+                    *self.predicates(scope),
+                )
+                .values(
+                    status="running",
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    job_id=job_id,
+                    resolved_membership_id=membership_id,
+                    resolved_membership_version=membership_version,
+                    launch_attempt_count=1,
+                    started_at=admitted_at,
+                    next_attempt_at=None,
+                    error_code=None,
+                    error_message=None,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=admitted_at,
                 )
                 .returning(ScheduledTaskRunRow)
             )

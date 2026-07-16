@@ -400,7 +400,8 @@ dry-run 只输出脱敏 counts 与稳定 source hash，不升级 schema、不写
 `cutover_complete` marker 的顺序执行；同一已完成 cutover 再执行会直接 no-op。
 
 M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation
-也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查；M6 Worker/SSE/配额/审计/通用备份恢复、
+也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查；M6 durable job、独立 Worker、Worker-only
+private run、Automation 原子 admission 与独立 Scheduler 已完成当前实现，SSE/配额/完整审计/通用备份恢复、
 M7 legacy source/API 清理和 M8 完整发布验收仍未交付，因此 DeerFlow 仍不能作为完整多用户 SaaS 发布。
 
 #### M3 共享资产迁移与 credential 轮换
@@ -443,7 +444,7 @@ tamper 会回滚当前批，已提交批保持可安全续跑；旧 envelope 仅
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 > [!IMPORTANT]
-> The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Supported launchers pass that authoritative value to both uvicorn's explicit `--workers` argument and the application. Startup orphan-run recovery runs only when it is exactly one; multi-worker startup skips recovery because persisted runs currently have no worker ownership lease. Project Automation reconciliation always precedes generic orphan recovery after final M5 cutover, even when automatic scheduling is disabled, so admitted manual runs are settled after a restart. When `scheduler.enabled=true`, the Gateway also holds a process-lifetime PostgreSQL session advisory lock on a dedicated connection before reconciliation or polling. It verifies the original backend session and existing lock before every poll without reacquiring; loss permanently stops that poller and appears as `ownership_lost`, allowing another Gateway to take over only after PostgreSQL releases the session lock. Disabled scheduler mode takes no lock or monitor. The Redis stream bridge (`stream_bridge.type: redis`) shares SSE delivery and `Last-Event-ID` replay across workers, with a rolling retained-buffer TTL (`stream_ttl_seconds`) as a cleanup safety net. It does not make run cancellation, request de-duplication, or IM channel state fully cross-worker by itself; use single-worker Gateway or explicit sticky routing/ownership before raising the worker count.
+> Under final M6 cutover, project-private and Automation runs are durable jobs consumed by the independent Worker; Gateway no longer executes them or owns Automation polling. Start the backend roles separately with `make gateway`, `make worker`, and—when `scheduler.enabled=true`—`make scheduler`. The Scheduler owns and verifies one PostgreSQL session advisory lock on its original backend connection; lock/PID/session loss fail-stops that process. Worker startup always performs terminal-only Automation reconciliation before claiming jobs, and enabled Scheduler startup repeats that idempotent check before polling; neither path replays or interrupts active Worker work. Full service orchestration, durable SSE replay, quotas, audit, and recovery gates are completed by later M6 tasks, so this intermediate branch is not yet a production release.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
@@ -974,9 +975,10 @@ run history.
 
 Project Automation supports `once` and five-field `cron` schedules, a fixed `skip`
 overlap policy, and either a reused private thread or a fresh private thread per run.
-Every automatic or manual trigger reserves a durable occurrence before normal private
-run admission. Once admitted, a run that is interrupted by a process crash is recorded
-and reconciled but is never replayed automatically.
+Every automatic or manual trigger atomically commits its durable occurrence, private
+Run/snapshot, and `automation_run` job. The independent Worker consumes that job;
+Worker startup and enabled Scheduler startup reconcile terminal state only and never
+replay or interrupt an active admitted Run.
 
 Current limits:
 
@@ -985,11 +987,11 @@ Current limits:
 - No channel or GitHub dispatch targets
 - No `interval` schedule type in this first cut
 
-Enable background polling with `config.yaml -> scheduler.enabled`. M5 supports one
-Gateway (`GATEWAY_WORKERS=1`) holding the PostgreSQL scheduler ownership lock. Disabling
-polling leaves the project API and manual trigger available; manual trigger uses the
-same durable occurrence and private-run path. Independent Workers, durable SSE,
-generic jobs/retries, quotas, audit, and general backup/restore remain M6 work.
+Enable background polling with `config.yaml -> scheduler.enabled` and run the backend
+Scheduler role with `cd backend && make scheduler`. It—not Gateway—holds the PostgreSQL
+scheduler ownership lock and only admits jobs. Disabling polling leaves the project API
+and manual trigger available; manual trigger uses the same atomic occurrence/Run/job
+path. Durable SSE, quotas, complete audit, and general backup/restore remain later M6 work.
 
 The project-scoped backend API is available at
 `/api/projects/{project_id}/automations`. It provides strict create, list, read,

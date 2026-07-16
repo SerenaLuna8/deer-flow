@@ -256,7 +256,6 @@ class PrivateRunAdmissionService:
                 existing = await runs.get(
                     scope=context.resource_scope,
                     run_id=server_request.run_id,
-                    lock=True,
                 )
                 if existing is not None:
                     if (
@@ -272,15 +271,30 @@ class PrivateRunAdmissionService:
                         scope=job_scope,
                         run_id=existing.run_id,
                         job_id=existing.job_id,
+                        lock=True,
                     )
-                    if existing_job is None:
+                    locked_existing = await runs.get(
+                        scope=context.resource_scope,
+                        run_id=server_request.run_id,
+                        lock=True,
+                    )
+                    if (
+                        existing_job is None
+                        or locked_existing is None
+                        or locked_existing.job_id != existing_job.job_id
+                        or not self._is_same_request(
+                            locked_existing,
+                            thread_id=thread_id,
+                            request=server_request,
+                        )
+                    ):
                         raise PrivateWorkConflict(context.request_id)
                     return AdmittedPrivateRun(
-                        run=existing,
+                        run=locked_existing,
                         snapshot=await self._persisted_snapshot(
                             session,
                             context,
-                            existing.run_id,
+                            locked_existing.run_id,
                         ),
                         opaque_runtime_scope=context.resource_scope,
                         job=existing_job,

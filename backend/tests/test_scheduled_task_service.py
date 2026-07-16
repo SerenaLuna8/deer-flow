@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -16,15 +17,25 @@ NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
 
 class FakeOccurrences:
     def __init__(self, occurrence_ids: tuple[str, ...] = ()) -> None:
-        self._occurrence_ids = list(occurrence_ids)
-        self.reserve_due = AsyncMock(return_value=())
-        self.claim_calls: list[dict[str, object]] = []
+        self._definitions = [
+            SimpleNamespace(
+                task_id=value,
+                project_id=uuid.UUID(int=index + 1),
+                owner_user_id=str(uuid.UUID(int=index + 100)),
+            )
+            for index, value in enumerate(occurrence_ids)
+        ]
+        self.due_calls: list[dict[str, object]] = []
 
-    async def claim_next(self, **kwargs):
-        self.claim_calls.append(kwargs)
-        if not self._occurrence_ids:
-            return None
-        return SimpleNamespace(id=self._occurrence_ids.pop(0))
+    async def due_definitions(self, **kwargs):
+        self.due_calls.append(kwargs)
+        limit = kwargs["limit"]
+        after = kwargs["after"]
+        start = 0
+        if after is not None:
+            start = next(index + 1 for index, definition in enumerate(self._definitions) if definition.task_id == after[3])
+        selected = self._definitions[start : start + limit]
+        return tuple((definition, NOW) for definition in selected)
 
 
 class FakeDispatcher:
@@ -32,9 +43,9 @@ class FakeDispatcher:
         self.failures = failures or {}
         self.calls: list[tuple[str, object]] = []
 
-    async def dispatch(self, occurrence_id: str, *, app):
-        self.calls.append((occurrence_id, app))
-        failure = self.failures.get(occurrence_id)
+    async def admit_occurrence(self, definition, *, scheduled_for):
+        self.calls.append((definition.task_id, scheduled_for))
+        failure = self.failures.get(definition.task_id)
         if failure is not None:
             raise failure
 
@@ -49,39 +60,33 @@ def _service(
     ownership=None,
 ) -> ScheduledTaskService:
     return ScheduledTaskService(
-        app=SimpleNamespace(state=SimpleNamespace()),
         occurrences=occurrences or FakeOccurrences(),
         dispatcher=dispatcher or FakeDispatcher(),
         reconciler=reconciler or SimpleNamespace(reconcile_restart=AsyncMock(return_value=ReconciliationReport())),
         poll_interval_seconds=poll_interval_seconds,
-        lease_seconds=120,
         max_concurrent_runs=max_concurrent_runs,
         ownership=ownership,
         clock=lambda: NOW,
-        lease_owner="scheduler-test",
     )
 
 
 @pytest.mark.asyncio
-async def test_run_once_reserves_then_claims_and_dispatches_each_occurrence() -> None:
+async def test_run_once_lists_due_definitions_then_admits_each_job() -> None:
     occurrences = FakeOccurrences(("occ-1", "occ-2"))
     dispatcher = FakeDispatcher()
     service = _service(occurrences=occurrences, dispatcher=dispatcher)
 
     await service.run_once(now=NOW)
 
-    occurrences.reserve_due.assert_awaited_once_with(now=NOW, limit=3)
-    assert len(occurrences.claim_calls) == 3
-    assert all(call["now"] == NOW for call in occurrences.claim_calls)
-    assert all(call["lease_owner"] == "scheduler-test" for call in occurrences.claim_calls)
+    assert occurrences.due_calls == [{"now": NOW, "limit": 3, "after": None}]
     assert dispatcher.calls == [
-        ("occ-1", service.app),
-        ("occ-2", service.app),
+        ("occ-1", NOW),
+        ("occ-2", NOW),
     ]
 
 
 @pytest.mark.asyncio
-async def test_run_once_is_bounded_and_continues_after_mapped_dispatch_failure() -> None:
+async def test_run_once_pages_past_mapped_failure_without_starving_later_due_work() -> None:
     occurrences = FakeOccurrences(("occ-1", "occ-2", "occ-3"))
     dispatcher = FakeDispatcher(failures={"occ-1": AutomationUnavailable("request-id")})
     service = _service(
@@ -92,8 +97,64 @@ async def test_run_once_is_bounded_and_continues_after_mapped_dispatch_failure()
 
     await service.run_once(now=NOW)
 
-    assert [call[0] for call in dispatcher.calls] == ["occ-1", "occ-2"]
-    assert len(occurrences.claim_calls) == 2
+    assert [call[0] for call in dispatcher.calls] == [
+        "occ-1",
+        "occ-2",
+        "occ-3",
+    ]
+    assert len(occurrences.due_calls) == 2
+    assert occurrences.due_calls[0] == {
+        "now": NOW,
+        "limit": 2,
+        "after": None,
+    }
+    assert occurrences.due_calls[1]["after"][3] == "occ-2"
+
+
+@pytest.mark.asyncio
+async def test_run_once_max_one_paginates_past_permanent_first_failure() -> None:
+    occurrences = FakeOccurrences(("bad", "good"))
+    dispatcher = FakeDispatcher(
+        failures={"bad": AutomationUnavailable("request-id")},
+    )
+    service = _service(
+        occurrences=occurrences,
+        dispatcher=dispatcher,
+        max_concurrent_runs=1,
+    )
+
+    await service.run_once(now=NOW)
+
+    assert [call[0] for call in dispatcher.calls] == ["bad", "good"]
+    assert len(occurrences.due_calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_run_once_reverifies_ownership_before_each_due_page() -> None:
+    occurrences = FakeOccurrences(("first", "must-not-admit"))
+    dispatcher = FakeDispatcher()
+    ownership = SimpleNamespace(
+        verify=AsyncMock(
+            side_effect=[
+                None,
+                AutomationUnavailable("ownership-lost"),
+            ],
+        ),
+        is_lost=True,
+    )
+    service = _service(
+        occurrences=occurrences,
+        dispatcher=dispatcher,
+        max_concurrent_runs=1,
+        ownership=ownership,
+    )
+
+    with pytest.raises(AutomationUnavailable):
+        await service.run_once(now=NOW)
+
+    assert ownership.verify.await_count == 2
+    assert [call[0] for call in dispatcher.calls] == ["first"]
+    assert len(occurrences.due_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -163,8 +224,7 @@ async def test_run_once_verifies_ownership_before_reserving() -> None:
         await service.run_once(now=NOW)
 
     ownership.verify.assert_awaited_once_with()
-    occurrences.reserve_due.assert_not_awaited()
-    assert occurrences.claim_calls == []
+    assert occurrences.due_calls == []
     assert dispatcher.calls == []
 
 
@@ -194,8 +254,7 @@ async def test_background_loop_fail_stops_after_ownership_loss() -> None:
 
     assert service.status == "ownership_lost"
     assert ownership.verify.await_count == 2
-    occurrences.reserve_due.assert_not_awaited()
-    assert occurrences.claim_calls == []
+    assert occurrences.due_calls == []
     assert dispatcher.calls == []
 
 
@@ -227,18 +286,15 @@ async def test_stop_cancels_blocked_poll_promptly_and_is_idempotent() -> None:
     ("field", "value"),
     [
         ("poll_interval_seconds", 0),
-        ("lease_seconds", 0),
         ("max_concurrent_runs", 0),
     ],
 )
 def test_service_rejects_non_positive_scheduler_settings(field: str, value: int) -> None:
     kwargs = {
-        "app": SimpleNamespace(state=SimpleNamespace()),
         "occurrences": FakeOccurrences(),
         "dispatcher": FakeDispatcher(),
         "reconciler": SimpleNamespace(reconcile_restart=AsyncMock()),
         "poll_interval_seconds": 1,
-        "lease_seconds": 1,
         "max_concurrent_runs": 1,
     }
     kwargs[field] = value

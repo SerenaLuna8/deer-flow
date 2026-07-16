@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+import sqlalchemy as sa
 from sqlalchemy import case, delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -237,10 +238,20 @@ class PrivateRunRepository:
                 select(JobRow)
                 .where(
                     JobRow.id == job_id,
-                    JobRow.job_type == "private_run",
+                    JobRow.job_type.in_(("private_run", "automation_run")),
                     JobRow.project_id == project_id,
                     JobRow.owner_user_id == owner_user_id,
                     JobRow.run_id == run_id,
+                    sa.or_(
+                        sa.and_(
+                            JobRow.job_type == "private_run",
+                            JobRow.automation_occurrence_id.is_(None),
+                        ),
+                        sa.and_(
+                            JobRow.job_type == "automation_run",
+                            JobRow.automation_occurrence_id.is_not(None),
+                        ),
+                    ),
                 )
                 .with_for_update(of=JobRow)
             )

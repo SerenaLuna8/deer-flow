@@ -89,15 +89,16 @@ legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `sta
 2026-07-16 完成：definition、occurrence、API/UI 和迁移均以认证 account、
 project 与 owner 为 authority，Viewer 只读自己的定义与历史；自动和手动触发都先持久化唯一
 occurrence 再进入 M4 private run admission，已 admitted 的 run 在 crash recovery 中只协调终态、
-绝不自动重放。M5 Scheduler 由 `scheduler.enabled` 控制并只支持单 Gateway；独立 Worker、持久化
-SSE、通用 jobs/retries、配额、审计和通用备份恢复仍属于 M6。当前进度为 5/8（62.5%）；M6–M8
+绝不自动重放。M6 当前已实现通用 durable job、独立 Worker、Worker-only private Run、Automation
+原子 admission 和独立 Scheduler；持久化 SSE、配额、完整审计和通用备份恢复仍待后续 M6 task。
+里程碑进度仍为 5/8（62.5%），因为 M6 尚未整体关闭；M6–M8
 尚未交付，因此当前仍不能
 作为完整多用户 SaaS 发布。
 
 Scheduled-task note:
-- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
-- Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
-- Project Automation restart reconciliation is independent of automatic polling: once the final M5 schema/cutover is open it always settles admitted manual/automatic runs before generic M4 orphan recovery. When enabled, the background scheduler requires `GATEWAY_WORKERS=1` and one process-lifetime PostgreSQL session advisory lock held on a dedicated connection before reconciliation or polling. Every poll verifies on that same physical PostgreSQL backend that the original session still owns the lock without reacquiring it; session/PID/lock loss permanently fail-stops that poller and is exposed as `ownership_lost`. A competing Gateway may take over only after PostgreSQL releases the old session lock. Disabled scheduler mode takes no lock or poll monitor, but keeps manual Automation APIs and restart reconciliation available.
+- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks`; under final M6 cutover, `config.yaml -> scheduler.enabled` gates an independent Scheduler process rather than a Gateway lifespan task.
+- Scheduled background runs are intentionally non-interactive: they execute through the normal Worker run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. `AutomationDispatcher` writes that flag as server-owned admission data in the atomic occurrence/Run/job transaction; client-supplied `context.non_interactive` is dropped.
+- Project Automation occurrence, private Run/snapshot, and `automation_run` job now commit atomically. Gateway retains manual admission but never constructs Scheduler ownership or a poller. When enabled, `make scheduler` owns the process-lifetime PostgreSQL session advisory lock on a dedicated connection; each poll verifies the same backend PID and existing lock without reacquiring it, and ownership loss exits polling/process lifetime. A competing Scheduler may take over only after PostgreSQL releases the old session lock. Worker startup always reconciles already-admitted terminal Runs before claiming jobs, and enabled Scheduler startup performs the same idempotent reconciliation before polling; neither path interrupts or replays active Worker work. Disabled Scheduler mode takes no lock or poll task while manual APIs and Worker restart reconciliation remain available.
 
 ## Commands: Root vs. Module
 

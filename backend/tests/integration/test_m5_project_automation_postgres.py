@@ -344,11 +344,16 @@ async def test_project_api_is_project_owner_and_capability_scoped(
     assert runner_delete.status_code == 200
 
     dispatched_occurrences: list[str] = []
+    atomic_dispatcher = AutomationDispatcher(
+        seed.factory,
+        max_concurrent_runs=3,
+    )
 
     class RecordingDispatcher:
-        async def dispatch(self, occurrence_id: str, *, app) -> None:
-            del app
-            dispatched_occurrences.append(occurrence_id)
+        async def admit_manual(self, *args, **kwargs):
+            admitted = await atomic_dispatcher.admit_manual(*args, **kwargs)
+            dispatched_occurrences.append(admitted.occurrence.id)
+            return admitted
 
     m5_app.app.state.automation_dispatcher = RecordingDispatcher()
     runner_idempotency_key = uuid.uuid4()
@@ -361,7 +366,7 @@ async def test_project_api_is_project_owner_and_capability_scoped(
     assert runner_trigger.status_code == 200
     assert runner_trigger.json()["automation_id"] == runner_trigger_target.id
     assert runner_trigger.json()["trigger"] == "manual"
-    assert runner_trigger.json()["status"] == "launching"
+    assert runner_trigger.json()["status"] == "running"
     assert dispatched_occurrences == [runner_trigger.json()["id"]]
 
     cross_update = await m5_app.request(
@@ -441,7 +446,8 @@ async def test_project_api_is_project_owner_and_capability_scoped(
     assert persisted_runner_occurrence.owner_user_id == str(seed.context("owner_b").user_id)
     assert persisted_runner_occurrence.task_id == runner_trigger_target.id
     assert persisted_runner_occurrence.trigger == "manual"
-    assert persisted_runner_occurrence.status == "launching"
+    assert persisted_runner_occurrence.status == "running"
+    assert persisted_runner_occurrence.job_id is not None
     assert persisted_runner_occurrence.manual_idempotency_hash == hashlib.sha256(str(runner_idempotency_key).encode("ascii")).hexdigest()
     assert persisted_cross_targets == (
         owner_cross_update_target,
@@ -944,19 +950,20 @@ async def test_dispatch_snapshots_completion_and_restart_never_replay_admitted_r
         )
     assert fresh_row is not None and fresh_row.status == "success"
     assert parent is not None and parent.run_count == 1
-    assert reuse_row is not None and reuse_row.status == "interrupted"
-    assert restart_run is not None and restart_run.status == "interrupted"
-    assert report.interrupted == 1
+    assert reuse_row is not None and reuse_row.status == "running"
+    assert restart_run is not None and restart_run.status == "pending"
+    assert report.interrupted == 0
+    assert report.unchanged == 1
     assert len(launch_records) == 2
 
 
 @pytest.mark.asyncio
-async def test_m5_head_keeps_m4_ready_and_scheduler_ownership_is_exclusive(
+async def test_m6_head_keeps_m4_ready_and_scheduler_ownership_is_exclusive(
     m5_database: M5Database,
 ) -> None:
     async with m5_database.factory() as session:
         revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-    assert revision == "0013_project_automation_finalize"
+    assert revision == "0015_project_reliability_finalize"
     assert m5_database.database_name.startswith("deerflow_test_")
     await PrivateWorkCutoverGuard(m5_database.factory).require_project_open()
 

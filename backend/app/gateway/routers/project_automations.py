@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from functools import wraps
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, Header, Query, Request, status
+from fastapi import APIRouter, Body, Depends, Header, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.automations.error_mapping import automation_http_exception
@@ -26,7 +26,6 @@ from app.gateway.automation_schemas import (
 from app.gateway.deps import (
     automation_context,
     get_automation_dispatcher,
-    get_automation_lease_seconds,
     get_automation_occurrence_service,
     get_automation_readiness_service,
     get_automation_scheduler_enabled,
@@ -195,31 +194,20 @@ async def resume_automation(
 @router.post("/{task_id}/trigger", response_model=AutomationRunResponse)
 @_map_automation_errors
 async def trigger_automation(
-    request: Request,
     task_id: str,
     idempotency_key: Annotated[uuid.UUID, Header(alias="Idempotency-Key")],
     context: PrivateWorkContext = Depends(automation_context),
     occurrences=Depends(get_automation_occurrence_service),
     dispatcher=Depends(get_automation_dispatcher),
-    lease_seconds: int = Depends(get_automation_lease_seconds),
 ) -> AutomationRunResponse:
     now = datetime.now(UTC)
-    reservation = await occurrences.reserve_manual(
+    admitted = await dispatcher.admit_manual(
         context,
         task_id,
         idempotency_key,
-        now=now,
+        scheduled_for=now,
     )
-    claim = await occurrences.claim_manual_occurrence(
-        context,
-        reservation.occurrence.id,
-        now=now,
-        lease_owner=f"manual:{context.request_id}"[:128],
-        lease_seconds=lease_seconds,
-    )
-    if claim.claimed:
-        await dispatcher.dispatch(claim.occurrence.id, app=request.app)
-    return AutomationRunResponse.from_view(await occurrences.get(context, reservation.occurrence.id))
+    return AutomationRunResponse.from_view(await occurrences.get(context, admitted.occurrence.id))
 
 
 @router.get("/{task_id}/runs", response_model=AutomationRunListResponse)

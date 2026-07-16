@@ -321,28 +321,21 @@ async def test_running_scheduler_fail_stops_before_reserve_after_backend_termina
 
     class Occurrences:
         def __init__(self) -> None:
-            self.reserve_count = 0
-            self.claim_count = 0
+            self.due_count = 0
 
-        async def reserve_due(self, **_kwargs):
-            self.reserve_count += 1
+        async def due_definitions(self, **_kwargs):
+            self.due_count += 1
             first_reserve.set()
             return ()
 
-        async def claim_next(self, **_kwargs):
-            self.claim_count += 1
-            return None
-
     occurrences = Occurrences()
-    dispatcher = SimpleNamespace(dispatch=AsyncMock())
+    dispatcher = SimpleNamespace(admit_occurrence=AsyncMock())
     reconciler = SimpleNamespace(reconcile_restart=AsyncMock(return_value=ReconciliationReport()))
     service = ScheduledTaskService(
-        app=SimpleNamespace(state=SimpleNamespace()),
         occurrences=occurrences,
         dispatcher=dispatcher,
         reconciler=reconciler,
         poll_interval_seconds=0.05,
-        lease_seconds=120,
         max_concurrent_runs=3,
         ownership=first,
     )
@@ -367,26 +360,25 @@ async def test_running_scheduler_fail_stops_before_reserve_after_backend_termina
                 )
                 is True
             )
+        due_count_after_termination = occurrences.due_count
 
         task = service.task
         assert task is not None
         await asyncio.wait_for(task, timeout=1)
-        reserve_count_at_loss = occurrences.reserve_count
-        claim_count_at_loss = occurrences.claim_count
+        due_count_at_loss = occurrences.due_count
 
         assert first.is_lost is True
         assert service.status == "ownership_lost"
-        assert reserve_count_at_loss == 1
-        assert claim_count_at_loss == 1
-        dispatcher.dispatch.assert_not_awaited()
+        assert due_count_after_termination >= 1
+        assert due_count_at_loss == due_count_after_termination
+        dispatcher.admit_occurrence.assert_not_awaited()
 
         await second.acquire()
         assert second.is_acquired is True
         with pytest.raises(AutomationUnavailable):
             await service.start()
         await asyncio.sleep(0.1)
-        assert occurrences.reserve_count == reserve_count_at_loss
-        assert occurrences.claim_count == claim_count_at_loss
+        assert occurrences.due_count == due_count_at_loss
     finally:
         await service.stop()
         await first.release()

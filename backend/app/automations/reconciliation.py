@@ -13,12 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.automations.errors import AutomationUnavailable
 from app.automations.execution_authority import (
     AutomationExecutionAuthority,
-    automation_retry_denial,
     lock_automation_execution_authority,
 )
 from app.automations.occurrences import deterministic_run_id, deterministic_thread_id
 from app.automations.settlement import (
-    ACTIVE_PRIVATE_RUN_STATUSES,
     AutomationRunOutcome,
     automation_outcome_for_private_run,
     settle_terminal_occurrence,
@@ -39,12 +37,6 @@ from deerflow.runtime import RunRecord
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 logger = logging.getLogger(__name__)
-
-_RESTART_ERROR_CODE = "AUTOMATION_GATEWAY_RESTARTED"
-_RESTART_RUN_ERROR = "Gateway restarted before automation run completion"
-_RESTART_ERROR_MESSAGE = "The automation run was interrupted by a Gateway restart."
-_MISSING_RUN_ERROR_CODE = "AUTOMATION_RUN_MISSING"
-_MISSING_RUN_ERROR_MESSAGE = "The admitted automation run could not be found."
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,7 +247,7 @@ class AutomationReconciler:
 
     async def _reconcile_candidate(self, candidate: _RestartCoordinates, now: datetime) -> str:
         async with self._session_factory() as session, session.begin():
-            authority = await self._lock_project_membership(session, candidate)
+            await self._lock_project_membership(session, candidate)
             tasks = ScheduledTaskRepository(session)
             task = await tasks.lock_for_automation_outcome(candidate.scope, candidate.task_id)
             if task is None:
@@ -269,51 +261,11 @@ class AutomationReconciler:
 
             run_id = occurrence.run_id or deterministic_run_id(occurrence.id)
             run = await PrivateRunRepository(session).get(scope=candidate.scope, run_id=run_id, lock=True)
+            # M6 admission commits occurrence + Run + job together. A missing
+            # relation is therefore not safe to synthesize, and legacy
+            # launching rows are never replayed by restart reconciliation.
             if run is None:
-                if occurrence.status == "launching" and occurrence.run_id is None:
-                    denial = automation_retry_denial(
-                        authority,
-                        task,
-                        occurrence,
-                    )
-                    if denial is not None:
-                        changed = await settle_terminal_occurrence(
-                            tasks,
-                            occurrences,
-                            candidate.scope,
-                            task,
-                            occurrence,
-                            status=denial.occurrence_status,
-                            error_code=denial.error_code,
-                            error_message=None,
-                            finished_at=now,
-                            request_id="automation-reconciliation",
-                        )
-                        if not changed:
-                            return "unchanged"
-                        return "interrupted" if denial.occurrence_status == "cancelled" else "failed"
-                    requeued = await occurrences.requeue_launch(
-                        candidate.scope,
-                        occurrence.id,
-                        next_attempt_at=now,
-                        error_code=_RESTART_ERROR_CODE,
-                        updated_at=now,
-                    )
-                    return "requeued" if requeued is not None else "unchanged"
-                changed = await self._settle(
-                    tasks,
-                    occurrences,
-                    candidate.scope,
-                    task,
-                    occurrence,
-                    AutomationRunOutcome(
-                        "failed",
-                        _MISSING_RUN_ERROR_CODE,
-                        _MISSING_RUN_ERROR_MESSAGE,
-                    ),
-                    finished_at=now,
-                )
-                return "failed" if changed else "unchanged"
+                return "unchanged"
 
             if not self._relation_is_valid(task, occurrence, run):
                 return "unchanged"
@@ -334,30 +286,10 @@ class AutomationReconciler:
                     return "unchanged"
                 return "succeeded" if outcome.occurrence_status == "success" else ("interrupted" if outcome.occurrence_status == "interrupted" else "failed")
 
-            if run.status not in ACTIVE_PRIVATE_RUN_STATUSES:
-                return "unchanged"
-            await PrivateRunRepository(session).update_status(
-                scope=candidate.scope,
-                run_id=run.run_id,
-                status="interrupted",
-                error=_RESTART_RUN_ERROR,
-            )
-            changed = await self._settle(
-                tasks,
-                occurrences,
-                candidate.scope,
-                task,
-                occurrence,
-                AutomationRunOutcome(
-                    "interrupted",
-                    _RESTART_ERROR_CODE,
-                    _RESTART_ERROR_MESSAGE,
-                ),
-                finished_at=now,
-                thread_id=run.thread_id,
-                run_id=run.run_id,
-            )
-            return "interrupted" if changed else "unchanged"
+            # Pending/running work remains owned by its durable job. Scheduler
+            # restart coordinates terminal state only; it never replays or
+            # interrupts an admitted Worker Run.
+            return "unchanged"
 
     @staticmethod
     async def _lock_project_membership(

@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import signal
 from contextlib import AsyncExitStack
+from datetime import UTC, datetime
 from functools import partial
 
+from app.automations.cutover import AutomationCutoverGuard
+from app.automations.reconciliation import AutomationReconciler
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.reliability.cutover import ReliabilityCutoverGuard
 from app.reliability.execution import (
@@ -40,11 +43,30 @@ async def run_worker(
         stack.push_async_callback(close_engine)
         session_factory = get_session_factory()
         await ReliabilityCutoverGuard(session_factory).require_worker_open()
+        await AutomationCutoverGuard(session_factory).require_project_open()
+        automation_reconciler = AutomationReconciler(session_factory)
+        await automation_reconciler.reconcile_restart(
+            datetime.now(UTC),
+        )
         audit_keyring = AuditHmacKeyring.from_environment()
+        terminal_port = PrivateRunJobTerminalPort()
+
+        async def reconcile_deferred_automation_terminals() -> None:
+            if not terminal_port.take_automation_reconciliation_pending():
+                return
+            try:
+                await automation_reconciler.reconcile_restart(datetime.now(UTC))
+            except asyncio.CancelledError:
+                terminal_port.restore_automation_reconciliation_pending()
+                raise
+            except Exception:
+                terminal_port.restore_automation_reconciliation_pending()
+                raise
+
         repository_builder = partial(
             JobRepository,
             owner_ref_hasher=audit_keyring.job_owner_ref,
-            terminal_port=PrivateRunJobTerminalPort(),
+            terminal_port=terminal_port,
         )
         active_handlers = handlers
         if active_handlers is None:
@@ -70,15 +92,17 @@ async def run_worker(
                     max_trace_content=config.run_events.max_trace_content,
                 ),
             )
+            private_run_handler = PrivateRunJobHandler(
+                session_factory,
+                executor=executor,
+                retry_initial_seconds=(config.worker.retry_initial_seconds),
+                retry_max_seconds=config.worker.retry_max_seconds,
+                job_repository_builder=repository_builder,
+                project_checkpointer=project_checkpointer,
+            )
             active_handlers = {
-                "private_run": PrivateRunJobHandler(
-                    session_factory,
-                    executor=executor,
-                    retry_initial_seconds=(config.worker.retry_initial_seconds),
-                    retry_max_seconds=config.worker.retry_max_seconds,
-                    job_repository_builder=repository_builder,
-                    project_checkpointer=project_checkpointer,
-                )
+                "private_run": private_run_handler,
+                "automation_run": private_run_handler,
             }
         registry = WorkerRegistry(session_factory, version=WORKER_VERSION)
         service = WorkerService(
@@ -87,6 +111,7 @@ async def run_worker(
             active_handlers,
             config.worker,
             repository_builder=repository_builder,
+            after_claim_commit=reconcile_deferred_automation_terminals,
         )
         await service.run(stop_event or asyncio.Event())
 

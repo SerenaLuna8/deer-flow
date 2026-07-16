@@ -198,6 +198,7 @@ class WorkerService:
         *,
         repository_builder: RepositoryBuilder = JobRepository,
         worker_id: uuid.UUID | None = None,
+        after_claim_commit: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if not isinstance(config, WorkerConfig):
             raise TypeError("WorkerConfig is required")
@@ -208,6 +209,7 @@ class WorkerService:
         self._registry = registry
         self._handlers = dict(handlers)
         self._config = config
+        self._after_claim_commit = after_claim_commit
         self.worker_id = worker_id or uuid.uuid4()
         self._inflight: set[asyncio.Task[None]] = set()
         self._detached: set[asyncio.Task] = set()
@@ -233,11 +235,14 @@ class WorkerService:
 
     async def _claim_next(self) -> JobClaim | None:
         async with self._repository() as repository:
-            return await repository.claim_next(
+            claim = await repository.claim_next(
                 worker_id=self.worker_id,
                 capabilities=frozenset(self._handlers),
                 lease_seconds=self._config.lease_seconds,
             )
+        if self._after_claim_commit is not None:
+            await self._after_claim_commit()
+        return claim
 
     async def _mark_running(self, claim: JobClaim) -> bool:
         async with self._repository() as repository:

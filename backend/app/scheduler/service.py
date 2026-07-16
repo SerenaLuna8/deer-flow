@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import socket
-import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Literal
 
-from app.automations.errors import AutomationError
+from app.automations.errors import AutomationConcurrencyLimit, AutomationError
 from app.automations.ownership import AutomationSchedulerOwnership
 
 logger = logging.getLogger(__name__)
@@ -22,33 +20,25 @@ class ScheduledTaskService:
     def __init__(
         self,
         *,
-        app,
         occurrences,
         dispatcher,
         reconciler,
         poll_interval_seconds: float,
-        lease_seconds: int,
         max_concurrent_runs: int,
         ownership: AutomationSchedulerOwnership | None = None,
         clock: Callable[[], datetime] | None = None,
-        lease_owner: str | None = None,
     ) -> None:
         if not isinstance(poll_interval_seconds, (int, float)) or poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
-        if type(lease_seconds) is not int or lease_seconds < 1:
-            raise ValueError("lease_seconds must be positive")
         if type(max_concurrent_runs) is not int or max_concurrent_runs < 1:
             raise ValueError("max_concurrent_runs must be positive")
-        self.app = app
         self._occurrences = occurrences
         self._dispatcher = dispatcher
         self._reconciler = reconciler
         self._poll_interval_seconds = float(poll_interval_seconds)
-        self._lease_seconds = lease_seconds
         self._max_concurrent_runs = max_concurrent_runs
         self._ownership = ownership
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._lease_owner = lease_owner or f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
@@ -65,29 +55,43 @@ class ScheduledTaskService:
         return "stopped"
 
     async def run_once(self, *, now: datetime) -> None:
-        if self._ownership is not None:
-            await self._ownership.verify()
-        await self._occurrences.reserve_due(
-            now=now,
-            limit=self._max_concurrent_runs,
-        )
-        for _ in range(self._max_concurrent_runs):
-            occurrence = await self._occurrences.claim_next(
+        cursor = None
+        while True:
+            if self._ownership is not None:
+                await self._ownership.verify()
+            definitions = await self._occurrences.due_definitions(
                 now=now,
-                lease_owner=self._lease_owner,
-                lease_seconds=self._lease_seconds,
+                limit=self._max_concurrent_runs,
+                after=cursor,
             )
-            if occurrence is None:
-                break
-            try:
-                await self._dispatcher.dispatch(occurrence.id, app=self.app)
-            except AutomationError as error:
-                # Dispatch already persists retry/rejection policy. Keep the
-                # poll moving without logging private identifiers or prompts.
-                logger.warning(
-                    "Automation dispatch did not complete: code=%s",
-                    error.code,
+            if not definitions:
+                return
+            for definition, scheduled_for in definitions:
+                cursor = (
+                    scheduled_for,
+                    definition.project_id,
+                    definition.owner_user_id,
+                    definition.task_id,
                 )
+                try:
+                    await self._dispatcher.admit_occurrence(
+                        definition,
+                        scheduled_for=scheduled_for,
+                    )
+                except AutomationConcurrencyLimit:
+                    # Global active capacity is full. Preserve all later due
+                    # definitions for the next poll instead of hot-scanning.
+                    return
+                except AutomationError as error:
+                    # Admission is transactionally all-or-nothing. Keyset
+                    # pagination prevents one persistent definition failure
+                    # from starving later due work in the same poll.
+                    logger.warning(
+                        "Automation admission did not complete: code=%s",
+                        error.code,
+                    )
+            if len(definitions) < self._max_concurrent_runs:
+                return
 
     async def start(self) -> None:
         if self._task is not None and not self._task.done():

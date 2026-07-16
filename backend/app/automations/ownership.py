@@ -14,9 +14,9 @@ from app.automations.errors import AutomationUnavailable
 
 logger = logging.getLogger(__name__)
 
-# Session-level advisory lock held by the one Gateway process allowed to run
-# automation startup reconciliation and polling. Keep this distinct from the
-# transaction-level admission lock used by AutomationOccurrenceService.
+# Session-level advisory lock held by the one independent Scheduler process
+# allowed to reconcile and poll. Keep this distinct from the transaction-level
+# admission lock used by AutomationOccurrenceService.
 AUTOMATION_SCHEDULER_OWNERSHIP_LOCK_KEY = 0x0DEE_12F1_0A55_0007
 _OWNERSHIP_REQUEST_ID = "automation-scheduler-ownership"
 _ACQUIRE_SQL = sa.text(

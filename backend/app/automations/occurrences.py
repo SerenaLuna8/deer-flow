@@ -52,6 +52,7 @@ from deerflow.scheduler.schedules import next_scheduled_occurrence
 _AUTOMATION_ADMISSION_LOCK = 0x0DEE_12F1_0A55_0005
 FRESH_THREAD_NAMESPACE = uuid.UUID("8bc2f65e-f186-5fb2-a480-7f23125f8005")
 RUN_NAMESPACE = uuid.UUID("a58150d1-9869-55b1-8cbe-cd30e6edba05")
+AutomationDueCursor = tuple[datetime, uuid.UUID, str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,115 @@ class AutomationOccurrenceService:
         self._session_factory = session_factory
         self._max_concurrent_runs = max_concurrent_runs
         self._revalidator = PrivateWorkRevalidator()
+
+    async def due_definitions(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        after: AutomationDueCursor | None = None,
+    ):
+        """Return due authority coordinates without reserving mutable work.
+
+        The independent Scheduler may race with a stale read. The dispatcher
+        therefore re-resolves and locks every coordinate before atomically
+        creating the occurrence, Run, and job.
+        """
+
+        from app.automations.dispatcher import AutomationDefinitionRef
+
+        now = self._validated_now(now)
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        cursor = self._validated_due_cursor(after)
+        try:
+            async with self._session_factory() as session:
+                statement = (
+                    sa.select(
+                        ScheduledTaskRow.project_id,
+                        ScheduledTaskRow.owner_user_id,
+                        ScheduledTaskRow.id,
+                        ScheduledTaskRow.next_run_at,
+                        ProjectMembershipRow.version,
+                    )
+                    .join(
+                        ProjectMembershipRow,
+                        sa.and_(
+                            ProjectMembershipRow.project_id == ScheduledTaskRow.project_id,
+                            ProjectMembershipRow.user_id == ScheduledTaskRow.owner_user_id,
+                        ),
+                    )
+                    .join(
+                        ProjectRow,
+                        ProjectRow.id == ScheduledTaskRow.project_id,
+                    )
+                    .where(
+                        ScheduledTaskRow.status == "enabled",
+                        ScheduledTaskRow.frozen_at.is_(None),
+                        ScheduledTaskRow.deleted_at.is_(None),
+                        ScheduledTaskRow.next_run_at.is_not(None),
+                        ScheduledTaskRow.next_run_at <= now,
+                        ProjectMembershipRow.status == "active",
+                        ProjectMembershipRow.role.in_(("admin", "editor", "runner")),
+                        ProjectRow.status == "active",
+                        ProjectRow.is_suspended.is_(False),
+                    )
+                )
+                if cursor is not None:
+                    statement = statement.where(
+                        sa.tuple_(
+                            ScheduledTaskRow.next_run_at,
+                            ScheduledTaskRow.project_id,
+                            ScheduledTaskRow.owner_user_id,
+                            ScheduledTaskRow.id,
+                        )
+                        > sa.tuple_(*cursor)
+                    )
+                rows = (
+                    await session.execute(
+                        statement.order_by(
+                            ScheduledTaskRow.next_run_at,
+                            ScheduledTaskRow.project_id,
+                            ScheduledTaskRow.owner_user_id,
+                            ScheduledTaskRow.id,
+                        ).limit(limit)
+                    )
+                ).all()
+            return tuple(
+                (
+                    AutomationDefinitionRef(
+                        project_id=row.project_id,
+                        owner_user_id=row.owner_user_id,
+                        task_id=row.id,
+                        membership_version=row.version,
+                    ),
+                    row.next_run_at,
+                )
+                for row in rows
+                if row.next_run_at is not None
+            )
+        except Exception as error:
+            self._raise_mapped(error, "scheduler")
+
+    @classmethod
+    def _validated_due_cursor(
+        cls,
+        value: AutomationDueCursor | None,
+    ) -> AutomationDueCursor | None:
+        if value is None:
+            return None
+        if type(value) is not tuple or len(value) != 4:
+            raise ValueError("due cursor is invalid")
+        scheduled_for, project_id, owner_user_id, task_id = value
+        scheduled_for = cls._validated_now(scheduled_for)
+        try:
+            project_id = uuid.UUID(str(project_id))
+            owner_user_id = str(uuid.UUID(owner_user_id))
+        except (TypeError, ValueError):
+            raise ValueError("due cursor is invalid") from None
+        if not isinstance(task_id, str) or not task_id or len(task_id) > 64:
+            raise ValueError("due cursor is invalid")
+        return scheduled_for, project_id, owner_user_id, task_id
 
     async def reserve_due(
         self,

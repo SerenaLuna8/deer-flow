@@ -45,6 +45,14 @@ def private_run_idempotency_key(run_id: str) -> str:
     return hashlib.sha256(f"private_run:{run_id}".encode()).hexdigest()
 
 
+def automation_run_idempotency_key(occurrence_id: str) -> str:
+    if not isinstance(occurrence_id, str) or not occurrence_id:
+        raise ValueError("occurrence_id is required")
+    return hashlib.sha256(
+        f"automation_run:{occurrence_id}".encode(),
+    ).hexdigest()
+
+
 class PrivateRunJobRepository:
     """Session-bound composition over the generic durable job state machine."""
 
@@ -123,10 +131,81 @@ class PrivateRunJobRepository:
         return None if row is None else self._record(row)
 
 
+class AutomationRunJobRepository:
+    """Session-bound admission for one occurrence-owned private Run job."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._jobs = JobRepository(session)
+
+    async def enqueue(
+        self,
+        *,
+        scope: JobScope,
+        run_id: str,
+        occurrence_id: str,
+        max_attempts: int = 3,
+    ) -> AdmittedJobRecord:
+        key = automation_run_idempotency_key(occurrence_id)
+        job_id = await self._jobs.enqueue(
+            EnqueueJob(
+                job_type="automation_run",
+                scope=scope,
+                idempotency_key=key,
+                run_id=run_id,
+                occurrence_id=occurrence_id,
+                max_attempts=max_attempts,
+                retry_safety="safe",
+            )
+        )
+        row = (
+            await self._session.execute(
+                select(JobRow).where(
+                    JobRow.id == job_id,
+                    JobRow.job_type == "automation_run",
+                    JobRow.project_id == scope.project_id,
+                    JobRow.owner_user_id == scope.owner_user_id,
+                    JobRow.run_id == run_id,
+                    JobRow.automation_occurrence_id == occurrence_id,
+                    JobRow.idempotency_key == key,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise JobIdempotencyConflict(
+                "automation job authority mismatch",
+            )
+        return PrivateRunJobRepository._record(row)
+
+    async def get(
+        self,
+        *,
+        scope: JobScope,
+        run_id: str,
+        occurrence_id: str,
+        job_id: uuid.UUID,
+        lock: bool = False,
+    ) -> AdmittedJobRecord | None:
+        statement = select(JobRow).where(
+            JobRow.id == job_id,
+            JobRow.job_type == "automation_run",
+            JobRow.project_id == scope.project_id,
+            JobRow.owner_user_id == scope.owner_user_id,
+            JobRow.run_id == run_id,
+            JobRow.automation_occurrence_id == occurrence_id,
+            JobRow.idempotency_key == automation_run_idempotency_key(occurrence_id),
+        )
+        if lock:
+            statement = statement.with_for_update(of=JobRow)
+        row = (await self._session.execute(statement)).scalar_one_or_none()
+        return None if row is None else PrivateRunJobRepository._record(row)
+
+
 __all__ = [
     "DeadJobRecord",
     "DeadJobRequeuedEvent",
     "AdmittedJobRecord",
+    "AutomationRunJobRepository",
     "EnqueueJob",
     "JobAuditPort",
     "JobClaim",
@@ -140,5 +219,6 @@ __all__ = [
     "JobType",
     "PrivateRunJobRepository",
     "RetrySafety",
+    "automation_run_idempotency_key",
     "private_run_idempotency_key",
 ]

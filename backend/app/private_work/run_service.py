@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.automations.errors import AutomationError
+from app.automations.reconciliation import AutomationReconciler
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
@@ -34,6 +38,7 @@ class PrivateRunService:
     ) -> None:
         self._session_factory = session_factory
         self._revalidator = PrivateWorkRevalidator()
+        self._automation_reconciler = AutomationReconciler(session_factory)
 
     @staticmethod
     async def _require_thread(
@@ -185,15 +190,21 @@ class PrivateRunService:
                     raise PrivateWorkNotFound(context.request_id)
                 if record.job_id is None:
                     raise PrivateWorkConflict(context.request_id)
-                await repository.request_cancel(
+                cancel_result = await repository.request_cancel(
                     scope=context.resource_scope,
                     thread_id=thread_id,
                     run_id=run_id,
                     job_id=record.job_id,
                     reason=reason,
                 )
+            if cancel_result in {"cancelled", "terminal"}:
+                await self._automation_reconciler.handle_run_completion(
+                    SimpleNamespace(run_id=run_id),
+                )
         except PrivateWorkError:
             raise
+        except AutomationError:
+            raise PrivateWorkUnavailable(context.request_id) from None
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
         except PrivateRunConflict:

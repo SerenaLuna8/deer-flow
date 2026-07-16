@@ -21,10 +21,15 @@ from deerflow.persistence.jobs.sql import JobClaim, JobHeartbeat, JobScope
 
 
 class _Transaction:
+    def __init__(self, backend: _FakeBackend) -> None:
+        self.backend = backend
+
     async def __aenter__(self):
+        self.backend.transaction_active = True
         return self
 
     async def __aexit__(self, *_args):
+        self.backend.transaction_active = False
         return False
 
 
@@ -39,7 +44,7 @@ class _Session:
         return False
 
     def begin(self) -> _Transaction:
-        return _Transaction()
+        return _Transaction(self.backend)
 
 
 class _Factory:
@@ -61,6 +66,7 @@ class _FakeBackend:
         self.heartbeat_result: JobHeartbeat | bool = JobHeartbeat(cancel_requested=False)
         self.heartbeat_error: Exception | None = None
         self.claim_calls = 0
+        self.transaction_active = False
         self.claim_gate: asyncio.Event | None = None
         self.claim_started: asyncio.Event | None = None
 
@@ -152,6 +158,27 @@ def _claim(index: int) -> JobClaim:
 
 def _config(**updates) -> WorkerConfig:
     return WorkerConfig().model_copy(update=updates)
+
+
+@pytest.mark.asyncio
+async def test_after_claim_commit_hook_runs_outside_claim_transaction() -> None:
+    backend = _FakeBackend(job_count=0)
+    observations: list[tuple[bool, int]] = []
+
+    async def after_claim_commit() -> None:
+        observations.append((backend.transaction_active, backend.claim_calls))
+
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {},
+        _config(),
+        repository_builder=_FakeRepository,
+        after_claim_commit=after_claim_commit,
+    )
+
+    assert await service._claim_next() is None
+    assert observations == [(False, 1)]
 
 
 @pytest.mark.parametrize(

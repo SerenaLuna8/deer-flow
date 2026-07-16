@@ -413,22 +413,23 @@ async def test_restart_reconciliation_recovers_lease_and_never_replays_admitted_
         admitted_run = await PrivateRunRepository(session).get(scope=seed.owner_a.resource_scope, run_id=admitted.run_id)
         missing_row = await ScheduledTaskRunRepository(session).get(seed.owner_a.resource_scope, missing.occurrence_id)
 
-    assert report.requeued == 1
-    assert report.interrupted == 1
-    assert report.failed == 1
+    assert report.requeued == 0
+    assert report.interrupted == 0
+    assert report.failed == 0
+    assert report.unchanged == 3
     assert expired_row is not None
-    assert expired_row.status == "queued"
-    assert expired_row.next_attempt_at == NOW
+    assert expired_row.status == "launching"
     assert admitted_row is not None
-    assert admitted_row.status == "interrupted"
-    assert admitted_row.run_id == admitted.run_id
-    assert admitted_run is not None and admitted_run.status == "interrupted"
+    assert admitted_row.status == "launching"
+    assert admitted_row.run_id is None
+    assert admitted_run is not None and admitted_run.status == "pending"
     assert missing_row is not None
-    assert missing_row.status == "failed"
-    assert missing_row.error_code == "AUTOMATION_RUN_MISSING"
+    assert missing_row.status == "running"
+    assert missing_row.error_code is None
 
     again = await AutomationReconciler(seed.factory).reconcile_restart(NOW)
     assert again.requeued == again.interrupted == again.failed == 0
+    assert again.unchanged == 3
 
 
 @pytest.mark.asyncio
@@ -518,7 +519,7 @@ async def test_restart_does_not_requeue_frozen_launch_without_run(
 
     result = await reconciler._reconcile_candidate(candidate, NOW)
 
-    assert result == "interrupted"
+    assert result == "unchanged"
     assert lock_order == [
         "project-membership",
         "definition",
@@ -526,14 +527,7 @@ async def test_restart_does_not_requeue_frozen_launch_without_run(
         "run",
     ]
     occurrences.requeue_launch.assert_not_awaited()
-    occurrences.finish.assert_awaited_once_with(
-        candidate.scope,
-        occurrence_id,
-        status="cancelled",
-        error_code="AUTOMATION_AUTHORIZATION_REVOKED",
-        error_message=None,
-        finished_at=NOW,
-    )
+    occurrences.finish.assert_not_awaited()
 
 
 @pytest.mark.postgres
@@ -542,7 +536,7 @@ async def test_restart_does_not_requeue_frozen_launch_without_run(
     "invalid_state",
     ["frozen", "project_suspended", "membership_revoked"],
 )
-async def test_restart_terminalizes_unauthorized_launch_without_run_and_releases_global_cap(
+async def test_restart_never_replays_or_synthesizes_legacy_unadmitted_launch(
     reconciliation_seed: M4ThreadSeed,
     invalid_state: str,
 ) -> None:
@@ -574,7 +568,7 @@ async def test_restart_terminalizes_unauthorized_launch_without_run_and_releases
                     "membership_id": seed.owner_a.membership_id,
                 },
             )
-        replacement = await ScheduledTaskRepository(session).create(
+        await ScheduledTaskRepository(session).create(
             seed.project_b_owner_a.resource_scope,
             ScheduledTaskCreate(
                 task_id=f"restart-replacement-{uuid.uuid4().hex[:12]}",
@@ -599,24 +593,18 @@ async def test_restart_terminalizes_unauthorized_launch_without_run_and_releases
             scenario.occurrence_id,
         )
     assert report.requeued == 0
-    assert report.interrupted == 1
+    assert report.interrupted == 0
+    assert report.unchanged == 1
     assert occurrence is not None
-    assert occurrence.status == "cancelled"
-    assert occurrence.error_code == "AUTOMATION_AUTHORIZATION_REVOKED"
-    assert occurrence.next_attempt_at is None
+    assert occurrence.status == "launching"
+    assert occurrence.error_code is None
 
     occurrences = AutomationOccurrenceService(
         seed.factory,
         max_concurrent_runs=1,
     )
     reserved = await occurrences.reserve_due(now=NOW, limit=10)
-    assert tuple(row.task_id for row in reserved) == (replacement.id,)
-    claimed = await occurrences.claim_next(
-        now=NOW,
-        lease_owner="restart-replacement",
-        lease_seconds=60,
-    )
-    assert claimed is not None and claimed.task_id == replacement.id
+    assert reserved == ()
 
 
 @pytest.mark.postgres

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
+from app.automations.dispatcher import AutomationDispatcher
 from app.automations.error_mapping import automation_http_exception
 from app.automations.errors import (
     AutomationConcurrencyLimit,
@@ -34,7 +35,6 @@ from app.gateway.automation_schemas import (
 from app.gateway.deps import (
     automation_context,
     get_automation_dispatcher,
-    get_automation_lease_seconds,
     get_automation_occurrence_service,
     get_automation_readiness_service,
     get_automation_scheduler_enabled,
@@ -129,12 +129,10 @@ def _test_app(
         resume=AsyncMock(return_value=_automation_view()),
     )
     occurrences = occurrences or SimpleNamespace(
-        reserve_manual=AsyncMock(),
-        claim_manual_occurrence=AsyncMock(),
         get=AsyncMock(return_value=_run_view()),
         list=AsyncMock(return_value=(_run_view(),)),
     )
-    dispatcher = dispatcher or SimpleNamespace(dispatch=AsyncMock())
+    dispatcher = dispatcher or SimpleNamespace(admit_manual=AsyncMock())
 
     async def override_context() -> PrivateWorkContext:
         return context
@@ -151,7 +149,6 @@ def _test_app(
     app.dependency_overrides[get_automation_service] = lambda: service
     app.dependency_overrides[get_automation_occurrence_service] = lambda: occurrences
     app.dependency_overrides[get_automation_dispatcher] = lambda: dispatcher
-    app.dependency_overrides[get_automation_lease_seconds] = lambda: 60
     app.dependency_overrides[get_automation_scheduler_enabled] = lambda: False
     app.dependency_overrides[get_automation_readiness_service] = lambda: SimpleNamespace(
         read=AsyncMock(
@@ -335,20 +332,13 @@ async def test_http_maps_only_public_automation_errors(error, status: int, code:
 
 
 @pytest.mark.anyio
-async def test_manual_trigger_reserves_claims_and_dispatches_without_scheduler_gate() -> None:
+async def test_manual_trigger_atomically_admits_without_scheduler_gate() -> None:
     context = _context()
     occurrence_record = SimpleNamespace(id="occurrence-1", status="queued")
     occurrences = SimpleNamespace(
-        reserve_manual=AsyncMock(return_value=SimpleNamespace(occurrence=occurrence_record, created=True)),
-        claim_manual_occurrence=AsyncMock(
-            return_value=SimpleNamespace(
-                occurrence=SimpleNamespace(id="occurrence-1", status="launching"),
-                claimed=True,
-            )
-        ),
         get=AsyncMock(return_value=_run_view()),
     )
-    dispatcher = SimpleNamespace(dispatch=AsyncMock())
+    dispatcher = SimpleNamespace(admit_manual=AsyncMock(return_value=SimpleNamespace(occurrence=occurrence_record)))
     app = _test_app(
         context=context,
         occurrences=occurrences,
@@ -365,11 +355,10 @@ async def test_manual_trigger_reserves_claims_and_dispatches_without_scheduler_g
         )
 
     assert response.status_code == 200
-    occurrences.reserve_manual.assert_awaited_once()
-    reserve_args = occurrences.reserve_manual.await_args
-    assert reserve_args.args[:3] == (context, "task-1", key)
-    occurrences.claim_manual_occurrence.assert_awaited_once()
-    dispatcher.dispatch.assert_awaited_once_with("occurrence-1", app=app)
+    dispatcher.admit_manual.assert_awaited_once()
+    admission = dispatcher.admit_manual.await_args
+    assert admission.args == (context, "task-1", key)
+    assert admission.kwargs["scheduled_for"].tzinfo is UTC
     occurrences.get.assert_awaited_once_with(context, "occurrence-1")
 
 
@@ -407,7 +396,8 @@ def _postgres_app(
     async def project_open() -> None:
         return None
 
-    dispatcher = AsyncMock()
+    real_dispatcher = AutomationDispatcher(seed.factory)
+    dispatcher = AsyncMock(side_effect=real_dispatcher.admit_manual)
     app.dependency_overrides[project_session] = request_session
     app.dependency_overrides[automation_context] = current_context
     app.dependency_overrides[require_project_automation_open] = project_open
@@ -419,8 +409,7 @@ def _postgres_app(
         seed.factory,
         max_concurrent_runs=3,
     )
-    app.dependency_overrides[get_automation_dispatcher] = lambda: SimpleNamespace(dispatch=dispatcher)
-    app.dependency_overrides[get_automation_lease_seconds] = lambda: 60
+    app.dependency_overrides[get_automation_dispatcher] = lambda: SimpleNamespace(admit_manual=dispatcher)
     app.dependency_overrides[get_automation_scheduler_enabled] = lambda: False
     return app, dispatcher
 
@@ -466,7 +455,7 @@ async def test_real_postgres_api_enforces_owner_viewer_scope_and_manual_history(
             headers={"Idempotency-Key": str(key)},
         )
         assert triggered.status_code == 200, triggered.text
-        assert triggered.json()["status"] == "launching"
+        assert triggered.json()["status"] == "running"
         assert not {
             "owner_user_id",
             "lease_owner",
@@ -500,7 +489,7 @@ async def test_real_postgres_api_enforces_owner_viewer_scope_and_manual_history(
         outsider = await client.get(f"/api/projects/{project_id}/automations/{task_id}")
         assert outsider.status_code == 404
 
-    assert dispatcher.await_count == 1
+    assert dispatcher.await_count == 2
     async with seed.factory() as session:
         count = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id))
     assert count == 1

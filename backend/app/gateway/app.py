@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -231,90 +231,6 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
     return migrated
 
 
-async def _start_scheduled_task_service(app: FastAPI, *, enabled: bool) -> bool:
-    """Start polling only after the automation cutover boundary is open."""
-
-    active_task = getattr(app.state, "automation_scheduler_task", None)
-    if active_task is not None and not active_task.done():
-        return True
-    app.state.automation_scheduler_task = None
-    if not enabled:
-        return False
-    service = getattr(
-        app.state,
-        "automation_scheduler",
-        getattr(app.state, "scheduled_task_service", None),
-    )
-    guard = getattr(app.state, "automation_cutover_guard", None)
-    ownership = getattr(app.state, "automation_scheduler_ownership", None)
-    if service is None or guard is None or ownership is None:
-        logger.warning("Automation scheduler unavailable: code=AUTOMATION_UNAVAILABLE")
-        return False
-    from app.gateway.deps import _should_reconcile_orphaned_runs
-
-    if not _should_reconcile_orphaned_runs():
-        logger.warning("Automation scheduler not started: code=AUTOMATION_UNAVAILABLE")
-        return False
-    if not ownership.is_acquired:
-        logger.warning("Automation scheduler ownership unavailable: code=AUTOMATION_UNAVAILABLE")
-        return False
-    from app.automations.errors import AutomationError
-
-    try:
-        await guard.require_project_open()
-        await service.start()
-    except AutomationError as error:
-        logger.warning("Automation scheduler not started: code=%s", error.code)
-        return False
-    except Exception as error:  # noqa: BLE001 - startup remains fail-closed
-        logger.error(
-            "Automation scheduler not started: error_type=%s",
-            type(error).__name__,
-        )
-        return False
-    task = getattr(service, "task", None)
-    if task is not None:
-        if task.done():
-            logger.warning("Automation scheduler not started: code=AUTOMATION_UNAVAILABLE")
-            return False
-        app.state.automation_scheduler_task = task
-    return True
-
-
-async def _stop_scheduled_task_service(app: FastAPI) -> None:
-    service = getattr(
-        app.state,
-        "automation_scheduler",
-        getattr(app.state, "scheduled_task_service", None),
-    )
-    task = getattr(app.state, "automation_scheduler_task", None)
-    if service is None and task is None:
-        return
-    try:
-        if service is not None:
-            await asyncio.wait_for(service.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
-        elif task is not None:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-    except TimeoutError:
-        logger.warning(
-            "Automation scheduler shutdown exceeded %.1fs; proceeding with worker exit.",
-            _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-        )
-    except Exception as error:  # noqa: BLE001 - shutdown must continue
-        logger.error(
-            "Automation scheduler shutdown failed: error_type=%s",
-            type(error).__name__,
-        )
-    finally:
-        if task is not None and not task.done():
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-        app.state.automation_scheduler_task = None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -378,15 +294,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
 
-        await _start_scheduled_task_service(
-            app,
-            enabled=getattr(
-                getattr(startup_config, "scheduler", None),
-                "enabled",
-                False,
-            ),
-        )
-
         # Start IM channel service if any channels are configured
         try:
             from app.channels.service import start_channel_service
@@ -396,28 +303,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
-        lifespan_error: BaseException | None = None
         try:
-            try:
-                yield
-            except BaseException as error:
-                lifespan_error = error
-                raise
+            yield
         finally:
-            # Cancel scheduler work before channels and before the runtime
-            # context releases ownership, stores, checkpointer, or engine.
-            # Keep cleanup cancellation visible without letting it hide an
-            # exception already propagating from the lifespan body.
-            scheduler_shutdown_error: BaseException | None = None
-            try:
-                await _stop_scheduled_task_service(app)
-            except BaseException as error:
-                scheduler_shutdown_error = error
-            finally:
-                app.state.automation_scheduler_task = None
-                app.state.automation_scheduler = None
-                app.state.scheduled_task_service = None
-
             try:
                 await auth.close_oidc_service()
             except Exception:
@@ -438,14 +326,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 )
             except Exception:
                 logger.exception("Failed to stop channel service")
-
-            if scheduler_shutdown_error is not None:
-                if lifespan_error is not None:
-                    raise BaseExceptionGroup(
-                        "Gateway lifespan and scheduler shutdown both failed",
-                        [lifespan_error, scheduler_shutdown_error],
-                    ) from None
-                raise scheduler_shutdown_error
 
     logger.info("Shutting down API Gateway")
 

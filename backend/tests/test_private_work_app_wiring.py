@@ -12,7 +12,6 @@ from app.automations.cutover import AutomationCutoverGuard
 from app.automations.dispatcher import AutomationDispatcher
 from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.readiness import AutomationReadinessService
-from app.automations.reconciliation import AutomationReconciler
 from app.gateway.app import create_app
 from app.gateway.deps import langgraph_runtime
 from app.private_work.connection_service import ProjectConnectionService
@@ -24,7 +23,6 @@ from app.private_work.run_repository import PrivateRunCreate, PrivateRunReposito
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.private_work.thread_service import PrivateThreadService
-from app.scheduler import ScheduledTaskService
 from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
 from deerflow.runtime.events.store.db import DbRunEventStore
@@ -135,15 +133,12 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
                 AutomationOccurrenceService,
             )
             assert app.state.automation_occurrence_service._session_factory is session_factory
-            assert isinstance(app.state.automation_reconciler, AutomationReconciler)
-            assert app.state.automation_reconciler._session_factory is session_factory
             assert isinstance(app.state.automation_dispatcher, AutomationDispatcher)
             assert app.state.automation_dispatcher._session_factory is session_factory
-            assert isinstance(app.state.scheduled_task_service, ScheduledTaskService)
-            assert app.state.automation_scheduler is app.state.scheduled_task_service
-            assert app.state.automation_scheduler_task is None
-            assert app.state.scheduled_task_service.app is app
-            assert app.state.scheduled_task_service._ownership is app.state.automation_scheduler_ownership
+            assert not hasattr(app.state, "automation_reconciler")
+            assert not hasattr(app.state, "scheduled_task_service")
+            assert not hasattr(app.state, "automation_scheduler")
+            assert not hasattr(app.state, "automation_scheduler_ownership")
             assert app.state.scheduled_task_repo is not None
             assert app.state.scheduled_task_repo is app.state.scheduled_task_run_repo
             legacy_read_adapter = app.state.scheduled_task_repo

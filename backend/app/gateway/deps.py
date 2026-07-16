@@ -259,7 +259,6 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     """
     from deerflow.persistence.engine import (
         close_engine,
-        get_engine,
         get_session_factory,
         init_engine_from_config,
     )
@@ -338,63 +337,29 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from app.automations.cutover import AutomationCutoverGuard
         from app.automations.dispatcher import AutomationDispatcher
         from app.automations.occurrences import AutomationOccurrenceService
-        from app.automations.ownership import AutomationSchedulerOwnership
         from app.automations.readiness import AutomationReadinessService
-        from app.automations.reconciliation import AutomationReconciler
         from app.automations.service import ProjectAutomationService
-        from app.scheduler import ScheduledTaskService
         from deerflow.config.scheduler_config import SchedulerConfig
 
         scheduler_config = getattr(config, "scheduler", None)
         effective_scheduler_config = scheduler_config or SchedulerConfig()
-        persistence_engine = get_engine()
-        scheduler_ownership_required = effective_scheduler_config.enabled and _should_reconcile_orphaned_runs()
-        if persistence_engine is None:
-            if scheduler_ownership_required:
-                from app.automations.errors import AutomationUnavailable
-
-                raise AutomationUnavailable("automation-scheduler-ownership")
-            app.state.automation_scheduler_ownership = None
-        else:
-            app.state.automation_scheduler_ownership = AutomationSchedulerOwnership(persistence_engine)
         app.state.automation_cutover_guard = AutomationCutoverGuard(sf)
         app.state.automation_service = ProjectAutomationService(
             sf,
             min_once_delay_seconds=effective_scheduler_config.min_once_delay_seconds,
         )
-        app.state.automation_readiness_service = AutomationReadinessService(scheduler_status_provider=lambda: app.state.scheduled_task_service.status)
+        # Gateway reports configured-but-external scheduling as stopped. M6
+        # runtime health aggregation replaces this local projection in Task 13.
+        app.state.automation_readiness_service = AutomationReadinessService()
         app.state.automation_occurrence_service = AutomationOccurrenceService(
             sf,
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
         )
-        app.state.automation_reconciler = AutomationReconciler(sf)
         app.state.automation_dispatcher = AutomationDispatcher(
             sf,
-            thread_service=app.state.private_thread_service,
-        )
-        app.state.scheduled_task_service = ScheduledTaskService(
-            app=app,
-            occurrences=app.state.automation_occurrence_service,
-            dispatcher=app.state.automation_dispatcher,
-            reconciler=app.state.automation_reconciler,
-            poll_interval_seconds=effective_scheduler_config.poll_interval_seconds,
-            lease_seconds=effective_scheduler_config.lease_seconds,
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
-            ownership=app.state.automation_scheduler_ownership,
         )
-        # Keep the legacy service name for its compatibility router, while the
-        # Automation names make the M5 lifecycle and task ownership explicit.
-        # Both names point at the same service; there is never a second poller.
-        app.state.automation_scheduler = app.state.scheduled_task_service
-        app.state.automation_scheduler_task = None
         app.state.automation_scheduler_enabled = effective_scheduler_config.enabled
-        app.state.automation_lease_seconds = effective_scheduler_config.lease_seconds
-
-        # GATEWAY_WORKERS remains a cheap local topology guard. The dedicated
-        # PostgreSQL session lock is the authoritative cross-process owner and
-        # must be held before any automation reconciliation or polling begins.
-        if scheduler_ownership_required:
-            await stack.enter_async_context(app.state.automation_scheduler_ownership.hold())
 
         # Legacy run event store. The store and the matching
         # ``run_events_config`` are both frozen at startup so
@@ -420,26 +385,6 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_manager = RunManager(store=app.state.run_store)
         if _should_reconcile_orphaned_runs():
             from deerflow.utils.time import now_iso
-
-            # Automation owns its admitted M4 Runs. Reconcile those first so
-            # generic orphan recovery cannot erase the distinct interrupted
-            # occurrence outcome. A production AppConfig always carries the
-            # scheduler section: disabled controls polling/ownership only, not
-            # recovery for manual project Automation runs. Minimal legacy test
-            # embeddings with no scheduler section retain generic-only recovery.
-            if scheduler_config is not None:
-                from datetime import UTC, datetime
-
-                from app.automations.errors import AutomationCutover
-
-                try:
-                    await app.state.automation_cutover_guard.require_project_open()
-                    await app.state.automation_reconciler.reconcile_restart(datetime.now(UTC))
-                except AutomationCutover as error:
-                    logger.warning(
-                        "Automation startup reconciliation skipped: code=%s",
-                        error.code,
-                    )
 
             # Without worker ownership/leases, startup recovery is safe only
             # when this process is the sole worker.
@@ -546,13 +491,6 @@ def get_automation_scheduler_enabled(request: Request) -> bool:
     return value
 
 
-def get_automation_lease_seconds(request: Request) -> int:
-    value = getattr(request.app.state, "automation_lease_seconds", None)
-    if type(value) is not int or value < 1:
-        raise automation_http_exception(AutomationUnavailable(get_current_trace_id() or generate_trace_id()))
-    return value
-
-
 def get_checkpointer(request: Request) -> Checkpointer:
     """Return the legacy raw saver without exposing it to project modules."""
 
@@ -631,7 +569,7 @@ def get_run_context(request: Request) -> RunContext:
         run_events_config=getattr(request.app.state, "run_events_config", None),
         thread_store=get_thread_store(request),
         app_config=get_config(),
-        on_run_completed=(request.app.state.automation_reconciler.handle_run_completion if getattr(request.app.state, "automation_reconciler", None) is not None else None),
+        on_run_completed=None,
     )
 
 

@@ -41,7 +41,11 @@ from app.private_work.snapshot_repository import RunSnapshotRepository
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectForbidden, ProjectNotFound
-from app.reliability.jobs import AdmittedJobRecord, private_run_idempotency_key
+from app.reliability.jobs import (
+    AdmittedJobRecord,
+    automation_run_idempotency_key,
+    private_run_idempotency_key,
+)
 from app.worker.service import (
     JobLeaseAuthority,
     JobOutcome,
@@ -55,6 +59,8 @@ from deerflow.persistence.jobs.sql import (
 )
 from deerflow.persistence.private_work.model import PrivateFileRow
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.runtime import (
     DisconnectMode,
     RunContext,
@@ -138,12 +144,24 @@ class PrivateRunExecutor(Protocol):
 class PrivateRunJobTerminalPort:
     """Atomically converge an unowned private job, Run, and staging files."""
 
+    def __init__(self) -> None:
+        self._automation_reconciliation_pending = asyncio.Event()
+
+    def take_automation_reconciliation_pending(self) -> bool:
+        if not self._automation_reconciliation_pending.is_set():
+            return False
+        self._automation_reconciliation_pending.clear()
+        return True
+
+    def restore_automation_reconciliation_pending(self) -> None:
+        self._automation_reconciliation_pending.set()
+
     async def job_terminalized(
         self,
         session: AsyncSession,
         event: JobTerminalEvent,
     ) -> None:
-        if event.job_type != "private_run":
+        if event.job_type not in {"private_run", "automation_run"}:
             return
         if event.owner_user_id is None or event.run_id is None:
             raise RuntimeError("private job terminal authority is incomplete")
@@ -172,6 +190,74 @@ class PrivateRunJobTerminalPort:
                 updated_at=event.occurred_at,
             )
         )
+        if event.job_type == "automation_run":
+            if event.occurrence_id is None:
+                raise RuntimeError("automation job terminal authority is incomplete")
+            occurrence_status = "interrupted" if event.status == "cancelled" else "failed"
+            error_code = event.cancel_reason if event.status == "cancelled" else event.public_error_code
+            task_id = await session.scalar(
+                sa.select(ScheduledTaskRunRow.task_id).where(
+                    ScheduledTaskRunRow.id == event.occurrence_id,
+                    ScheduledTaskRunRow.project_id == event.project_id,
+                    ScheduledTaskRunRow.owner_user_id == event.owner_user_id,
+                    ScheduledTaskRunRow.run_id == event.run_id,
+                    ScheduledTaskRunRow.job_id == event.job_id,
+                )
+            )
+            task = None
+            if task_id is not None:
+                task = (
+                    await session.execute(
+                        sa.select(ScheduledTaskRow)
+                        .where(
+                            ScheduledTaskRow.id == task_id,
+                            ScheduledTaskRow.project_id == event.project_id,
+                            ScheduledTaskRow.owner_user_id == event.owner_user_id,
+                        )
+                        .with_for_update(
+                            of=ScheduledTaskRow,
+                            skip_locked=True,
+                        )
+                    )
+                ).scalar_one_or_none()
+            occurrence = None
+            if task is not None:
+                occurrence = (
+                    await session.execute(
+                        sa.select(ScheduledTaskRunRow)
+                        .where(
+                            ScheduledTaskRunRow.id == event.occurrence_id,
+                            ScheduledTaskRunRow.project_id == event.project_id,
+                            ScheduledTaskRunRow.owner_user_id == event.owner_user_id,
+                            ScheduledTaskRunRow.task_id == task.id,
+                            ScheduledTaskRunRow.run_id == event.run_id,
+                            ScheduledTaskRunRow.job_id == event.job_id,
+                            ScheduledTaskRunRow.status.in_(
+                                ("queued", "launching", "running"),
+                            ),
+                        )
+                        .with_for_update(
+                            of=ScheduledTaskRunRow,
+                            skip_locked=True,
+                        )
+                    )
+                ).scalar_one_or_none()
+            if task is not None and occurrence is not None:
+                occurrence.status = occurrence_status
+                occurrence.error_code = error_code
+                occurrence.error_message = None
+                occurrence.finished_at = event.occurred_at
+                occurrence.updated_at = event.occurred_at
+                if task.schedule_type == "once":
+                    task.status = "cancelled" if occurrence_status == "interrupted" else "failed"
+                    task.next_run_at = None
+                task.last_run_at = event.occurred_at
+                task.last_outcome = occurrence_status
+                task.last_error_code = error_code
+                task.run_count += 1
+                task.updated_at = event.occurred_at
+            else:
+                self._automation_reconciliation_pending.set()
         await session.execute(
             sa.delete(PrivateFileRow).where(
                 PrivateFileRow.project_id == event.project_id,
@@ -481,13 +567,11 @@ class RunAgentPrivateExecutor:
             run=execution.run,
             job=AdmittedJobRecord(
                 job_id=claim.job_id,
-                job_type="private_run",
+                job_type=claim.job_type,
                 project_id=execution.run.project_id,
                 owner_user_id=execution.run.owner_user_id,
                 run_id=execution.run.run_id,
-                idempotency_key=private_run_idempotency_key(
-                    execution.run.run_id,
-                ),
+                idempotency_key=(automation_run_idempotency_key(claim.occurrence_id) if claim.job_type == "automation_run" and claim.occurrence_id is not None else private_run_idempotency_key(execution.run.run_id)),
                 status="running",
             ),
             snapshot=execution.snapshot,
@@ -706,7 +790,7 @@ class PrivateRunJobHandler:
         self,
         claim: JobClaim,
     ) -> tuple[PrivateRunExecution | None, bool]:
-        if claim.job_type != "private_run" or claim.run_id is None or claim.scope.owner_user_id is None:
+        if claim.job_type not in {"private_run", "automation_run"} or claim.run_id is None or claim.scope.owner_user_id is None or (claim.job_type == "automation_run" and claim.occurrence_id is None):
             raise LeaseLost(claim.job_id)
         try:
             owner_user_id = uuid.UUID(claim.scope.owner_user_id)
@@ -845,8 +929,9 @@ class PrivateRunJobHandler:
 
         async def commit() -> None:
             try:
+                settled_run = None
                 async with self._factory() as session, session.begin():
-                    await self._runs(session).settle_execution(
+                    settled_run = await self._runs(session).settle_execution(
                         scope=scope,
                         run_id=claim.run_id or "",
                         job_id=claim.job_id,
@@ -857,6 +942,23 @@ class PrivateRunJobHandler:
                         retry_initial_seconds=self._retry_initial_seconds,
                         retry_max_seconds=self._retry_max_seconds,
                     )
+                if claim.job_type == "automation_run" and settled_run is not None:
+                    from types import SimpleNamespace
+
+                    from app.automations.errors import AutomationError
+                    from app.automations.reconciliation import (
+                        AutomationReconciler,
+                    )
+
+                    try:
+                        await AutomationReconciler(
+                            self._factory,
+                        ).handle_run_completion(SimpleNamespace(run_id=settled_run.run_id))
+                    except AutomationError as error:
+                        logger.warning(
+                            "Automation terminal reconciliation deferred: code=%s",
+                            error.code,
+                        )
             except PrivateRunExecutionLeaseLost:
                 raise LeaseLost(claim.job_id) from None
 

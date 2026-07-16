@@ -47,19 +47,17 @@ async def test_gate_restores_blockbuster_patches_after_exceptions() -> None:
 async def test_gate_catches_unoffloaded_blocking_io_in_scheduler_path() -> None:
     from app.scheduler.service import ScheduledTaskService
 
-    async def blocking_reserve_due(**_kwargs) -> None:
+    async def blocking_due_definitions(**_kwargs):
         time.sleep(0.01)
+        return ()
 
     service = ScheduledTaskService(
-        app=SimpleNamespace(),
         occurrences=SimpleNamespace(
-            reserve_due=blocking_reserve_due,
-            claim_next=AsyncMock(return_value=None),
+            due_definitions=blocking_due_definitions,
         ),
-        dispatcher=SimpleNamespace(dispatch=AsyncMock()),
+        dispatcher=SimpleNamespace(admit_occurrence=AsyncMock()),
         reconciler=SimpleNamespace(reconcile_restart=AsyncMock()),
         poll_interval_seconds=60,
-        lease_seconds=120,
         max_concurrent_runs=3,
     )
 
