@@ -274,3 +274,88 @@ existing report semantics; no private values or database URLs were added to erro
 fixed lock order is unchanged; and no `40P01` occurred in either scheduler ordering. This repair is
 limited to Task 10 migration finalization, its regression test, and this appended report. Task 11 and
 `.superpowers/sdd/progress.md` remain untouched.
+
+## Frozen review repair — exact 0012 schema and complete final constraints
+
+The frozen Task 10 review found two remaining Important fail-before-DDL gaps.
+
+First, revision 0013 held the correct fixed-order `ACCESS EXCLUSIVE` barrier but immediately entered
+fixed target/source projections. Unlike the public runner's preflight, the revision did not compare
+the actual table schemas to the exact 0012 expanded allowlists. An unknown column added after staging
+could therefore survive finalize even though the equivalent preflight state was rejected.
+
+Revision 0013 now performs this immutable order inside its Alembic transaction:
+
+1. acquire the shared `scheduled_tasks, scheduled_task_runs` `ACCESS EXCLUSIVE` barrier;
+2. inspect both actual column sets and require exact equality with
+   `AUTOMATION_EXPANDED_COLUMNS`;
+3. only then execute the first fixed target projection and final-constraint validation;
+4. verify marker/run/ledger/count/digest/source/relation receipts; and
+5. perform destructive DDL and record the final schema probe.
+
+A structural unit test pins that ordering before any Alembic mutation. Real PostgreSQL tests add a
+non-empty `private_shadow` column after committed staging to each source table independently. Both
+finalizations now fail with the redacted unsupported-schema error while revision remains 0012, the
+unknown and legacy columns remain intact, and the singleton remains `migration_ready` with no final
+probe or cutover timestamp.
+
+Second, script preflight previously validated only selected legacy enums. In particular, a negative
+`run_count` passed dry-run; execute could commit staging and freeze the receipt before final CHECK
+installation rejected the row. Revision 0013 likewise had no independent actual-target constraint
+probe, so a migration-ready target tamper was classified first as digest drift instead of the more
+fundamental invalid-final-row state.
+
+The dependency-light migration digest module now owns one shared
+`final_target_rows_satisfy_constraints()` validator used by both the public runner's planned rows and
+revision 0013's actual rows. It mirrors every final CHECK plus each data uniqueness rule:
+
+- task context mode, schedule type, status, overlap policy, context/thread pairing, Agent scope,
+  positive version, non-negative run count, and bounded last outcome;
+- occurrence trigger, status, Run-to-Thread requirement, non-negative launch attempts, positive
+  optional membership version, and positive task version; and
+- project/owner task scope uniqueness, occurrence-key uniqueness, and the partial non-null manual
+  idempotency uniqueness rule.
+
+The existing pre-DDL scope/relation probes continue to cover the final NOT NULL, project, owner,
+membership, Agent, Thread, Run, and Agent-project trigger authorities. Thus the shared validator and
+the existing relation probes together cover every final data constraint before installation.
+
+### Frozen-review TDD evidence
+
+Before production changes, the five new real PostgreSQL cases all failed:
+
+```text
+FFFFF
+2 unknown-column cases: Failed: DID NOT RAISE RuntimeError
+negative run_count dry-run: Failed: DID NOT RAISE AutomationMigrationError
+negative run_count execute: automation migration failed safely after staging/finalize
+migration-ready tamper: target digest probe failed instead of target constraints
+```
+
+The shared validator test was also written before implementation and failed collection with the
+expected missing-import error. GREEN now proves all final conditions and uniqueness rules through 19
+pure validator cases, while the five real PostgreSQL cases prove both lifecycle boundaries.
+
+### Frozen-review verification
+
+All PostgreSQL suites used the explicit isolated server on port 55435 and random
+`deerflow_test_*` databases.
+
+| Gate | Result |
+| --- | ---: |
+| Shared final CHECK/uniqueness validator matrix | 19 passed |
+| Unknown-column, negative preflight, and post-stage constraint-tamper PostgreSQL cases | 5 passed |
+| Complete Task 10 migration and M5 schema suites | 59 passed |
+| Task 10 migration/CLI/setup/check-db/doctor suite | 163 passed |
+| Comprehensive Tasks 1–10 Automation, bootstrap/check-db, and real M4 migration gate | 435 passed |
+| Full backend Ruff check | all checks passed |
+| Full backend Ruff format check | 1052 files already formatted |
+| Compileall for backend app/packages/scripts and affected Task 10 tests | passed |
+| Code diff whitespace check | passed |
+
+Self-review confirmed that exact column validation is the first operation after the source lock and
+occurs before `_assert_final_target_constraints()` can issue a fixed projection. Dry-run and execute
+share the same zero-write plan validator before expand; 0013 independently revalidates actual rows
+under the final barrier; recovery after 0013 remains protected by installed database constraints.
+Errors and reports remain redacted. This repair changes only Task 10 migration validation, its tests,
+and this appended report; Task 11 and `.superpowers/sdd/progress.md` remain untouched.

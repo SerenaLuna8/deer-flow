@@ -28,6 +28,7 @@ from deerflow.persistence.automations.migration_digest import (
     AUTOMATION_TARGET_COLUMNS,
     canonical_digest,
     canonical_value,
+    final_target_rows_satisfy_constraints,
 )
 from deerflow.persistence.bootstrap import _get_alembic_config
 
@@ -813,6 +814,11 @@ async def _build_validated_plan(
         )
     task_rows = tuple(task_plans)
     run_rows = tuple(run_plans)
+    if not final_target_rows_satisfy_constraints(
+        [row.values for row in task_rows],
+        [row.values for row in run_rows],
+    ):
+        raise AutomationMigrationError("automation final target constraints are invalid")
     return AutomationMigrationPlan(
         source_fingerprint=_stable_source_fingerprint(
             inventory,

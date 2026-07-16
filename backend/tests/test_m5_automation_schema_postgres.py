@@ -194,6 +194,7 @@ def test_m5_finalize_validates_readiness_before_any_ddl(
 ) -> None:
     migration = importlib.import_module("deerflow.persistence.migrations.versions.0013_project_automation_finalize")
     mutations: list[str] = []
+    probes: list[str] = []
 
     class _Batch:
         def __enter__(self):
@@ -213,14 +214,18 @@ def test_m5_finalize_validates_readiness_before_any_ddl(
         drop_index=lambda *_args, **_kwargs: mutations.append("drop_index"),
     )
     monkeypatch.setattr(migration, "op", fake_op)
-    monkeypatch.setattr(migration, "_lock_automation_sources", lambda _connection: None)
+    monkeypatch.setattr(migration, "_lock_automation_sources", lambda _connection: probes.append("lock"))
+    monkeypatch.setattr(migration, "_assert_expanded_source_schema", lambda _connection: probes.append("exact_columns"))
+    monkeypatch.setattr(migration, "_assert_final_target_constraints", lambda _connection: probes.append("target_constraints"))
 
     def fail_before_ddl(_connection) -> None:
+        probes.append("receipts")
         raise RuntimeError("automation finalize prerequisites are incomplete")
 
     monkeypatch.setattr(migration, "_assert_finalize_ready", fail_before_ddl)
     with pytest.raises(RuntimeError, match="prerequisites are incomplete"):
         migration.upgrade()
+    assert probes == ["lock", "exact_columns", "target_constraints", "receipts"]
     assert mutations == []
 
 

@@ -13,9 +13,11 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 from deerflow.persistence.automations.migration_digest import (
+    AUTOMATION_EXPANDED_COLUMNS,
     AUTOMATION_FINALIZE_LOCK_SQL,
     canonical_digest,
     expanded_select_sql,
+    final_target_rows_satisfy_constraints,
     target_select_sql,
 )
 
@@ -74,6 +76,23 @@ def _is_empty_automation_domain(connection: Connection) -> bool:
         connection.execute(sa.text(f'SELECT NOT EXISTS (SELECT 1 FROM "{table}" LIMIT 1)')).scalar_one()  # noqa: S608 - fixed internal table allowlist
         for table in ("scheduled_tasks", "scheduled_task_runs")
     )
+
+
+def _assert_expanded_source_schema(connection: Connection) -> None:
+    inspector = sa.inspect(connection)
+    for domain in sorted(AUTOMATION_LEDGER_DOMAINS):
+        actual = {column["name"] for column in inspector.get_columns(domain)}
+        if actual != set(AUTOMATION_EXPANDED_COLUMNS[domain]):
+            raise RuntimeError("automation migration required: source schema is unsupported")
+
+
+def _assert_final_target_constraints(connection: Connection) -> None:
+    rows = {domain: [dict(row) for row in connection.execute(sa.text(target_select_sql(domain))).mappings()] for domain in sorted(AUTOMATION_LEDGER_DOMAINS)}
+    if not final_target_rows_satisfy_constraints(
+        rows["scheduled_tasks"],
+        rows["scheduled_task_runs"],
+    ):
+        raise RuntimeError("automation migration required: target constraints are invalid")
 
 
 def _assert_m4_cutover_complete(connection: Connection) -> None:
@@ -555,6 +574,8 @@ def _record_final_schema_probe(connection: Connection) -> None:
 def upgrade() -> None:
     connection = op.get_bind()
     _lock_automation_sources(connection)
+    _assert_expanded_source_schema(connection)
+    _assert_final_target_constraints(connection)
     _assert_finalize_ready(connection)
 
     for index in (

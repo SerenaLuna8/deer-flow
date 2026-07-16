@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
+from deerflow.persistence.automations.migration_digest import final_target_rows_satisfy_constraints
 from deerflow.persistence.bootstrap import _get_alembic_config, bootstrap_schema
 from scripts import migrate_automations
 from scripts.migrate_automations import (
@@ -114,6 +115,101 @@ def test_inventory_and_report_do_not_include_private_values_or_ids() -> None:
         "source_key_hash": "a" * 12,
         "status_counts": {"tasks:enabled": 1},
     }
+
+
+def _valid_final_task_row() -> dict[str, object]:
+    return {
+        "id": "task-1",
+        "project_id": "project-1",
+        "owner_user_id": "owner-1",
+        "thread_id": None,
+        "context_mode": "fresh_thread_per_run",
+        "agent_scope": "project",
+        "schedule_type": "cron",
+        "status": "enabled",
+        "overlap_policy": "skip",
+        "version": 1,
+        "run_count": 0,
+        "last_outcome": None,
+    }
+
+
+def _valid_final_occurrence_row() -> dict[str, object]:
+    return {
+        "id": "occurrence-1",
+        "project_id": "project-1",
+        "owner_user_id": "owner-1",
+        "task_id": "task-1",
+        "task_version": 1,
+        "occurrence_key": "a" * 64,
+        "manual_idempotency_hash": None,
+        "trigger": "scheduled",
+        "status": "queued",
+        "thread_id": None,
+        "run_id": None,
+        "resolved_membership_version": None,
+        "launch_attempt_count": 0,
+    }
+
+
+def test_final_target_constraint_validator_accepts_valid_rows() -> None:
+    assert final_target_rows_satisfy_constraints(
+        [_valid_final_task_row()],
+        [_valid_final_occurrence_row()],
+    )
+
+
+@pytest.mark.parametrize(
+    ("domain", "updates"),
+    (
+        ("task", {"context_mode": "legacy"}),
+        ("task", {"schedule_type": "interval"}),
+        ("task", {"status": "running"}),
+        ("task", {"overlap_policy": "parallel"}),
+        ("task", {"thread_id": "thread-1"}),
+        ("task", {"context_mode": "reuse_thread", "thread_id": None}),
+        ("task", {"agent_scope": "legacy"}),
+        ("task", {"version": 0}),
+        ("task", {"run_count": -1}),
+        ("task", {"last_outcome": "unknown"}),
+        ("occurrence", {"trigger": "legacy"}),
+        ("occurrence", {"status": "pending"}),
+        ("occurrence", {"run_id": "run-1", "thread_id": None}),
+        ("occurrence", {"launch_attempt_count": -1}),
+        ("occurrence", {"resolved_membership_version": 0}),
+        ("occurrence", {"task_version": 0}),
+    ),
+)
+def test_final_target_constraint_validator_rejects_every_final_check(
+    domain: str,
+    updates: dict[str, object],
+) -> None:
+    task = _valid_final_task_row()
+    occurrence = _valid_final_occurrence_row()
+    (task if domain == "task" else occurrence).update(updates)
+
+    assert final_target_rows_satisfy_constraints([task], [occurrence]) is False
+
+
+@pytest.mark.parametrize("constraint", ("occurrence", "manual_idempotency"))
+def test_final_target_constraint_validator_rejects_final_uniqueness(
+    constraint: str,
+) -> None:
+    first = _valid_final_occurrence_row()
+    second = dict(first)
+    second["id"] = "occurrence-2"
+    if constraint == "manual_idempotency":
+        first["manual_idempotency_hash"] = "b" * 64
+        second["manual_idempotency_hash"] = "b" * 64
+        second["occurrence_key"] = "c" * 64
+
+    assert (
+        final_target_rows_satisfy_constraints(
+            [_valid_final_task_row()],
+            [first, second],
+        )
+        is False
+    )
 
 
 async def _downgrade_to_0011(url: str) -> None:
@@ -1311,6 +1407,177 @@ async def test_finalize_lockers_use_one_fixed_two_table_order(
             *(task for task in (first, second) if task is not None),
             return_exceptions=True,
         )
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("table", "legacy_column"),
+    (
+        ("scheduled_tasks", "user_id"),
+        ("scheduled_task_runs", "error"),
+    ),
+)
+async def test_finalize_rejects_unknown_expanded_column_before_destructive_ddl(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    table: str,
+    legacy_column: str,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    await _stage_until_before_finalize(
+        postgres_database_url,
+        scenario,
+        monkeypatch,
+    )
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    f"ALTER TABLE \"{table}\" ADD COLUMN private_shadow TEXT DEFAULT 'private'"  # noqa: S608 - fixed parametrized allowlist
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    with pytest.raises(RuntimeError, match="source schema is unsupported"):
+        await _upgrade_automation_to_head(postgres_database_url)
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            columns = set(
+                (
+                    await connection.execute(
+                        text(
+                            """SELECT column_name FROM information_schema.columns
+                            WHERE table_schema=current_schema() AND table_name=:table"""
+                        ),
+                        {"table": table},
+                    )
+                ).scalars()
+            )
+            marker = (
+                await connection.execute(
+                    text(
+                        """SELECT stage,final_schema_probe_complete,cutover_at
+                        FROM automation_cutover_state WHERE id=1"""
+                    )
+                )
+            ).one()
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0012_project_automation_expand"
+            assert {legacy_column, "private_shadow"} <= columns
+            assert marker.stage == "migration_ready"
+            assert marker.final_schema_probe_complete is False
+            assert marker.cutover_at is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("execute", (False, True))
+async def test_negative_legacy_run_count_fails_preflight_without_writes(
+    postgres_database_url: str,
+    tmp_path: Path,
+    execute: bool,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE scheduled_tasks SET run_count=-1
+                    WHERE id='legacy-fresh'"""
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    with pytest.raises(AutomationMigrationError, match="target constraints"):
+        await run_automation_migration(
+            postgres_database_url,
+            owner_map=scenario.owner_map,
+            backup_dir=scenario.backup_dir,
+            execute=execute,
+        )
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0011_private_artifact_tombstone"
+            assert await connection.scalar(text("SELECT to_regclass('automation_migration_runs')")) is None
+            assert await connection.scalar(text("SELECT run_count FROM scheduled_tasks WHERE id='legacy-fresh'")) == -1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_finalize_rejects_constraint_invalid_target_before_destructive_ddl(
+    postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = await _seed_legacy_scenario(postgres_database_url, tmp_path)
+    _write_backup_proof(scenario.backup_dir)
+    await _stage_until_before_finalize(
+        postgres_database_url,
+        scenario,
+        monkeypatch,
+    )
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE scheduled_tasks SET run_count=-1
+                    WHERE id='legacy-fresh'"""
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    with pytest.raises(RuntimeError, match="target constraints"):
+        await _upgrade_automation_to_head(postgres_database_url)
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.connect() as connection:
+            marker = (
+                await connection.execute(
+                    text(
+                        """SELECT stage,final_schema_probe_complete,cutover_at
+                        FROM automation_cutover_state WHERE id=1"""
+                    )
+                )
+            ).one()
+            columns = set(
+                (
+                    await connection.execute(
+                        text(
+                            """SELECT column_name FROM information_schema.columns
+                            WHERE table_schema=current_schema()
+                              AND table_name='scheduled_tasks'"""
+                        )
+                    )
+                ).scalars()
+            )
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0012_project_automation_expand"
+            assert await connection.scalar(text("SELECT run_count FROM scheduled_tasks WHERE id='legacy-fresh'")) == -1
+            assert "user_id" in columns
+            assert marker.stage == "migration_ready"
+            assert marker.final_schema_probe_complete is False
+            assert marker.cutover_at is None
+    finally:
         await engine.dispose()
 
 
