@@ -138,3 +138,77 @@ clean.
   Thread-search signal paths found by the transition gate.
 - No Task 18 status, milestone completion claim, or release document was
   changed.
+
+## Independent review repairs
+
+The review found three release-gate weaknesses and this follow-up repaired
+them without adding a production test hook or moving slug resolution out of
+`ProjectContextProvider`.
+
+- The account transition scenario no longer reloads the page. It first makes
+  account A the real `AuthProvider` identity through the existing throttled
+  visibility refresh, holds an account-A Automation list in the same project
+  and SPA, changes `/api/v1/auth/me` to account B, advances the Playwright
+  clock, and triggers the same refresh path again. The test observes the old
+  request's abort before releasing its late response, then proves the account-B
+  shell and list are visible and no account-A definition is rendered. Project
+  provider teardown is an intentional redundant cancellation path alongside
+  `transitionAccountQueries`; the behavioral gate requires the abort and
+  isolation outcome rather than coupling itself to one React Query listener.
+- Source-string static assertions were replaced with a separate production
+  Next build and Chromium scenario. `playwright.static.config.ts` builds with
+  `NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true` into `.next-static`, verifies the
+  preserved `/workspace/chats/*` landing has no project/Automation entry,
+  verifies a direct project Automation request returns 404, and records zero
+  Automation or legacy scheduled-task API requests. The normal focused suite
+  continues to use `playwright.config.ts`; `pnpm test:e2e:all` is the combined
+  repeatable full gate.
+- A project lacking `private_work.read_own` now reaches the Next not-found
+  boundary after the existing client-owned project context resolves, with no
+  readiness, list, or history request. The E2E then bypasses the UI and probes
+  the project Automation API explicitly; the capability-aware fixture returns
+  403 with no definition content. The initial HTML navigation can still be
+  status 200 because `ProjectContextProvider` is deliberately the sole owner
+  of slug paging and enter authority. Duplicating those calls in the Server
+  Component merely to manufacture an initial 404 would create a second
+  authority path, so the API's 403/404 remains the resource security boundary.
+
+Review-repair RED evidence:
+
+```text
+# Capability-direct unit: current forbidden panel did not call notFound
+12 passed, 1 failed
+
+# Capability-direct browser: default Next not-found surface was absent
+1 passed, 1 failed (account path already green; direct path red)
+
+# Independent static production build/browser
+expected 404, received 307
+```
+
+Focused repair GREEN evidence:
+
+```text
+# Direct authority, static routing, and entry units
+25 passed
+
+# Direct authority + project transition + real AuthProvider account transition
+3 passed
+
+# Independent static production build/browser
+1 passed
+
+# Frontend lint + typecheck / repository formatting
+pnpm check: passed
+pnpm format: passed
+
+# Full frontend unit suite
+126 files, 915 passed, 0 skipped
+
+# Combined full production-browser gate
+normal E2E: 164 passed
+independent static-build E2E: 1 passed
+
+# Patch structure
+git diff --check: passed
+```

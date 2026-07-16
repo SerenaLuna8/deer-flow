@@ -3,3 +3,4 @@ pnpm-lock.yaml
 src/content/**/*.mdx
 playwright-report/
 test-results/
+.next-static/

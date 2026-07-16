@@ -5,6 +5,9 @@ import { describe, expect, test, rs } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 rs.mock("next/navigation", () => ({
+  notFound: rs.fn(() => {
+    throw Object.assign(new Error("Not found"), { code: "NEXT_NOT_FOUND" });
+  }),
   useSearchParams: () => new URLSearchParams(),
 }));
 rs.mock("@/core/auth/AuthProvider", () => ({
@@ -287,6 +290,23 @@ describe("ProjectAutomationsPage", () => {
       "agents",
       false,
     );
+  });
+
+  test("uses the Next not-found boundary when project capabilities deny Automation read", () => {
+    prepare();
+    const forbidden = {
+      ...PROJECT,
+      capabilities: [
+        "project.read",
+        "project.enter",
+      ] as Project["capabilities"],
+    };
+
+    expect(() =>
+      renderToStaticMarkup(<ProjectAutomationsPage project={forbidden} />),
+    ).toThrow("Not found");
+    expect(useProjectAutomationReadiness).toHaveBeenLastCalledWith(false);
+    expect(useProjectAutomations).toHaveBeenLastCalledWith({}, false);
   });
 
   test("route consumes current project and does not resolve slug or use legacy APIs", () => {

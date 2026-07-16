@@ -1,10 +1,6 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
 import { expect, test, type Page } from "@playwright/test";
 
 import type { Automation } from "@/core/project-automations/types";
-import { PROJECT_AUTOMATION } from "@/core/projects/features";
 import type { Capability, Project } from "@/core/projects/types";
 
 import { mockProjectAutomationAPI } from "./utils/mock-api";
@@ -322,7 +318,7 @@ test("409 refreshes the version and 429 leaves a safe explicit retry", async ({
   await expect(page.getByRole("button", { name: "恢复" })).toBeVisible();
 });
 
-test("direct URL without read capability is stable forbidden and sends no list", async ({
+test("direct URL without read capability uses not-found and the API rejects an explicit probe", async ({
   page,
 }) => {
   const forbidden = project(
@@ -337,32 +333,32 @@ test("direct URL without read capability is stable forbidden and sends no list",
   ]);
   await page.goto("/projects/forbidden/automations");
 
-  await expect(page.getByText("AUTOMATION_FORBIDDEN")).toBeVisible();
+  await expect(page.getByText("This page could not be found.")).toBeVisible();
+  const automationApiBase = `/api/projects/${PROJECT_ALPHA}/automations`;
+  expect(
+    state.requestedPaths.some((path) => path.startsWith(automationApiBase)),
+  ).toBe(false);
   expect(
     state.requests.some(
-      ({ method, path }) =>
-        method === "GET" &&
-        path === `/api/projects/${PROJECT_ALPHA}/automations`,
+      ({ method, path }) => method === "GET" && path === automationApiBase,
     ),
   ).toBe(false);
+
+  const probe = await page.evaluate(async (projectId) => {
+    const response = await fetch(`/api/projects/${projectId}/automations`);
+    return { status: response.status, body: await response.text() };
+  }, PROJECT_ALPHA);
+  expect(probe.status).toBe(403);
+  expect(probe.body).not.toContain("items");
+  expect(probe.body).not.toContain("private mock detail");
 });
 
-test("project transition aborts the old list and account transition cannot reuse old cache", async ({
-  page,
-}) => {
+test("project transition aborts the old Automation list", async ({ page }) => {
   const state = await mockProjectAutomationAPI(page, [
     ownerAccount([ALPHA, BETA], {
       [PROJECT_ALPHA]: [automation(TASK_ALPHA, "Late Alpha task")],
       [PROJECT_BETA]: [automation(TASK_BETA, "Account A Beta task")],
     }),
-    {
-      id: ACCOUNT_B,
-      email: "owner-b@example.test",
-      projects: [BETA],
-      automations: {
-        [PROJECT_BETA]: [automation(TASK_ALPHA, "Account B Beta task")],
-      },
-    },
   ]);
   const held = state.holdNextList(ACCOUNT_A, PROJECT_ALPHA);
   await page.goto("/projects/alpha/automations");
@@ -398,33 +394,94 @@ test("project transition aborts the old list and account transition cannot reuse
   await expect(page.getByText("Late Alpha task", { exact: true })).toHaveCount(
     0,
   );
+});
+
+test("AuthProvider account transition aborts the old list and cannot reuse its cache", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date("2026-07-16T00:00:00Z") });
+  const state = await mockProjectAutomationAPI(page, [
+    ownerAccount([ALPHA], {
+      [PROJECT_ALPHA]: [automation(TASK_ALPHA, "Account A Alpha task")],
+    }),
+    {
+      id: ACCOUNT_B,
+      email: "owner-b@example.test",
+      projects: [ALPHA],
+      automations: {
+        [PROJECT_ALPHA]: [automation(TASK_BETA, "Account B Alpha task")],
+      },
+    },
+  ]);
+  await page.goto("/projects/alpha/automations");
+  await expect(
+    page.getByRole("heading", { name: "Account A Alpha task" }),
+  ).toBeVisible();
+
+  const accountARefresh = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/auth/me" &&
+      response.request().method() === "GET",
+  );
+  await page.evaluate(() =>
+    document.dispatchEvent(new Event("visibilitychange")),
+  );
+  expect((await accountARefresh).status()).toBe(200);
+  await expect(
+    page.getByText("owner-a@example.test", { exact: true }).first(),
+  ).toBeVisible();
+
+  await page.getByRole("link", { name: "项目概览" }).click();
+  const held = state.holdNextList(ACCOUNT_A, PROJECT_ALPHA);
+  await page.getByRole("link", { name: "Automations" }).click();
+  await held.started;
+  await expect(
+    page.getByRole("heading", { name: "Account A Alpha task" }),
+  ).toBeVisible();
+  await page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __projectAbortPaths?: string[];
+    };
+    trackedWindow.__projectAbortPaths = [];
+  });
 
   state.switchAccount(ACCOUNT_B);
-  await page.reload();
+  await page.clock.fastForward(61_000);
+  const accountBRefresh = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/auth/me" &&
+      response.request().method() === "GET",
+  );
+  await page.evaluate(() =>
+    document.dispatchEvent(new Event("visibilitychange")),
+  );
+  const accountBResponse = await accountBRefresh;
+  expect((await accountBResponse.json()).id).toBe(ACCOUNT_B);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const trackedWindow = window as typeof window & {
+          __projectAbortPaths?: string[];
+        };
+        return trackedWindow.__projectAbortPaths ?? [];
+      }),
+    )
+    .toContain(`/api/projects/${PROJECT_ALPHA}/automations`);
+
+  held.release();
   await expect(
-    page.getByRole("heading", { name: "Account B Beta task" }),
+    page.getByText("owner-b@example.test", { exact: true }).first(),
   ).toBeVisible();
   await expect(
-    page.getByText("Account A Beta task", { exact: true }),
+    page.getByRole("heading", { name: "Account B Alpha task" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Account A Alpha task", { exact: true }),
   ).toHaveCount(0);
   expect(
     state.requests.some(
       ({ accountId, projectId }) =>
-        accountId === ACCOUNT_B && projectId === PROJECT_BETA,
+        accountId === ACCOUNT_B && projectId === PROJECT_ALPHA,
     ),
   ).toBe(true);
-});
-
-test("static demo gates every Automation entry and project Chat never falls back to legacy scheduled tasks", () => {
-  expect(PROJECT_AUTOMATION).toBe(true);
-  const chatSource = readFileSync(
-    resolve(
-      process.cwd(),
-      "src/components/projects/private-work/project-chat-page.tsx",
-    ),
-    "utf8",
-  );
-  expect(chatSource).toContain("staticWebsiteOnly");
-  expect(chatSource).toContain("/automations?thread_id=");
-  expect(chatSource).not.toContain("/workspace/scheduled-tasks");
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useSearchParams } from "next/navigation";
+import { notFound, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -236,6 +236,8 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
     setScopedActionFeedback(null);
   }, [project.id]);
 
+  if (!permissions.canRead) notFound();
+
   const perform = async <T,>(
     action: AutomationAction,
     operation: () => Promise<T>,
@@ -277,14 +279,6 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
         migrationRequired={false}
         code="AUTOMATION_READINESS_INCONSISTENT"
         onRetry={() => void readiness.refetch()}
-      />
-    );
-  }
-  if (!permissions.canRead) {
-    return (
-      <AutomationUnavailableState
-        migrationRequired={false}
-        code="AUTOMATION_FORBIDDEN"
       />
     );
   }

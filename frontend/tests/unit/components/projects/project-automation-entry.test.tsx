@@ -112,15 +112,12 @@ describe("project Automation entry", () => {
     );
   });
 
-  test("runs the Playwright release suite without an environment bypass", () => {
+  test("keeps the normal Playwright release suite focused and environment independent", () => {
     const source = readFileSync(
       resolve(process.cwd(), "tests/e2e/project-automations.spec.ts"),
       "utf8",
     );
 
-    expect(source).toContain(
-      'import { PROJECT_AUTOMATION } from "@/core/projects/features";',
-    );
     expect(source).not.toContain("test.skip(");
     expect(source).not.toMatch(
       /PLAYWRIGHT_PROJECT_AUTOMATION|NEXT_PUBLIC_PROJECT_AUTOMATION|process\.env/u,

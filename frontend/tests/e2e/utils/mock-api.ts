@@ -1543,6 +1543,9 @@ export async function mockProjectAutomationAPI(
     if (!path.startsWith(base)) {
       return automationJson(route, { detail: "not found" }, 404);
     }
+    if (!currentProject.capabilities.includes("private_work.read_own")) {
+      return automationJson(route, { detail: "forbidden" }, 403);
+    }
     const record: MockProjectAutomationRequest = {
       accountId,
       projectId,

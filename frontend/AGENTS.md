@@ -17,22 +17,24 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 ## Commands
 
-| Command          | Purpose                                           |
-| ---------------- | ------------------------------------------------- |
-| `pnpm dev`       | Dev server with Turbopack (http://localhost:3000) |
-| `pnpm build`     | Production build                                  |
-| `pnpm check`     | Lint + type check (run before committing)         |
-| `pnpm lint`      | ESLint only                                       |
-| `pnpm lint:fix`  | ESLint with auto-fix                              |
-| `pnpm format`    | Prettier check (`pnpm format:write` to apply)     |
-| `pnpm test`      | Run unit tests with Rstest                        |
-| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)          |
-| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)            |
-| `pnpm start`     | Start production server                           |
+| Command                | Purpose                                           |
+| ---------------------- | ------------------------------------------------- |
+| `pnpm dev`             | Dev server with Turbopack (http://localhost:3000) |
+| `pnpm build`           | Production build                                  |
+| `pnpm check`           | Lint + type check (run before committing)         |
+| `pnpm lint`            | ESLint only                                       |
+| `pnpm lint:fix`        | ESLint with auto-fix                              |
+| `pnpm format`          | Prettier check (`pnpm format:write` to apply)     |
+| `pnpm test`            | Run unit tests with Rstest                        |
+| `pnpm test:e2e`        | Run E2E tests with Playwright (Chromium)          |
+| `pnpm test:e2e:static` | Build and test the static demo gate               |
+| `pnpm test:e2e:all`    | Run normal and static-demo E2E gates              |
+| `pnpm typecheck`       | TypeScript type check (`tsc --noEmit`)            |
+| `pnpm start`           | Start production server                           |
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; its production WebServer build uses Webpack explicitly so the 120-second startup gate is deterministic across local and CI environments.
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; its production WebServer build uses Webpack explicitly so the 120-second startup gate is deterministic across local and CI environments. Static-demo release coverage lives under `tests/e2e-static/` and uses `playwright.static.config.ts`; it builds with `NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true` into the independent `.next-static` dist directory, so normal and static production builds cannot reuse each other's output.
 
 ## Architecture
 
@@ -144,7 +146,13 @@ Viewer 仅 list/export/read/own-delete，不渲染 create/run/upload/connect 或
 传给 project client，保证切换时真实中止旧 scope 请求。M5 Automation 前端候选已把
 `PROJECT_AUTOMATION` 编译期开启，入口、query/mutation、manual idempotency 与 E2E mock 均按认证
 account + project UUID 双重隔离；入口仍同时依赖非 static、服务端 readiness 和
-`private_work.read_own`。M5 只有在 Task 18 的里程碑总门禁与独立审查完成后才算完成，当前仍不能把
+`private_work.read_own`。静态 build 的 `/projects/*` server layout 必须直接 `notFound()`，不得回跳
+workspace；能力不足的 Automation 直达页在 `ProjectContextProvider` 完成客户端权限解析后进入 Next
+not-found boundary，且不得启动 readiness/list/history。由于 slug/enter 权限只有该 client provider
+拥有，初始 HTML status 可能仍为 200，真正的资源权限必须由项目 API 返回 403/404，页面不得复制
+server-side slug paging 或 enter。静态独立 build/browser 门禁必须同时证明 workspace 没有项目入口、
+项目 Automation 直达为 404、且没有 Automation 或 legacy scheduled-task API 请求。M5 只有在 Task 18
+的里程碑总门禁与独立审查完成后才算完成，当前仍不能把
 界面描述为完整多用户 SaaS。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。

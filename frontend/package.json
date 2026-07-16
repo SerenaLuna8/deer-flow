@@ -16,6 +16,8 @@
     "start": "next start",
     "test": "rstest",
     "test:e2e": "playwright test",
+    "test:e2e:all": "playwright test && playwright test --config playwright.static.config.ts",
+    "test:e2e:static": "playwright test --config playwright.static.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

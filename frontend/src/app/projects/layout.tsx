@@ -1,4 +1,4 @@
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
 import { QueryClientProvider } from "@/components/query-client-provider";
 import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 export default async function ProjectsLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  if (isStaticWebsiteOnly()) redirect("/workspace");
+  if (isStaticWebsiteOnly()) notFound();
   const result = await getServerSideUser();
   switch (result.tag) {
     case "authenticated":

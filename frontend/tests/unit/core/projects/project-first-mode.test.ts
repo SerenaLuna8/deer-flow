@@ -26,6 +26,7 @@ describe("project-first routing", () => {
     expect(source).toContain("getServerSideUser");
     expect(source).toContain("<QueryClientProvider>");
     expect(source).toContain("<AuthProvider");
+    expect(source).toContain("if (isStaticWebsiteOnly()) notFound()");
     expect(source).not.toContain("WorkspaceContent");
   });
 
