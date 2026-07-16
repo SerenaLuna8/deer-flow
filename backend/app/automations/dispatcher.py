@@ -20,6 +20,10 @@ from app.automations.errors import (
     AutomationUnavailable,
     AutomationVersionConflict,
 )
+from app.automations.execution_authority import (
+    automation_retry_denial,
+    lock_automation_execution_authority,
+)
 from app.automations.occurrences import deterministic_run_id, deterministic_thread_id
 from app.gateway.services import start_scheduled_private_run
 from app.private_work.context import PrivateWorkContext
@@ -445,9 +449,15 @@ class AutomationDispatcher:
         now = self._now()
         try:
             async with self._session_factory() as session, session.begin():
-                # Failure settlement follows the same occurrence -> Run order
-                # as the launching -> running transition. Never acquire the
-                # Run first and then wait on the occurrence row.
+                authority = await lock_automation_execution_authority(
+                    session,
+                    coordinates.scope,
+                )
+                tasks = ScheduledTaskRepository(session)
+                task = await tasks.lock_for_automation_outcome(
+                    coordinates.scope,
+                    coordinates.task_id,
+                )
                 occurrences = ScheduledTaskRunRepository(session)
                 occurrence = await occurrences.get(
                     coordinates.scope,
@@ -456,6 +466,7 @@ class AutomationDispatcher:
                 )
                 if occurrence is None or occurrence.status != "launching":
                     return
+                denial = automation_retry_denial(authority, task, occurrence)
                 run = await PrivateRunRepository(session).get(
                     scope=coordinates.scope,
                     run_id=coordinates.expected_run_id,
@@ -470,6 +481,16 @@ class AutomationDispatcher:
                     else:
                         attach_run = True
                 if run is None and isinstance(error, AutomationUnavailable):
+                    if denial is not None:
+                        await occurrences.finish(
+                            coordinates.scope,
+                            coordinates.occurrence_id,
+                            status=denial.occurrence_status,
+                            error_code=denial.error_code,
+                            error_message=None,
+                            finished_at=now,
+                        )
+                        return
                     await occurrences.requeue_launch(
                         coordinates.scope,
                         coordinates.occurrence_id,

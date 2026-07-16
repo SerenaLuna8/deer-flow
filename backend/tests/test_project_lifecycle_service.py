@@ -123,8 +123,17 @@ async def test_pending_deletion_revokes_and_freezes_all_members_before_commit_th
     repository.lock_active_members.return_value = members
     repository.mark_pending_locked.return_value = object()
     authorization = AsyncMock()
-    authorization.mark_revoked.side_effect = [("run-1",), ("run-2",)]
     retention = AsyncMock()
+
+    async def mark_revoked(*_args, **_kwargs):
+        events.append("authorization-mark")
+        return (f"run-{events.count('authorization-mark')}",)
+
+    async def freeze_owner(*_args, **_kwargs):
+        events.append("retention-freeze")
+
+    authorization.mark_revoked.side_effect = mark_revoked
+    retention.freeze_owner.side_effect = freeze_owner
 
     async def notify(run_ids, reason):
         events.append(f"notify:{run_ids}:{reason}")
@@ -138,6 +147,10 @@ async def test_pending_deletion_revokes_and_freezes_all_members_before_commit_th
 
     assert events == [
         "transaction-enter",
+        "retention-freeze",
+        "authorization-mark",
+        "retention-freeze",
+        "authorization-mark",
         "transaction-commit",
         "notify:('run-1', 'run-2'):authorization_revoked",
     ]
@@ -192,8 +205,13 @@ async def test_suspend_freezes_all_active_members_before_project_mutation() -> N
     repository.lock_active_members.return_value = members
     repository.suspend_locked.return_value = object()
     authorization = AsyncMock()
-    authorization.mark_revoked.side_effect = [("run-1",), ("run-2",)]
     retention = AsyncMock()
+
+    async def mark_revoked(*_args, **_kwargs):
+        events.append("authorization-mark")
+        return (f"run-{events.count('authorization-mark')}",)
+
+    authorization.mark_revoked.side_effect = mark_revoked
 
     async def freeze_owner(*_args, **_kwargs):
         events.append("retention-freeze")
@@ -209,7 +227,9 @@ async def test_suspend_freezes_all_active_members_before_project_mutation() -> N
     assert events == [
         "transaction-enter",
         "retention-freeze",
+        "authorization-mark",
         "retention-freeze",
+        "authorization-mark",
         "transaction-commit",
     ]
     assert authorization.mark_revoked.await_count == 2

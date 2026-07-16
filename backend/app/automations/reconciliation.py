@@ -11,9 +11,13 @@ from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.automations.errors import AutomationUnavailable
+from app.automations.execution_authority import (
+    AutomationExecutionAuthority,
+    automation_retry_denial,
+    lock_automation_execution_authority,
+)
 from app.automations.occurrences import deterministic_run_id, deterministic_thread_id
 from app.private_work.run_repository import PrivateRunRecord, PrivateRunRepository
-from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs import (
     TERMINAL_OCCURRENCE_STATUSES,
@@ -113,7 +117,7 @@ class AutomationReconciler:
             if coordinates is None:
                 return
             async with self._session_factory() as session, session.begin():
-                if not await self._lock_project_membership(session, coordinates):
+                if await self._lock_project_membership(session, coordinates) is None:
                     return
                 occurrences = ScheduledTaskRunRepository(session)
                 # A committed occurrence FK is the preferred locator. Persisted
@@ -254,8 +258,7 @@ class AutomationReconciler:
 
     async def _reconcile_candidate(self, candidate: _RestartCoordinates, now: datetime) -> str:
         async with self._session_factory() as session, session.begin():
-            if not await self._lock_project_membership(session, candidate):
-                return "unchanged"
+            authority = await self._lock_project_membership(session, candidate)
             tasks = ScheduledTaskRepository(session)
             task = await tasks.lock_for_automation_outcome(candidate.scope, candidate.task_id)
             if task is None:
@@ -271,6 +274,23 @@ class AutomationReconciler:
             run = await PrivateRunRepository(session).get(scope=candidate.scope, run_id=run_id, lock=True)
             if run is None:
                 if occurrence.status == "launching" and occurrence.run_id is None:
+                    denial = automation_retry_denial(
+                        authority,
+                        task,
+                        occurrence,
+                    )
+                    if denial is not None:
+                        changed = await occurrences.finish(
+                            candidate.scope,
+                            occurrence.id,
+                            status=denial.occurrence_status,
+                            error_code=denial.error_code,
+                            error_message=None,
+                            finished_at=now,
+                        )
+                        if not changed:
+                            return "unchanged"
+                        return "interrupted" if denial.occurrence_status == "cancelled" else "failed"
                     requeued = await occurrences.requeue_launch(
                         candidate.scope,
                         occurrence.id,
@@ -342,19 +362,11 @@ class AutomationReconciler:
     async def _lock_project_membership(
         session: AsyncSession,
         coordinates: _RunCoordinates | _RestartCoordinates,
-    ) -> bool:
-        project = await session.scalar(sa.select(ProjectRow.id).where(ProjectRow.id == coordinates.project_id).with_for_update(of=ProjectRow))
-        if project is None:
-            return False
-        membership = await session.scalar(
-            sa.select(ProjectMembershipRow.id)
-            .where(
-                ProjectMembershipRow.project_id == coordinates.project_id,
-                ProjectMembershipRow.user_id == coordinates.owner_user_id,
-            )
-            .with_for_update(of=ProjectMembershipRow)
+    ) -> AutomationExecutionAuthority | None:
+        return await lock_automation_execution_authority(
+            session,
+            coordinates.scope,
         )
-        return membership is not None
 
     @staticmethod
     def _automation_locator(

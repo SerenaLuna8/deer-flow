@@ -57,17 +57,17 @@ class MembershipService:
                 await self.repository.require_another_active_admin(project.id, target.id)
             if target_role is not ProjectRole.VIEWER and role is ProjectRole.VIEWER:
                 revoked_at = self._clock()
+                await self._retention.freeze_owner(
+                    self.repository.session,
+                    project_id=project.id,
+                    owner_user_id=target.user_id,
+                    now=revoked_at,
+                )
                 run_ids = await self._authorization.mark_revoked(
                     self.repository.session,
                     project_id=project.id,
                     owner_user_id=target.user_id,
                     reason=AUTHORIZATION_REVOKED_REASON,
-                    now=revoked_at,
-                )
-                await self._retention.freeze_owner(
-                    self.repository.session,
-                    project_id=project.id,
-                    owner_user_id=target.user_id,
                     now=revoked_at,
                 )
             result = await self.repository.set_role(project, target, role)
@@ -103,17 +103,17 @@ class MembershipService:
 
     async def _end(self, context: ProjectContext, project, target, *, status: str) -> tuple[MembershipView, tuple[str, ...]]:
         ended_at = self._clock()
+        await self._retention.freeze_owner(
+            self.repository.session,
+            project_id=project.id,
+            owner_user_id=target.user_id,
+            now=ended_at,
+        )
         run_ids = await self._authorization.mark_revoked(
             self.repository.session,
             project_id=project.id,
             owner_user_id=target.user_id,
             reason=AUTHORIZATION_REVOKED_REASON,
-            now=ended_at,
-        )
-        await self._retention.freeze_owner(
-            self.repository.session,
-            project_id=project.id,
-            owner_user_id=target.user_id,
             now=ended_at,
         )
         result = await self.repository.end_membership(

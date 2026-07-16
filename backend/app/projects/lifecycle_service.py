@@ -43,6 +43,12 @@ class ProjectLifecycleService:
             project, actor = await self.repository.lock_pending_deletion(context)
             members = await self.repository.lock_active_members(project.id)
             for member in members:
+                await self._retention.freeze_owner(
+                    self.repository.session,
+                    project_id=project.id,
+                    owner_user_id=member.user_id,
+                    now=now,
+                )
                 run_ids.extend(
                     await self._authorization.mark_revoked(
                         self.repository.session,
@@ -51,12 +57,6 @@ class ProjectLifecycleService:
                         reason=AUTHORIZATION_REVOKED_REASON,
                         now=now,
                     )
-                )
-                await self._retention.freeze_owner(
-                    self.repository.session,
-                    project_id=project.id,
-                    owner_user_id=member.user_id,
-                    now=now,
                 )
             result = await self.repository.mark_pending_locked(
                 project,
@@ -103,6 +103,12 @@ class ProjectLifecycleService:
             project, actor = await self.repository.lock_suspend(context)
             members = await self.repository.lock_active_members(project.id)
             for member in members:
+                await self._retention.freeze_owner(
+                    self.repository.session,
+                    project_id=project.id,
+                    owner_user_id=member.user_id,
+                    now=now,
+                )
                 run_ids.extend(
                     await self._authorization.mark_revoked(
                         self.repository.session,
@@ -111,12 +117,6 @@ class ProjectLifecycleService:
                         reason=AUTHORIZATION_REVOKED_REASON,
                         now=now,
                     )
-                )
-                await self._retention.freeze_owner(
-                    self.repository.session,
-                    project_id=project.id,
-                    owner_user_id=member.user_id,
-                    now=now,
                 )
             result = await self.repository.suspend_locked(
                 project,

@@ -12,8 +12,14 @@ import pytest_asyncio
 from sqlalchemy import text
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
-from app.automations.occurrences import deterministic_run_id, deterministic_thread_id
+import app.automations.reconciliation as reconciliation_module
+from app.automations.occurrences import (
+    AutomationOccurrenceService,
+    deterministic_run_id,
+    deterministic_thread_id,
+)
 from app.automations.reconciliation import AutomationReconciler
+from app.private_work.retention import PrivateWorkRetentionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.persistence.run import RunRepository
@@ -26,6 +32,25 @@ from deerflow.runtime import DisconnectMode, RunManager, RunRecord, RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+
+
+class _AsyncNullContext:
+    def __init__(self, value=None):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class _UnitSessionFactory:
+    def __init__(self):
+        self.session = SimpleNamespace(begin=lambda: _AsyncNullContext())
+
+    def __call__(self):
+        return _AsyncNullContext(self.session)
 
 
 @dataclass(frozen=True)
@@ -358,6 +383,194 @@ async def test_restart_reconciliation_recovers_lease_and_never_replays_admitted_
 
     again = await AutomationReconciler(seed.factory).reconcile_restart(NOW)
     assert again.requeued == again.interrupted == again.failed == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authority_missing", [False, True])
+async def test_restart_does_not_requeue_frozen_launch_without_run(
+    monkeypatch: pytest.MonkeyPatch,
+    authority_missing: bool,
+) -> None:
+    project_id = uuid.uuid4()
+    owner_user_id = str(uuid.uuid4())
+    task_id = "restart-frozen-task"
+    occurrence_id = str(uuid.uuid4())
+    candidate = reconciliation_module._RestartCoordinates(
+        occurrence_id=occurrence_id,
+        project_id=project_id,
+        owner_user_id=owner_user_id,
+        task_id=task_id,
+    )
+    authority = SimpleNamespace(
+        project_status="active",
+        project_is_suspended=False,
+        membership_status="active",
+        membership_role="runner",
+        can_execute=True,
+    )
+    task = SimpleNamespace(
+        id=task_id,
+        status="paused",
+        version=2,
+        frozen_at=NOW,
+        deleted_at=None,
+        schedule_type="cron",
+    )
+    occurrence = SimpleNamespace(
+        id=occurrence_id,
+        task_id=task_id,
+        task_version=1,
+        trigger="scheduled",
+        status="launching",
+        thread_id=None,
+        run_id=None,
+    )
+    lock_order: list[str] = []
+    tasks = AsyncMock()
+
+    async def lock_task(*_args, **_kwargs):
+        lock_order.append("definition")
+        return task
+
+    tasks.lock_for_automation_outcome.side_effect = lock_task
+    occurrences = AsyncMock()
+
+    async def lock_occurrence(*_args, **_kwargs):
+        lock_order.append("occurrence")
+        return occurrence
+
+    occurrences.get.side_effect = lock_occurrence
+    runs = AsyncMock()
+
+    async def lock_run(*_args, **_kwargs):
+        lock_order.append("run")
+        return None
+
+    runs.get.side_effect = lock_run
+    monkeypatch.setattr(
+        reconciliation_module,
+        "ScheduledTaskRepository",
+        lambda _session: tasks,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "ScheduledTaskRunRepository",
+        lambda _session: occurrences,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "PrivateRunRepository",
+        lambda _session: runs,
+    )
+    reconciler = AutomationReconciler(_UnitSessionFactory(), clock=lambda: NOW)
+
+    async def lock_authority(*_args, **_kwargs):
+        lock_order.append("project-membership")
+        return None if authority_missing else authority
+
+    reconciler._lock_project_membership = AsyncMock(side_effect=lock_authority)
+
+    result = await reconciler._reconcile_candidate(candidate, NOW)
+
+    assert result == "interrupted"
+    assert lock_order == [
+        "project-membership",
+        "definition",
+        "occurrence",
+        "run",
+    ]
+    occurrences.requeue_launch.assert_not_awaited()
+    occurrences.finish.assert_awaited_once_with(
+        candidate.scope,
+        occurrence_id,
+        status="cancelled",
+        error_code="AUTOMATION_AUTHORIZATION_REVOKED",
+        error_message=None,
+        finished_at=NOW,
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_state",
+    ["frozen", "project_suspended", "membership_revoked"],
+)
+async def test_restart_terminalizes_unauthorized_launch_without_run_and_releases_global_cap(
+    reconciliation_seed: M4ThreadSeed,
+    invalid_state: str,
+) -> None:
+    seed = reconciliation_seed
+    scenario = await _create_scenario(
+        seed,
+        occurrence_status="launching",
+        run_status=None,
+    )
+    async with seed.factory() as session, session.begin():
+        if invalid_state == "frozen":
+            await PrivateWorkRetentionService.freeze_owner(
+                session,
+                project_id=seed.owner_a.project_id,
+                owner_user_id=str(seed.owner_a.user_id),
+                now=NOW,
+            )
+        elif invalid_state == "project_suspended":
+            await session.execute(
+                text("UPDATE projects SET is_suspended=true WHERE id=:project_id"),
+                {"project_id": seed.owner_a.project_id},
+            )
+        else:
+            await session.execute(
+                text("UPDATE project_memberships SET status='removed', ended_at=:now, retention_until=:retention_until, end_reason='removed', version=version+1 WHERE id=:membership_id"),
+                {
+                    "now": NOW,
+                    "retention_until": NOW + timedelta(days=30),
+                    "membership_id": seed.owner_a.membership_id,
+                },
+            )
+        replacement = await ScheduledTaskRepository(session).create(
+            seed.project_b_owner_a.resource_scope,
+            ScheduledTaskCreate(
+                task_id=f"restart-replacement-{uuid.uuid4().hex[:12]}",
+                thread_id=None,
+                context_mode="fresh_thread_per_run",
+                agent_asset_id=seed.system_agent_id,
+                agent_scope="system",
+                title="Restart replacement",
+                prompt="Run after unauthorized launch recovery.",
+                schedule_type="cron",
+                schedule_spec={"cron": "0 * * * *"},
+                timezone="UTC",
+                next_run_at=NOW,
+            ),
+        )
+
+    report = await AutomationReconciler(seed.factory).reconcile_restart(NOW)
+
+    async with seed.factory() as session:
+        occurrence = await ScheduledTaskRunRepository(session).get(
+            seed.owner_a.resource_scope,
+            scenario.occurrence_id,
+        )
+    assert report.requeued == 0
+    assert report.interrupted == 1
+    assert occurrence is not None
+    assert occurrence.status == "cancelled"
+    assert occurrence.error_code == "AUTOMATION_AUTHORIZATION_REVOKED"
+    assert occurrence.next_attempt_at is None
+
+    occurrences = AutomationOccurrenceService(
+        seed.factory,
+        max_concurrent_runs=1,
+    )
+    reserved = await occurrences.reserve_due(now=NOW, limit=10)
+    assert tuple(row.task_id for row in reserved) == (replacement.id,)
+    claimed = await occurrences.claim_next(
+        now=NOW,
+        lease_owner="restart-replacement",
+        lease_seconds=60,
+    )
+    assert claimed is not None and claimed.task_id == replacement.id
 
 
 @pytest.mark.postgres

@@ -8,6 +8,9 @@ from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.automations.execution_authority import (
+    AUTOMATION_AUTHORIZATION_REVOKED_ERROR_CODE,
+)
 from deerflow.persistence.channel_connections.identity_lock import (
     ChannelIdentity,
     lock_channel_identities,
@@ -16,8 +19,6 @@ from deerflow.persistence.channel_connections.model import ChannelConnectionRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
-
-_AUTOMATION_AUTHORIZATION_REVOKED = "AUTOMATION_AUTHORIZATION_REVOKED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +113,7 @@ class PrivateWorkRetentionService:
                             )
                             .values(
                                 status="cancelled",
-                                error_code=_AUTOMATION_AUTHORIZATION_REVOKED,
+                                error_code=AUTOMATION_AUTHORIZATION_REVOKED_ERROR_CODE,
                                 error_message=None,
                                 finished_at=frozen_at,
                                 lease_owner=None,

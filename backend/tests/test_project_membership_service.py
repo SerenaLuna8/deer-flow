@@ -167,6 +167,7 @@ async def test_cross_project_membership_is_not_found() -> None:
 
 @pytest.mark.asyncio
 async def test_remove_and_leave_record_distinct_end_metadata() -> None:
+    events: list[str] = []
     now = datetime(2026, 7, 12, 8, 30, tzinfo=UTC)
     context = _context()
     project = SimpleNamespace(id=context.project_id)
@@ -174,8 +175,17 @@ async def test_remove_and_leave_record_distinct_end_metadata() -> None:
     target = _member(role=ProjectRole.VIEWER)
     repository.lock_project_and_member.return_value = (project, target)
     authorization = AsyncMock()
-    authorization.mark_revoked.return_value = ()
     retention = AsyncMock()
+
+    async def mark_revoked(*_args, **_kwargs):
+        events.append("authorization-mark")
+        return ()
+
+    async def freeze_owner(*_args, **_kwargs):
+        events.append("retention-freeze")
+
+    authorization.mark_revoked.side_effect = mark_revoked
+    retention.freeze_owner.side_effect = freeze_owner
     service = MembershipService(
         repository,
         clock=lambda: now,
@@ -184,6 +194,7 @@ async def test_remove_and_leave_record_distinct_end_metadata() -> None:
     )
 
     await service.remove(context, target.id, expected_version=1)
+    assert events == ["retention-freeze", "authorization-mark"]
     retention.freeze_owner.assert_awaited_once_with(
         repository.session,
         project_id=project.id,
@@ -201,10 +212,12 @@ async def test_remove_and_leave_record_distinct_end_metadata() -> None:
 
     repository.reset_mock()
     retention.reset_mock()
+    events.clear()
     leaving = _member(role=ProjectRole.VIEWER)
     leaving.id = context.membership_id
     repository.lock_project_and_member.return_value = (project, leaving)
     await service.leave(context, expected_version=1)
+    assert events == ["retention-freeze", "authorization-mark"]
     retention.freeze_owner.assert_awaited_once_with(
         repository.session,
         project_id=project.id,
@@ -282,8 +295,13 @@ async def test_viewer_downgrade_marks_runs_in_transaction_then_notifies_after_co
     target = _member(role=ProjectRole.EDITOR)
     repository.lock_project_and_member.return_value = (SimpleNamespace(id=context.project_id), target)
     authorization = AsyncMock()
-    authorization.mark_revoked.return_value = ("run-1",)
     retention = AsyncMock()
+
+    async def mark_revoked(*_args, **_kwargs):
+        events.append("authorization-mark")
+        return ("run-1",)
+
+    authorization.mark_revoked.side_effect = mark_revoked
 
     async def freeze_owner(*_args, **_kwargs):
         events.append("retention-freeze")
@@ -304,6 +322,7 @@ async def test_viewer_downgrade_marks_runs_in_transaction_then_notifies_after_co
     assert events == [
         "transaction-enter",
         "retention-freeze",
+        "authorization-mark",
         "transaction-commit",
         "notify:('run-1',):authorization_revoked",
     ]
@@ -346,6 +365,7 @@ async def test_viewer_downgrade_retention_failure_prevents_role_change_and_notif
         )
 
     repository.set_role.assert_not_awaited()
+    authorization.mark_revoked.assert_not_awaited()
     notifier.assert_not_awaited()
 
 
