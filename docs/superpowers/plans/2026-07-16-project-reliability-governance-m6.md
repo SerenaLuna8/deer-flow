@@ -891,7 +891,7 @@ Expected: PASS；无 counter/ledger/domain write 分裂。
 
 **Interfaces:** `AuditService.append(session, actor, action: AuditAction, target: AuditTarget, outcome, metadata)` 只接受枚举 action 和每 action 固定 metadata schema；private target 保存 key id + HMAC，不保存名称/路径/内容。
 
-- [ ] **Step 1: 写 audit RED tests**
+- [x] **Step 1: 写 audit RED tests**
 
 ```python
 @pytest.mark.parametrize("forbidden", ["prompt", "message", "memory", "path", "filename", "token", "exception"])
@@ -906,7 +906,7 @@ async def test_committed_audit_rows_are_immutable(pg_session, audit_row):
 
 覆盖 project reader双 scope、system reader governance context、key rotation lookup、stable public errors、无异常正文。
 
-- [ ] **Step 2: 观察 RED**
+- [x] **Step 2: 观察 RED**
 
 ```bash
 cd backend
@@ -915,7 +915,7 @@ uv run pytest tests/test_m6_audit_service_postgres.py tests/test_m6_audit_redact
 
 Expected: FAIL with missing audit contracts。
 
-- [ ] **Step 3: 实现 allowlist-first append**
+- [x] **Step 3: 实现 allowlist-first append**
 
 ```python
 async def append(self, session, actor, action, target, outcome, metadata):
@@ -926,7 +926,7 @@ async def append(self, session, actor, action, target, outcome, metadata):
 
 Pydantic models 使用 `extra="forbid"`；HMAC key 与 backup/credential key 分离，日志不得输出原 target。
 
-- [ ] **Step 4: 验证并提交**
+- [x] **Step 4: 验证并提交**
 
 ```bash
 cd backend

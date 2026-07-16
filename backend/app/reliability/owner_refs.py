@@ -21,6 +21,9 @@ _KEY_BYTES = 32
 _KEY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 _JOB_OWNER_DOMAIN = b"deerflow.m6.job-owner-ref.v1\x00"
 _QUOTA_SOURCE_DOMAIN = b"deerflow.m6.quota-source-ref-hmac.v1\x00"
+_AUDIT_TARGET_DOMAIN = b"deerflow.m6.audit-target-ref.v1\x00"
+_AUDIT_REQUEST_DOMAIN = b"deerflow.m6.audit-request-ref.v1\x00"
+_AUDIT_TARGET_KIND = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 
 class AuditHmacKeyringInvalid(Exception):
@@ -28,6 +31,25 @@ class AuditHmacKeyringInvalid(Exception):
 
     def __init__(self) -> None:
         super().__init__("Audit HMAC keyring configuration invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditTargetRef:
+    key_id: str
+    hmac_hex: str
+
+    def __post_init__(self) -> None:
+        if _KEY_ID.fullmatch(self.key_id) is None or re.fullmatch(r"[0-9a-f]{64}", self.hmac_hex) is None:
+            raise ValueError("audit target reference is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditRequestRef:
+    hmac_hex: str
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[0-9a-f]{64}", self.hmac_hex) is None:
+            raise ValueError("audit request reference is invalid")
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -134,6 +156,49 @@ class AuditHmacKeyring:
             )
             for key_id in key_ids
         )
+
+    def audit_target_refs(
+        self,
+        target_kind: str,
+        authority_id: uuid.UUID,
+    ) -> tuple[AuditTargetRef, ...]:
+        """Return active and retained target refs without preserving raw authority."""
+
+        if type(target_kind) is not str or _AUDIT_TARGET_KIND.fullmatch(target_kind) is None or type(authority_id) is not uuid.UUID:
+            raise ValueError("audit target reference requires typed authority")
+        kind = target_kind.encode("ascii")
+        payload = _AUDIT_TARGET_DOMAIN + len(kind).to_bytes(2, "big") + kind + authority_id.bytes
+        key_ids = (self.active_key_id, *sorted(set(self._keys) - {self.active_key_id}))
+        return tuple(
+            AuditTargetRef(
+                key_id=key_id,
+                hmac_hex=hmac.new(
+                    self._keys[key_id],
+                    payload,
+                    hashlib.sha256,
+                ).hexdigest(),
+            )
+            for key_id in key_ids
+        )
+
+    def audit_target_ref(
+        self,
+        target_kind: str,
+        authority_id: uuid.UUID,
+    ) -> AuditTargetRef:
+        return self.audit_target_refs(target_kind, authority_id)[0]
+
+    def audit_request_ref(self, request_id: str) -> AuditRequestRef:
+        """Return a privacy-safe correlation ref for a normalized trace ID."""
+
+        if type(request_id) is not str or not 1 <= len(request_id) <= 512 or request_id != request_id.strip() or any(ord(character) < 32 or ord(character) > 126 for character in request_id):
+            raise ValueError("audit request reference requires a normalized trace ID")
+        digest = hmac.new(
+            self._keys[self.active_key_id],
+            _AUDIT_REQUEST_DOMAIN + request_id.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+        return AuditRequestRef(hmac_hex=digest)
 
     def __call__(self, payload: bytes) -> QuotaSourceRef:
         return self.quota_source_ref(payload)
