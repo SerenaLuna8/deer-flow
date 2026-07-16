@@ -1,9 +1,5 @@
-from deerflow.persistence.jobs.model import (
-    DeadJobRow,
-    JobAttemptRow,
-    JobRow,
-    WorkerNodeRow,
-)
+"""M6 durable job contracts."""
+
 from deerflow.persistence.jobs.sql import (
     DeadJobRecord,
     DeadJobRequeuedEvent,
@@ -17,14 +13,14 @@ from deerflow.persistence.jobs.sql import (
     JobRepository,
     JobRequeueForbidden,
     JobScope,
+    JobType,
+    RetrySafety,
 )
 
 __all__ = [
     "DeadJobRecord",
     "DeadJobRequeuedEvent",
-    "DeadJobRow",
     "EnqueueJob",
-    "JobAttemptRow",
     "JobAuditPort",
     "JobClaim",
     "JobHeartbeat",
@@ -33,7 +29,7 @@ __all__ = [
     "JobOwnerRefRequired",
     "JobRepository",
     "JobRequeueForbidden",
-    "JobRow",
     "JobScope",
-    "WorkerNodeRow",
+    "JobType",
+    "RetrySafety",
 ]
