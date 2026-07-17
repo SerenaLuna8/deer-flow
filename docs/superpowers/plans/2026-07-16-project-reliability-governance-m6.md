@@ -1233,6 +1233,8 @@ git commit -m "feat: add verifiable recovery workflow"
 
 Expected: PASS；journal gap或认证失败时 restore fail closed。
 
+完成（2026-07-18）：实现提交 `9e0ac7cb` 建立 authenticated external tombstone journal、journal-first retention purge、new-database restore、连续 replay/probe/proof 和 disposable drill。三轮有界审查修复 `03827d20`、`7de03095`、`d1a36c90` 关闭可信 journal head、随机 nonce、source 三方绑定、account membership 竞态、完整 key separation、proof 前敏感清理、unlock cancellation、producer settle、exact dev/inode ownership、drill DROP ownership、probe head 校验和部分删除幂等重试。最终独立复审为 0 Critical/Important；Fresh gates 为 Task 17 真实 PostgreSQL 53 passed/0 skipped、Task 16 98 passed、audit/retention/schema 真实 PostgreSQL 60 passed/0 skipped、blocking-I/O 49 passed，Ruff、format、CLI/Make smoke、残留随机数据库、static scan 与 `git diff --check` 全绿。Task 18 负责 staged M6 cutover、readiness 和多进程运维入口。
+
 ### Task 18: 建立 M6 staged migration、readiness 和多进程运维入口
 
 **Files:**
