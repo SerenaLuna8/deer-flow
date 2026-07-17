@@ -21,7 +21,7 @@ import shutil
 import stat
 import tempfile
 import uuid
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -208,6 +208,15 @@ class _LibpqInvocation:
     directory: _PinnedDirectory
     passfile_name: str | None = None
     passfile_identity: tuple[int, int] | None = None
+    passfile_descriptor: int | None = None
+
+    @property
+    def pass_fds(self) -> tuple[int, ...]:
+        if self.passfile_descriptor is None:
+            return ()
+        if self.passfile_descriptor < 0:
+            raise OSError(errno.EBADF, "passfile descriptor is closed")
+        return (self.passfile_descriptor,)
 
 
 def _validate_key(key: bytes) -> None:
@@ -965,6 +974,15 @@ def _escape_pgpass(value: str) -> str:
     return value.replace("\\", "\\\\").replace(":", "\\:")
 
 
+def _write_fd_all(descriptor: int, value: bytes) -> None:
+    remaining = memoryview(value)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError(errno.EIO, "short passfile write")
+        remaining = remaining[written:]
+
+
 def _create_libpq_invocation(database_url: str, directory: Path) -> _LibpqInvocation:
     try:
         parsed = make_url(database_url)
@@ -987,29 +1005,33 @@ def _create_libpq_invocation(database_url: str, directory: Path) -> _LibpqInvoca
     passfile: Path | None = None
     passfile_name: str | None = None
     passfile_identity: tuple[int, int] | None = None
+    passfile_descriptor: int | None = None
     if parsed.password is not None:
+        if os.name != "posix" or not os.path.isdir("/dev/fd"):
+            pinned.close()
+            raise BackupCommandFailed
         passfile_name = f".pgpass.{uuid.uuid4().hex}"
         passfile = pinned.path / passfile_name
-        descriptor = os.open(
+        passfile_descriptor = os.open(
             passfile_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
             0o600,
             dir_fd=pinned.descriptor,
         )
         try:
             line = ":".join(_escape_pgpass(value) for value in (host or "*", port, database, username or "*", parsed.password)) + "\n"
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
-                info = os.fstat(handle.fileno())
-                passfile_identity = (info.st_dev, info.st_ino)
+            _write_fd_all(passfile_descriptor, line.encode("utf-8"))
+            os.fsync(passfile_descriptor)
+            info = os.fstat(passfile_descriptor)
+            passfile_identity = (info.st_dev, info.st_ino)
+            os.lseek(passfile_descriptor, 0, os.SEEK_SET)
             _fsync_directory(pinned.descriptor)
         except BaseException:
             try:
-                os.close(descriptor)
+                os.close(passfile_descriptor)
             except OSError:
                 pass
+            passfile_descriptor = None
             try:
                 os.unlink(passfile_name, dir_fd=pinned.descriptor)
                 _fsync_directory(pinned.descriptor)
@@ -1018,34 +1040,49 @@ def _create_libpq_invocation(database_url: str, directory: Path) -> _LibpqInvoca
             finally:
                 pinned.close()
             raise
-        env["PGPASSFILE"] = str(passfile)
+        env["PGPASSFILE"] = f"/dev/fd/{passfile_descriptor}"
     return _LibpqInvocation(
         env=env,
         passfile=passfile,
         directory=pinned,
         passfile_name=passfile_name,
         passfile_identity=passfile_identity,
+        passfile_descriptor=passfile_descriptor,
     )
 
 
+def _finish_libpq_invocation_release(invocation: _LibpqInvocation) -> None:
+    descriptor = invocation.passfile_descriptor
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        finally:
+            invocation.passfile_descriptor = None
+    invocation.passfile_name = None
+    invocation.passfile_identity = None
+    invocation.directory.close()
+
+
 def _release_libpq_invocation(invocation: _LibpqInvocation) -> None:
+    passfile_name = invocation.passfile_name
+    if passfile_name is None:
+        _finish_libpq_invocation_release(invocation)
+        return
+    directory_descriptor = invocation.directory.descriptor
+    if directory_descriptor < 0:
+        raise BackupCommandFailed
     try:
-        if invocation.passfile_name is not None:
-            passfile_name = invocation.passfile_name
-            passfile_identity = invocation.passfile_identity
-            invocation.passfile_name = None
-            invocation.passfile_identity = None
-            try:
-                info = os.stat(passfile_name, dir_fd=invocation.directory.descriptor, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                if not stat.S_ISREG(info.st_mode) or passfile_identity != (info.st_dev, info.st_ino):
-                    raise BackupCommandFailed
-                os.unlink(passfile_name, dir_fd=invocation.directory.descriptor)
-                _fsync_directory(invocation.directory.descriptor)
-    finally:
-        invocation.directory.close()
+        info = os.stat(passfile_name, dir_fd=directory_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        _fsync_directory(directory_descriptor)
+        _finish_libpq_invocation_release(invocation)
+        return
+    if not stat.S_ISREG(info.st_mode) or invocation.passfile_identity != (info.st_dev, info.st_ino):
+        _finish_libpq_invocation_release(invocation)
+        raise BackupCommandFailed
+    os.unlink(passfile_name, dir_fd=directory_descriptor)
+    _fsync_directory(directory_descriptor)
+    _finish_libpq_invocation_release(invocation)
 
 
 def _asyncpg_url(database_url: str) -> str:
@@ -1239,15 +1276,19 @@ async def _await_shielded(task: asyncio.Task[object]) -> object:
     return result
 
 
+async def _run_owned_writer_operation(operation: Callable[..., object], *args: object, **kwargs: object) -> object:
+    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+    return await _await_shielded(task)
+
+
 async def _acquire_libpq_invocation(database_url: str, directory: Path) -> _LibpqInvocation:
     creation_task = asyncio.create_task(asyncio.to_thread(_create_libpq_invocation, database_url, directory))
     result, cancelled = await _await_task_through_cancellation(creation_task)
     if not isinstance(result, _LibpqInvocation):
         raise BackupCommandFailed
     if cancelled:
-        cleanup_task = asyncio.create_task(asyncio.to_thread(_release_libpq_invocation, result))
         try:
-            await _await_shielded(cleanup_task)
+            await _release_owned_libpq_invocation(result)
         except BaseException:
             pass
         raise asyncio.CancelledError
@@ -1255,8 +1296,14 @@ async def _acquire_libpq_invocation(database_url: str, directory: Path) -> _Libp
 
 
 async def _release_owned_libpq_invocation(invocation: _LibpqInvocation) -> None:
-    cleanup_task = asyncio.create_task(asyncio.to_thread(_release_libpq_invocation, invocation))
-    await _await_shielded(cleanup_task)
+    for attempt in range(2):
+        cleanup_task = asyncio.create_task(asyncio.to_thread(_release_libpq_invocation, invocation))
+        try:
+            await _await_shielded(cleanup_task)
+            return
+        except OSError:
+            if attempt == 1:
+                raise
 
 
 async def _cleanup_backup(process: object | None, stderr_task: asyncio.Task[object] | None, writer: BackupArchiveWriter | None) -> None:
@@ -1333,6 +1380,7 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=dict(invocation.env),
+                pass_fds=invocation.pass_fds,
             )
             if process.stdout is None or process.stderr is None:
                 raise BackupCommandFailed
@@ -1348,16 +1396,16 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
                 archive_id=config.archive_id,
                 _parent_directory=invocation.directory.duplicate(),
             )
-            await asyncio.to_thread(writer.__enter__)
+            await _run_owned_writer_operation(writer.__enter__)
             buffer = bytearray()
             while data := await process.stdout.read(min(_READ_BLOCK_BYTES, config.chunk_bytes)):
                 buffer.extend(data)
                 while len(buffer) >= config.chunk_bytes:
                     plaintext = bytes(buffer[: config.chunk_bytes])
                     del buffer[: config.chunk_bytes]
-                    await asyncio.to_thread(writer.write_chunk, plaintext)
+                    await _run_owned_writer_operation(writer.write_chunk, plaintext)
             if buffer:
-                await asyncio.to_thread(writer.write_chunk, bytes(buffer))
+                await _run_owned_writer_operation(writer.write_chunk, bytes(buffer))
             returncode = await process.wait()
             await stderr_task
             if returncode != 0:

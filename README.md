@@ -1008,10 +1008,12 @@ The command exports one read-only repeatable-read PostgreSQL snapshot, derives a
 source identity from PostgreSQL system/database authority, and binds that same snapshot to
 fixed `pg_dump --format=custom --no-owner --no-acl --snapshot=...` argv. The database role
 must be allowed to read `pg_control_system()`; otherwise backup fails closed. Connection
-credentials use a temporary `0600` libpq passfile, never process argv, and are removed before
-publication through a retained fd-relative directory handle. Every archive-path ancestor is
-opened with no-follow directory semantics, and passfile creation/removal plus directory fsync are
-owned through cancellation. When `AUTH_JWT_SECRET` is absent, key separation reads the existing
+credentials use a temporary `0600` libpq passfile, never process argv, and reach `pg_dump` only
+through an inherited `/dev/fd/N` descriptor; mutable absolute passfile paths are never handed to
+the child. The file is removed before publication through a retained fd-relative directory handle.
+Every archive-path ancestor is opened with no-follow directory semantics, writer work is settled
+before cancellation cleanup, and transient identity-check/unlink/directory-fsync failures retain
+passfile ownership for safe cleanup retry. When `AUTH_JWT_SECRET` is absent, key separation reads the existing
 `DEER_FLOW_HOME/.jwt_secret` without creating or rotating it; missing, unsafe, or unreadable Auth
 material fails closed. The archive records the actual Alembic revision, `pg_dump` version,
 non-empty byte/table counts, and a proven contiguous tombstone cursor. It uses per-archive keys

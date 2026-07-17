@@ -697,6 +697,62 @@ async def test_create_backup_publishes_only_authenticated_archive(tmp_path: Path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("writer_method", ["__enter__", "write_chunk"])
+async def test_writer_thread_task_settles_before_cancellation_cleanup(
+    writer_method: str,
+    tmp_path: Path,
+    backup_key: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    cleanup_entered = threading.Event()
+    original_method = getattr(BackupArchiveWriter, writer_method)
+    original_abort = BackupArchiveWriter.abort
+
+    def blocking_method(writer: BackupArchiveWriter, *args: object, **kwargs: object):
+        entered.set()
+        release.wait(timeout=2)
+        try:
+            return original_method(writer, *args, **kwargs)
+        finally:
+            finished.set()
+
+    def recording_abort(writer: BackupArchiveWriter) -> None:
+        cleanup_entered.set()
+        original_abort(writer)
+
+    async def fake_subprocess(*_argv: str, **_kwargs: object) -> _FakeProcess:
+        return _FakeProcess(0, [b"PGDMPpayload"])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    monkeypatch.setattr(BackupArchiveWriter, writer_method, blocking_method)
+    monkeypatch.setattr(BackupArchiveWriter, "abort", recording_abort)
+    output = tmp_path / f"cancel-{writer_method.strip('_')}.dfba"
+    task = asyncio.create_task(
+        create_backup(
+            BackupConfig(
+                database_url="postgresql://db/test",
+                output=output,
+                key=backup_key,
+            )
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 1)
+    task.cancel()
+    cleanup_before_release = await asyncio.to_thread(cleanup_entered.wait, 0.1)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not cleanup_before_release
+    assert finished.is_set()
+    assert cleanup_entered.is_set()
+    assert not output.exists()
+    assert not list(tmp_path.glob(f".{output.name}.*.part"))
+
+
+@pytest.mark.asyncio
 async def test_passfile_creation_cancellation_removes_owned_file(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
     created = threading.Event()
     release = threading.Event()
@@ -733,6 +789,54 @@ async def test_passfile_creation_cancellation_removes_owned_file(tmp_path: Path,
 
 
 @pytest.mark.asyncio
+async def test_passfile_creation_cancellation_retries_transient_unlink(
+    tmp_path: Path,
+    backup_key: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = threading.Event()
+    release = threading.Event()
+    passfile: Path | None = None
+    original_create = archive_module._create_libpq_invocation
+    original_unlink = archive_module.os.unlink
+    failed = False
+
+    def blocking_create(*args: object, **kwargs: object):
+        nonlocal passfile
+        invocation = original_create(*args, **kwargs)
+        passfile = invocation.passfile
+        created.set()
+        release.wait(timeout=2)
+        return invocation
+
+    def fail_once_unlink(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal failed
+        if not failed and isinstance(path, str) and path.startswith(".pgpass.") and kwargs.get("dir_fd") is not None:
+            failed = True
+            raise OSError("transient unlink failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(archive_module, "_create_libpq_invocation", blocking_create)
+    monkeypatch.setattr(archive_module.os, "unlink", fail_once_unlink)
+    task = asyncio.create_task(
+        create_backup(
+            BackupConfig(
+                database_url="postgresql://user:password@db/test",
+                output=tmp_path / "cancel-passfile-retry.dfba",
+                key=backup_key,
+            )
+        )
+    )
+    assert await asyncio.to_thread(created.wait, 1)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert failed
+    assert passfile is not None and not passfile.exists()
+
+
+@pytest.mark.asyncio
 async def test_passfile_create_and_remove_fsync_the_pinned_directory(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
     parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
     directory_fsyncs = 0
@@ -763,16 +867,24 @@ async def test_passfile_create_and_remove_fsync_the_pinned_directory(tmp_path: P
 @pytest.mark.asyncio
 async def test_passfile_cleanup_never_unlinks_replaced_file(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
     replacement: Path | None = None
+    invocation: archive_module._LibpqInvocation | None = None
+    original_create = archive_module._create_libpq_invocation
+
+    def recording_create(*args: object, **kwargs: object):
+        nonlocal invocation
+        invocation = original_create(*args, **kwargs)
+        return invocation
 
     async def fake_subprocess(*_argv: str, **kwargs: object) -> _FakeProcess:
         nonlocal replacement
-        env = kwargs["env"]
-        assert isinstance(env, dict)
-        replacement = Path(env["PGPASSFILE"])
+        assert invocation is not None
+        replacement = invocation.passfile
+        assert replacement is not None
         replacement.unlink()
         replacement.write_text("replacement", encoding="utf-8")
         return _FakeProcess(0, [b"PGDMPpayload"])
 
+    monkeypatch.setattr(archive_module, "_create_libpq_invocation", recording_create)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
     with pytest.raises(BackupCommandFailed):
         await create_backup(
@@ -784,6 +896,152 @@ async def test_passfile_cleanup_never_unlinks_replaced_file(tmp_path: Path, back
         )
     assert replacement is not None
     assert replacement.read_text(encoding="utf-8") == "replacement"
+
+
+def test_passfile_cleanup_retries_transient_stat_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    invocation = archive_module._create_libpq_invocation("postgresql://user:password@db/test", tmp_path)
+    passfile_name = invocation.passfile_name
+    directory_descriptor = invocation.directory.descriptor
+    original_stat = archive_module.os.stat
+    failed = False
+
+    def fail_once_stat(path: object, *args: object, **kwargs: object):
+        nonlocal failed
+        if not failed and path == passfile_name and kwargs.get("dir_fd") == directory_descriptor:
+            failed = True
+            raise OSError("transient stat failure")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(archive_module.os, "stat", fail_once_stat)
+    with pytest.raises(OSError, match="transient stat failure"):
+        archive_module._release_libpq_invocation(invocation)
+    assert invocation.passfile_name is not None
+    assert invocation.passfile_identity is not None
+    assert invocation.directory.descriptor >= 0
+
+    archive_module._release_libpq_invocation(invocation)
+    assert invocation.passfile is not None and not invocation.passfile.exists()
+    assert invocation.passfile_name is None
+    assert invocation.passfile_identity is None
+    assert invocation.directory.descriptor == -1
+
+
+def test_passfile_cleanup_retries_transient_unlink_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    invocation = archive_module._create_libpq_invocation("postgresql://user:password@db/test", tmp_path)
+    passfile_name = invocation.passfile_name
+    directory_descriptor = invocation.directory.descriptor
+    original_unlink = archive_module.os.unlink
+    failed = False
+
+    def fail_once_unlink(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal failed
+        if not failed and path == passfile_name and kwargs.get("dir_fd") == directory_descriptor:
+            failed = True
+            raise OSError("transient unlink failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(archive_module.os, "unlink", fail_once_unlink)
+    with pytest.raises(OSError, match="transient unlink failure"):
+        archive_module._release_libpq_invocation(invocation)
+    assert invocation.passfile_name is not None
+    assert invocation.passfile_identity is not None
+    assert invocation.directory.descriptor >= 0
+
+    archive_module._release_libpq_invocation(invocation)
+    assert invocation.passfile is not None and not invocation.passfile.exists()
+    assert invocation.passfile_name is None
+    assert invocation.passfile_identity is None
+    assert invocation.directory.descriptor == -1
+
+
+def test_passfile_cleanup_retries_transient_directory_fsync_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    invocation = archive_module._create_libpq_invocation("postgresql://user:password@db/test", tmp_path)
+    passfile_name = invocation.passfile_name
+    directory_descriptor = invocation.directory.descriptor
+    original_fsync = archive_module._fsync_directory
+    original_unlink = archive_module.os.unlink
+    unlinked = False
+    failed = False
+
+    def recording_unlink(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal unlinked
+        original_unlink(path, *args, **kwargs)
+        if path == passfile_name and kwargs.get("dir_fd") == directory_descriptor:
+            unlinked = True
+
+    def fail_once_fsync(descriptor: int) -> None:
+        nonlocal failed
+        if unlinked and not failed and descriptor == directory_descriptor:
+            failed = True
+            raise OSError("transient fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(archive_module.os, "unlink", recording_unlink)
+    monkeypatch.setattr(archive_module, "_fsync_directory", fail_once_fsync)
+    with pytest.raises(OSError, match="transient fsync failure"):
+        archive_module._release_libpq_invocation(invocation)
+    assert invocation.passfile_name is not None
+    assert invocation.passfile_identity is not None
+    assert invocation.directory.descriptor >= 0
+
+    archive_module._release_libpq_invocation(invocation)
+    assert invocation.passfile is not None and not invocation.passfile.exists()
+    assert invocation.passfile_name is None
+    assert invocation.passfile_identity is None
+    assert invocation.directory.descriptor == -1
+
+
+@pytest.mark.asyncio
+async def test_pg_dump_uses_inherited_passfile_fd_across_ancestor_replacement(
+    tmp_path: Path,
+    backup_key: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    archive_root = tmp_path / "operator"
+    archive_root.mkdir()
+    moved_root = tmp_path / "moved-operator"
+    argv_seen: tuple[str, ...] | None = None
+    passfile_name: str | None = None
+    original_create = archive_module._create_libpq_invocation
+
+    def recording_create(*args: object, **kwargs: object):
+        nonlocal passfile_name
+        invocation = original_create(*args, **kwargs)
+        passfile_name = invocation.passfile_name
+        return invocation
+
+    async def fake_subprocess(*argv: str, **kwargs: object) -> _FakeProcess:
+        nonlocal argv_seen
+        argv_seen = argv
+        env = kwargs["env"]
+        pass_fds = kwargs["pass_fds"]
+        assert isinstance(env, dict)
+        assert isinstance(pass_fds, tuple) and len(pass_fds) == 1
+        assert env["PGPASSFILE"] == f"/dev/fd/{pass_fds[0]}"
+        archive_root.rename(moved_root)
+        archive_root.mkdir()
+        with open(env["PGPASSFILE"], encoding="utf-8") as handle:
+            assert "password" in handle.read()
+        return _FakeProcess(0, [b"PGDMPpayload"])
+
+    monkeypatch.setattr(archive_module, "_create_libpq_invocation", recording_create)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    config = BackupConfig(
+        database_url="postgresql://user:password@db/test",
+        output=archive_root / "fd-passfile.dfba",
+        key=backup_key,
+    )
+    await create_backup(config)
+
+    assert argv_seen is not None
+    assert all("password" not in argument and str(archive_root) not in argument for argument in argv_seen)
+    assert "password" not in caplog.text
+    assert str(archive_root) not in caplog.text
+    assert (moved_root / config.output.name).is_dir()
+    assert not (archive_root / config.output.name).exists()
+    assert passfile_name is not None
+    assert not (moved_root / passfile_name).exists()
 
 
 def test_external_directory_walk_pins_every_ancestor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
