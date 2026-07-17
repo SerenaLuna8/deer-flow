@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.models import (
     AuditAction,
     AuditActor,
+    AuditAuthorityRejected,
     AuditOutcome,
     AuditProcess,
     AuditTarget,
@@ -14,12 +15,20 @@ from app.audit.models import (
     SystemAuditContext,
 )
 from app.audit.service import AuditService
-from app.private_work.context import PrivateWorkContext
+from app.private_work.context import (
+    PrivateWorkContext,
+    is_issued_private_work_context,
+)
 from app.private_work.run_repository import PrivateRunRecord
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.quotas.models import ProjectQuotaPolicy
 from app.reliability.jobs import AdmittedJobRecord
-from deerflow.persistence.jobs.sql import JobTerminalEvent
+from deerflow.persistence.jobs.model import JobRow
+from deerflow.persistence.jobs.sql import (
+    DeadJobRequeuedEvent,
+    JobTerminalEvent,
+)
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 
@@ -33,10 +42,24 @@ def _uuid(value: object) -> uuid.UUID:
 class OperationalAuditSink:
     """Typed transactional audit ports used by project reliability domains."""
 
-    def __init__(self, service: AuditService) -> None:
-        if type(service) is not AuditService:
-            raise TypeError("AuditService is required")
+    def __init__(
+        self,
+        service: AuditService,
+        *,
+        process: AuditProcess,
+    ) -> None:
+        if type(service) is not AuditService or process not in {
+            AuditProcess.GATEWAY,
+            AuditProcess.WORKER,
+            AuditProcess.SCHEDULER,
+        }:
+            raise TypeError("process-bound AuditService is required")
         self._service = service
+        self._process = process
+
+    def _require_process(self, *allowed: AuditProcess) -> None:
+        if self._process not in allowed:
+            raise AuditAuthorityRejected()
 
     async def run_admitted(
         self,
@@ -45,6 +68,7 @@ class OperationalAuditSink:
         run: PrivateRunRecord,
         job: AdmittedJobRecord,
     ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
         await self._service.append(
             session,
             AuditActor.user(_uuid(context.user_id)),
@@ -71,6 +95,7 @@ class OperationalAuditSink:
         run_id: str,
         job_id: uuid.UUID,
     ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
         await self._service.append(
             session,
             AuditActor.user(_uuid(context.user_id)),
@@ -94,6 +119,7 @@ class OperationalAuditSink:
         previous_role: ProjectRole,
         role: ProjectRole,
     ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
         await self._service.append(
             session,
             AuditActor.user(_uuid(context.user_id)),
@@ -118,6 +144,7 @@ class OperationalAuditSink:
         membership_id: uuid.UUID,
         status: str,
     ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
         action = {
             "removed": AuditAction.MEMBER_REMOVED,
             "left": AuditAction.MEMBER_LEFT,
@@ -138,6 +165,36 @@ class OperationalAuditSink:
             request_id=context.request_id,
         )
 
+    async def quota_policy_updated(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        policy: ProjectQuotaPolicy,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
+        if not is_issued_private_work_context(context) or type(policy) is not ProjectQuotaPolicy:
+            raise AuditAuthorityRejected()
+        configured = policy.configured
+        await self._service.append(
+            session,
+            AuditActor.user(_uuid(context.user_id)),
+            AuditAction.QUOTA_POLICY_UPDATED,
+            AuditTarget(
+                AuditTargetKind.QUOTA,
+                _uuid(context.project_id),
+                _uuid(context.project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "member_limit": configured.member_limit,
+                "storage_bytes_limit": configured.storage_bytes_limit,
+                "concurrent_run_limit": configured.concurrent_run_limit,
+                "mcp_calls_daily_limit": configured.mcp_calls_daily_limit,
+                "version": policy.version,
+            },
+            request_id=context.request_id,
+        )
+
     async def automation_admitted(
         self,
         session: AsyncSession,
@@ -148,7 +205,14 @@ class OperationalAuditSink:
         run: PrivateRunRecord,
         job: AdmittedJobRecord,
     ) -> None:
-        actor = AuditActor.user(_uuid(context.user_id)) if trigger == "manual" else AuditActor.trusted_process(AuditProcess.SCHEDULER)
+        if trigger == "manual":
+            self._require_process(AuditProcess.GATEWAY)
+            actor = AuditActor.user(_uuid(context.user_id))
+        elif trigger == "scheduled":
+            self._require_process(AuditProcess.SCHEDULER)
+            actor = AuditActor.trusted_process(self._process)
+        else:
+            raise TypeError("automation audit trigger is invalid")
         await self._service.append(
             session,
             actor,
@@ -201,9 +265,14 @@ class OperationalAuditSink:
             "automation_run",
         }:
             raise TypeError("run terminal audit event is invalid")
+        if self._process is AuditProcess.GATEWAY:
+            if terminal_status != "cancelled":
+                raise AuditAuthorityRejected()
+        else:
+            self._require_process(AuditProcess.WORKER)
         await self._service.append(
             session,
-            AuditActor.trusted_process(AuditProcess.WORKER),
+            AuditActor.trusted_process(self._process),
             AuditAction.RUN_TERMINAL,
             AuditTarget(
                 AuditTargetKind.RUN,
@@ -226,7 +295,8 @@ class OperationalAuditSink:
         session: AsyncSession,
         event: JobTerminalEvent,
     ) -> None:
-        actor = AuditActor.trusted_process(AuditProcess.WORKER)
+        self._require_process(AuditProcess.WORKER)
+        actor = AuditActor.trusted_process(self._process)
         if event.status == "dead":
             await self._service.append(
                 session,
@@ -263,12 +333,16 @@ class SystemJobAuditSink:
         self._actor = AuditActor.system_admin(context)
         self._request_id = context.request_id
 
-    async def dead_job_requeued(self, session, event) -> None:
-        from deerflow.persistence.jobs.model import JobRow
-
+    async def dead_job_requeued(
+        self,
+        session: AsyncSession,
+        event: DeadJobRequeuedEvent,
+    ) -> None:
+        if type(event) is not DeadJobRequeuedEvent or event.request_id != self._request_id:
+            raise AuditAuthorityRejected()
         row = await session.get(JobRow, event.successor_job_id)
-        if row is None:
-            raise RuntimeError("requeued job audit authority is missing")
+        if row is None or row.project_id != event.project_id or row.predecessor_dead_job_id != event.predecessor_job_id or row.status != "queued" or row.retry_safety != "safe":
+            raise AuditAuthorityRejected()
         await self._service.append(
             session,
             self._actor,
@@ -289,4 +363,173 @@ class SystemJobAuditSink:
         )
 
 
-__all__ = ["OperationalAuditSink", "SystemJobAuditSink"]
+class TrustedOperationAuditSink:
+    """Process-bound contracts for forward-owned backup and recovery callers."""
+
+    def __init__(
+        self,
+        service: AuditService,
+        *,
+        process: AuditProcess,
+    ) -> None:
+        if type(service) is not AuditService or process not in {
+            AuditProcess.OPERATOR,
+            AuditProcess.RECOVERY,
+            AuditProcess.WORKER,
+        }:
+            raise TypeError("trusted-operation AuditService is required")
+        self._service = service
+        self._process = process
+
+    def _require_process(self, *allowed: AuditProcess) -> None:
+        if self._process not in allowed:
+            raise AuditAuthorityRejected()
+
+    async def backup_created(
+        self,
+        session: AsyncSession,
+        *,
+        backup_id: uuid.UUID,
+        table_count: int,
+        tombstone_high_watermark: int,
+        request_id: str,
+    ) -> None:
+        self._require_process(AuditProcess.OPERATOR)
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process),
+            AuditAction.BACKUP_CREATED,
+            AuditTarget(
+                AuditTargetKind.BACKUP,
+                _uuid(backup_id),
+                None,
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "table_count": table_count,
+                "tombstone_high_watermark": tombstone_high_watermark,
+            },
+            request_id=request_id,
+        )
+
+    async def restore_started(
+        self,
+        session: AsyncSession,
+        *,
+        restore_id: uuid.UUID,
+        table_count: int,
+        tombstones_replayed: int,
+        request_id: str,
+    ) -> None:
+        await self._restore_event(
+            session,
+            action=AuditAction.RESTORE_STARTED,
+            restore_id=restore_id,
+            table_count=table_count,
+            tombstones_replayed=tombstones_replayed,
+            request_id=request_id,
+        )
+
+    async def restore_completed(
+        self,
+        session: AsyncSession,
+        *,
+        restore_id: uuid.UUID,
+        table_count: int,
+        tombstones_replayed: int,
+        request_id: str,
+    ) -> None:
+        await self._restore_event(
+            session,
+            action=AuditAction.RESTORE_COMPLETED,
+            restore_id=restore_id,
+            table_count=table_count,
+            tombstones_replayed=tombstones_replayed,
+            request_id=request_id,
+        )
+
+    async def recovery_drill_completed(
+        self,
+        session: AsyncSession,
+        *,
+        restore_id: uuid.UUID,
+        table_count: int,
+        tombstones_replayed: int,
+        request_id: str,
+    ) -> None:
+        await self._restore_event(
+            session,
+            action=AuditAction.RECOVERY_DRILL_COMPLETED,
+            restore_id=restore_id,
+            table_count=table_count,
+            tombstones_replayed=tombstones_replayed,
+            request_id=request_id,
+        )
+
+    async def _restore_event(
+        self,
+        session: AsyncSession,
+        *,
+        action: AuditAction,
+        restore_id: uuid.UUID,
+        table_count: int,
+        tombstones_replayed: int,
+        request_id: str,
+    ) -> None:
+        self._require_process(AuditProcess.OPERATOR, AuditProcess.RECOVERY)
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process),
+            action,
+            AuditTarget(
+                AuditTargetKind.RESTORE,
+                _uuid(restore_id),
+                None,
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "table_count": table_count,
+                "tombstones_replayed": tombstones_replayed,
+            },
+            request_id=request_id,
+        )
+
+    async def purge_completed(
+        self,
+        session: AsyncSession,
+        *,
+        purge_id: uuid.UUID,
+        project_id: uuid.UUID | None,
+        resource_kind: str,
+        purged_count: int,
+        request_id: str,
+    ) -> None:
+        if resource_kind == "account":
+            self._require_process(AuditProcess.RECOVERY)
+        elif resource_kind in {"project", "file"}:
+            self._require_process(AuditProcess.WORKER, AuditProcess.RECOVERY)
+        else:
+            raise TypeError("purge audit resource kind is invalid")
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process),
+            AuditAction.PURGE_COMPLETED,
+            AuditTarget(
+                AuditTargetKind.PURGE,
+                _uuid(purge_id),
+                None if project_id is None else _uuid(project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "resource_kind": resource_kind,
+                "purged_count": purged_count,
+            },
+            request_id=request_id,
+        )
+
+
+__all__ = [
+    "OperationalAuditSink",
+    "SystemJobAuditSink",
+    "TrustedOperationAuditSink",
+]

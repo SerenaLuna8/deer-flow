@@ -290,7 +290,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from app.audit.sinks import OperationalAuditSink
 
         audit_service = AuditService(sf, audit_keyring)
-        operational_audit_sink = OperationalAuditSink(audit_service)
+        from app.audit.models import AuditProcess
+
+        operational_audit_sink = OperationalAuditSink(
+            audit_service,
+            process=AuditProcess.GATEWAY,
+        )
         from app.shared_assets.audit import (
             DurableSharedAssetGovernanceEventSink,
         )

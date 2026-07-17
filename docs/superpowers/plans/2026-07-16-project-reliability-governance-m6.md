@@ -977,9 +977,9 @@ uv run pytest tests/test_m6_audit_integration_postgres.py tests/test_asset_audit
 
 Expected: FAIL because sinks尚未接入新 repository。
 
-- [ ] **Step 3: 接入 typed sinks 并验证**
+- [x] **Step 3: 接入 typed sinks 并验证**
 
-Checkpoint（2026-07-16）：typed sinks、项目/平台共享资产 adapter、成员变更、Run admit/cancel/terminal、Automation trigger、job dead 及 Gateway/Worker/Scheduler 接线已实现；PostgreSQL 相关组 59 passed，受影响 service/router/process 组 228 passed。仍需完成独立复审、全量静态门禁，并补齐本 Step 所列后续 recovery/quota-policy 调用点后再勾选。
+完成（2026-07-17）：现有 Task 13 domain 已全部接入 caller-owned transaction；Gateway、Worker、Scheduler sink 按进程绑定，M3 adapter 在写入前重新验证数据库 actor authority，system requeue 校验 request/project/predecessor/successor 关联。Task 14 quota-policy HTTP mutation 与 Tasks 16–17 backup/restore/purge caller 尚不存在且继续由各自任务创建；Task 13 只提前提供同事务 `quota_policy_updated` 与 process-bound trusted-operation typed contracts，不创建 recovery placeholder module。focused PostgreSQL audit 39 passed，受影响 service/router/process 290 passed，backend Ruff check 与 format-check 全通过。
 
 ```bash
 cd backend

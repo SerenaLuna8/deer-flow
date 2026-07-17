@@ -307,11 +307,21 @@ _ACTION_CONTRACTS[AuditAction.RUN_CANCEL_REQUESTED] = _contract(
     AuditScope.PROJECT,
     "user",
 )
-_ACTION_CONTRACTS[AuditAction.RUN_TERMINAL] = _contract(
-    AuditTargetKind.RUN,
-    AuditScope.PROJECT,
-    "process",
-    processes=(AuditProcess.WORKER,),
+_ACTION_CONTRACTS[AuditAction.RUN_TERMINAL] = AuditActionContract(
+    target_kind=AuditTargetKind.RUN,
+    variants=(
+        _variant(
+            AuditScope.PROJECT,
+            "process",
+            processes=(AuditProcess.WORKER,),
+        ),
+        _variant(
+            AuditScope.PROJECT,
+            "process",
+            processes=(AuditProcess.GATEWAY,),
+            metadata_equals=(("status", "cancelled"),),
+        ),
+    ),
 )
 _ACTION_CONTRACTS[AuditAction.JOB_DEAD] = _contract(
     AuditTargetKind.JOB,

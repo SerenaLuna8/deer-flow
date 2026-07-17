@@ -3,17 +3,21 @@ from __future__ import annotations
 import uuid
 from types import SimpleNamespace
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.models import (
     AuditAction,
     AuditActor,
+    AuditAuthorityRejected,
     AuditOutcome,
     AuditTarget,
     AuditTargetKind,
     resolve_system_audit_context,
 )
 from app.audit.service import AuditService
+from deerflow.persistence.projects.model import ProjectMembershipRow
+from deerflow.persistence.user.model import UserRow
 
 _ACTIONS: dict[str, AuditAction] = {
     "agent.create": AuditAction.ASSET_CREATED,
@@ -68,6 +72,13 @@ class DurableSharedAssetGovernanceEventSink:
         selected_kind = asset_kind or action.partition(".")[0]
         if selected_action is None or selected_kind not in {"agent", "skill", "mcp"}:
             raise TypeError("shared asset audit event is invalid")
+        system_role = await session.scalar(
+            select(UserRow.system_role).where(
+                UserRow.id == str(actor),
+            )
+        )
+        if system_role != "system_admin":
+            raise AuditAuthorityRejected()
         context = resolve_system_audit_context(
             SimpleNamespace(
                 id=uuid.UUID(str(actor)),
@@ -102,6 +113,15 @@ class DurableSharedAssetGovernanceEventSink:
         selected_kind = asset_kind or action.partition(".")[0]
         if selected_action is None or selected_kind not in {"agent", "skill", "mcp"}:
             raise TypeError("shared asset audit event is invalid")
+        membership_id = await session.scalar(
+            select(ProjectMembershipRow.id).where(
+                ProjectMembershipRow.project_id == project_id,
+                ProjectMembershipRow.user_id == str(actor),
+                ProjectMembershipRow.status == "active",
+            )
+        )
+        if membership_id is None:
+            raise AuditAuthorityRejected()
         await self._append(
             session,
             actor=AuditActor.user(uuid.UUID(str(actor))),
