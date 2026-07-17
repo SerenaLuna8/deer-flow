@@ -178,6 +178,40 @@ export interface Translations {
     audit: string;
     automations: string;
     usage: string;
+    governance: {
+      retry: string;
+      usage: {
+        title: string;
+        description: string;
+        loading: string;
+        unavailableTitle: string;
+        unavailableDescription: string;
+        thresholdReached: string;
+        used: string;
+        reserved: string;
+        limit: string;
+        tightenTitle: string;
+        updateError: string;
+        saving: string;
+        save: string;
+        dimensions: {
+          members: string;
+          storage_bytes: string;
+          concurrent_runs: string;
+          mcp_calls_daily: string;
+        };
+      };
+      audit: {
+        title: string;
+        description: string;
+        loading: string;
+        unavailableTitle: string;
+        unavailableDescription: string;
+        emptyTitle: string;
+        emptyDescription: string;
+        olderEvents: string;
+      };
+    };
   };
 
   automation: {

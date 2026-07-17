@@ -8,6 +8,7 @@ import {
   transitionPrivateWorkScope,
 } from "@/core/private-work/scope-registry";
 import { automationRoot } from "@/core/project-automations/query-keys";
+import { governanceRoot } from "@/core/project-governance/query-keys";
 
 const A_P1 = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -28,6 +29,66 @@ function makeSessionStorage() {
 }
 
 describe("project private-work scope registry", () => {
+  test("aborts and removes in-flight governance queries and mutations on project switch", async () => {
+    const registry = createPrivateWorkScopeRegistry();
+    const access = registry.acquire(A_P1);
+    const queryClient = new QueryClient();
+    const root = governanceRoot(A_P1);
+    let queryStarted!: () => void;
+    const queryReady = new Promise<void>((resolve) => {
+      queryStarted = resolve;
+    });
+    let queryAborted = false;
+    const pendingQuery = queryClient
+      .fetchQuery({
+        queryKey: [...root, "usage"],
+        queryFn: ({ signal }) =>
+          new Promise<string>((resolve) => {
+            signal.addEventListener("abort", () => {
+              queryAborted = true;
+              resolve("late-query");
+            });
+            queryStarted();
+          }),
+      })
+      .catch(() => undefined);
+
+    let mutationStarted!: () => void;
+    const mutationReady = new Promise<void>((resolve) => {
+      mutationStarted = resolve;
+    });
+    let mutationAborted = false;
+    let resolveMutation!: (value: string) => void;
+    const deferredMutation = new Promise<string>((resolve) => {
+      resolveMutation = resolve;
+    });
+    const mutation = queryClient.getMutationCache().build(queryClient, {
+      mutationKey: [...root, "usage", "mutation", "limits"],
+      mutationFn: () =>
+        access.runAbortable!(async (signal) => {
+          signal.addEventListener("abort", () => {
+            mutationAborted = true;
+          });
+          mutationStarted();
+          return deferredMutation;
+        }),
+    });
+    const pendingMutation = mutation.execute(undefined);
+    await Promise.all([queryReady, mutationReady]);
+
+    await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
+
+    expect(queryAborted).toBe(true);
+    expect(mutationAborted).toBe(true);
+    expect(queryClient.getQueryData([...root, "usage"])).toBeUndefined();
+    expect(
+      queryClient.getMutationCache().findAll({ mutationKey: root }),
+    ).toHaveLength(0);
+
+    resolveMutation("late-mutation");
+    await Promise.all([pendingQuery, pendingMutation]);
+  });
+
   test("drops a deferred automation mutation without recreating its old query", async () => {
     const registry = createPrivateWorkScopeRegistry();
     const access = registry.acquire(A_P1);
@@ -91,7 +152,7 @@ describe("project private-work scope registry", () => {
 
     await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
 
-    expect(order).toEqual(["cancel", "cancel", "dispose"]);
+    expect(order).toEqual(["cancel", "cancel", "cancel", "dispose"]);
     expect(dispose).toHaveBeenCalledWith(A_P1);
     expect(registry.has(A_P1)).toBe(false);
     expect(

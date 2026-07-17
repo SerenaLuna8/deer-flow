@@ -3,6 +3,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { getAPIClient } from "@/core/api";
 import { getBackendBaseURL } from "@/core/config";
 import { automationRoot } from "@/core/project-automations/query-keys";
+import { governanceRoot } from "@/core/project-governance/query-keys";
 
 import {
   clearProjectReconnectStorage,
@@ -131,7 +132,11 @@ export async function transitionPrivateWorkScope(
   if (sameScope(previous, next)) return false;
   if (!previous) return true;
 
-  const roots = [privateWorkRoot(previous), automationRoot(previous)];
+  const roots = [
+    privateWorkRoot(previous),
+    automationRoot(previous),
+    governanceRoot(previous),
+  ];
   const cancellations = roots.map((queryKey) =>
     queryClient.cancelQueries({ queryKey }),
   );

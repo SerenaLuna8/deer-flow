@@ -1,10 +1,13 @@
 "use client";
 
 import { notFound } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useI18n } from "@/core/i18n/hooks";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import type { ProjectClientScope } from "@/core/private-work/types";
 import {
   useProjectAudit,
   type ProjectAuditPage as ProjectAuditPageData,
@@ -25,14 +28,16 @@ export function ProjectAuditStateView({
   state: ProjectAuditState;
   onRetry?: () => void;
 }) {
+  const { t } = useI18n();
+  const labels = t.project.governance.audit;
   if (state.status === "loading") {
     return (
       <section
         aria-busy="true"
-        aria-label="Loading audit"
+        aria-label={labels.loading}
         className="space-y-4"
       >
-        <p>Loading audit</p>
+        <p>{labels.loading}</p>
         <Skeleton className="h-40 w-full rounded-xl" />
       </section>
     );
@@ -40,9 +45,9 @@ export function ProjectAuditStateView({
   if (state.status === "error") {
     return (
       <section role="alert" className="rounded-xl border p-6">
-        <h2 className="font-semibold">Audit is unavailable</h2>
+        <h2 className="font-semibold">{labels.unavailableTitle}</h2>
         <p className="text-muted-foreground mt-2 text-sm">
-          Audit history could not be read safely.
+          {labels.unavailableDescription}
         </p>
         {onRetry ? (
           <Button
@@ -51,7 +56,7 @@ export function ProjectAuditStateView({
             variant="outline"
             onClick={onRetry}
           >
-            Retry
+            {t.project.governance.retry}
           </Button>
         ) : null}
       </section>
@@ -60,9 +65,9 @@ export function ProjectAuditStateView({
   if (state.data.items.length === 0) {
     return (
       <section className="rounded-xl border p-8 text-center">
-        <h2 className="font-semibold">No audit events</h2>
+        <h2 className="font-semibold">{labels.emptyTitle}</h2>
         <p className="text-muted-foreground mt-2 text-sm">
-          This project has no recorded governance events yet.
+          {labels.emptyDescription}
         </p>
       </section>
     );
@@ -103,11 +108,22 @@ export function ProjectAuditPage() {
   const project = useCurrentProject();
   const canRead = project.capabilities.includes("project.audit.read");
   const staticMode = isStaticWebsiteOnly();
-  const [cursor, setCursor] = useState<string | null>(null);
-  const audit = useProjectAudit(cursor, 50, canRead && !staticMode);
+  const access = usePrivateWorkAccess();
 
-  useEffect(() => setCursor(null), [project.id]);
-  if (!canRead || staticMode) notFound();
+  if (!canRead || staticMode || access.scope === null) notFound();
+  return (
+    <AuthorizedProjectAuditPage
+      key={access.scope.projectId}
+      scope={access.scope}
+    />
+  );
+}
+
+function AuthorizedProjectAuditPage({ scope }: { scope: ProjectClientScope }) {
+  const { t } = useI18n();
+  const [cursor, setCursor] = useState<string | null>(null);
+  const audit = useProjectAudit(scope, cursor, 50);
+
   if (audit.isLoading)
     return <ProjectAuditStateView state={{ status: "loading" }} />;
   if (audit.error || !audit.data) {
@@ -127,7 +143,7 @@ export function ProjectAuditPage() {
           variant="outline"
           onClick={() => setCursor(audit.data.next_cursor)}
         >
-          Older events
+          {t.project.governance.audit.olderEvents}
         </Button>
       ) : null}
     </div>

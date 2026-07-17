@@ -7,13 +7,16 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ProjectAuditStateView } from "@/components/projects/governance/project-audit-page";
 import { ProjectUsageStateView } from "@/components/projects/governance/project-usage-page";
 import { projectNavigationItems } from "@/components/projects/project-nav";
+import { I18nProvider } from "@/core/i18n/context";
 import {
   auditPageSchema,
   projectAuditQueryKey,
+  projectAuditQueryOptions,
   type ProjectAuditPage,
 } from "@/core/project-governance/audit";
 import {
   projectUsageQueryKey,
+  projectUsageQueryOptions,
   usageResponseSchema,
   type ProjectUsage,
 } from "@/core/project-governance/usage";
@@ -64,9 +67,33 @@ const usage: ProjectUsage = {
     {
       dimension: "members",
       bucket: "lifetime",
+      used: 2,
+      reserved: 0,
+      limit: 20,
+      warning_threshold_reached: false,
+    },
+    {
+      dimension: "storage_bytes",
+      bucket: "lifetime",
+      used: 1024,
+      reserved: 0,
+      limit: 5_368_709_120,
+      warning_threshold_reached: false,
+    },
+    {
+      dimension: "concurrent_runs",
+      bucket: "lifetime",
       used: 0,
       reserved: 2,
-      limit: 20,
+      limit: 3,
+      warning_threshold_reached: false,
+    },
+    {
+      dimension: "mcp_calls_daily",
+      bucket: "2026-07-17",
+      used: 12,
+      reserved: 0,
+      limit: 10_000,
       warning_threshold_reached: false,
     },
   ],
@@ -94,8 +121,18 @@ const auditPage: ProjectAuditPage = {
   next_cursor: null,
 };
 
+function renderWithLocale(
+  children: React.ReactNode,
+  locale: "en-US" | "zh-CN" = "en-US",
+) {
+  return renderToStaticMarkup(
+    <I18nProvider initialLocale={locale}>{children}</I18nProvider>,
+  );
+}
+
 describe("M6 project governance", () => {
   test("keeps every query key under its exact account and project prefix", () => {
+    const scope = { accountId: ACCOUNT_A, projectId: PROJECT_A };
     expect(
       projectUsageQueryKey({ accountId: ACCOUNT_A, projectId: PROJECT_A }),
     ).toEqual([
@@ -127,6 +164,12 @@ describe("M6 project governance", () => {
     ).not.toEqual(
       projectUsageQueryKey({ accountId: ACCOUNT_A, projectId: PROJECT_B }),
     );
+    expect(projectUsageQueryOptions(scope as never).queryKey).toEqual(
+      projectUsageQueryKey(scope),
+    );
+    expect(projectAuditQueryOptions(scope as never).queryKey).toEqual(
+      projectAuditQueryKey(scope),
+    );
   });
 
   test("accepts only strict public usage and audit response fields", () => {
@@ -144,6 +187,74 @@ describe("M6 project governance", () => {
             target_ref_hmac: "secret-digest",
           },
         ],
+      }),
+    ).toThrow();
+    expect(() =>
+      auditPageSchema.parse({
+        ...auditPage,
+        items: [{ ...auditPage.items[0], action: "unknown.action" }],
+      }),
+    ).toThrow();
+    for (const privateKey of [
+      "password",
+      "access_token",
+      "oauth_state",
+      "filename",
+      "path",
+    ]) {
+      expect(() =>
+        auditPageSchema.parse({
+          ...auditPage,
+          items: [
+            {
+              ...auditPage.items[0],
+              metadata: {
+                ...auditPage.items[0]!.metadata,
+                [privateKey]: "must-not-render",
+              },
+            },
+          ],
+        }),
+      ).toThrow();
+    }
+  });
+
+  test("requires all four unique dimensions with exact bucket contracts", () => {
+    expect(() =>
+      usageResponseSchema.parse({
+        ...usage,
+        dimensions: usage.dimensions.slice(0, 3),
+      }),
+    ).toThrow();
+    expect(() =>
+      usageResponseSchema.parse({
+        ...usage,
+        dimensions: [
+          usage.dimensions[0],
+          usage.dimensions[0],
+          usage.dimensions[2],
+          usage.dimensions[3],
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      usageResponseSchema.parse({
+        ...usage,
+        dimensions: usage.dimensions.map((item) =>
+          item.dimension === "storage_bytes"
+            ? { ...item, bucket: "2026-07-17" }
+            : item,
+        ),
+      }),
+    ).toThrow();
+    expect(() =>
+      usageResponseSchema.parse({
+        ...usage,
+        dimensions: usage.dimensions.map((item) =>
+          item.dimension === "mcp_calls_daily"
+            ? { ...item, bucket: "2026-02-30" }
+            : item,
+        ),
       }),
     ).toThrow();
   });
@@ -220,49 +331,57 @@ describe("M6 project governance", () => {
 
   test("renders loading, empty, error, and public data states without secrets", () => {
     expect(
-      renderToStaticMarkup(
-        <ProjectUsageStateView state={{ status: "loading" }} />,
-      ),
+      renderWithLocale(<ProjectUsageStateView state={{ status: "loading" }} />),
     ).toContain("Loading usage");
     expect(
-      renderToStaticMarkup(
+      renderWithLocale(
         <ProjectUsageStateView
           state={{ status: "error" }}
           onRetry={() => undefined}
         />,
       ),
     ).toContain("Usage is unavailable");
-    const usageHtml = renderToStaticMarkup(
+    const usageHtml = renderWithLocale(
       <ProjectUsageStateView state={{ status: "ready", data: usage }} />,
     );
     expect(usageHtml).toContain("Members");
     expect(usageHtml).not.toContain("owner_user_id");
 
     expect(
-      renderToStaticMarkup(
-        <ProjectAuditStateView state={{ status: "loading" }} />,
-      ),
+      renderWithLocale(<ProjectAuditStateView state={{ status: "loading" }} />),
     ).toContain("Loading audit");
     expect(
-      renderToStaticMarkup(
+      renderWithLocale(
         <ProjectAuditStateView
           state={{ status: "ready", data: { items: [], next_cursor: null } }}
         />,
       ),
     ).toContain("No audit events");
     expect(
-      renderToStaticMarkup(
+      renderWithLocale(
         <ProjectAuditStateView
           state={{ status: "error" }}
           onRetry={() => undefined}
         />,
       ),
     ).toContain("Audit is unavailable");
-    const auditHtml = renderToStaticMarkup(
+    const auditHtml = renderWithLocale(
       <ProjectAuditStateView state={{ status: "ready", data: auditPage }} />,
     );
     expect(auditHtml).toContain("quota.policy_updated");
     expect(auditHtml).not.toMatch(/target_ref|owner_user_id|secret-digest/u);
+    expect(
+      renderWithLocale(
+        <ProjectUsageStateView state={{ status: "loading" }} />,
+        "zh-CN",
+      ),
+    ).toContain("正在加载用量");
+    expect(
+      renderWithLocale(
+        <ProjectAuditStateView state={{ status: "loading" }} />,
+        "zh-CN",
+      ),
+    ).toContain("正在加载审计");
   });
 
   test("keeps both direct pages behind the non-static route gate", () => {
@@ -275,6 +394,7 @@ describe("M6 project governance", () => {
         "utf8",
       );
       expect(source).toContain("if (isStaticWebsiteOnly()) notFound();");
+      expect(source).toContain("getI18n");
     }
   });
 });

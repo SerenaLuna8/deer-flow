@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -7,7 +8,8 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from fastapi import FastAPI, Request
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import DBAPIError
 from support.m4_private_threads import seed_m4_thread_database
 
 from app.audit.models import (
@@ -39,6 +41,7 @@ from app.reliability.error_mapping import (
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.audit.model import AuditLogRow
+from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.quotas.model import ProjectQuotaRow, ProjectUsageLedgerRow
 
 
@@ -393,6 +396,11 @@ async def test_audit_is_descending_cursor_paginated_scoped_and_privacy_safe(
                 f"/api/projects/{seed.owner_a.project_id}/audit?cursor=not-a-cursor",
                 headers={"x-test-user": str(seed.owner_a.user_id)},
             )
+            oversized_cursor = await client.get(
+                f"/api/projects/{seed.owner_a.project_id}/audit",
+                params={"cursor": "a" * 257},
+                headers={"x-test-user": str(seed.owner_a.user_id)},
+            )
             invalid_limit = await client.get(
                 f"/api/projects/{seed.owner_a.project_id}/audit?limit=101",
                 headers={"x-test-user": str(seed.owner_a.user_id)},
@@ -436,8 +444,81 @@ async def test_audit_is_descending_cursor_paginated_scoped_and_privacy_safe(
             assert private_field not in encoded
         assert invalid_cursor.status_code == 400
         assert invalid_cursor.json()["code"] == "INVALID_STREAM_CURSOR"
+        assert oversized_cursor.status_code == 422
+        assert oversized_cursor.json()["code"] == "RELIABILITY_INVALID"
         assert invalid_limit.status_code == 422
         assert invalid_limit.json()["code"] == "RELIABILITY_INVALID"
         _assert_public_not_found(hidden)
     finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_audit_read_holds_project_and_membership_authority_locks_until_listing_finishes(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    keyring = _keyring()
+    quotas = QuotaService(seed.factory, QuotaConfig(), source_ref_hasher=keyring)
+    audit = AuditService(seed.factory, keyring)
+    list_started = asyncio.Event()
+    list_release = asyncio.Event()
+    original_list_project = getattr(audit, "list_project", None)
+
+    async def paused_list_project(session, context, **kwargs):
+        list_started.set()
+        await list_release.wait()
+        assert original_list_project is not None
+        return await original_list_project(session, context, **kwargs)
+
+    setattr(audit, "list_project", paused_list_project)
+    sink = OperationalAuditSink(
+        audit,
+        process_context=_bind_gateway_audit_process(audit),
+    )
+    app = _test_app(seed, quotas, audit, sink)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response_task = asyncio.create_task(
+                client.get(
+                    f"/api/projects/{seed.owner_a.project_id}/audit",
+                    headers={"x-test-user": str(seed.owner_a.user_id)},
+                )
+            )
+            await asyncio.wait_for(list_started.wait(), timeout=1)
+
+            for statement in (
+                update(ProjectRow).where(ProjectRow.id == seed.owner_a.project_id).values(is_suspended=True),
+                update(ProjectMembershipRow).where(ProjectMembershipRow.id == seed.owner_a.membership_id).values(role=ProjectRole.VIEWER.value),
+            ):
+                async with seed.factory() as competing_session:
+                    await competing_session.execute(text("SET lock_timeout = '200ms'"))
+                    with pytest.raises(DBAPIError):
+                        await competing_session.execute(statement)
+                    await competing_session.rollback()
+
+            list_release.set()
+            response = await response_task
+            assert response.status_code == 200
+
+            async with seed.factory.begin() as session:
+                await session.execute(
+                    update(ProjectMembershipRow)
+                    .where(ProjectMembershipRow.id == seed.owner_a.membership_id)
+                    .values(
+                        status="removed",
+                        version=ProjectMembershipRow.version + 1,
+                    )
+                )
+            hidden = await client.get(
+                f"/api/projects/{seed.owner_a.project_id}/audit",
+                headers={"x-test-user": str(seed.owner_a.user_id)},
+            )
+            _assert_public_not_found(hidden)
+    finally:
+        list_release.set()
         await seed.engine.dispose()

@@ -31,10 +31,12 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { useI18n } from "@/core/i18n/hooks";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
   projectPrivateWorkEntryEnabled,
   useProjectPrivateWorkReadiness,
 } from "@/core/private-work/readiness";
+import type { ProjectClientScope } from "@/core/private-work/types";
 import { useProjectAutomationReadiness } from "@/core/project-automations/readiness";
 import { useProjectAudit } from "@/core/project-governance/audit";
 import { useProjectUsage } from "@/core/project-governance/usage";
@@ -242,17 +244,77 @@ function ProjectNavigationLinksWithGovernance({
   privateWorkReady: boolean;
   automationReady: boolean;
 }) {
+  const scope = usePrivateWorkAccess().scope;
   const canReadUsage = project.capabilities.includes("project.usage.read");
   const canReadAudit = project.capabilities.includes("project.audit.read");
-  const usage = useProjectUsage(canReadUsage);
-  const audit = useProjectAudit(null, 1, canReadAudit);
+  const props = { project, mobile, privateWorkReady, automationReady };
+  if (scope !== null && canReadUsage && canReadAudit) {
+    return <ProjectNavigationLinksWithUsageAndAudit {...props} scope={scope} />;
+  }
+  if (scope !== null && canReadUsage) {
+    return <ProjectNavigationLinksWithUsage {...props} scope={scope} />;
+  }
+  if (scope !== null && canReadAudit) {
+    return <ProjectNavigationLinksWithAudit {...props} scope={scope} />;
+  }
   return (
     <ProjectNavigationLinksContent
-      project={project}
-      mobile={mobile}
-      privateWorkReady={privateWorkReady}
-      automationReady={automationReady}
+      {...props}
+      usageReady={false}
+      auditReady={false}
+      staticWebsiteOnly={false}
+    />
+  );
+}
+
+type GovernanceNavigationProps = {
+  project: Project;
+  mobile: boolean;
+  privateWorkReady: boolean;
+  automationReady: boolean;
+  scope: ProjectClientScope;
+};
+
+function ProjectNavigationLinksWithUsageAndAudit({
+  scope,
+  ...props
+}: GovernanceNavigationProps) {
+  const usage = useProjectUsage(scope);
+  const audit = useProjectAudit(scope, null, 1);
+  return (
+    <ProjectNavigationLinksContent
+      {...props}
       usageReady={usage.isSuccess}
+      auditReady={audit.isSuccess}
+      staticWebsiteOnly={false}
+    />
+  );
+}
+
+function ProjectNavigationLinksWithUsage({
+  scope,
+  ...props
+}: GovernanceNavigationProps) {
+  const usage = useProjectUsage(scope);
+  return (
+    <ProjectNavigationLinksContent
+      {...props}
+      usageReady={usage.isSuccess}
+      auditReady={false}
+      staticWebsiteOnly={false}
+    />
+  );
+}
+
+function ProjectNavigationLinksWithAudit({
+  scope,
+  ...props
+}: GovernanceNavigationProps) {
+  const audit = useProjectAudit(scope, null, 1);
+  return (
+    <ProjectNavigationLinksContent
+      {...props}
+      usageReady={false}
       auditReady={audit.isSuccess}
       staticWebsiteOnly={false}
     />

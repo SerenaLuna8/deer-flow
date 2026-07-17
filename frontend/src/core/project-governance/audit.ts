@@ -3,51 +3,170 @@
 import { useQuery } from "@tanstack/react-query";
 import { z } from "zod";
 
-import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
   projectClientScopeSchema,
-  type PrivateWorkAccess,
   type ProjectClientScope,
 } from "@/core/private-work/types";
 
+import { governanceRoot } from "./query-keys";
 import {
   projectGovernanceBaseURL,
   readProjectGovernanceResponse,
   requestProjectGovernance,
 } from "./usage";
 
-const PRIVATE_METADATA_KEYS = new Set([
-  "attempt_id",
-  "ciphertext",
-  "job_id",
-  "nonce",
-  "owner_user_id",
-  "project_id",
-  "request_id",
-  "secret",
-  "target_ref_hmac",
-  "target_ref_key_id",
+export const auditActionSchema = z.enum([
+  "project.created",
+  "project.updated",
+  "project.suspended",
+  "project.resumed",
+  "project.deletion_requested",
+  "project.recovered",
+  "invitation.created",
+  "invitation.revoked",
+  "invitation.redeemed",
+  "member.joined",
+  "member.role_changed",
+  "member.removed",
+  "member.left",
+  "asset.created",
+  "asset.updated",
+  "asset.published",
+  "asset.deprecated",
+  "asset.bound",
+  "asset.unbound",
+  "asset.credential_replaced",
+  "automation.created",
+  "automation.updated",
+  "automation.deleted",
+  "automation.triggered",
+  "quota.policy_updated",
+  "quota.reconciled",
+  "run.admitted",
+  "run.cancel_requested",
+  "run.terminal",
+  "job.dead",
+  "job.requeued",
+  "backup.created",
+  "restore.started",
+  "restore.completed",
+  "recovery.drill_completed",
+  "purge.completed",
+  "audit.corrected",
 ]);
 
-function containsPrivateKey(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(containsPrivateKey);
-  if (typeof value !== "object" || value === null) return false;
-  return Object.entries(value).some(
-    ([key, item]) =>
-      PRIVATE_METADATA_KEYS.has(key.toLowerCase()) || containsPrivateKey(item),
-  );
-}
+type AuditAction = z.infer<typeof auditActionSchema>;
 
-const publicMetadataSchema = z
-  .record(z.string(), z.unknown())
-  .superRefine((value, context) => {
-    if (containsPrivateKey(value)) {
-      context.addIssue({
-        code: "custom",
-        message: "Private audit metadata is forbidden",
-      });
-    }
-  });
+const emptyMetadataSchema = z.object({}).strict();
+const roleSchema = z.enum(["admin", "editor", "runner", "viewer"]);
+const roleMetadataSchema = z.object({ role: roleSchema }).strict();
+const roleChangedMetadataSchema = z
+  .object({ previous_role: roleSchema, role: roleSchema })
+  .strict();
+const assetMetadataSchema = z
+  .object({ asset_kind: z.enum(["agent", "skill", "mcp"]) })
+  .strict();
+const automationMetadataSchema = z
+  .object({ trigger_kind: z.enum(["manual", "scheduled"]).optional() })
+  .strict();
+const automationTriggeredMetadataSchema = z
+  .object({ trigger_kind: z.enum(["manual", "scheduled"]) })
+  .strict();
+const publicErrorCodeSchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/u);
+const quotaPolicyMetadataSchema = z
+  .object({
+    member_limit: z.number().int().min(1).nullable().optional(),
+    storage_bytes_limit: z.number().int().nonnegative().nullable().optional(),
+    concurrent_run_limit: z.number().int().min(1).nullable().optional(),
+    mcp_calls_daily_limit: z.number().int().nonnegative().nullable().optional(),
+    version: z.number().int().min(1),
+  })
+  .strict();
+const quotaReconciledMetadataSchema = z
+  .object({ changed_dimensions: z.number().int().min(0).max(4) })
+  .strict();
+const runAdmittedMetadataSchema = z
+  .object({
+    job_type: z.enum(["private_run", "automation_run"]),
+    non_interactive: z.boolean(),
+  })
+  .strict();
+const runTerminalMetadataSchema = z
+  .object({
+    job_type: z.enum(["private_run", "automation_run"]),
+    status: z.enum(["completed", "failed", "cancelled"]),
+    public_error_code: publicErrorCodeSchema.nullable().optional(),
+  })
+  .strict();
+const jobMetadataSchema = z
+  .object({
+    job_type: z.enum(["private_run", "automation_run", "retention_purge"]),
+    public_error_code: publicErrorCodeSchema.nullable().optional(),
+    attempt_count: z.number().int().min(0).max(20),
+    retry_safety: z.enum(["safe", "unknown", "unsafe"]),
+  })
+  .strict();
+const backupMetadataSchema = z
+  .object({
+    table_count: z.number().int().nonnegative(),
+    tombstone_high_watermark: z.number().int().nonnegative(),
+  })
+  .strict();
+const restoreMetadataSchema = z
+  .object({
+    table_count: z.number().int().nonnegative(),
+    tombstones_replayed: z.number().int().nonnegative(),
+  })
+  .strict();
+const purgeMetadataSchema = z
+  .object({
+    resource_kind: z.enum(["project", "account", "file"]),
+    purged_count: z.number().int().nonnegative(),
+  })
+  .strict();
+const correctionMetadataSchema = z
+  .object({ correction_kind: z.enum(["outcome", "metadata", "target"]) })
+  .strict();
+
+const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
+  "project.created": emptyMetadataSchema,
+  "project.updated": emptyMetadataSchema,
+  "project.suspended": emptyMetadataSchema,
+  "project.resumed": emptyMetadataSchema,
+  "project.deletion_requested": emptyMetadataSchema,
+  "project.recovered": emptyMetadataSchema,
+  "invitation.created": roleMetadataSchema,
+  "invitation.revoked": emptyMetadataSchema,
+  "invitation.redeemed": roleMetadataSchema,
+  "member.joined": roleMetadataSchema,
+  "member.role_changed": roleChangedMetadataSchema,
+  "member.removed": emptyMetadataSchema,
+  "member.left": emptyMetadataSchema,
+  "asset.created": assetMetadataSchema,
+  "asset.updated": assetMetadataSchema,
+  "asset.published": assetMetadataSchema,
+  "asset.deprecated": assetMetadataSchema,
+  "asset.bound": assetMetadataSchema,
+  "asset.unbound": assetMetadataSchema,
+  "asset.credential_replaced": assetMetadataSchema,
+  "automation.created": automationMetadataSchema,
+  "automation.updated": automationMetadataSchema,
+  "automation.deleted": automationMetadataSchema,
+  "automation.triggered": automationTriggeredMetadataSchema,
+  "quota.policy_updated": quotaPolicyMetadataSchema,
+  "quota.reconciled": quotaReconciledMetadataSchema,
+  "run.admitted": runAdmittedMetadataSchema,
+  "run.cancel_requested": emptyMetadataSchema,
+  "run.terminal": runTerminalMetadataSchema,
+  "job.dead": jobMetadataSchema,
+  "job.requeued": jobMetadataSchema,
+  "backup.created": backupMetadataSchema,
+  "restore.started": restoreMetadataSchema,
+  "restore.completed": restoreMetadataSchema,
+  "recovery.drill_completed": restoreMetadataSchema,
+  "purge.completed": purgeMetadataSchema,
+  "audit.corrected": correctionMetadataSchema,
+};
 
 export const auditItemSchema = z
   .object({
@@ -63,7 +182,7 @@ export const auditItemSchema = z
       "recovery",
       "system_admin",
     ]),
-    action: z.string().min(1).max(64),
+    action: auditActionSchema,
     target_kind: z.enum([
       "project",
       "invitation",
@@ -83,9 +202,21 @@ export const auditItemSchema = z
       .string()
       .regex(/^[A-Z][A-Z0-9_]{0,63}$/u)
       .nullable(),
-    metadata: publicMetadataSchema,
+    metadata: z.record(z.string(), z.unknown()),
   })
-  .strict();
+  .strict()
+  .superRefine((item, context) => {
+    const result = auditMetadataSchemas[item.action].safeParse(item.metadata);
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        context.addIssue({
+          code: "custom",
+          path: ["metadata", ...issue.path],
+          message: issue.message,
+        });
+      }
+    }
+  });
 
 export const auditPageSchema = z
   .object({
@@ -99,22 +230,7 @@ export function projectAuditQueryKey(
   cursor: string | null = null,
   limit = 50,
 ) {
-  const parsed = projectClientScopeSchema.parse(scope);
-  return [
-    "account",
-    parsed.accountId,
-    "project",
-    parsed.projectId,
-    "governance",
-    "audit",
-    cursor,
-    limit,
-  ] as const;
-}
-
-function requiredScope(access: PrivateWorkAccess): ProjectClientScope {
-  if (!access.scope) throw new Error("Project governance scope is unavailable");
-  return access.scope;
+  return [...governanceRoot(scope), "audit", cursor, limit] as const;
 }
 
 export async function fetchProjectAudit(
@@ -133,31 +249,28 @@ export async function fetchProjectAudit(
 }
 
 export function projectAuditQueryOptions(
-  access: PrivateWorkAccess,
+  scope: ProjectClientScope,
   cursor: string | null = null,
   limit = 50,
   enabled = true,
 ) {
-  const scope = access.scope;
+  const parsed = projectClientScopeSchema.parse(scope);
   return {
-    queryKey: scope
-      ? projectAuditQueryKey(scope, cursor, limit)
-      : (["governance", "audit", "inactive"] as const),
+    queryKey: projectAuditQueryKey(parsed, cursor, limit),
     queryFn: ({ signal }: { signal: AbortSignal }) =>
-      fetchProjectAudit(requiredScope(access), cursor, limit, signal),
-    enabled: enabled && scope !== null,
+      fetchProjectAudit(parsed, cursor, limit, signal),
+    enabled,
     retry: false,
     refetchOnWindowFocus: false,
   };
 }
 
 export function useProjectAudit(
+  scope: ProjectClientScope,
   cursor: string | null = null,
   limit = 50,
-  enabled = true,
 ) {
-  const access = usePrivateWorkAccess();
-  return useQuery(projectAuditQueryOptions(access, cursor, limit, enabled));
+  return useQuery(projectAuditQueryOptions(scope, cursor, limit));
 }
 
 export type ProjectAuditItem = z.infer<typeof auditItemSchema>;

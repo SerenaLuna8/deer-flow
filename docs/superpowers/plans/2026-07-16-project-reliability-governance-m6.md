@@ -1045,6 +1045,8 @@ Expected: PASS；无 capability/readiness 时 route 和 sidebar 都不暴露入�
 
 完成（2026-07-17）：后端新增 project Admin-only usage、optimistic quota tightening 和 privacy-safe descending audit API，所有入口使用 fresh `ProjectContext`、精确 capability 与 M6 cutover guard；Member/Viewer/outsider/cross-project 统一 public 404。Quota policy、80% threshold ledger 与 `quota.policy_updated` audit 共用 caller transaction，audit failure 已由真实 PostgreSQL 用例证明全部回滚。前端实现 account+project-scoped strict queries、Usage/Audit loading/empty/error/data states、direct static gate，并在实际 `project-nav.tsx` 中只于 non-static + exact capability + endpoint readiness 同时满足时显示入口。RED 分别证明 backend dependency 与 frontend component 缺失；GREEN 为后端聚焦回归 56 passed、前端全量 unit 926 passed，`pnpm check` 与 Prettier gate 通过。
 
+独立审查修复（2026-07-17）：后端新增 caller-session audit list，route 在同一 `session.begin()` 内锁定 Project→Membership、检查 capability/cutover 并完成 audit query；真实 PostgreSQL `lock_timeout` 回归证明 suspension/downgrade 不能插入 authorization/list 间隙，兼容 `list_project_new_session()` 保留，cursor 长度在路由层固定为 256。前端 audit 改为 closed action enum + 与 backend `AUDIT_METADATA_MODELS` 对齐的逐 action strict schema；Usage 固定四个唯一 dimension 与 lifetime/UTC-day bucket；capability/static parent gate 和 navigation fixed hook variants 确保未授权 hook 不挂载；active key 全部从 account+project `governanceRoot()` 派生并纳入 project transition cancel/remove；所有新增页面文案接入 typed en-US/zh-CN i18n。修复 RED：backend 2 expected failures，frontend 10 expected failures；GREEN：backend Task 14 5 passed、backend audit/cutover 49 passed、frontend focused 14 passed、frontend nav/static/scope/project-switch 27 passed、frontend full 932 passed；Ruff、`pnpm check`、Prettier 与 `git diff --check` 全部通过。
+
 ### Task 15: 提供 system_admin operations/projects/jobs/audit API 和 UI
 
 **Files:**

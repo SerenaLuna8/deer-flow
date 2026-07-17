@@ -213,12 +213,40 @@ class AuditService:
         outcome: AuditOutcome | None = None,
         target: AuditTarget | None = None,
     ) -> AuditPage:
+        if self._sessions is None:
+            raise AuditUnavailable()
+        try:
+            async with self._sessions() as session:
+                return await self.list_project(
+                    session,
+                    context,
+                    limit=limit,
+                    cursor=cursor,
+                    action=action,
+                    outcome=outcome,
+                    target=target,
+                )
+        except DBAPIError:
+            raise AuditUnavailable() from None
+
+    async def list_project(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        action: AuditAction | None = None,
+        outcome: AuditOutcome | None = None,
+        target: AuditTarget | None = None,
+    ) -> AuditPage:
         if type(context) is not ProjectContext:
             raise AuditAuthorityRejected()
         context.require(Capability.PROJECT_AUDIT_READ)
         if target is not None and (type(target) is not AuditTarget or target.project_id != context.project_id):
             raise AuditAuthorityRejected()
-        return await self._list_new_session(
+        return await self._list_in_session(
+            session,
             project_id=context.project_id,
             limit=limit,
             cursor=cursor,
@@ -260,6 +288,31 @@ class AuditService:
     ) -> AuditPage:
         if self._sessions is None:
             raise AuditUnavailable()
+        try:
+            async with self._sessions() as session:
+                return await self._list_in_session(
+                    session,
+                    project_id=project_id,
+                    limit=limit,
+                    cursor=cursor,
+                    action=action,
+                    outcome=outcome,
+                    target=target,
+                )
+        except DBAPIError:
+            raise AuditUnavailable() from None
+
+    async def _list_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID | None,
+        limit: int,
+        cursor: str | None,
+        action: AuditAction | None,
+        outcome: AuditOutcome | None,
+        target: AuditTarget | None,
+    ) -> AuditPage:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise AuditCursorRejected()
         if action is not None and type(action) is not AuditAction:
@@ -278,28 +331,24 @@ class AuditService:
                     target.authority_id,
                 )
             )
-        try:
-            async with self._sessions() as session:
-                repository = AuditRepository(session)
-                if project_id is None:
-                    rows = await repository.list_platform(
-                        limit=limit + 1,
-                        cursor=selected_cursor,
-                        action=action.value if action is not None else None,
-                        outcome=outcome.value if outcome is not None else None,
-                        target_refs=target_refs,
-                    )
-                else:
-                    rows = await repository.list_project(
-                        project_id,
-                        limit=limit + 1,
-                        cursor=selected_cursor,
-                        action=action.value if action is not None else None,
-                        outcome=outcome.value if outcome is not None else None,
-                        target_refs=target_refs,
-                    )
-        except DBAPIError:
-            raise AuditUnavailable() from None
+        repository = AuditRepository(session)
+        if project_id is None:
+            rows = await repository.list_platform(
+                limit=limit + 1,
+                cursor=selected_cursor,
+                action=action.value if action is not None else None,
+                outcome=outcome.value if outcome is not None else None,
+                target_refs=target_refs,
+            )
+        else:
+            rows = await repository.list_project(
+                project_id,
+                limit=limit + 1,
+                cursor=selected_cursor,
+                action=action.value if action is not None else None,
+                outcome=outcome.value if outcome is not None else None,
+                target_refs=target_refs,
+            )
         page_rows = rows[:limit]
         next_cursor = self._encode_cursor(page_rows[-1]) if len(rows) > limit else None
         return AuditPage(

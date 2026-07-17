@@ -166,7 +166,12 @@ account/project/thread 隔离保存，重复 event ID 与 terminal 会被丢弃�
 Usage/Audit 页面；两类 query key 都以认证 account UUID 和 entered project UUID 开头，入口必须同时满足
 非 static、精确 server capability 和对应 M6 API readiness，直达页仍由 capability 与 API 的 public-404
 边界关闭。Usage 只显示 configured/effective limit、used/reserved 和 80% 状态，并以 optimistic version
-收紧项目 quota；Audit 只接受严格公共字段，不显示 target HMAC、owner/project 私有标识或 secret。
+收紧项目 quota；四个 usage dimension 必须各出现一次，lifetime 与 UTC daily bucket contract 不得混用。
+Audit 使用 closed action enum 与逐 action strict metadata schema，不显示 target HMAC、owner/project 私有标识
+或 secret。能力/static 父组件必须在挂载 query/mutation hook 前拒绝直达页；导航使用 fixed hook variants，
+没有对应 capability 时不得调用该 governance hook。所有 active governance key 都从 exact account+project
+`governanceRoot()` 派生，project/account transition 必须与 private-work/Automation 一起先 cancel，再移除旧 scope
+的 governance queries 与 mutations。页面、状态、表单和分页文案统一使用 typed en-US/zh-CN i18n。
 平台运营面、通用备份恢复与最终 M6 关闭仍属于后续 task。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。

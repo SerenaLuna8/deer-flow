@@ -5,13 +5,14 @@ import { z } from "zod";
 
 import { AuthRequiredError, fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
-import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
   projectClientScopeSchema,
   runPrivateWorkAbortable,
   type PrivateWorkAccess,
   type ProjectClientScope,
 } from "@/core/private-work/types";
+
+import { governanceRoot } from "./query-keys";
 
 const quotaLimitsSchema = z
   .object({
@@ -39,26 +40,58 @@ export const quotaPolicySchema = z
   })
   .strict();
 
-const quotaDimensionSchema = z
-  .object({
-    dimension: z.enum([
-      "members",
-      "storage_bytes",
-      "concurrent_runs",
-      "mcp_calls_daily",
-    ]),
-    bucket: z.string().min(1).max(32),
-    used: z.number().int().nonnegative(),
-    reserved: z.number().int().nonnegative(),
-    limit: z.number().int().nonnegative(),
-    warning_threshold_reached: z.boolean(),
-  })
-  .strict();
+const quotaCounterShape = {
+  used: z.number().int().nonnegative(),
+  reserved: z.number().int().nonnegative(),
+  limit: z.number().int().nonnegative(),
+  warning_threshold_reached: z.boolean(),
+};
+
+const quotaDimensionSchema = z.discriminatedUnion("dimension", [
+  z
+    .object({
+      dimension: z.literal("members"),
+      bucket: z.literal("lifetime"),
+      ...quotaCounterShape,
+    })
+    .strict(),
+  z
+    .object({
+      dimension: z.literal("storage_bytes"),
+      bucket: z.literal("lifetime"),
+      ...quotaCounterShape,
+    })
+    .strict(),
+  z
+    .object({
+      dimension: z.literal("concurrent_runs"),
+      bucket: z.literal("lifetime"),
+      ...quotaCounterShape,
+    })
+    .strict(),
+  z
+    .object({
+      dimension: z.literal("mcp_calls_daily"),
+      bucket: z.string().date(),
+      ...quotaCounterShape,
+    })
+    .strict(),
+]);
 
 export const usageResponseSchema = z
   .object({
     policy: quotaPolicySchema,
-    dimensions: z.array(quotaDimensionSchema).max(4),
+    dimensions: z
+      .array(quotaDimensionSchema)
+      .length(4)
+      .superRefine((dimensions, context) => {
+        if (new Set(dimensions.map((item) => item.dimension)).size !== 4) {
+          context.addIssue({
+            code: "custom",
+            message: "Every quota dimension is required exactly once",
+          });
+        }
+      }),
   })
   .strict();
 
@@ -195,15 +228,7 @@ export async function readProjectGovernanceResponse<T>(
 }
 
 export function projectUsageQueryKey(scope: ProjectClientScope) {
-  const parsed = projectClientScopeSchema.parse(scope);
-  return [
-    "account",
-    parsed.accountId,
-    "project",
-    parsed.projectId,
-    "governance",
-    "usage",
-  ] as const;
+  return [...governanceRoot(scope), "usage"] as const;
 }
 
 function requiredScope(access: PrivateWorkAccess): ProjectClientScope {
@@ -241,45 +266,37 @@ export async function updateProjectQuotaLimits(
 }
 
 export function projectUsageQueryOptions(
-  access: PrivateWorkAccess,
+  scope: ProjectClientScope,
   enabled = true,
 ) {
-  const scope = access.scope;
+  const parsed = projectClientScopeSchema.parse(scope);
   return {
-    queryKey: scope
-      ? projectUsageQueryKey(scope)
-      : (["governance", "usage", "inactive"] as const),
+    queryKey: projectUsageQueryKey(parsed),
     queryFn: ({ signal }: { signal: AbortSignal }) =>
-      fetchProjectUsage(requiredScope(access), signal),
-    enabled: enabled && scope !== null,
+      fetchProjectUsage(parsed, signal),
+    enabled,
     retry: false,
     refetchOnWindowFocus: false,
   };
 }
 
-export function useProjectUsage(enabled = true) {
-  const access = usePrivateWorkAccess();
-  return useQuery(projectUsageQueryOptions(access, enabled));
+export function useProjectUsage(scope: ProjectClientScope) {
+  return useQuery(projectUsageQueryOptions(scope));
 }
 
-export function useUpdateProjectQuotaLimits() {
+export function useUpdateProjectQuotaLimits(access: PrivateWorkAccess) {
   const queryClient = useQueryClient();
-  const access = usePrivateWorkAccess();
-  const scope = access.scope;
+  const scope = requiredScope(access);
   return useMutation({
-    mutationKey: scope
-      ? [...projectUsageQueryKey(scope), "mutation", "limits"]
-      : ["governance", "usage", "inactive", "mutation"],
+    mutationKey: [...projectUsageQueryKey(scope), "mutation", "limits"],
     mutationFn: (input: UpdateQuotaLimits) =>
       runPrivateWorkAbortable(access, (signal) =>
         updateProjectQuotaLimits(requiredScope(access), input, signal),
       ),
     onSuccess: async () => {
-      if (scope) {
-        await queryClient.invalidateQueries({
-          queryKey: projectUsageQueryKey(scope),
-        });
-      }
+      await queryClient.invalidateQueries({
+        queryKey: projectUsageQueryKey(scope),
+      });
     },
   });
 }

@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.models import (
@@ -99,7 +100,7 @@ def _map_audit_errors(function):
             raise reliability_http_exception(ReliabilityInvalidStreamCursor(request_id)) from None
         except AuditMetadataRejected:
             raise reliability_http_exception(ReliabilityInvalid(request_id)) from None
-        except (AuditUnavailable, ProjectDatabaseUnavailable):
+        except (AuditUnavailable, ProjectDatabaseUnavailable, DBAPIError):
             raise reliability_http_exception(ReliabilityDatabaseUnavailable(request_id)) from None
 
     return wrapped
@@ -110,7 +111,7 @@ def _map_audit_errors(function):
 async def list_project_audit(
     project_id: uuid.UUID,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
-    cursor: str | None = None,
+    cursor: Annotated[str | None, Query(max_length=256)] = None,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
     session: AsyncSession = Depends(project_session),
     audit=Depends(get_project_audit_service),
@@ -121,6 +122,7 @@ async def list_project_audit(
             identity[0],
             project_id,
             identity[1],
+            lock=True,
         )
         if Capability.PROJECT_AUDIT_READ not in context.capabilities:
             raise ProjectForbidden(Capability.PROJECT_AUDIT_READ)
@@ -128,13 +130,14 @@ async def list_project_audit(
             session,
             request_id=identity[1],
         ).require_gateway_open()
-    return _response(
-        await audit.list_project_new_session(
-            context,
-            limit=limit,
-            cursor=cursor,
+        return _response(
+            await audit.list_project(
+                session,
+                context,
+                limit=limit,
+                cursor=cursor,
+            )
         )
-    )
 
 
 __all__ = ["router"]

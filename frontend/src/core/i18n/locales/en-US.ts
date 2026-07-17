@@ -240,6 +240,41 @@ export const enUS: Translations = {
     audit: "Audit",
     automations: "Automations",
     usage: "Usage",
+    governance: {
+      retry: "Retry",
+      usage: {
+        title: "Project usage",
+        description: "Review effective limits and current project consumption.",
+        loading: "Loading usage",
+        unavailableTitle: "Usage is unavailable",
+        unavailableDescription:
+          "The project usage service could not be read safely.",
+        thresholdReached: "80% threshold reached",
+        used: "Used",
+        reserved: "Reserved",
+        limit: "Limit",
+        tightenTitle: "Tighten project limits",
+        updateError: "Limits were not updated. Refresh and retry.",
+        saving: "Saving…",
+        save: "Save limits",
+        dimensions: {
+          members: "Members",
+          storage_bytes: "Storage bytes",
+          concurrent_runs: "Concurrent runs",
+          mcp_calls_daily: "Daily MCP calls",
+        },
+      },
+      audit: {
+        title: "Project audit",
+        description: "Review privacy-safe project governance history.",
+        loading: "Loading audit",
+        unavailableTitle: "Audit is unavailable",
+        unavailableDescription: "Audit history could not be read safely.",
+        emptyTitle: "No audit events",
+        emptyDescription: "This project has no recorded governance events yet.",
+        olderEvents: "Older events",
+      },
+    },
   },
 
   automation: {

@@ -4,6 +4,12 @@ import { notFound } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useI18n } from "@/core/i18n/hooks";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import type {
+  PrivateWorkAccess,
+  ProjectClientScope,
+} from "@/core/private-work/types";
 import {
   useProjectUsage,
   useUpdateProjectQuotaLimits,
@@ -12,13 +18,6 @@ import {
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import { useCurrentProject } from "../project-context";
-
-const DIMENSION_LABELS = {
-  members: "Members",
-  storage_bytes: "Storage bytes",
-  concurrent_runs: "Concurrent runs",
-  mcp_calls_daily: "Daily MCP calls",
-} as const;
 
 export type ProjectUsageState =
   | { status: "loading" }
@@ -32,14 +31,16 @@ export function ProjectUsageStateView({
   state: ProjectUsageState;
   onRetry?: () => void;
 }) {
+  const { t } = useI18n();
+  const labels = t.project.governance.usage;
   if (state.status === "loading") {
     return (
       <section
         aria-busy="true"
-        aria-label="Loading usage"
+        aria-label={labels.loading}
         className="space-y-4"
       >
-        <p>Loading usage</p>
+        <p>{labels.loading}</p>
         <Skeleton className="h-28 w-full rounded-xl" />
       </section>
     );
@@ -47,9 +48,9 @@ export function ProjectUsageStateView({
   if (state.status === "error") {
     return (
       <section role="alert" className="rounded-xl border p-6">
-        <h2 className="font-semibold">Usage is unavailable</h2>
+        <h2 className="font-semibold">{labels.unavailableTitle}</h2>
         <p className="text-muted-foreground mt-2 text-sm">
-          The project usage service could not be read safely.
+          {labels.unavailableDescription}
         </p>
         {onRetry ? (
           <Button
@@ -58,7 +59,7 @@ export function ProjectUsageStateView({
             variant="outline"
             onClick={onRetry}
           >
-            Retry
+            {t.project.governance.retry}
           </Button>
         ) : null}
       </section>
@@ -70,25 +71,25 @@ export function ProjectUsageStateView({
         <section key={item.dimension} className="bg-card rounded-xl border p-5">
           <div className="flex items-center justify-between gap-3">
             <h2 className="font-semibold">
-              {DIMENSION_LABELS[item.dimension]}
+              {labels.dimensions[item.dimension]}
             </h2>
             {item.warning_threshold_reached ? (
               <span className="text-amber-700 dark:text-amber-300">
-                80% threshold reached
+                {labels.thresholdReached}
               </span>
             ) : null}
           </div>
           <dl className="mt-4 grid grid-cols-3 gap-3 text-sm">
             <div>
-              <dt className="text-muted-foreground">Used</dt>
+              <dt className="text-muted-foreground">{labels.used}</dt>
               <dd>{item.used}</dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Reserved</dt>
+              <dt className="text-muted-foreground">{labels.reserved}</dt>
               <dd>{item.reserved}</dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Limit</dt>
+              <dt className="text-muted-foreground">{labels.limit}</dt>
               <dd>{item.limit}</dd>
             </div>
           </dl>
@@ -108,10 +109,24 @@ export function ProjectUsagePage() {
   const project = useCurrentProject();
   const canRead = project.capabilities.includes("project.usage.read");
   const staticMode = isStaticWebsiteOnly();
-  const usage = useProjectUsage(canRead && !staticMode);
-  const update = useUpdateProjectQuotaLimits();
+  const access = usePrivateWorkAccess();
 
-  if (!canRead || staticMode) notFound();
+  if (!canRead || staticMode || access.scope === null) notFound();
+  return <AuthorizedProjectUsagePage access={access} scope={access.scope} />;
+}
+
+function AuthorizedProjectUsagePage({
+  access,
+  scope,
+}: {
+  access: PrivateWorkAccess;
+  scope: ProjectClientScope;
+}) {
+  const { t } = useI18n();
+  const labels = t.project.governance.usage;
+  const usage = useProjectUsage(scope);
+  const update = useUpdateProjectQuotaLimits(access);
+
   if (usage.isLoading) {
     return <ProjectUsageStateView state={{ status: "loading" }} />;
   }
@@ -145,22 +160,22 @@ export function ProjectUsagePage() {
           });
         }}
       >
-        <h2 className="font-semibold">Tighten project limits</h2>
+        <h2 className="font-semibold">{labels.tightenTitle}</h2>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           {(
             [
-              ["member_limit", "Members"],
-              ["storage_bytes_limit", "Storage bytes"],
-              ["concurrent_run_limit", "Concurrent runs"],
-              ["mcp_calls_daily_limit", "Daily MCP calls"],
+              ["member_limit", labels.dimensions.members, 1],
+              ["storage_bytes_limit", labels.dimensions.storage_bytes, 0],
+              ["concurrent_run_limit", labels.dimensions.concurrent_runs, 1],
+              ["mcp_calls_daily_limit", labels.dimensions.mcp_calls_daily, 0],
             ] as const
-          ).map(([name, label]) => (
+          ).map(([name, label, minimum]) => (
             <label key={name} className="grid gap-2 text-sm">
               {label}
               <input
                 className="border-input bg-background h-9 rounded-md border px-3"
                 type="number"
-                min={0}
+                min={minimum}
                 name={name}
                 defaultValue={configured[name] ?? ""}
               />
@@ -169,11 +184,11 @@ export function ProjectUsagePage() {
         </div>
         {update.error ? (
           <p role="alert" className="mt-4 text-sm text-red-600">
-            Limits were not updated. Refresh and retry.
+            {labels.updateError}
           </p>
         ) : null}
         <Button className="mt-5" type="submit" disabled={update.isPending}>
-          {update.isPending ? "Saving…" : "Save limits"}
+          {update.isPending ? labels.saving : labels.save}
         </Button>
       </form>
     </div>
