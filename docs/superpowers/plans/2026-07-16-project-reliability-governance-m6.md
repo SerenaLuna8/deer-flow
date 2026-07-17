@@ -1168,6 +1168,8 @@ git commit -m "feat: add encrypted postgres backups"
 
 Expected: PASS；篡改 archive 无法产生可恢复明文。
 
+完成（2026-07-18）：提交 `c30f5f9e` 建立 `pg_dump` custom format 的分块 AEAD archive，四个有界审查修复提交 `2f7ec160`、`b46e1bef`、`b1def02c`、`5d9c34b1` 依次关闭 snapshot/high-watermark 绑定、失败/取消原子发布、manifest/版本/计数、key/nonce 分离、bounded reader、operator audit、libpq secret channel、逐祖先 fd pin、credential 清理重试和 passfile creation ownership。最终独立复审为 0 Critical/Important，保留 1 个 `archive.py` 体积 Minor 并明确 Task 17 只能从独立 journal/purge/restore 模块消费 facade。Fresh gates 为 focused/affected 98 passed、blocking-I/O 46 passed、audit 17 passed/1 explicit local skip（缺 `POSTGRES_TEST_URL`），Ruff、format、blocking scan 与 `git diff --check` 全绿；Task 17 负责首次真实 PostgreSQL archive→restore/journal proof。
+
 ### Task 17: 建立 external tombstone journal、retention purge、restore 和 drill
 
 **Files:**
