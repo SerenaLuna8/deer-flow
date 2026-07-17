@@ -63,6 +63,7 @@ async def test_backup_subprocess_file_and_crypto_work_does_not_block_event_loop(
     async def fake_subprocess(*_argv: str, **_kwargs: object) -> _Process:
         return _Process()
 
+    monkeypatch.setenv("AUTH_JWT_SECRET", "blocking-test-auth-secret-distinct-from-backup")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
     monkeypatch.setattr(archive_module, "_exported_snapshot", fake_snapshot)
     monkeypatch.setattr(archive_module, "_read_pg_dump_version", fake_version)

@@ -994,8 +994,8 @@ and manual trigger available; manual trigger uses the same atomic occurrence/Run
 path. PostgreSQL durable stream writing/reading, terminal uniqueness, Gateway SSE reconnect,
 frontend cursor/dedupe, and the atomic project quota core are implemented. Member, storage,
 concurrent-Run, and actual MCP-dispatch quota enforcement are also wired across Gateway,
-Worker, and Scheduler with stable 429/`Retry-After` responses. Complete audit and general
-Task 16 adds an operator-only encrypted PostgreSQL archive command. Set a distinct 32-byte
+Worker, and Scheduler with stable 429/`Retry-After` responses. Task 16 adds an operator-only
+encrypted PostgreSQL archive command. Set a distinct 32-byte
 base64 `DEER_FLOW_BACKUP_KEY`, `DATABASE_URL`, and the existing
 `DEER_FLOW_AUDIT_ACTIVE_KEY_ID` / `DEER_FLOW_AUDIT_KEYRING_JSON` audit environment, then
 write only to an external secure directory (never this repository):
@@ -1009,12 +1009,19 @@ source identity from PostgreSQL system/database authority, and binds that same s
 fixed `pg_dump --format=custom --no-owner --no-acl --snapshot=...` argv. The database role
 must be allowed to read `pg_control_system()`; otherwise backup fails closed. Connection
 credentials use a temporary `0600` libpq passfile, never process argv, and are removed before
-publication. The archive records the actual Alembic revision, `pg_dump` version, non-empty
-byte/table counts, and a proven contiguous tombstone cursor. It uses per-archive keys with
-counter nonces, no-clobber publication, and a bounded authenticated plaintext spool; a success
-audit is required or the archive is removed. Output remains limited to archive ID, schema
-revision, chunk count, and a truncated checksum. Restore, recovery journal, and retention purge
-remain later M6 work.
+publication through a retained fd-relative directory handle. Every archive-path ancestor is
+opened with no-follow directory semantics, and passfile creation/removal plus directory fsync are
+owned through cancellation. When `AUTH_JWT_SECRET` is absent, key separation reads the existing
+`DEER_FLOW_HOME/.jwt_secret` without creating or rotating it; missing, unsafe, or unreadable Auth
+material fails closed. The archive records the actual Alembic revision, `pg_dump` version,
+non-empty byte/table counts, and a proven contiguous tombstone cursor. It uses per-archive keys
+with counter nonces, no-clobber publication, and a bounded authenticated plaintext spool. The
+format permits at most 65,536 chunks of at most 1 MiB (64 GiB plaintext) and a 16 MiB manifest;
+writer and reader enforce the same limits. A failed or uncommitted audit removes the archive,
+while the successful audit commit is the durable operation commit point: later cancellation or
+engine disposal cannot delete the valid audited archive. Output remains limited to archive ID,
+schema revision, chunk count, and a truncated checksum. Restore, recovery journal, and retention
+purge remain later M6 work.
 
 The project-scoped backend API is available at
 `/api/projects/{project_id}/automations`. It provides strict create, list, read,

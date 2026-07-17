@@ -35,6 +35,9 @@ from sqlalchemy.engine import make_url
 
 CHUNK_SIZE = 1_048_576
 ARCHIVE_FORMAT_VERSION = 1
+MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_ARCHIVE_CHUNKS = 65_536
+MAX_ARCHIVE_PLAINTEXT_BYTES = CHUNK_SIZE * MAX_ARCHIVE_CHUNKS
 _PGDMP_MAGIC = b"PGDMP"
 _NONCE_BYTES = 12
 _TAG_BYTES = 16
@@ -43,6 +46,7 @@ _SALT_BYTES = 32
 _READ_BLOCK_BYTES = 64 * 1024
 _PROCESS_TERM_TIMEOUT_SECONDS = 5.0
 _VERSION_OUTPUT_LIMIT = 512
+_AUTH_SECRET_FILE_LIMIT = 16 * 1024
 _ARCHIVE_INFO = b"deerflow-recovery-archive-v1"
 _CHUNK_INFO = b"deerflow-recovery-chunk-v1"
 _MANIFEST_INFO = b"deerflow-recovery-manifest-v1"
@@ -163,8 +167,8 @@ class BackupConfig:
         _validate_key(self.key)
         if not isinstance(self.database_url, str) or not self.database_url:
             raise ValueError("database_url is required")
-        if type(self.chunk_bytes) is not int or self.chunk_bytes < len(_PGDMP_MAGIC):
-            raise ValueError("chunk_bytes must fit the pg_dump header")
+        if type(self.chunk_bytes) is not int or not len(_PGDMP_MAGIC) <= self.chunk_bytes <= CHUNK_SIZE:
+            raise ValueError("chunk_bytes must fit the pg_dump header and archive bound")
         if self.archive_id is not None:
             _canonical_uuid(self.archive_id)
 
@@ -179,10 +183,31 @@ class BackupSnapshot:
     table_count: int
 
 
-@dataclass(frozen=True)
+@dataclass
+class _PinnedDirectory:
+    path: Path
+    descriptor: int
+
+    def duplicate(self) -> _PinnedDirectory:
+        if self.descriptor < 0:
+            raise OSError(errno.EBADF, "pinned directory is closed")
+        return _PinnedDirectory(self.path, os.dup(self.descriptor))
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            try:
+                os.close(self.descriptor)
+            finally:
+                self.descriptor = -1
+
+
+@dataclass
 class _LibpqInvocation:
     env: Mapping[str, str]
     passfile: Path | None
+    directory: _PinnedDirectory
+    passfile_name: str | None = None
+    passfile_identity: tuple[int, int] | None = None
 
 
 def _validate_key(key: bytes) -> None:
@@ -205,10 +230,36 @@ def _decoded_secret_candidates(value: str) -> tuple[bytes, ...]:
     return tuple(candidates)
 
 
-def _known_deployment_secrets(database_url: str | None) -> Iterator[bytes]:
+def _active_auth_secret_candidates() -> tuple[bytes, ...]:
     auth_secret = os.environ.get("AUTH_JWT_SECRET")
     if auth_secret:
-        yield from _decoded_secret_candidates(auth_secret)
+        return _decoded_secret_candidates(auth_secret)
+
+    pinned: _PinnedDirectory | None = None
+    try:
+        from deerflow.config.paths import get_paths
+
+        pinned, _ = _walk_directory(get_paths().base_dir)
+        descriptor = os.open(".jwt_secret", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=pinned.descriptor)
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > _AUTH_SECRET_FILE_LIMIT:
+                raise BackupKeyInvalid
+            encoded = _read_fd_all(handle, limit=_AUTH_SECRET_FILE_LIMIT).decode("utf-8").strip()
+        if not encoded:
+            raise BackupKeyInvalid
+        return _decoded_secret_candidates(encoded)
+    except BackupKeyInvalid:
+        raise
+    except Exception:
+        raise BackupKeyInvalid from None
+    finally:
+        if pinned is not None:
+            pinned.close()
+
+
+def _known_deployment_secrets(database_url: str | None) -> Iterator[bytes]:
+    yield from _active_auth_secret_candidates()
     for name in (
         "DEER_FLOW_AUDIT_KEYRING_JSON",
         "DEER_FLOW_CREDENTIAL_KEYRING_JSON",
@@ -326,25 +377,61 @@ def _fsync_directory(path_or_descriptor: Path | int) -> None:
         os.close(descriptor)
 
 
-def _reject_symlink_components(path: Path) -> None:
-    absolute = path.expanduser().absolute()
-    current = Path(absolute.anchor)
-    for part in absolute.parts[1:]:
-        current /= part
-        if stat.S_ISLNK(os.lstat(current).st_mode):
-            raise OSError(errno.ELOOP, "archive path contains a symlink")
+def _absolute_directory_parts(path: Path) -> tuple[Path, tuple[str, ...]]:
+    expanded = path.expanduser()
+    absolute = expanded if expanded.is_absolute() else Path.cwd() / expanded
+    if not absolute.anchor:
+        raise OSError(errno.EINVAL, "archive path must be absolute")
+    parts = absolute.parts[1:]
+    if any(part in {"", ".", ".."} for part in parts):
+        raise OSError(errno.EINVAL, "archive path contains an unsafe component")
+    return Path(absolute.anchor).joinpath(*parts), parts
 
 
-def _validated_external_parent(path: Path) -> Path:
-    parent = path.expanduser().absolute()
-    if not parent.exists() or not parent.is_dir():
-        raise OSError(errno.ENOENT, "archive parent is missing")
-    _reject_symlink_components(parent)
-    resolved = parent.resolve(strict=True)
-    repository = _REPOSITORY_ROOT.resolve(strict=True)
-    if resolved == repository or repository in resolved.parents:
-        raise ValueError("BACKUP_OUTPUT_MUST_BE_EXTERNAL")
-    return resolved
+def _walk_directory(path: Path) -> tuple[_PinnedDirectory, tuple[tuple[int, int], ...]]:
+    absolute, parts = _absolute_directory_parts(path)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(absolute.anchor, flags)
+    identities: list[tuple[int, int]] = []
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError(errno.ENOTDIR, "archive ancestor is not a directory")
+        identities.append((info.st_dev, info.st_ino))
+        for part in parts:
+            child = os.open(part, flags, dir_fd=descriptor)
+            try:
+                info = os.fstat(child)
+                if not stat.S_ISDIR(info.st_mode):
+                    raise OSError(errno.ENOTDIR, "archive ancestor is not a directory")
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+            identities.append((info.st_dev, info.st_ino))
+        return _PinnedDirectory(absolute, descriptor), tuple(identities)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_external_directory(path: Path) -> _PinnedDirectory:
+    parent, ancestor_identities = _walk_directory(path)
+    repository: _PinnedDirectory | None = None
+    try:
+        repository, _ = _walk_directory(_REPOSITORY_ROOT)
+        repository_info = os.fstat(repository.descriptor)
+        if (repository_info.st_dev, repository_info.st_ino) in ancestor_identities:
+            raise ValueError("BACKUP_OUTPUT_MUST_BE_EXTERNAL")
+        os.fchmod(parent.descriptor, 0o700)
+        return parent
+    except BaseException:
+        parent.close()
+        raise
+    finally:
+        if repository is not None:
+            repository.close()
 
 
 def _rename_noreplace(parent_fd: int, source: str, target: str) -> None:
@@ -392,9 +479,10 @@ class BackupArchiveWriter:
         pg_dump_version: str = "pg_dump (PostgreSQL) test",
         table_count: int = 1,
         archive_id: str | None = None,
+        _parent_directory: _PinnedDirectory | None = None,
     ) -> None:
         _validate_key(key)
-        if type(chunk_bytes) is not int or chunk_bytes < len(_PGDMP_MAGIC):
+        if type(chunk_bytes) is not int or not len(_PGDMP_MAGIC) <= chunk_bytes <= CHUNK_SIZE:
             raise ValueError("invalid backup chunk size")
         if _SOURCE_ID.fullmatch(source_installation_id) is None:
             raise ValueError("invalid source installation identity")
@@ -422,6 +510,7 @@ class BackupArchiveWriter:
         self._published = False
         self._published_identity: tuple[int, int] | None = None
         self._finalized = False
+        self._provided_parent = _parent_directory
 
     @classmethod
     def atomic(
@@ -435,6 +524,7 @@ class BackupArchiveWriter:
         pg_dump_version: str = "pg_dump (PostgreSQL) test",
         table_count: int = 1,
         archive_id: str | None = None,
+        _parent_directory: _PinnedDirectory | None = None,
     ) -> BackupArchiveWriter:
         return cls(
             output,
@@ -445,15 +535,18 @@ class BackupArchiveWriter:
             pg_dump_version=pg_dump_version,
             table_count=table_count,
             archive_id=archive_id,
+            _parent_directory=_parent_directory,
         )
 
     def __enter__(self) -> BackupArchiveWriter:
-        parent = _validated_external_parent(self.output.parent)
         if self.output.name in {"", ".", ".."} or Path(self.output.name).name != self.output.name:
             raise ValueError("invalid backup output name")
-        self.output = parent / self.output.name
+        parent = self._provided_parent or _open_external_directory(self.output.parent)
+        self._provided_parent = None
+        self.output = parent.path / self.output.name
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        self._parent_fd = os.open(parent, flags)
+        self._parent_fd = parent.descriptor
+        parent.descriptor = -1
         try:
             os.fchmod(self._parent_fd, 0o700)
             try:
@@ -491,11 +584,9 @@ class BackupArchiveWriter:
     def abort(self) -> None:
         parent_fd = self._parent_fd
         if parent_fd is None:
-            if not self._published:
-                return
-            parent = _validated_external_parent(self.output.parent)
-            parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
-            close_parent = True
+            if self._published:
+                raise OSError(errno.EBADF, "published archive parent is closed")
+            return
         else:
             close_parent = False
         for attribute in ("_chunks_fd", "_staging_fd"):
@@ -529,8 +620,8 @@ class BackupArchiveWriter:
         if self._finalized or self._chunks_fd is None or not plaintext or len(plaintext) > self._chunk_bytes:
             raise ValueError("invalid backup chunk")
         index = len(self._chunks)
-        if index >= 1 << (_NONCE_BYTES * 8):
-            raise ValueError("backup chunk counter exhausted")
+        if index >= MAX_ARCHIVE_CHUNKS:
+            raise ValueError("backup archive chunk bound exceeded")
         nonce = index.to_bytes(_NONCE_BYTES, "big")
         chunk_key = _derive_key(self._key, _CHUNK_INFO, salt=self._salt, archive_id=self._archive_id)
         ciphertext = AESGCM(chunk_key).encrypt(
@@ -594,6 +685,9 @@ class BackupArchiveWriter:
         )
         body = manifest.as_dict()
         envelope = {"manifest": body, "signature": _manifest_signature(self._key, body)}
+        encoded_envelope = _canonical_json(envelope)
+        if len(encoded_envelope) > MAX_MANIFEST_BYTES:
+            raise ValueError("backup manifest exceeds authenticated reader bound")
         try:
             descriptor = os.open(
                 "manifest.json",
@@ -603,7 +697,7 @@ class BackupArchiveWriter:
             )
             try:
                 with os.fdopen(descriptor, "wb") as handle:
-                    handle.write(_canonical_json(envelope))
+                    handle.write(encoded_envelope)
                     handle.flush()
                     os.fsync(handle.fileno())
             except BaseException:
@@ -707,7 +801,7 @@ class BackupArchiveReader:
     def _load_manifest(self, archive_fd: int) -> BackupManifest:
         descriptor = os.open("manifest.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=archive_fd)
         with os.fdopen(descriptor, "rb") as handle:
-            envelope = json.loads(_read_fd_all(handle, limit=16 * 1024 * 1024))
+            envelope = json.loads(_read_fd_all(handle, limit=MAX_MANIFEST_BYTES))
         if not isinstance(envelope, dict) or set(envelope) != {"manifest", "signature"}:
             raise BackupAuthenticationFailed
         body, signature = envelope["manifest"], envelope["signature"]
@@ -741,7 +835,7 @@ class BackupArchiveReader:
         archive_salt = str(body["archive_salt"])
         _archive_salt(archive_salt)
         chunks_data = body.get("chunks")
-        if not isinstance(chunks_data, list) or not chunks_data:
+        if not isinstance(chunks_data, list) or not chunks_data or len(chunks_data) > MAX_ARCHIVE_CHUNKS:
             raise BackupAuthenticationFailed
         chunks = tuple(self._parse_chunk(entry) for entry in chunks_data)
         if [chunk.index for chunk in chunks] != list(range(len(chunks))):
@@ -762,7 +856,7 @@ class BackupArchiveReader:
             pg_dump_version=pg_dump_version,
             tool=str(body["tool"]),
         )
-        if manifest.tool != "pg_dump --format=custom --no-owner --no-acl" or manifest.chunk_bytes < len(_PGDMP_MAGIC) or manifest.chunk_bytes > CHUNK_SIZE * 1024:
+        if manifest.tool != "pg_dump --format=custom --no-owner --no-acl" or manifest.chunk_bytes < len(_PGDMP_MAGIC) or manifest.chunk_bytes > CHUNK_SIZE or manifest.total_plaintext_bytes > MAX_ARCHIVE_PLAINTEXT_BYTES:
             raise BackupAuthenticationFailed
         if sum(chunk.plaintext_bytes for chunk in chunks) != manifest.total_plaintext_bytes or sum(chunk.ciphertext_bytes for chunk in chunks) != manifest.total_ciphertext_bytes:
             raise BackupAuthenticationFailed
@@ -866,16 +960,12 @@ def _base_subprocess_env() -> dict[str, str]:
 
 
 def _escape_pgpass(value: str) -> str:
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise BackupCommandFailed
     return value.replace("\\", "\\\\").replace(":", "\\:")
 
 
 def _create_libpq_invocation(database_url: str, directory: Path) -> _LibpqInvocation:
-    directory = _validated_external_parent(directory)
-    directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        os.fchmod(directory_fd, 0o700)
-    finally:
-        os.close(directory_fd)
     try:
         parsed = make_url(database_url)
     except Exception:
@@ -893,25 +983,69 @@ def _create_libpq_invocation(database_url: str, directory: Path) -> _LibpqInvoca
         if target is None or not isinstance(value, str):
             raise BackupCommandFailed
         env[target] = value
+    pinned = _open_external_directory(directory)
     passfile: Path | None = None
+    passfile_name: str | None = None
+    passfile_identity: tuple[int, int] | None = None
     if parsed.password is not None:
-        passfile = directory / f".pgpass.{uuid.uuid4().hex}"
-        descriptor = os.open(passfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        passfile_name = f".pgpass.{uuid.uuid4().hex}"
+        passfile = pinned.path / passfile_name
+        descriptor = os.open(
+            passfile_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=pinned.descriptor,
+        )
         try:
             line = ":".join(_escape_pgpass(value) for value in (host or "*", port, database, username or "*", parsed.password)) + "\n"
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.flush()
                 os.fsync(handle.fileno())
+                info = os.fstat(handle.fileno())
+                passfile_identity = (info.st_dev, info.st_ino)
+            _fsync_directory(pinned.descriptor)
         except BaseException:
             try:
                 os.close(descriptor)
             except OSError:
                 pass
-            passfile.unlink(missing_ok=True)
+            try:
+                os.unlink(passfile_name, dir_fd=pinned.descriptor)
+                _fsync_directory(pinned.descriptor)
+            except FileNotFoundError:
+                pass
+            finally:
+                pinned.close()
             raise
         env["PGPASSFILE"] = str(passfile)
-    return _LibpqInvocation(env=env, passfile=passfile)
+    return _LibpqInvocation(
+        env=env,
+        passfile=passfile,
+        directory=pinned,
+        passfile_name=passfile_name,
+        passfile_identity=passfile_identity,
+    )
+
+
+def _release_libpq_invocation(invocation: _LibpqInvocation) -> None:
+    try:
+        if invocation.passfile_name is not None:
+            passfile_name = invocation.passfile_name
+            passfile_identity = invocation.passfile_identity
+            invocation.passfile_name = None
+            invocation.passfile_identity = None
+            try:
+                info = os.stat(passfile_name, dir_fd=invocation.directory.descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISREG(info.st_mode) or passfile_identity != (info.st_dev, info.st_ino):
+                    raise BackupCommandFailed
+                os.unlink(passfile_name, dir_fd=invocation.directory.descriptor)
+                _fsync_directory(invocation.directory.descriptor)
+    finally:
+        invocation.directory.close()
 
 
 def _asyncpg_url(database_url: str) -> str:
@@ -923,93 +1057,82 @@ async def _exported_snapshot(database_url: str) -> AsyncIterator[BackupSnapshot]
     connection = None
     transaction = None
     try:
-        import asyncpg
+        try:
+            import asyncpg
 
-        connection = await asyncpg.connect(_asyncpg_url(database_url))
-        transaction = connection.transaction(isolation="repeatable_read", readonly=True)
-        await transaction.start()
-        snapshot_id = await connection.fetchval("SELECT pg_export_snapshot()")
-        row = await connection.fetchrow(
-            """SELECT
-                   (SELECT version_num FROM alembic_version LIMIT 1) AS schema_revision,
-                   (SELECT system_identifier::text FROM pg_control_system()) AS system_identifier,
-                   (SELECT oid::bigint FROM pg_database WHERE datname = current_database()) AS database_oid,
-                   COALESCE((SELECT MAX(high_watermark) FROM thread_event_sequences), 0)::bigint AS database_high_watermark,
-                   (SELECT COUNT(*)::bigint FROM deletion_tombstones) AS tombstone_count,
-                   COALESCE((SELECT MIN(journal_sequence) FROM deletion_tombstones), 0)::bigint AS tombstone_min,
-                   COALESCE((SELECT MAX(journal_sequence) FROM deletion_tombstones), 0)::bigint AS tombstone_max,
-                   (SELECT COUNT(*)::bigint
-                      FROM pg_class
-                     WHERE relnamespace = current_schema()::regnamespace
-                       AND relkind IN ('r', 'p')) AS table_count"""
-        )
-        schema_revision = str(row["schema_revision"])
-        system_identifier = str(row["system_identifier"])
-        database_oid = int(row["database_oid"])
-        database_high_watermark = int(row["database_high_watermark"])
-        tombstone_count = int(row["tombstone_count"])
-        tombstone_min = int(row["tombstone_min"])
-        tombstone_max = int(row["tombstone_max"])
-        table_count = int(row["table_count"])
-        if (
-            not snapshot_id
-            or _SCHEMA_REVISION.fullmatch(schema_revision) is None
-            or not system_identifier.isdigit()
-            or database_oid < 1
-            or database_high_watermark < 0
-            or table_count < 1
-            or tombstone_count < 0
-            or (tombstone_count == 0 and (tombstone_min != 0 or tombstone_max != 0))
-            or (tombstone_count > 0 and (tombstone_min != 1 or tombstone_count != tombstone_max))
-        ):
-            raise BackupCommandFailed
-        source_payload = _SOURCE_ID_DOMAIN + system_identifier.encode("ascii") + b"\x00" + str(database_oid).encode("ascii")
-        snapshot = BackupSnapshot(
-            snapshot_id=str(snapshot_id),
-            schema_revision=schema_revision,
-            source_installation_id=hashlib.sha256(source_payload).hexdigest(),
-            database_high_watermark=database_high_watermark,
-            tombstone_journal_sequence=tombstone_max,
-            table_count=table_count,
-        )
-    except BackupCommandFailed:
-        if transaction is not None:
-            try:
-                await transaction.rollback()
-            except Exception:
-                pass
-        if connection is not None:
-            try:
-                await connection.close()
-            except Exception:
-                pass
-        raise
-    except Exception:
-        if transaction is not None:
-            try:
-                await transaction.rollback()
-            except Exception:
-                pass
-        if connection is not None:
-            try:
-                await connection.close()
-            except Exception:
-                pass
-        raise BackupCommandFailed from None
-    try:
+            connection = await asyncpg.connect(_asyncpg_url(database_url))
+            transaction = connection.transaction(isolation="repeatable_read", readonly=True)
+            await transaction.start()
+            snapshot_id = await connection.fetchval("SELECT pg_export_snapshot()")
+            row = await connection.fetchrow(
+                """SELECT
+                       (SELECT version_num FROM alembic_version LIMIT 1) AS schema_revision,
+                       (SELECT system_identifier::text FROM pg_control_system()) AS system_identifier,
+                       (SELECT oid::bigint FROM pg_database WHERE datname = current_database()) AS database_oid,
+                       COALESCE((SELECT MAX(high_watermark) FROM thread_event_sequences), 0)::bigint AS database_high_watermark,
+                       (SELECT COUNT(*)::bigint FROM deletion_tombstones) AS tombstone_count,
+                       COALESCE((SELECT MIN(journal_sequence) FROM deletion_tombstones), 0)::bigint AS tombstone_min,
+                       COALESCE((SELECT MAX(journal_sequence) FROM deletion_tombstones), 0)::bigint AS tombstone_max,
+                       (SELECT COUNT(*)::bigint
+                          FROM pg_class
+                         WHERE relnamespace = current_schema()::regnamespace
+                           AND relkind IN ('r', 'p')) AS table_count"""
+            )
+            schema_revision = str(row["schema_revision"])
+            system_identifier = str(row["system_identifier"])
+            database_oid = int(row["database_oid"])
+            database_high_watermark = int(row["database_high_watermark"])
+            tombstone_count = int(row["tombstone_count"])
+            tombstone_min = int(row["tombstone_min"])
+            tombstone_max = int(row["tombstone_max"])
+            table_count = int(row["table_count"])
+            if (
+                not snapshot_id
+                or _SCHEMA_REVISION.fullmatch(schema_revision) is None
+                or not system_identifier.isdigit()
+                or database_oid < 1
+                or database_high_watermark < 0
+                or table_count < 1
+                or tombstone_count < 0
+                or (tombstone_count == 0 and (tombstone_min != 0 or tombstone_max != 0))
+                or (tombstone_count > 0 and (tombstone_min != 1 or tombstone_count != tombstone_max))
+            ):
+                raise BackupCommandFailed
+            source_payload = _SOURCE_ID_DOMAIN + system_identifier.encode("ascii") + b"\x00" + str(database_oid).encode("ascii")
+            snapshot = BackupSnapshot(
+                snapshot_id=str(snapshot_id),
+                schema_revision=schema_revision,
+                source_installation_id=hashlib.sha256(source_payload).hexdigest(),
+                database_high_watermark=database_high_watermark,
+                tombstone_journal_sequence=tombstone_max,
+                table_count=table_count,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BackupCommandFailed:
+            raise
+        except Exception:
+            raise BackupCommandFailed from None
         yield snapshot
     finally:
-        cleanup_failed = False
+        cleanup_task = asyncio.create_task(_release_exported_snapshot(transaction, connection))
+        await _await_shielded(cleanup_task)
+
+
+async def _release_exported_snapshot(transaction: object | None, connection: object | None) -> None:
+    cleanup_failed = False
+    if transaction is not None:
         try:
             await transaction.rollback()
-        except Exception:
+        except BaseException:
             cleanup_failed = True
+    if connection is not None:
         try:
             await connection.close()
-        except Exception:
+        except BaseException:
             cleanup_failed = True
-        if cleanup_failed:
-            raise BackupCommandFailed from None
+    if cleanup_failed:
+        raise BackupCommandFailed from None
 
 
 async def _read_pg_dump_version() -> str:
@@ -1090,7 +1213,7 @@ async def _terminate_process(process: object) -> None:
         pass
 
 
-async def _await_shielded(task: asyncio.Task[object]) -> object:
+async def _await_task_through_cancellation(task: asyncio.Task[object]) -> tuple[object, bool]:
     cancelled = False
     current = asyncio.current_task()
     while not task.done():
@@ -1100,9 +1223,40 @@ async def _await_shielded(task: asyncio.Task[object]) -> object:
             cancelled = True
             if current is not None:
                 current.uncancel()
+    try:
+        result = task.result()
+    except BaseException:
+        if cancelled:
+            raise asyncio.CancelledError from None
+        raise
+    return result, cancelled
+
+
+async def _await_shielded(task: asyncio.Task[object]) -> object:
+    result, cancelled = await _await_task_through_cancellation(task)
     if cancelled:
         raise asyncio.CancelledError
-    return task.result()
+    return result
+
+
+async def _acquire_libpq_invocation(database_url: str, directory: Path) -> _LibpqInvocation:
+    creation_task = asyncio.create_task(asyncio.to_thread(_create_libpq_invocation, database_url, directory))
+    result, cancelled = await _await_task_through_cancellation(creation_task)
+    if not isinstance(result, _LibpqInvocation):
+        raise BackupCommandFailed
+    if cancelled:
+        cleanup_task = asyncio.create_task(asyncio.to_thread(_release_libpq_invocation, result))
+        try:
+            await _await_shielded(cleanup_task)
+        except BaseException:
+            pass
+        raise asyncio.CancelledError
+    return result
+
+
+async def _release_owned_libpq_invocation(invocation: _LibpqInvocation) -> None:
+    cleanup_task = asyncio.create_task(asyncio.to_thread(_release_libpq_invocation, invocation))
+    await _await_shielded(cleanup_task)
 
 
 async def _cleanup_backup(process: object | None, stderr_task: asyncio.Task[object] | None, writer: BackupArchiveWriter | None) -> None:
@@ -1117,6 +1271,23 @@ async def _cleanup_backup(process: object | None, stderr_task: asyncio.Task[obje
             await asyncio.to_thread(writer.close)
 
 
+async def _close_backup_resources(process: object | None, stderr_task: asyncio.Task[object] | None, writer: BackupArchiveWriter | None) -> None:
+    if process is not None:
+        await _terminate_process(process)
+    if stderr_task is not None:
+        await _cancel_and_await(stderr_task)
+    if writer is not None:
+        await asyncio.to_thread(writer.close)
+
+
+async def _dispose_audit_engine(engine: object, *, committed: bool) -> None:
+    try:
+        await engine.dispose()
+    except BaseException:
+        if not committed:
+            raise
+
+
 async def _record_backup_audit(database_url: str, manifest: BackupManifest) -> None:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -1127,6 +1298,7 @@ async def _record_backup_audit(database_url: str, manifest: BackupManifest) -> N
 
     engine = create_async_engine(DatabaseConfig(url=database_url).sqlalchemy_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    committed = False
     try:
         service = AuditService(factory, AuditHmacKeyring.from_environment())
         sink = TrustedOperationAuditSink(service, process_context=_bind_operator_audit_process(service))
@@ -1138,22 +1310,23 @@ async def _record_backup_audit(database_url: str, manifest: BackupManifest) -> N
                 tombstone_high_watermark=manifest.tombstone_journal_sequence,
                 request_id=f"backup-{uuid.uuid4()}",
             )
+        committed = True
     finally:
-        await engine.dispose()
+        await _dispose_audit_engine(engine, committed=committed)
 
 
 async def create_backup(config: BackupConfig) -> BackupManifest:
     """Create one audited archive from a single exported PostgreSQL snapshot."""
 
     _validate_key_separation(config.key, config.database_url)
-    output_parent = await asyncio.to_thread(_validated_external_parent, config.output.parent)
-    pg_dump_version = await _read_pg_dump_version()
-    invocation = await asyncio.to_thread(_create_libpq_invocation, config.database_url, output_parent)
+    invocation = await _acquire_libpq_invocation(config.database_url, config.output.parent)
     process = None
     stderr_task: asyncio.Task[object] | None = None
     writer: BackupArchiveWriter | None = None
-    passfile_removed = invocation.passfile is None
+    invocation_released = False
+    audit_committed = False
     try:
+        pg_dump_version = await _read_pg_dump_version()
         async with _exported_snapshot(config.database_url) as snapshot:
             process = await asyncio.create_subprocess_exec(
                 *pg_dump_argv(config.database_url, snapshot_id=snapshot.snapshot_id),
@@ -1173,6 +1346,7 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
                 pg_dump_version=pg_dump_version,
                 table_count=snapshot.table_count,
                 archive_id=config.archive_id,
+                _parent_directory=invocation.directory.duplicate(),
             )
             await asyncio.to_thread(writer.__enter__)
             buffer = bytearray()
@@ -1188,9 +1362,8 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
             await stderr_task
             if returncode != 0:
                 raise BackupCommandFailed
-        if invocation.passfile is not None:
-            await asyncio.to_thread(invocation.passfile.unlink)
-            passfile_removed = True
+        await _release_owned_libpq_invocation(invocation)
+        invocation_released = True
         finalize_task = asyncio.create_task(
             asyncio.to_thread(
                 writer.finalize,
@@ -1202,11 +1375,16 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
         if not isinstance(manifest, BackupManifest):
             raise BackupCommandFailed
         audit_task = asyncio.create_task(_record_backup_audit(config.database_url, manifest))
-        await _await_shielded(audit_task)
-        await asyncio.to_thread(writer.close)
+        _, audit_cancelled = await _await_task_through_cancellation(audit_task)
+        audit_committed = True
+        close_task = asyncio.create_task(asyncio.to_thread(writer.close))
+        _, close_cancelled = await _await_task_through_cancellation(close_task)
+        if audit_cancelled or close_cancelled:
+            raise asyncio.CancelledError
         return manifest
     except asyncio.CancelledError:
-        cleanup_task = asyncio.create_task(_cleanup_backup(process, stderr_task, writer))
+        cleanup = _close_backup_resources if audit_committed else _cleanup_backup
+        cleanup_task = asyncio.create_task(cleanup(process, stderr_task, writer))
         try:
             await _await_shielded(cleanup_task)
         except asyncio.CancelledError:
@@ -1216,12 +1394,14 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
         await _cleanup_backup(process, stderr_task, writer)
         raise
     except BaseException:
-        await _cleanup_backup(process, stderr_task, writer)
+        if audit_committed:
+            await _close_backup_resources(process, stderr_task, writer)
+        else:
+            await _cleanup_backup(process, stderr_task, writer)
         raise BackupCommandFailed from None
     finally:
-        if invocation.passfile is not None and not passfile_removed:
-            unlink_task = asyncio.create_task(asyncio.to_thread(invocation.passfile.unlink, missing_ok=True))
+        if not invocation_released:
             try:
-                await _await_shielded(unlink_task)
+                await _release_owned_libpq_invocation(invocation)
             except asyncio.CancelledError:
                 pass

@@ -5,6 +5,7 @@ import base64
 import hashlib
 import importlib
 import json
+import os
 import stat
 import sys
 import threading
@@ -41,6 +42,8 @@ def backup_key() -> bytes:
 
 @pytest.fixture(autouse=True)
 def backup_runtime_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_JWT_SECRET", "unit-test-auth-secret-that-is-distinct")
+
     @asynccontextmanager
     async def fake_snapshot(_database_url: str):
         yield BackupSnapshot(
@@ -120,6 +123,59 @@ def test_backup_key_reuse_of_known_deployment_secret_is_rejected(monkeypatch: py
         load_backup_key(encoded)
 
 
+def test_backup_key_reuse_of_persisted_auth_secret_is_rejected_without_rotating_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    reused = bytes(range(32))
+    encoded = base64.b64encode(reused).decode("ascii")
+    home = tmp_path / "deer-flow-home"
+    home.mkdir()
+    secret_file = home / ".jwt_secret"
+    secret_file.write_text(encoded, encoding="utf-8")
+    monkeypatch.delenv("AUTH_JWT_SECRET", raising=False)
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+
+    with pytest.raises(BackupKeyInvalid):
+        load_backup_key(encoded)
+    assert secret_file.read_text(encoding="utf-8") == encoded
+
+
+def test_backup_key_validation_never_creates_missing_auth_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    encoded = base64.b64encode(bytes(range(32))).decode("ascii")
+    home = tmp_path / "deer-flow-home"
+    home.mkdir()
+    monkeypatch.delenv("AUTH_JWT_SECRET", raising=False)
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+
+    with pytest.raises(BackupKeyInvalid):
+        load_backup_key(encoded)
+    assert not (home / ".jwt_secret").exists()
+
+
+def test_backup_key_validation_fails_closed_on_unsafe_auth_secret_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    encoded = base64.b64encode(bytes(range(32))).decode("ascii")
+    home = tmp_path / "deer-flow-home"
+    home.mkdir()
+    target = tmp_path / "elsewhere-secret"
+    target.write_text(encoded, encoding="utf-8")
+    (home / ".jwt_secret").symlink_to(target)
+    monkeypatch.delenv("AUTH_JWT_SECRET", raising=False)
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+
+    with pytest.raises(BackupKeyInvalid):
+        load_backup_key(encoded)
+
+
+def test_explicit_auth_secret_takes_precedence_over_persisted_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    backup_key = bytes(range(32))
+    encoded = base64.b64encode(backup_key).decode("ascii")
+    home = tmp_path / "deer-flow-home"
+    home.mkdir()
+    (home / ".jwt_secret").write_text(encoded, encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    monkeypatch.setenv("AUTH_JWT_SECRET", "explicit-distinct-auth-secret")
+
+    assert load_backup_key(encoded) == backup_key
+
+
 def test_missing_backup_key_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DEER_FLOW_BACKUP_KEY", raising=False)
     with pytest.raises(BackupKeyMissing):
@@ -169,6 +225,35 @@ def test_manifest_records_nonempty_plaintext_and_ciphertext_totals(tmp_path: Pat
 
     assert manifest.total_plaintext_bytes == 22
     assert manifest.total_ciphertext_bytes > manifest.total_plaintext_bytes
+
+
+def test_archive_size_contract_is_explicit_and_validated(backup_key: bytes, tmp_path: Path) -> None:
+    import app.recovery as recovery_facade
+
+    assert archive_module.MAX_MANIFEST_BYTES == 16 * 1024 * 1024
+    assert archive_module.MAX_ARCHIVE_CHUNKS == 65_536
+    assert archive_module.MAX_ARCHIVE_PLAINTEXT_BYTES == CHUNK_SIZE * archive_module.MAX_ARCHIVE_CHUNKS
+    assert recovery_facade.MAX_ARCHIVE_PLAINTEXT_BYTES == archive_module.MAX_ARCHIVE_PLAINTEXT_BYTES
+    with pytest.raises(ValueError, match="chunk_bytes"):
+        BackupConfig(database_url="postgresql://db/test", output=tmp_path / "too-large.dfba", key=backup_key, chunk_bytes=CHUNK_SIZE + 1)
+
+
+def test_writer_rejects_manifest_the_reader_cannot_accept(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    output = tmp_path / "oversized-manifest.dfba"
+    monkeypatch.setattr(archive_module, "MAX_MANIFEST_BYTES", 128, raising=False)
+    with pytest.raises(ValueError, match="manifest"):
+        with BackupArchiveWriter.atomic(output, backup_key, source_installation_id=_SOURCE_ID) as writer:
+            writer.write_chunk(b"PGDMPpayload")
+            writer.finalize(database_high_watermark=0, tombstone_journal_sequence=0)
+    assert not output.exists()
+
+
+def test_reader_uses_the_same_manifest_limit_as_writer(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    archive, _ = make_archive(tmp_path, backup_key, b"PGDMPpayload")
+    manifest_size = (archive / "manifest.json").stat().st_size
+    monkeypatch.setattr(archive_module, "MAX_MANIFEST_BYTES", manifest_size - 1, raising=False)
+    with pytest.raises(BackupAuthenticationFailed):
+        list(BackupArchiveReader(backup_key).verified_chunks(archive))
 
 
 def test_parent_fsync_failure_removes_published_archive(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -450,6 +535,140 @@ async def test_tombstone_snapshot_gap_fails_before_pg_dump(tmp_path: Path, backu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_stage", ["start", "export", "metadata"])
+async def test_snapshot_acquisition_cancellation_rolls_back_and_closes(cancel_stage: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    entered = asyncio.Event()
+    rolled_back = False
+    closed = False
+
+    class Transaction:
+        async def start(self) -> None:
+            if cancel_stage == "start":
+                entered.set()
+                await asyncio.Event().wait()
+
+        async def rollback(self) -> None:
+            nonlocal rolled_back
+            rolled_back = True
+
+    class Connection:
+        def transaction(self, **_kwargs: object) -> Transaction:
+            return Transaction()
+
+        async def fetchval(self, _query: str) -> str:
+            if cancel_stage == "export":
+                entered.set()
+                await asyncio.Event().wait()
+            return "00000003-0000001B-1"
+
+        async def fetchrow(self, _query: str) -> dict[str, object]:
+            if cancel_stage == "metadata":
+                entered.set()
+                await asyncio.Event().wait()
+            return {
+                "schema_revision": "0015_project_reliability_finalize",
+                "system_identifier": "7312345678901234567",
+                "database_oid": 16384,
+                "database_high_watermark": 17,
+                "tombstone_count": 0,
+                "tombstone_min": 0,
+                "tombstone_max": 0,
+                "table_count": 41,
+            }
+
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    async def connect(*_args: object, **_kwargs: object) -> Connection:
+        return Connection()
+
+    monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=connect))
+
+    async def acquire() -> None:
+        async with _ORIGINAL_EXPORTED_SNAPSHOT("postgresql://db/test"):
+            raise AssertionError("snapshot acquisition unexpectedly yielded")
+
+    task = asyncio.create_task(acquire())
+    await asyncio.wait_for(entered.wait(), timeout=0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert rolled_back
+    assert closed
+
+
+@pytest.mark.asyncio
+async def test_snapshot_cleanup_is_shielded_through_repeated_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+    yielded = asyncio.Event()
+    rollback_entered = asyncio.Event()
+    rollback_release = asyncio.Event()
+    close_entered = asyncio.Event()
+    close_release = asyncio.Event()
+    rolled_back = False
+    closed = False
+
+    class Transaction:
+        async def start(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            nonlocal rolled_back
+            rollback_entered.set()
+            await rollback_release.wait()
+            rolled_back = True
+
+    class Connection:
+        def transaction(self, **_kwargs: object) -> Transaction:
+            return Transaction()
+
+        async def fetchval(self, _query: str) -> str:
+            return "00000003-0000001B-1"
+
+        async def fetchrow(self, _query: str) -> dict[str, object]:
+            return {
+                "schema_revision": "0015_project_reliability_finalize",
+                "system_identifier": "7312345678901234567",
+                "database_oid": 16384,
+                "database_high_watermark": 17,
+                "tombstone_count": 0,
+                "tombstone_min": 0,
+                "tombstone_max": 0,
+                "table_count": 41,
+            }
+
+        async def close(self) -> None:
+            nonlocal closed
+            close_entered.set()
+            await close_release.wait()
+            closed = True
+
+    async def connect(*_args: object, **_kwargs: object) -> Connection:
+        return Connection()
+
+    monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=connect))
+
+    async def hold_snapshot() -> None:
+        async with _ORIGINAL_EXPORTED_SNAPSHOT("postgresql://db/test"):
+            yielded.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(hold_snapshot())
+    await asyncio.wait_for(yielded.wait(), timeout=0.2)
+    task.cancel()
+    await asyncio.wait_for(rollback_entered.wait(), timeout=0.2)
+    task.cancel()
+    rollback_release.set()
+    await asyncio.wait_for(close_entered.wait(), timeout=0.2)
+    task.cancel()
+    close_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert rolled_back
+    assert closed
+
+
+@pytest.mark.asyncio
 async def test_create_backup_publishes_only_authenticated_archive(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
     passfile: Path | None = None
 
@@ -475,6 +694,132 @@ async def test_create_backup_publishes_only_authenticated_archive(tmp_path: Path
     assert b"".join(BackupArchiveReader(backup_key).verified_chunks(config.output)) == b"PGDMPonetwo"
     assert not list(tmp_path.glob(".ok.dfba.*"))
     assert passfile is not None and not passfile.exists()
+
+
+@pytest.mark.asyncio
+async def test_passfile_creation_cancellation_removes_owned_file(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    created = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    passfile: Path | None = None
+    original_create = archive_module._create_libpq_invocation
+
+    def blocking_create(*args: object, **kwargs: object):
+        nonlocal passfile
+        invocation = original_create(*args, **kwargs)
+        passfile = invocation.passfile
+        created.set()
+        release.wait(timeout=2)
+        finished.set()
+        return invocation
+
+    monkeypatch.setattr(archive_module, "_create_libpq_invocation", blocking_create)
+    task = asyncio.create_task(
+        create_backup(
+            BackupConfig(
+                database_url="postgresql://user:password@db/test",
+                output=tmp_path / "cancel-passfile.dfba",
+                key=backup_key,
+            )
+        )
+    )
+    assert await asyncio.to_thread(created.wait, 1)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.to_thread(finished.wait, 1)
+    assert passfile is not None and not passfile.exists()
+
+
+@pytest.mark.asyncio
+async def test_passfile_create_and_remove_fsync_the_pinned_directory(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
+    directory_fsyncs = 0
+    original_fsync = os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == parent_identity:
+            directory_fsyncs += 1
+        original_fsync(descriptor)
+
+    async def fake_subprocess(*_argv: str, **_kwargs: object) -> _FakeProcess:
+        return _FakeProcess(0, [b"PGDMPpayload"])
+
+    monkeypatch.setattr(archive_module.os, "fsync", recording_fsync)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    await create_backup(
+        BackupConfig(
+            database_url="postgresql://user:password@db/test",
+            output=tmp_path / "fsynced-passfile.dfba",
+            key=backup_key,
+        )
+    )
+    assert directory_fsyncs >= 3  # passfile create, passfile unlink, archive publication
+
+
+@pytest.mark.asyncio
+async def test_passfile_cleanup_never_unlinks_replaced_file(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    replacement: Path | None = None
+
+    async def fake_subprocess(*_argv: str, **kwargs: object) -> _FakeProcess:
+        nonlocal replacement
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        replacement = Path(env["PGPASSFILE"])
+        replacement.unlink()
+        replacement.write_text("replacement", encoding="utf-8")
+        return _FakeProcess(0, [b"PGDMPpayload"])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    with pytest.raises(BackupCommandFailed):
+        await create_backup(
+            BackupConfig(
+                database_url="postgresql://user:password@db/test",
+                output=tmp_path / "replaced-passfile.dfba",
+                key=backup_key,
+            )
+        )
+    assert replacement is not None
+    assert replacement.read_text(encoding="utf-8") == "replacement"
+
+
+def test_external_directory_walk_pins_every_ancestor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent = tmp_path / "operator" / "archives"
+    parent.mkdir(parents=True)
+    opened: list[tuple[object, int, int | None]] = []
+    original_open = os.open
+
+    def recording_open(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        opened.append((path, flags, dir_fd))
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(archive_module.os, "open", recording_open)
+    pinned = archive_module._open_external_directory(parent)
+    try:
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        directory = getattr(os, "O_DIRECTORY", 0)
+        assert opened
+        assert all(flags & no_follow and flags & directory for _path, flags, _dir_fd in opened)
+        assert all(dir_fd is not None for path, _flags, dir_fd in opened if os.fspath(path) != parent.anchor)
+
+        moved = tmp_path / "moved-operator"
+        parent.parent.rename(moved)
+        parent.mkdir(parents=True)
+        descriptor = os.open("proof", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=pinned.descriptor)
+        os.close(descriptor)
+        assert (moved / "archives" / "proof").exists()
+        assert not (parent / "proof").exists()
+    finally:
+        pinned.close()
+
+
+def test_pgpass_components_reject_control_characters(tmp_path: Path) -> None:
+    with pytest.raises(BackupCommandFailed):
+        archive_module._create_libpq_invocation("postgresql://user:bad%0Asecret@db/test", tmp_path)
+    assert not list(tmp_path.glob(".pgpass.*"))
 
 
 @pytest.mark.asyncio
@@ -536,7 +881,7 @@ async def test_cancellation_during_publication_removes_final_archive(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_descriptor_close_reopens_parent_and_removes_archive(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cancellation_during_post_commit_descriptor_close_preserves_archive(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_subprocess(*_argv: str, **_kwargs: object) -> _FakeProcess:
         return _FakeProcess(0, [b"PGDMPpayload"])
 
@@ -562,7 +907,65 @@ async def test_cancellation_during_descriptor_close_reopens_parent_and_removes_a
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert not config.output.exists()
+    assert b"".join(BackupArchiveReader(backup_key).verified_chunks(config.output)) == b"PGDMPpayload"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_post_commit_audit_dispose_preserves_archive(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    committed = asyncio.Event()
+    dispose_entered = asyncio.Event()
+    dispose_release = asyncio.Event()
+
+    class Engine:
+        async def dispose(self) -> None:
+            dispose_entered.set()
+            await dispose_release.wait()
+
+    async def fake_subprocess(*_argv: str, **_kwargs: object) -> _FakeProcess:
+        return _FakeProcess(0, [b"PGDMPpayload"])
+
+    async def fake_audit(*_args: object, **_kwargs: object) -> None:
+        committed.set()
+        await archive_module._dispose_audit_engine(Engine(), committed=True)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    monkeypatch.setattr(archive_module, "_record_backup_audit", fake_audit)
+    config = BackupConfig(
+        database_url="postgresql://db/test",
+        output=tmp_path / "audit-dispose-cancelled.dfba",
+        key=backup_key,
+    )
+    task = asyncio.create_task(create_backup(config))
+    await asyncio.wait_for(committed.wait(), timeout=0.2)
+    await asyncio.wait_for(dispose_entered.wait(), timeout=0.2)
+    task.cancel()
+    dispose_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert b"".join(BackupArchiveReader(backup_key).verified_chunks(config.output)) == b"PGDMPpayload"
+
+
+@pytest.mark.asyncio
+async def test_post_commit_audit_dispose_failure_preserves_archive(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Engine:
+        async def dispose(self) -> None:
+            raise OSError("dispose failed")
+
+    async def fake_subprocess(*_argv: str, **_kwargs: object) -> _FakeProcess:
+        return _FakeProcess(0, [b"PGDMPpayload"])
+
+    async def fake_audit(*_args: object, **_kwargs: object) -> None:
+        await archive_module._dispose_audit_engine(Engine(), committed=True)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    monkeypatch.setattr(archive_module, "_record_backup_audit", fake_audit)
+    config = BackupConfig(
+        database_url="postgresql://db/test",
+        output=tmp_path / "audit-dispose-failed.dfba",
+        key=backup_key,
+    )
+    await create_backup(config)
+    assert b"".join(BackupArchiveReader(backup_key).verified_chunks(config.output)) == b"PGDMPpayload"
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,9 @@
 from .archive import (
     ARCHIVE_FORMAT_VERSION,
     CHUNK_SIZE,
+    MAX_ARCHIVE_CHUNKS,
+    MAX_ARCHIVE_PLAINTEXT_BYTES,
+    MAX_MANIFEST_BYTES,
     BackupArchiveReader,
     BackupArchiveWriter,
     BackupAuthenticationFailed,
@@ -20,6 +23,9 @@ from .archive import (
 __all__ = [
     "ARCHIVE_FORMAT_VERSION",
     "CHUNK_SIZE",
+    "MAX_ARCHIVE_CHUNKS",
+    "MAX_ARCHIVE_PLAINTEXT_BYTES",
+    "MAX_MANIFEST_BYTES",
     "BackupArchiveReader",
     "BackupArchiveWriter",
     "BackupAuthenticationFailed",
