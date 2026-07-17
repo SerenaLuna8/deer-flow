@@ -32,6 +32,20 @@ class ProjectCreateQuotaPort(Protocol):
     ) -> None: ...
 
 
+class ProjectMutationAuditPort(Protocol):
+    async def project_created(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None: ...
+
+    async def project_updated(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None: ...
+
+
 class _NoopProjectCreateQuota:
     async def reserve_member(
         self,
@@ -96,7 +110,14 @@ class ProjectRepository:
         self.session = session
         self._quota = quota or _NoopProjectCreateQuota()
 
-    async def create_with_admin(self, user_id: uuid.UUID, command: CreateProject, request_id: str) -> ProjectContext:
+    async def create_with_admin(
+        self,
+        user_id: uuid.UUID,
+        command: CreateProject,
+        request_id: str,
+        *,
+        audit: ProjectMutationAuditPort | None = None,
+    ) -> ProjectContext:
         project = ProjectRow(
             slug=command.slug,
             display_name=command.display_name,
@@ -129,6 +150,8 @@ class ProjectRepository:
                     membership_id=membership.id,
                     membership_version=membership.version,
                 )
+                if audit is not None:
+                    await audit.project_created(self.session, context)
         except IntegrityError as exc:
             if _constraint_name(exc) == "uq_projects_slug":
                 raise ProjectSlugConflict() from None
@@ -193,7 +216,13 @@ class ProjectRepository:
             project.deletion_effective_at,
         )
 
-    async def update(self, context: ProjectContext, changes: ProjectChanges) -> ProjectView:
+    async def update(
+        self,
+        context: ProjectContext,
+        changes: ProjectChanges,
+        *,
+        audit: ProjectMutationAuditPort | None = None,
+    ) -> ProjectView:
         values = {key: value for key, value in vars(changes).items() if value is not None}
         membership_scope = exists(
             select(1).where(
@@ -209,7 +238,10 @@ class ProjectRepository:
                 result = await self.session.execute(update(ProjectRow).where(ProjectRow.id == context.project_id, ProjectRow.status == "active", ProjectRow.is_suspended.is_(False), membership_scope).values(**values))
                 if result.rowcount != 1:
                     raise ProjectNotFound()
-                return await self._get_in_transaction(context)
+                view = await self._get_in_transaction(context)
+                if audit is not None:
+                    await audit.project_updated(self.session, context)
+                return view
         except DBAPIError:
             raise ProjectDatabaseUnavailable() from None
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from copy import copy
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from support.m4_private_threads import seed_m4_thread_database
 
 import app.audit.sinks as audit_sinks
@@ -14,9 +15,19 @@ from app.audit.models import (
     AuditProcess,
     resolve_system_audit_context,
 )
-from app.audit.service import AuditService
+from app.audit.service import (
+    AuditService,
+    _bind_gateway_audit_process,
+    _bind_operator_audit_process,
+    _bind_process_audit_for_test,
+    _bind_recovery_audit_process,
+    _bind_scheduler_audit_process,
+    _bind_worker_audit_process,
+)
 from app.audit.sinks import OperationalAuditSink, SystemJobAuditSink
 from app.automations.dispatcher import AutomationDefinitionRef, AutomationDispatcher
+from app.automations.models import AutomationChanges, AutomationCreate
+from app.automations.service import ProjectAutomationService
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.run_service import PrivateRunService
@@ -24,19 +35,34 @@ from app.private_work.thread_repository import PrivateThreadRepository, ThreadAg
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectLastAdmin
+from app.projects.invitation_repository import InvitationRepository
+from app.projects.invitation_service import InvitationService
+from app.projects.lifecycle_repository import ProjectLifecycleRepository
+from app.projects.lifecycle_service import ProjectLifecycleService
 from app.projects.membership_repository import MembershipRepository
 from app.projects.membership_service import MembershipService
-from app.projects.models import ProjectRole
+from app.projects.models import CreateProject, ProjectChanges, ProjectRole
+from app.projects.repository import ProjectRepository
+from app.projects.service import ProjectService
 from app.quotas.models import (
     EffectiveQuotaLimits,
     ProjectQuotaLimits,
     ProjectQuotaPolicy,
 )
-from app.reliability.execution import PrivateRunJobTerminalPort
+from app.reliability.execution import (
+    AgentExecutionResult,
+    PrivateRunJobHandler,
+    PrivateRunJobTerminalPort,
+)
 from app.reliability.owner_refs import AuditHmacKeyring
+from app.worker.service import JobLeaseAuthority
 from deerflow.persistence.audit.model import AuditLogRow
-from deerflow.persistence.jobs.model import DeadJobRow, JobRow
-from deerflow.persistence.jobs.sql import DeadJobRequeuedEvent, JobTerminalEvent
+from deerflow.persistence.jobs.model import DeadJobRow, JobRow, WorkerNodeRow
+from deerflow.persistence.jobs.sql import (
+    JobRepository,
+    JobRequeueForbidden,
+    JobTerminalEvent,
+)
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import (
     ScheduledTaskCreate,
@@ -53,6 +79,18 @@ def _keyring() -> AuditHmacKeyring:
     )
 
 
+def _operational_sink(
+    service: AuditService,
+    process: AuditProcess,
+) -> OperationalAuditSink:
+    bind = {
+        AuditProcess.GATEWAY: _bind_gateway_audit_process,
+        AuditProcess.WORKER: _bind_worker_audit_process,
+        AuditProcess.SCHEDULER: _bind_scheduler_audit_process,
+    }[process]
+    return OperationalAuditSink(service, process_context=bind(service))
+
+
 def _project(context) -> ProjectContext:
     return ProjectContext(
         user_id=context.user_id,
@@ -65,9 +103,8 @@ def _project(context) -> ProjectContext:
     )
 
 
-async def _seed_safe_requeue_pair(seed) -> tuple[uuid.UUID, uuid.UUID]:
+async def _seed_safe_dead_job(seed) -> uuid.UUID:
     predecessor_id = uuid.uuid4()
-    successor_id = uuid.uuid4()
     async with seed.factory() as session, session.begin():
         session.add(
             JobRow(
@@ -101,23 +138,7 @@ async def _seed_safe_requeue_pair(seed) -> tuple[uuid.UUID, uuid.UUID]:
             )
         )
         await session.flush()
-        session.add(
-            JobRow(
-                id=successor_id,
-                job_type="retention_purge",
-                project_id=seed.owner_a.project_id,
-                owner_user_id=None,
-                run_id=None,
-                automation_occurrence_id=None,
-                predecessor_dead_job_id=predecessor_id,
-                idempotency_key=uuid.uuid4().hex * 2,
-                status="queued",
-                attempt_count=0,
-                max_attempts=3,
-                retry_safety="safe",
-            )
-        )
-    return predecessor_id, successor_id
+    return predecessor_id
 
 
 @pytest.mark.postgres
@@ -128,9 +149,9 @@ async def test_private_run_admission_writes_audit_in_domain_transaction(
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     run_id = str(uuid.uuid4())
     thread_id = f"m6-audit-{uuid.uuid4()}"
-    sink = OperationalAuditSink(
+    sink = _operational_sink(
         AuditService(seed.factory, _keyring()),
-        process=AuditProcess.GATEWAY,
+        AuditProcess.GATEWAY,
     )
     try:
         async with seed.factory() as session, session.begin():
@@ -174,9 +195,9 @@ async def test_failed_last_admin_removal_writes_no_success_audit(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    sink = OperationalAuditSink(
+    sink = _operational_sink(
         AuditService(seed.factory, _keyring()),
-        process=AuditProcess.GATEWAY,
+        AuditProcess.GATEWAY,
     )
     project = _project(seed.owner_a)
     try:
@@ -210,9 +231,9 @@ async def test_successful_member_removal_commits_one_safe_audit_row(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    sink = OperationalAuditSink(
+    sink = _operational_sink(
         AuditService(seed.factory, _keyring()),
-        process=AuditProcess.GATEWAY,
+        AuditProcess.GATEWAY,
     )
     project = _project(seed.owner_a)
     try:
@@ -245,13 +266,332 @@ async def test_successful_member_removal_commits_one_safe_audit_row(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_same_role_change_is_idempotent_without_audit_or_version_change(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    sink = _operational_sink(
+        AuditService(seed.factory, _keyring()),
+        AuditProcess.GATEWAY,
+    )
+    project = _project(seed.owner_a)
+    try:
+        async with seed.factory() as session:
+            unchanged = await MembershipService(
+                MembershipRepository(session),
+                audit=sink,
+            ).change_role(
+                project,
+                seed.owner_b.membership_id,
+                ProjectRole.RUNNER,
+                seed.owner_b.membership_version,
+            )
+
+        assert unchanged.version == seed.owner_b.membership_version
+        async with seed.factory() as session:
+            assert (
+                await session.scalar(
+                    select(AuditLogRow.id).where(
+                        AuditLogRow.action == "member.role_changed",
+                    )
+                )
+                is None
+            )
+    finally:
+        await seed.engine.dispose()
+
+
+class _FailingProjectAudit:
+    async def project_created(self, *_args, **_kwargs) -> None:
+        raise RuntimeError("governance audit unavailable")
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_project_create_update_audit_and_hook_rollback(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    sink = _operational_sink(
+        AuditService(seed.factory, _keyring()),
+        AuditProcess.GATEWAY,
+    )
+    slug = f"audit-project-{uuid.uuid4().hex[:12]}"
+    rolled_back_slug = f"audit-rollback-{uuid.uuid4().hex[:12]}"
+    try:
+        async with seed.factory() as session:
+            service = ProjectService(ProjectRepository(session), audit=sink)
+            context = await service.create(
+                seed.owner_a.user_id,
+                CreateProject(slug, "Audit project", "private description", "A"),
+                "project-create-audit",
+            )
+            await service.update(
+                context,
+                ProjectChanges(display_name="Updated audit project"),
+            )
+
+        with pytest.raises(RuntimeError, match="governance audit unavailable"):
+            async with seed.factory() as session:
+                await ProjectService(
+                    ProjectRepository(session),
+                    audit=_FailingProjectAudit(),
+                ).create(
+                    seed.owner_a.user_id,
+                    CreateProject(
+                        rolled_back_slug,
+                        "Rollback project",
+                        "private rollback description",
+                        "R",
+                    ),
+                    "project-create-rollback",
+                )
+
+        async with seed.factory() as session:
+            rows = (await session.execute(select(AuditLogRow).where(AuditLogRow.project_id == context.project_id).order_by(AuditLogRow.occurred_at, AuditLogRow.id))).scalars().all()
+            rolled_back = await session.scalar(
+                text("SELECT id FROM projects WHERE slug=:slug"),
+                {"slug": rolled_back_slug},
+            )
+        assert [row.action for row in rows] == ["project.created", "project.updated"]
+        assert all(row.metadata_json == {} for row in rows)
+        assert all(row.actor_user_id == str(seed.owner_a.user_id) for row in rows)
+        assert rolled_back is None
+        assert "private description" not in repr([row.__dict__ for row in rows])
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_project_lifecycle_audits_all_existing_mutations(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    sink = _operational_sink(
+        AuditService(seed.factory, _keyring()),
+        AuditProcess.GATEWAY,
+    )
+    context = _project(seed.owner_a)
+    try:
+        async with seed.factory() as session:
+            service = ProjectLifecycleService(
+                ProjectLifecycleRepository(session),
+                audit=sink,
+            )
+            await service.request_deletion(context, NOW)
+            await service.restore(
+                context.user_id,
+                context.project_id,
+                "project-recovered-audit",
+                NOW + timedelta(seconds=1),
+            )
+            await service.suspend(context, NOW + timedelta(seconds=2))
+            await service.resume(
+                context.user_id,
+                context.project_id,
+                "project-resumed-audit",
+                NOW + timedelta(seconds=3),
+            )
+
+        async with seed.factory() as session:
+            rows = (await session.execute(select(AuditLogRow).where(AuditLogRow.project_id == context.project_id).order_by(AuditLogRow.occurred_at, AuditLogRow.id))).scalars().all()
+        assert [row.action for row in rows] == [
+            "project.deletion_requested",
+            "project.recovered",
+            "project.suspended",
+            "project.resumed",
+        ]
+        assert all(row.metadata_json == {} for row in rows)
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_invitation_and_member_join_audits_are_allowlisted(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    sink = _operational_sink(
+        AuditService(seed.factory, _keyring()),
+        AuditProcess.GATEWAY,
+    )
+    context = _project(seed.owner_a)
+    member_id = uuid.uuid4()
+    member_email = f"{member_id}@example.com"
+    try:
+        async with seed.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                    (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,:email,'user',now(),false,0)"""
+                ),
+                {"id": str(member_id), "email": member_email},
+            )
+        async with seed.factory() as session:
+            service = InvitationService(
+                InvitationRepository(session),
+                audit=sink,
+            )
+            revoked = await service.create(
+                context,
+                "revoked@example.com",
+                ProjectRole.VIEWER,
+                NOW,
+            )
+            await service.revoke(
+                context,
+                revoked.invitation.id,
+                revoked.invitation.version,
+                NOW + timedelta(seconds=1),
+            )
+            redeemable = await service.create(
+                context,
+                member_email,
+                ProjectRole.EDITOR,
+                NOW + timedelta(seconds=2),
+            )
+            claim = await service.claim(
+                redeemable.token,
+                NOW + timedelta(seconds=3),
+            )
+            await service.redeem(
+                member_id,
+                member_email,
+                claim,
+                NOW + timedelta(seconds=4),
+                request_id="invitation-redeemed-audit",
+            )
+
+        async with seed.factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AuditLogRow)
+                        .where(
+                            AuditLogRow.project_id == context.project_id,
+                            AuditLogRow.action.in_(
+                                (
+                                    "invitation.created",
+                                    "invitation.revoked",
+                                    "invitation.redeemed",
+                                    "member.joined",
+                                )
+                            ),
+                        )
+                        .order_by(AuditLogRow.occurred_at, AuditLogRow.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert [row.action for row in rows] == [
+            "invitation.created",
+            "invitation.revoked",
+            "invitation.created",
+            "invitation.redeemed",
+            "member.joined",
+        ]
+        assert [row.metadata_json for row in rows] == [
+            {"role": "viewer"},
+            {},
+            {"role": "editor"},
+            {"role": "editor"},
+            {"role": "editor"},
+        ]
+        encoded = repr([row.__dict__ for row in rows])
+        assert member_email not in encoded
+        assert redeemable.token not in encoded
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_automation_definition_mutations_write_safe_audit(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    sink = _operational_sink(
+        AuditService(seed.factory, _keyring()),
+        AuditProcess.GATEWAY,
+    )
+    try:
+        service = ProjectAutomationService(
+            seed.factory,
+            lambda: NOW,
+            min_once_delay_seconds=0,
+            audit=sink,
+        )
+        created = await service.create(
+            seed.owner_a,
+            AutomationCreate(
+                title="Private automation title",
+                prompt="Private automation prompt",
+                context_mode="fresh_thread_per_run",
+                thread_id=None,
+                agent_asset_id=seed.project_agent_id,
+                agent_scope="project",
+                schedule_type="cron",
+                schedule_spec={"cron": "0 * * * *"},
+                timezone="UTC",
+            ),
+        )
+        updated = await service.update(
+            seed.owner_a,
+            created.id,
+            AutomationChanges(
+                expected_version=created.version,
+                title="Updated private title",
+            ),
+        )
+        await service.delete(seed.owner_a, updated.id, updated.version)
+
+        async with seed.factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AuditLogRow)
+                        .where(
+                            AuditLogRow.project_id == seed.owner_a.project_id,
+                            AuditLogRow.action.in_(
+                                (
+                                    "automation.created",
+                                    "automation.updated",
+                                    "automation.deleted",
+                                )
+                            ),
+                        )
+                        .order_by(AuditLogRow.occurred_at, AuditLogRow.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert [row.action for row in rows] == [
+            "automation.created",
+            "automation.updated",
+            "automation.deleted",
+        ]
+        assert all(row.metadata_json == {} for row in rows)
+        encoded = repr([row.__dict__ for row in rows])
+        assert "Private automation" not in encoded
+        assert "Updated private" not in encoded
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_scheduled_automation_writes_joint_trigger_and_run_audit(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    sink = OperationalAuditSink(
+    sink = _operational_sink(
         AuditService(seed.factory, _keyring()),
-        process=AuditProcess.SCHEDULER,
+        AuditProcess.SCHEDULER,
     )
     try:
         async with seed.factory() as session, session.begin():
@@ -321,9 +661,9 @@ async def test_gateway_bound_sink_cannot_mint_scheduler_audit_actor(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    sink = OperationalAuditSink(
+    sink = _operational_sink(
         AuditService(seed.factory, _keyring()),
-        process=AuditProcess.GATEWAY,
+        AuditProcess.GATEWAY,
     )
     try:
         async with seed.factory() as session, session.begin():
@@ -365,15 +705,61 @@ async def test_gateway_bound_sink_cannot_mint_scheduler_audit_actor(
         await seed.engine.dispose()
 
 
+def test_process_audit_registry_binds_service_to_one_role() -> None:
+    service = AuditService(None, _keyring())
+
+    gateway_context = _bind_gateway_audit_process(service)
+
+    assert gateway_context.process is AuditProcess.GATEWAY
+    assert not hasattr(service, "bind_gateway_process")
+    assert _bind_gateway_audit_process(service) is gateway_context
+    with pytest.raises(AuditAuthorityRejected):
+        _bind_worker_audit_process(service)
+    with pytest.raises(AuditAuthorityRejected):
+        _bind_scheduler_audit_process(service)
+
+
+def test_process_audit_context_rejects_copy_replacement_and_cross_service_use() -> None:
+    gateway_service = AuditService(None, _keyring())
+    gateway_context = _bind_gateway_audit_process(gateway_service)
+    worker_service = AuditService(None, _keyring())
+    worker_context = _bind_process_audit_for_test(
+        worker_service,
+        AuditProcess.WORKER,
+    )
+
+    OperationalAuditSink(
+        gateway_service,
+        process_context=gateway_context,
+    )
+    with pytest.raises(AuditAuthorityRejected):
+        OperationalAuditSink(
+            gateway_service,
+            process_context=copy(gateway_context),
+        )
+    with pytest.raises(AuditAuthorityRejected):
+        OperationalAuditSink(
+            gateway_service,
+            process_context=worker_context,
+        )
+
+    object.__setattr__(gateway_context, "process", AuditProcess.WORKER)
+    with pytest.raises(AuditAuthorityRejected):
+        OperationalAuditSink(
+            gateway_service,
+            process_context=gateway_context,
+        )
+
+
 @pytest.mark.postgres
 @pytest.mark.anyio
 async def test_quota_policy_audit_contract_persists_only_allowlisted_governance_values(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    sink = OperationalAuditSink(
+    sink = _operational_sink(
         AuditService(seed.factory, _keyring()),
-        process=AuditProcess.GATEWAY,
+        AuditProcess.GATEWAY,
     )
     policy = ProjectQuotaPolicy(
         configured=ProjectQuotaLimits(
@@ -421,13 +807,15 @@ async def test_trusted_operation_audit_contracts_allowlist_recovery_metadata(
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     sink_type = audit_sinks.TrustedOperationAuditSink
+    operator_service = AuditService(seed.factory, _keyring())
     operator = sink_type(
-        AuditService(seed.factory, _keyring()),
-        process=AuditProcess.OPERATOR,
+        operator_service,
+        process_context=_bind_operator_audit_process(operator_service),
     )
+    recovery_service = AuditService(seed.factory, _keyring())
     recovery = sink_type(
-        AuditService(seed.factory, _keyring()),
-        process=AuditProcess.RECOVERY,
+        recovery_service,
+        process_context=_bind_recovery_audit_process(recovery_service),
     )
     backup_id = uuid.uuid4()
     restore_id = uuid.uuid4()
@@ -519,9 +907,10 @@ async def test_trusted_operation_audit_contracts_allowlist_recovery_metadata(
 @pytest.mark.anyio
 async def test_system_requeue_sink_binds_admin_and_successor_authority(
     migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    predecessor_id, successor_id = await _seed_safe_requeue_pair(seed)
+    predecessor_id = await _seed_safe_dead_job(seed)
     context = resolve_system_audit_context(
         SimpleNamespace(
             id=seed.owner_a.user_id,
@@ -535,14 +924,18 @@ async def test_system_requeue_sink_binds_admin_and_successor_authority(
     )
     try:
         async with seed.factory() as session, session.begin():
-            await sink.dead_job_requeued(
+            monkeypatch.setattr(
                 session,
-                DeadJobRequeuedEvent(
-                    project_id=seed.owner_a.project_id,
-                    predecessor_job_id=predecessor_id,
-                    successor_job_id=successor_id,
-                    request_id=context.request_id,
-                ),
+                "get",
+                lambda *_args, **_kwargs: pytest.fail("system requeue audit must not load a naked Job row"),
+            )
+            successor_id = await JobRepository(session).requeue_safe_system(
+                seed.owner_a.project_id,
+                predecessor_id,
+                idempotency_key="a" * 64,
+                max_attempts=3,
+                request_id=context.request_id,
+                audit_port=sink,
             )
 
         async with seed.factory() as session:
@@ -570,11 +963,11 @@ async def test_system_requeue_sink_binds_admin_and_successor_authority(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_system_requeue_sink_rejects_unrelated_predecessor_authority(
+async def test_system_requeue_rejects_cross_project_dead_job_scope(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    _predecessor_id, successor_id = await _seed_safe_requeue_pair(seed)
+    predecessor_id = await _seed_safe_dead_job(seed)
     context = resolve_system_audit_context(
         SimpleNamespace(
             id=seed.owner_a.user_id,
@@ -587,16 +980,15 @@ async def test_system_requeue_sink_rejects_unrelated_predecessor_authority(
         context,
     )
     try:
-        with pytest.raises(AuditAuthorityRejected):
+        with pytest.raises(JobRequeueForbidden):
             async with seed.factory() as session, session.begin():
-                await sink.dead_job_requeued(
-                    session,
-                    DeadJobRequeuedEvent(
-                        project_id=seed.owner_a.project_id,
-                        predecessor_job_id=uuid.uuid4(),
-                        successor_job_id=successor_id,
-                        request_id=context.request_id,
-                    ),
+                await JobRepository(session).requeue_safe_system(
+                    seed.project_b_owner_a.project_id,
+                    predecessor_id,
+                    idempotency_key="b" * 64,
+                    max_attempts=3,
+                    request_id=context.request_id,
+                    audit_port=sink,
                 )
 
         async with seed.factory() as session:
@@ -611,9 +1003,9 @@ async def test_dead_job_audit_contains_codes_not_exception_text(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    sink = OperationalAuditSink(
+    sink = _operational_sink(
         AuditService(seed.factory, _keyring()),
-        process=AuditProcess.WORKER,
+        AuditProcess.WORKER,
     )
     run_id = str(uuid.uuid4())
     thread_id = f"m6-dead-audit-{uuid.uuid4()}"
@@ -684,14 +1076,23 @@ async def test_successful_job_terminal_does_not_duplicate_run_terminal_audit(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    sink = OperationalAuditSink(
+    sink = _operational_sink(
         AuditService(seed.factory, _keyring()),
-        process=AuditProcess.WORKER,
+        AuditProcess.WORKER,
     )
     run_id = str(uuid.uuid4())
     thread_id = f"m6-terminal-audit-{uuid.uuid4()}"
+    worker_id = uuid.uuid4()
     try:
         async with seed.factory() as session, session.begin():
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="audit-test",
+                    capabilities_json=["private_run"],
+                    max_concurrent_jobs=1,
+                )
+            )
             await PrivateThreadRepository(session).create(
                 scope=seed.owner_a_scope,
                 thread_id=thread_id,
@@ -702,34 +1103,35 @@ async def test_successful_job_terminal_does_not_duplicate_run_terminal_audit(
             thread_id,
             PrivateRunCreate(run_id=run_id),
         )
+
         async with seed.factory() as session, session.begin():
-            await sink.run_terminal(
-                session,
-                seed.owner_a_scope,
-                run_id=run_id,
-                job_id=admitted.job.job_id,
-                job_type="private_run",
-                status="success",
-                public_error_code=None,
-                request_id="worker-private-run",
+            repository = JobRepository(session)
+            claim = await repository.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=90,
             )
-            await sink.job_terminalized(
-                session,
-                JobTerminalEvent(
-                    job_id=admitted.job.job_id,
-                    project_id=seed.owner_a.project_id,
-                    owner_user_id=str(seed.owner_a.user_id),
-                    run_id=run_id,
-                    occurrence_id=None,
-                    job_type="private_run",
-                    status="succeeded",
-                    retry_safety="safe",
-                    public_error_code=None,
-                    cancel_reason=None,
-                    occurred_at=NOW,
-                    attempt_count=1,
-                ),
+            assert claim is not None
+            assert claim.job_id == admitted.job.job_id
+            assert await repository.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
             )
+
+        class Executor:
+            async def execute(self, _execution, _authority):
+                return AgentExecutionResult.succeeded()
+
+        settlement = await PrivateRunJobHandler(
+            seed.factory,
+            executor=Executor(),
+            audit=sink,
+        )(
+            claim,
+            JobLeaseAuthority(seed.factory, claim, lease_seconds=90),
+        )
+        await settlement.commit()
+        await settlement.commit()
 
         async with seed.factory() as session:
             rows = (
@@ -758,9 +1160,9 @@ async def test_queued_run_cancel_writes_request_and_terminal_in_same_transaction
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    sink = OperationalAuditSink(
+    sink = _operational_sink(
         AuditService(seed.factory, _keyring()),
-        process=AuditProcess.GATEWAY,
+        AuditProcess.GATEWAY,
     )
     run_id = str(uuid.uuid4())
     thread_id = f"m6-cancel-audit-{uuid.uuid4()}"

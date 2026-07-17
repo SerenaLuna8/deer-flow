@@ -23,12 +23,14 @@ from app.audit.models import (
     AuditPage,
     AuditPlatformRole,
     AuditProcess,
+    AuditProcessContext,
     AuditRecord,
     AuditScope,
     AuditTarget,
     AuditTargetKind,
     AuditUnavailable,
     SystemAuditContext,
+    _AuditProcessRegistry,
     is_issued_elevated_audit_actor,
     is_issued_system_audit_context,
 )
@@ -53,6 +55,21 @@ class AuditService:
             raise TypeError("audit HMAC keyring is invalid")
         self._sessions = session_factory
         self._keyring = keyring
+        self.__process_registry = _AuditProcessRegistry()
+
+    def _bind_process_context(
+        self,
+        process: AuditProcess,
+    ) -> AuditProcessContext:
+        return self.__process_registry.bind(process)
+
+    def require_process_context(
+        self,
+        context: object,
+    ) -> AuditProcessContext:
+        if not self.__process_registry.owns(context):
+            raise AuditAuthorityRejected()
+        return context
 
     async def append(
         self,
@@ -349,6 +366,35 @@ class AuditService:
             ValueError,
         ):
             raise AuditCursorRejected() from None
+
+
+def _bind_gateway_audit_process(service: AuditService) -> AuditProcessContext:
+    return service._bind_process_context(AuditProcess.GATEWAY)
+
+
+def _bind_worker_audit_process(service: AuditService) -> AuditProcessContext:
+    return service._bind_process_context(AuditProcess.WORKER)
+
+
+def _bind_scheduler_audit_process(service: AuditService) -> AuditProcessContext:
+    return service._bind_process_context(AuditProcess.SCHEDULER)
+
+
+def _bind_operator_audit_process(service: AuditService) -> AuditProcessContext:
+    return service._bind_process_context(AuditProcess.OPERATOR)
+
+
+def _bind_recovery_audit_process(service: AuditService) -> AuditProcessContext:
+    return service._bind_process_context(AuditProcess.RECOVERY)
+
+
+def _bind_process_audit_for_test(
+    service: AuditService,
+    process: AuditProcess,
+) -> AuditProcessContext:
+    """Private test-only factory for isolated process composition fixtures."""
+
+    return service._bind_process_context(process)
 
 
 __all__ = ["AuditService"]

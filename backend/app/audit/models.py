@@ -186,6 +186,7 @@ for _action in (AuditAction.PROJECT_SUSPENDED, AuditAction.PROJECT_RESUMED):
     _ACTION_CONTRACTS[_action] = _contract(
         AuditTargetKind.PROJECT,
         AuditScope.PROJECT,
+        "user",
         "system",
         authority_matches_project=True,
     )
@@ -418,8 +419,10 @@ class AuditActor:
         return actor
 
     @classmethod
-    def trusted_process(cls, process: AuditProcess) -> AuditActor:
-        actor = cls(process=process)
+    def trusted_process(cls, context: AuditProcessContext) -> AuditActor:
+        if not is_issued_audit_process_context(context):
+            raise AuditAuthorityRejected()
+        actor = cls(process=context.process)
         _register_elevated_actor(actor)
         return actor
 
@@ -470,9 +473,22 @@ class SystemAuditContext:
     request_id: str
 
 
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+class AuditProcessContext:
+    process: AuditProcess
+    issuer_id: uuid.UUID
+
+
 _SYSTEM_CONTEXTS: dict[
     int,
     tuple[weakref.ReferenceType[SystemAuditContext], tuple[uuid.UUID, str]],
+] = {}
+_PROCESS_CONTEXTS: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[AuditProcessContext],
+        tuple[AuditProcess, uuid.UUID],
+    ],
 ] = {}
 _SYSTEM_CONTEXT_LOCK = Lock()
 _ELEVATED_ACTORS: dict[
@@ -486,6 +502,57 @@ _ELEVATED_ACTORS: dict[
 
 def _valid_request_id(value: object) -> bool:
     return type(value) is str and 1 <= len(value) <= 512 and value == value.strip() and all(32 <= ord(character) <= 126 for character in value)
+
+
+def is_issued_audit_process_context(
+    value: object,
+) -> TypeGuard[AuditProcessContext]:
+    if type(value) is not AuditProcessContext:
+        return False
+    with _SYSTEM_CONTEXT_LOCK:
+        issued = _PROCESS_CONTEXTS.get(id(value))
+    try:
+        return issued is not None and issued[0]() is value and issued[1] == (value.process, value.issuer_id)
+    except AttributeError:
+        return False
+
+
+class _AuditProcessRegistry:
+    """AuditService-owned one-time process authority registry."""
+
+    def __init__(self) -> None:
+        self._issuer_id = uuid.uuid4()
+        self._context: AuditProcessContext | None = None
+
+    def bind(self, process: AuditProcess) -> AuditProcessContext:
+        if type(process) is not AuditProcess:
+            raise AuditAuthorityRejected()
+        if self._context is not None:
+            if self._context.process is not process:
+                raise AuditAuthorityRejected()
+            return self._context
+        context = object.__new__(AuditProcessContext)
+        object.__setattr__(context, "process", process)
+        object.__setattr__(context, "issuer_id", self._issuer_id)
+        identity = id(context)
+
+        def discard(reference: weakref.ReferenceType[AuditProcessContext]) -> None:
+            with _SYSTEM_CONTEXT_LOCK:
+                current = _PROCESS_CONTEXTS.get(identity)
+                if current is not None and current[0] is reference:
+                    del _PROCESS_CONTEXTS[identity]
+
+        reference = weakref.ref(context, discard)
+        with _SYSTEM_CONTEXT_LOCK:
+            _PROCESS_CONTEXTS[identity] = (
+                reference,
+                (process, self._issuer_id),
+            )
+        self._context = context
+        return context
+
+    def owns(self, context: object) -> TypeGuard[AuditProcessContext]:
+        return is_issued_audit_process_context(context) and context is self._context and context.issuer_id == self._issuer_id
 
 
 def _register_elevated_actor(actor: AuditActor) -> None:
@@ -699,12 +766,14 @@ __all__ = [
     "AuditPage",
     "AuditPlatformRole",
     "AuditProcess",
+    "AuditProcessContext",
     "AuditRecord",
     "AuditScope",
     "AuditTarget",
     "AuditTargetKind",
     "AuditUnavailable",
     "SystemAuditContext",
+    "is_issued_audit_process_context",
     "is_issued_elevated_audit_actor",
     "is_issued_system_audit_context",
     "resolve_system_audit_context",

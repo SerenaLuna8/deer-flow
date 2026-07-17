@@ -142,13 +142,14 @@ class MembershipService:
                     now=revoked_at,
                 )
             result = await self.repository.set_role(project, target, role)
-            await self._audit.member_role_changed(
-                self.repository.session,
-                context,
-                target.id,
-                target_role,
-                role,
-            )
+            if target_role is not role:
+                await self._audit.member_role_changed(
+                    self.repository.session,
+                    context,
+                    target.id,
+                    target_role,
+                    role,
+                )
         await self._notify(run_ids)
         return result
 

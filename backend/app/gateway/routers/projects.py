@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.deps import (
     get_current_user_from_request,
+    get_operational_audit_sink,
     get_project_quota_enforcer,
     project_session,
 )
@@ -116,9 +117,15 @@ async def authenticated_project_identity(user=Depends(get_current_user_from_requ
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
-async def create_project(body: CreateProjectRequest, identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity), session: AsyncSession = Depends(project_session), quota=Depends(get_project_quota_enforcer)):
+async def create_project(
+    body: CreateProjectRequest,
+    identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
+    session: AsyncSession = Depends(project_session),
+    quota=Depends(get_project_quota_enforcer),
+    audit=Depends(get_operational_audit_sink),
+):
     user_id, request_id = identity
-    service = ProjectService(ProjectRepository(session, quota=quota))
+    service = ProjectService(ProjectRepository(session, quota=quota), audit=audit)
     try:
         context = await service.create(user_id, CreateProject(**body.model_dump()), request_id)
         return _response(await service.get(context))
@@ -152,10 +159,10 @@ async def list_projects(
         _raise_domain(exc)
 
 
-async def _context_service(project_id: uuid.UUID, identity: tuple[uuid.UUID, str], session: AsyncSession):
+async def _context_service(project_id: uuid.UUID, identity: tuple[uuid.UUID, str], session: AsyncSession, *, audit=None):
     user_id, request_id = identity
     context = await resolve_project_context(session, user_id, project_id, request_id)
-    return context, ProjectService(ProjectRepository(session))
+    return context, ProjectService(ProjectRepository(session), audit=audit)
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
@@ -168,9 +175,11 @@ async def get_project(project_id: uuid.UUID, identity: tuple[uuid.UUID, str] = D
 
 
 @router.patch("/{project_id}", response_model=ProjectResponse)
-async def patch_project(project_id: uuid.UUID, body: PatchProjectRequest, identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity), session: AsyncSession = Depends(project_session)):
+async def patch_project(
+    project_id: uuid.UUID, body: PatchProjectRequest, identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity), session: AsyncSession = Depends(project_session), audit=Depends(get_operational_audit_sink)
+):
     try:
-        context, service = await _context_service(project_id, identity, session)
+        context, service = await _context_service(project_id, identity, session, audit=audit)
         return _response(await service.update(context, ProjectChanges(**body.model_dump())))
     except DOMAIN_ERRORS as exc:
         _raise_domain(exc)

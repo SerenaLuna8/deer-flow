@@ -76,13 +76,13 @@ async def run_scheduler(
             raise RuntimeError("scheduler persistence engine is unavailable")
         ownership = AutomationSchedulerOwnership(engine)
         audit_keyring = AuditHmacKeyring.from_environment()
-        from app.audit.models import AuditProcess
-        from app.audit.service import AuditService
+        from app.audit.service import AuditService, _bind_scheduler_audit_process
         from app.audit.sinks import OperationalAuditSink
 
+        audit_service = AuditService(session_factory, audit_keyring)
         audit_sink = OperationalAuditSink(
-            AuditService(session_factory, audit_keyring),
-            process=AuditProcess.SCHEDULER,
+            audit_service,
+            process_context=_bind_scheduler_audit_process(audit_service),
         )
         quota_enforcer = ProjectQuotaEnforcer(
             QuotaService(

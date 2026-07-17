@@ -286,15 +286,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.config.quota_config import QuotaConfig
 
         audit_keyring = AuditHmacKeyring.from_environment()
-        from app.audit.service import AuditService
+        from app.audit.service import AuditService, _bind_gateway_audit_process
         from app.audit.sinks import OperationalAuditSink
 
         audit_service = AuditService(sf, audit_keyring)
-        from app.audit.models import AuditProcess
-
         operational_audit_sink = OperationalAuditSink(
             audit_service,
-            process=AuditProcess.GATEWAY,
+            process_context=_bind_gateway_audit_process(audit_service),
         )
         from app.shared_assets.audit import (
             DurableSharedAssetGovernanceEventSink,
@@ -394,6 +392,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.automation_service = ProjectAutomationService(
             sf,
             min_once_delay_seconds=effective_scheduler_config.min_once_delay_seconds,
+            audit=operational_audit_sink,
         )
         # Gateway reports configured-but-external scheduling as stopped. M6
         # runtime health aggregation replaces this local projection in Task 13.

@@ -62,9 +62,20 @@ class JobSettlement:
 
     outcome: JobOutcome
     _commit: Callable[[], Awaitable[None]] = field(repr=False)
+    _commit_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _committed: bool = field(default=False, init=False, repr=False, compare=False)
 
     async def commit(self) -> None:
-        await self._commit()
+        async with self._commit_lock:
+            if self._committed:
+                return
+            await self._commit()
+            object.__setattr__(self, "_committed", True)
 
 
 class JobHandler(Protocol):

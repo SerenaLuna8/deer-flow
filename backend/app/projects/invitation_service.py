@@ -21,7 +21,10 @@ from app.projects.invitation_models import (
     ProjectInvitationInvalid,
     RedeemedInvitation,
 )
-from app.projects.invitation_repository import InvitationRepository
+from app.projects.invitation_repository import (
+    InvitationMutationAuditPort,
+    InvitationRepository,
+)
 from app.projects.models import ProjectRole
 
 
@@ -33,6 +36,20 @@ class InvitationQuotaPort(Protocol):
         *,
         membership_id: uuid.UUID,
         membership_version: int,
+    ) -> None: ...
+
+
+class InvitationAuditPort(InvitationMutationAuditPort, Protocol):
+    async def invitation_redeemed_and_member_joined(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        project_id: uuid.UUID,
+        invitation_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        role: ProjectRole,
+        request_id: str,
     ) -> None: ...
 
 
@@ -72,10 +89,12 @@ class InvitationService:
         *,
         retention: object = PrivateWorkRetentionService,
         quota: InvitationQuotaPort | None = None,
+        audit: InvitationAuditPort | None = None,
     ):
         self.repository = repository
         self._retention = retention
         self._quota = quota or _NoopInvitationQuota()
+        self._audit = audit
 
     async def create(
         self,
@@ -93,14 +112,16 @@ class InvitationService:
             raise ProjectValidationFailed("invalid_invitation_role")
         invited_email = normalize_email(email)
         token = secrets.token_urlsafe(32)
-        invitation = await self.repository.create(
-            context,
-            invited_email=invited_email,
-            role=invitation_role,
-            token_hash=hash_invitation_token(token),
-            now=now,
-            expires_at=now + timedelta(days=7),
-        )
+        kwargs = {
+            "invited_email": invited_email,
+            "role": invitation_role,
+            "token_hash": hash_invitation_token(token),
+            "now": now,
+            "expires_at": now + timedelta(days=7),
+        }
+        if self._audit is not None:
+            kwargs["audit"] = self._audit
+        invitation = await self.repository.create(context, **kwargs)
         return CreatedInvitation(invitation=invitation, token=token)
 
     async def list_for_project(
@@ -126,12 +147,10 @@ class InvitationService:
         now: datetime,
     ) -> InvitationView:
         context.require(Capability.PROJECT_MEMBERS_MANAGE)
-        return await self.repository.revoke(
-            context,
-            invitation_id,
-            expected_version=expected_version,
-            now=now,
-        )
+        kwargs = {"expected_version": expected_version, "now": now}
+        if self._audit is not None:
+            kwargs["audit"] = self._audit
+        return await self.repository.revoke(context, invitation_id, **kwargs)
 
     async def claim(self, token: str, now: datetime) -> InvitationClaim:
         if not isinstance(token, str) or not token or len(token) > 512:
@@ -147,6 +166,8 @@ class InvitationService:
         user_email: str,
         claim: InvitationClaim,
         now: datetime,
+        *,
+        request_id: str = "invitation-redeem",
     ) -> RedeemedInvitation:
         try:
             normalized_email = normalize_email(user_email)
@@ -199,6 +220,16 @@ class InvitationService:
                 owner_user_id=str(user_id),
                 now=now,
             )
+            if self._audit is not None:
+                await self._audit.invitation_redeemed_and_member_joined(
+                    self.repository.session,
+                    user_id=user_id,
+                    project_id=project.id,
+                    invitation_id=result.invitation_id,
+                    membership_id=result.membership_id,
+                    role=result.role,
+                    request_id=request_id,
+                )
             return result
 
     @staticmethod

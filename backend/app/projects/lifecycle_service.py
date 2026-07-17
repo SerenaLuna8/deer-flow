@@ -4,6 +4,9 @@ import logging
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from typing import Protocol
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.authorization import (
     AUTHORIZATION_REVOKED_REASON,
@@ -18,6 +21,60 @@ from app.projects.models import ProjectView
 logger = logging.getLogger(__name__)
 
 
+class ProjectLifecycleAuditPort(Protocol):
+    async def project_deletion_requested(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None: ...
+
+    async def project_recovered(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        project_id: uuid.UUID,
+        request_id: str,
+    ) -> None: ...
+
+    async def project_suspended(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None: ...
+
+    async def project_resumed(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        project_id: uuid.UUID,
+        request_id: str,
+    ) -> None: ...
+
+
+class _NoopProjectLifecycleAudit:
+    async def project_deletion_requested(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None:
+        del session, context
+
+    async def project_recovered(self, session: AsyncSession, **kwargs) -> None:
+        del session, kwargs
+
+    async def project_suspended(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None:
+        del session, context
+
+    async def project_resumed(self, session: AsyncSession, **kwargs) -> None:
+        del session, kwargs
+
+
 class ProjectLifecycleService:
     def __init__(
         self,
@@ -26,11 +83,13 @@ class ProjectLifecycleService:
         authorization: object = PrivateRunAuthorizationService,
         retention: object = PrivateWorkRetentionService,
         notify_local_cancellation: Callable[[tuple[str, ...], str], object] | None = None,
+        audit: ProjectLifecycleAuditPort | None = None,
     ):
         self.repository = repository
         self._authorization = authorization
         self._retention = retention
         self._notifier = notify_local_cancellation
+        self._audit = audit or _NoopProjectLifecycleAudit()
 
     async def request_deletion(
         self,
@@ -66,6 +125,10 @@ class ProjectLifecycleService:
                 requested_by_user_id=context.user_id,
                 request_id=context.request_id,
             )
+            await self._audit.project_deletion_requested(
+                self.repository.session,
+                context,
+            )
         await self._notify(tuple(run_ids))
         return result
 
@@ -89,6 +152,12 @@ class ProjectLifecycleService:
                 project_id=project.id,
                 owner_user_ids=tuple(member.user_id for member in members),
                 now=now,
+            )
+            await self._audit.project_recovered(
+                self.repository.session,
+                user_id=user_id,
+                project_id=project_id,
+                request_id=request_id,
             )
         return result
 
@@ -123,6 +192,10 @@ class ProjectLifecycleService:
                 actor,
                 request_id=context.request_id,
             )
+            await self._audit.project_suspended(
+                self.repository.session,
+                context,
+            )
         await self._notify(tuple(run_ids))
         return result
 
@@ -142,6 +215,12 @@ class ProjectLifecycleService:
                 project_id=project.id,
                 owner_user_ids=tuple(member.user_id for member in members),
                 now=now,
+            )
+            await self._audit.project_resumed(
+                self.repository.session,
+                user_id=user_id,
+                project_id=project_id,
+                request_id=request_id,
             )
         return result
 

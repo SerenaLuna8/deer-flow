@@ -4,6 +4,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Protocol
 
 from sqlalchemy import exists, select
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -21,6 +22,23 @@ from app.projects.invitation_models import (
 from app.projects.models import ProjectRole
 from deerflow.persistence.projects.invitation_model import ProjectInvitationRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+
+
+class InvitationMutationAuditPort(Protocol):
+    async def invitation_created(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        invitation_id: uuid.UUID,
+        role: ProjectRole,
+    ) -> None: ...
+
+    async def invitation_revoked(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        invitation_id: uuid.UUID,
+    ) -> None: ...
 
 
 class InvitationRepository:
@@ -62,6 +80,7 @@ class InvitationRepository:
         token_hash: str,
         now: datetime,
         expires_at: datetime,
+        audit: InvitationMutationAuditPort | None = None,
     ) -> InvitationView:
         async with self.transaction():
             await self.lock_project(context.project_id, not_found=ProjectNotFound)
@@ -97,7 +116,15 @@ class InvitationRepository:
             )
             self.session.add(invitation)
             await self.session.flush()
-            return self._view(invitation)
+            view = self._view(invitation)
+            if audit is not None:
+                await audit.invitation_created(
+                    self.session,
+                    context,
+                    invitation.id,
+                    role,
+                )
+            return view
 
     async def get(self, invitation_id: uuid.UUID) -> ProjectInvitationRow | None:
         async with self.transaction():
@@ -173,6 +200,7 @@ class InvitationRepository:
         *,
         expected_version: int,
         now: datetime,
+        audit: InvitationMutationAuditPort | None = None,
     ) -> InvitationView:
         async with self.transaction():
             await self.lock_project(context.project_id, not_found=ProjectNotFound)
@@ -197,7 +225,14 @@ class InvitationRepository:
             invitation.revoked_at = now
             invitation.version += 1
             await self.session.flush()
-            return self._view(invitation)
+            view = self._view(invitation)
+            if audit is not None:
+                await audit.invitation_revoked(
+                    self.session,
+                    context,
+                    invitation.id,
+                )
+            return view
 
     async def locate_invitation_project(self, invitation_id: uuid.UUID, token_hash: str) -> uuid.UUID:
         project_id = (

@@ -21,6 +21,7 @@ from app.gateway.auth.invitation_rate_limit import (
 from app.gateway.csrf_middleware import is_allowed_auth_origin, is_secure_request
 from app.gateway.deps import (
     get_current_user_from_request,
+    get_operational_audit_sink,
     get_project_quota_enforcer,
     project_session,
 )
@@ -221,6 +222,7 @@ async def create_invitation(
     body: InvitationCreateRequest,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
     session: AsyncSession = Depends(project_session),
+    audit=Depends(get_operational_audit_sink),
 ):
     try:
         context = await resolve_project_context(
@@ -229,7 +231,10 @@ async def create_invitation(
             project_id,
             identity[1],
         )
-        created = await InvitationService(InvitationRepository(session)).create(
+        created = await InvitationService(
+            InvitationRepository(session),
+            audit=audit,
+        ).create(
             context,
             body.email,
             body.role,
@@ -250,6 +255,7 @@ async def revoke_invitation(
     body: InvitationVersionRequest,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
     session: AsyncSession = Depends(project_session),
+    audit=Depends(get_operational_audit_sink),
 ):
     try:
         context = await resolve_project_context(
@@ -258,7 +264,10 @@ async def revoke_invitation(
             project_id,
             identity[1],
         )
-        view = await InvitationService(InvitationRepository(session)).revoke(
+        view = await InvitationService(
+            InvitationRepository(session),
+            audit=audit,
+        ).revoke(
             context,
             invitation_id,
             body.version,
@@ -320,6 +329,7 @@ async def redeem_invitation(
     identity: tuple[uuid.UUID, str, str] = Depends(authenticated_invitation_identity),
     session: AsyncSession = Depends(project_session),
     quota=Depends(get_project_quota_enforcer),
+    audit=Depends(get_operational_audit_sink),
 ):
     user_id, user_email, request_id = identity
     rate_limit = InvitationRateLimitRepository(session)
@@ -339,7 +349,14 @@ async def redeem_invitation(
         redeemed: RedeemedInvitation = await InvitationService(
             InvitationRepository(session),
             quota=quota,
-        ).redeem(user_id, user_email, invitation_claim, now)
+            audit=audit,
+        ).redeem(
+            user_id,
+            user_email,
+            invitation_claim,
+            now,
+            request_id=request_id,
+        )
     except (ProjectInvitationInvalid, ProjectInvitationConflict, ProjectValidationFailed) as exc:
         return _redeem_error_response(exc, request_id, request)
     except GOVERNANCE_DOMAIN_ERRORS as exc:

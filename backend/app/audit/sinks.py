@@ -10,6 +10,7 @@ from app.audit.models import (
     AuditAuthorityRejected,
     AuditOutcome,
     AuditProcess,
+    AuditProcessContext,
     AuditTarget,
     AuditTargetKind,
     SystemAuditContext,
@@ -24,10 +25,10 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.quotas.models import ProjectQuotaPolicy
 from app.reliability.jobs import AdmittedJobRecord
-from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.jobs.sql import (
     DeadJobRequeuedEvent,
     JobTerminalEvent,
+    is_issued_dead_job_requeued_event,
 )
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -39,6 +40,15 @@ def _uuid(value: object) -> uuid.UUID:
         raise TypeError("audit sink authority is invalid") from None
 
 
+def _automation_uuid(value: object) -> uuid.UUID:
+    if type(value) is str and value.startswith("task-"):
+        try:
+            return uuid.UUID(hex=value.removeprefix("task-"))
+        except ValueError:
+            raise TypeError("audit sink authority is invalid") from None
+    return _uuid(value)
+
+
 class OperationalAuditSink:
     """Typed transactional audit ports used by project reliability domains."""
 
@@ -46,16 +56,20 @@ class OperationalAuditSink:
         self,
         service: AuditService,
         *,
-        process: AuditProcess,
+        process_context: AuditProcessContext,
     ) -> None:
-        if type(service) is not AuditService or process not in {
+        if type(service) is not AuditService:
+            raise TypeError("process-bound AuditService is required")
+        context = service.require_process_context(process_context)
+        if context.process not in {
             AuditProcess.GATEWAY,
             AuditProcess.WORKER,
             AuditProcess.SCHEDULER,
         }:
             raise TypeError("process-bound AuditService is required")
         self._service = service
-        self._process = process
+        self._process_context = context
+        self._process = context.process
 
     def _require_process(self, *allowed: AuditProcess) -> None:
         if self._process not in allowed:
@@ -137,6 +151,270 @@ class OperationalAuditSink:
             request_id=context.request_id,
         )
 
+    async def project_created(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None:
+        await self._project_event(
+            session,
+            context.user_id,
+            context.project_id,
+            context.request_id,
+            AuditAction.PROJECT_CREATED,
+        )
+
+    async def project_updated(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None:
+        await self._project_event(
+            session,
+            context.user_id,
+            context.project_id,
+            context.request_id,
+            AuditAction.PROJECT_UPDATED,
+        )
+
+    async def project_deletion_requested(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None:
+        await self._project_event(
+            session,
+            context.user_id,
+            context.project_id,
+            context.request_id,
+            AuditAction.PROJECT_DELETION_REQUESTED,
+        )
+
+    async def project_recovered(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        project_id: uuid.UUID,
+        request_id: str,
+    ) -> None:
+        await self._project_event(
+            session,
+            user_id,
+            project_id,
+            request_id,
+            AuditAction.PROJECT_RECOVERED,
+        )
+
+    async def project_suspended(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None:
+        await self._project_event(
+            session,
+            context.user_id,
+            context.project_id,
+            context.request_id,
+            AuditAction.PROJECT_SUSPENDED,
+        )
+
+    async def project_resumed(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        project_id: uuid.UUID,
+        request_id: str,
+    ) -> None:
+        await self._project_event(
+            session,
+            user_id,
+            project_id,
+            request_id,
+            AuditAction.PROJECT_RESUMED,
+        )
+
+    async def _project_event(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        project_id: uuid.UUID,
+        request_id: str,
+        action: AuditAction,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
+        await self._service.append(
+            session,
+            AuditActor.user(_uuid(user_id)),
+            action,
+            AuditTarget(
+                AuditTargetKind.PROJECT,
+                _uuid(project_id),
+                _uuid(project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {},
+            request_id=request_id,
+        )
+
+    async def invitation_created(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        invitation_id: uuid.UUID,
+        role: ProjectRole,
+    ) -> None:
+        await self._invitation_event(
+            session,
+            context,
+            invitation_id,
+            role,
+            AuditAction.INVITATION_CREATED,
+        )
+
+    async def invitation_revoked(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        invitation_id: uuid.UUID,
+    ) -> None:
+        await self._invitation_event(
+            session,
+            context,
+            invitation_id,
+            None,
+            AuditAction.INVITATION_REVOKED,
+        )
+
+    async def _invitation_event(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        invitation_id: uuid.UUID,
+        role: ProjectRole | None,
+        action: AuditAction,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
+        await self._service.append(
+            session,
+            AuditActor.user(_uuid(context.user_id)),
+            action,
+            AuditTarget(
+                AuditTargetKind.INVITATION,
+                _uuid(invitation_id),
+                _uuid(context.project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {} if role is None else {"role": role.value},
+            request_id=context.request_id,
+        )
+
+    async def invitation_redeemed_and_member_joined(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        project_id: uuid.UUID,
+        invitation_id: uuid.UUID,
+        membership_id: uuid.UUID,
+        role: ProjectRole,
+        request_id: str,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
+        actor = AuditActor.user(_uuid(user_id))
+        project_uuid = _uuid(project_id)
+        metadata = {"role": role.value}
+        await self._service.append(
+            session,
+            actor,
+            AuditAction.INVITATION_REDEEMED,
+            AuditTarget(
+                AuditTargetKind.INVITATION,
+                _uuid(invitation_id),
+                project_uuid,
+            ),
+            AuditOutcome.SUCCESS,
+            metadata,
+            request_id=request_id,
+        )
+        await self._service.append(
+            session,
+            actor,
+            AuditAction.MEMBER_JOINED,
+            AuditTarget(
+                AuditTargetKind.MEMBERSHIP,
+                _uuid(membership_id),
+                project_uuid,
+            ),
+            AuditOutcome.SUCCESS,
+            metadata,
+            request_id=request_id,
+        )
+
+    async def automation_created(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        task_id: str,
+    ) -> None:
+        await self._automation_definition_event(
+            session,
+            context,
+            task_id,
+            AuditAction.AUTOMATION_CREATED,
+        )
+
+    async def automation_updated(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        task_id: str,
+    ) -> None:
+        await self._automation_definition_event(
+            session,
+            context,
+            task_id,
+            AuditAction.AUTOMATION_UPDATED,
+        )
+
+    async def automation_deleted(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        task_id: str,
+    ) -> None:
+        await self._automation_definition_event(
+            session,
+            context,
+            task_id,
+            AuditAction.AUTOMATION_DELETED,
+        )
+
+    async def _automation_definition_event(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        task_id: str,
+        action: AuditAction,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
+        if not is_issued_private_work_context(context):
+            raise AuditAuthorityRejected()
+        await self._service.append(
+            session,
+            AuditActor.user(_uuid(context.user_id)),
+            action,
+            AuditTarget(
+                AuditTargetKind.AUTOMATION,
+                _automation_uuid(task_id),
+                _uuid(context.project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {},
+            request_id=context.request_id,
+        )
+
     async def member_ended(
         self,
         session: AsyncSession,
@@ -210,7 +488,7 @@ class OperationalAuditSink:
             actor = AuditActor.user(_uuid(context.user_id))
         elif trigger == "scheduled":
             self._require_process(AuditProcess.SCHEDULER)
-            actor = AuditActor.trusted_process(self._process)
+            actor = AuditActor.trusted_process(self._process_context)
         else:
             raise TypeError("automation audit trigger is invalid")
         await self._service.append(
@@ -219,7 +497,7 @@ class OperationalAuditSink:
             AuditAction.AUTOMATION_TRIGGERED,
             AuditTarget(
                 AuditTargetKind.AUTOMATION,
-                _uuid(task_id),
+                _automation_uuid(task_id),
                 _uuid(context.project_id),
             ),
             AuditOutcome.SUCCESS,
@@ -272,7 +550,7 @@ class OperationalAuditSink:
             self._require_process(AuditProcess.WORKER)
         await self._service.append(
             session,
-            AuditActor.trusted_process(self._process),
+            AuditActor.trusted_process(self._process_context),
             AuditAction.RUN_TERMINAL,
             AuditTarget(
                 AuditTargetKind.RUN,
@@ -296,7 +574,7 @@ class OperationalAuditSink:
         event: JobTerminalEvent,
     ) -> None:
         self._require_process(AuditProcess.WORKER)
-        actor = AuditActor.trusted_process(self._process)
+        actor = AuditActor.trusted_process(self._process_context)
         if event.status == "dead":
             await self._service.append(
                 session,
@@ -338,10 +616,7 @@ class SystemJobAuditSink:
         session: AsyncSession,
         event: DeadJobRequeuedEvent,
     ) -> None:
-        if type(event) is not DeadJobRequeuedEvent or event.request_id != self._request_id:
-            raise AuditAuthorityRejected()
-        row = await session.get(JobRow, event.successor_job_id)
-        if row is None or row.project_id != event.project_id or row.predecessor_dead_job_id != event.predecessor_job_id or row.status != "queued" or row.retry_safety != "safe":
+        if not is_issued_dead_job_requeued_event(event) or event.request_id != self._request_id:
             raise AuditAuthorityRejected()
         await self._service.append(
             session,
@@ -354,9 +629,9 @@ class SystemJobAuditSink:
             ),
             AuditOutcome.SUCCESS,
             {
-                "job_type": row.job_type,
-                "attempt_count": row.attempt_count,
-                "retry_safety": row.retry_safety,
+                "job_type": event.job_type,
+                "attempt_count": event.attempt_count,
+                "retry_safety": event.retry_safety,
             },
             request_id=self._request_id,
             job_id=event.successor_job_id,
@@ -370,16 +645,20 @@ class TrustedOperationAuditSink:
         self,
         service: AuditService,
         *,
-        process: AuditProcess,
+        process_context: AuditProcessContext,
     ) -> None:
-        if type(service) is not AuditService or process not in {
+        if type(service) is not AuditService:
+            raise TypeError("trusted-operation AuditService is required")
+        context = service.require_process_context(process_context)
+        if context.process not in {
             AuditProcess.OPERATOR,
             AuditProcess.RECOVERY,
             AuditProcess.WORKER,
         }:
             raise TypeError("trusted-operation AuditService is required")
         self._service = service
-        self._process = process
+        self._process_context = context
+        self._process = context.process
 
     def _require_process(self, *allowed: AuditProcess) -> None:
         if self._process not in allowed:
@@ -397,7 +676,7 @@ class TrustedOperationAuditSink:
         self._require_process(AuditProcess.OPERATOR)
         await self._service.append(
             session,
-            AuditActor.trusted_process(self._process),
+            AuditActor.trusted_process(self._process_context),
             AuditAction.BACKUP_CREATED,
             AuditTarget(
                 AuditTargetKind.BACKUP,
@@ -479,7 +758,7 @@ class TrustedOperationAuditSink:
         self._require_process(AuditProcess.OPERATOR, AuditProcess.RECOVERY)
         await self._service.append(
             session,
-            AuditActor.trusted_process(self._process),
+            AuditActor.trusted_process(self._process_context),
             action,
             AuditTarget(
                 AuditTargetKind.RESTORE,
@@ -512,7 +791,7 @@ class TrustedOperationAuditSink:
             raise TypeError("purge audit resource kind is invalid")
         await self._service.append(
             session,
-            AuditActor.trusted_process(self._process),
+            AuditActor.trusted_process(self._process_context),
             AuditAction.PURGE_COMPLETED,
             AuditTarget(
                 AuditTargetKind.PURGE,

@@ -4,6 +4,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
+from typing import Protocol
 
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
@@ -63,6 +64,40 @@ _ACTIVE_EXECUTION_STATUSES = frozenset({"launching", "running"})
 _MAX_EXPECTED_VERSION = 2**63 - 1
 
 
+class AutomationDefinitionAuditPort(Protocol):
+    async def automation_created(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        task_id: str,
+    ) -> None: ...
+
+    async def automation_updated(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        task_id: str,
+    ) -> None: ...
+
+    async def automation_deleted(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        task_id: str,
+    ) -> None: ...
+
+
+class _NoopAutomationDefinitionAudit:
+    async def automation_created(self, *args) -> None:
+        del args
+
+    async def automation_updated(self, *args) -> None:
+        del args
+
+    async def automation_deleted(self, *args) -> None:
+        del args
+
+
 class ProjectAutomationService:
     """Project-and-owner scoped Automation definition lifecycle."""
 
@@ -72,12 +107,14 @@ class ProjectAutomationService:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         *,
         min_once_delay_seconds: int = 60,
+        audit: AutomationDefinitionAuditPort | None = None,
     ) -> None:
         if type(min_once_delay_seconds) is not int or min_once_delay_seconds < 0:
             raise ValueError("min_once_delay_seconds must be a non-negative integer")
         self._session_factory = session_factory
         self._clock = clock
         self._min_once_delay_seconds = min_once_delay_seconds
+        self._audit = audit or _NoopAutomationDefinitionAudit()
         self._revalidator = PrivateWorkRevalidator()
         self._resolver = ProjectAssetResolver(session_factory)
 
@@ -139,6 +176,7 @@ class ProjectAutomationService:
                         next_run_at=next_run_at,
                     ),
                 )
+                await self._audit.automation_created(session, context, record.id)
             return self._view(record)
         except Exception as error:
             self._raise_mapped(error, context.request_id)
@@ -250,6 +288,7 @@ class ProjectAutomationService:
                 )
                 if updated is None:
                     raise AutomationVersionConflict(context.request_id)
+                await self._audit.automation_updated(session, context, updated.id)
             return self._view(updated)
         except Exception as error:
             self._raise_mapped(error, context.request_id)
@@ -363,6 +402,7 @@ class ProjectAutomationService:
                 )
                 if not deleted:
                     raise AutomationVersionConflict(context.request_id)
+                await self._audit.automation_deleted(session, context, task.id)
         except Exception as error:
             self._raise_mapped(error, context.request_id)
 

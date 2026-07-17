@@ -593,6 +593,16 @@ class _FailingAuditPort:
         raise RuntimeError("audit unavailable")
 
 
+def test_dead_job_requeue_event_cannot_be_fabricated() -> None:
+    with pytest.raises(TypeError):
+        DeadJobRequeuedEvent(
+            project_id=uuid.uuid4(),
+            predecessor_job_id=uuid.uuid4(),
+            successor_job_id=uuid.uuid4(),
+            request_id="fabricated-system-requeue",
+        )
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_safe_requeue_creates_successor_and_preserves_dead_projection(seed: JobSeed) -> None:
@@ -675,3 +685,147 @@ async def test_safe_requeue_creates_successor_and_preserves_dead_projection(seed
             )
         )
     assert rolled_back is None
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_system_safe_requeue_derives_private_owner_without_exposing_it(
+    seed: JobSeed,
+) -> None:
+    run_id = await _create_private_run(seed)
+    async with seed.data.factory() as session, session.begin():
+        repository = JobRepository(
+            session,
+            owner_ref_hasher=lambda _owner: JobOwnerRef(
+                key_id="audit-v1",
+                hmac_hex="f" * 64,
+            ),
+        )
+        dead_job_id = await repository.enqueue(_private_request(seed, run_id, "a" * 64, max_attempts=1))
+        claim = await repository.claim_next(
+            worker_id=seed.worker_a,
+            capabilities=frozenset({"private_run"}),
+            lease_seconds=90,
+        )
+        assert claim is not None
+        assert await repository.retry_or_dead(
+            dead_job_id,
+            lease_token=claim.lease_token,
+            public_error_code="FINAL_FAILURE",
+            retry_initial_seconds=2,
+            retry_max_seconds=300,
+        )
+
+    audit = _AuditPort()
+    async with seed.data.factory() as session, session.begin():
+        successor_id = await JobRepository(session).requeue_safe_system(
+            seed.scope.project_id,
+            dead_job_id,
+            idempotency_key="b" * 64,
+            max_attempts=3,
+            request_id="system-private-requeue",
+            audit_port=audit,
+        )
+
+    assert len(audit.events) == 1
+    event = audit.events[0]
+    assert not hasattr(event, "owner_user_id")
+    assert not hasattr(event, "run_id")
+    assert event.predecessor_job_id == dead_job_id
+    assert event.successor_job_id == successor_id
+    async with seed.data.factory() as session:
+        successor = await session.get(JobRow, successor_id)
+    assert successor is not None
+    assert successor.owner_user_id == seed.scope.owner_user_id
+    assert successor.run_id == run_id
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        async with seed.data.factory() as session, session.begin():
+            await JobRepository(session).requeue_safe_system(
+                seed.scope.project_id,
+                dead_job_id,
+                idempotency_key="c" * 64,
+                max_attempts=3,
+                request_id="system-private-requeue-rollback",
+                audit_port=_FailingAuditPort(),
+            )
+    async with seed.data.factory() as session:
+        assert await session.scalar(select(JobRow.id).where(JobRow.idempotency_key == "c" * 64)) is None
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_system_safe_requeue_rejects_unsafe_and_predecessor_mismatch(
+    seed: JobSeed,
+) -> None:
+    run_ids = [
+        await _create_private_run(seed),
+        await _create_private_run(seed),
+        await _create_private_run(seed),
+    ]
+    dead_ids: list[uuid.UUID] = []
+    for index, run_id in enumerate(run_ids):
+        async with seed.data.factory() as session, session.begin():
+            repository = JobRepository(
+                session,
+                owner_ref_hasher=lambda _owner: JobOwnerRef(
+                    key_id="audit-v1",
+                    hmac_hex="f" * 64,
+                ),
+            )
+            dead_job_id = await repository.enqueue(
+                _private_request(
+                    seed,
+                    run_id,
+                    str(index + 1) * 64,
+                    max_attempts=1,
+                    retry_safety="unknown" if index == 1 else "safe",
+                )
+            )
+            claim = await repository.claim_next(
+                worker_id=seed.worker_a,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=90,
+            )
+            assert claim is not None
+            assert await repository.retry_or_dead(
+                dead_job_id,
+                lease_token=claim.lease_token,
+                public_error_code="FINAL_FAILURE",
+                retry_initial_seconds=2,
+                retry_max_seconds=300,
+            )
+            dead_ids.append(dead_job_id)
+
+    audit = _AuditPort()
+    async with seed.data.factory() as session, session.begin():
+        await JobRepository(session).requeue_safe_system(
+            seed.scope.project_id,
+            dead_ids[0],
+            idempotency_key="d" * 64,
+            max_attempts=3,
+            request_id="system-safe-requeue",
+            audit_port=audit,
+        )
+
+    with pytest.raises(JobRequeueForbidden):
+        async with seed.data.factory() as session, session.begin():
+            await JobRepository(session).requeue_safe_system(
+                seed.scope.project_id,
+                dead_ids[1],
+                idempotency_key="e" * 64,
+                max_attempts=3,
+                request_id="system-unsafe-requeue",
+                audit_port=audit,
+            )
+
+    with pytest.raises(JobIdempotencyConflict):
+        async with seed.data.factory() as session, session.begin():
+            await JobRepository(session).requeue_safe_system(
+                seed.scope.project_id,
+                dead_ids[2],
+                idempotency_key="d" * 64,
+                max_attempts=3,
+                request_id="system-predecessor-mismatch",
+                audit_port=audit,
+            )

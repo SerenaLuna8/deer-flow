@@ -8,7 +8,7 @@ from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectValidationFailed
 from app.projects.models import CreateProject, ProjectChanges, ProjectPage, ProjectView
-from app.projects.repository import ProjectRepository
+from app.projects.repository import ProjectMutationAuditPort, ProjectRepository
 
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -30,8 +30,14 @@ def _text(value: str, *, field: str, minimum: int, maximum: int) -> str:
 
 
 class ProjectService:
-    def __init__(self, repository: ProjectRepository):
+    def __init__(
+        self,
+        repository: ProjectRepository,
+        *,
+        audit: ProjectMutationAuditPort | None = None,
+    ):
         self.repository = repository
+        self._audit = audit
 
     async def create(self, user_id: uuid.UUID, command: CreateProject, request_id: str) -> ProjectContext:
         validated = CreateProject(
@@ -40,7 +46,13 @@ class ProjectService:
             description=_text(command.description, field="description", minimum=0, maximum=500),
             icon=_text(command.icon, field="icon", minimum=1, maximum=32),
         )
-        return await self.repository.create_with_admin(user_id, validated, request_id)
+        if self._audit is None:
+            return await self.repository.create_with_admin(
+                user_id,
+                validated,
+                request_id,
+            )
+        return await self.repository.create_with_admin(user_id, validated, request_id, audit=self._audit)
 
     async def get(self, context: ProjectContext) -> ProjectView:
         context.require(Capability.PROJECT_READ)
@@ -56,7 +68,9 @@ class ProjectService:
             description=None if changes.description is None else _text(changes.description, field="description", minimum=0, maximum=500),
             icon=None if changes.icon is None else _text(changes.icon, field="icon", minimum=1, maximum=32),
         )
-        return await self.repository.update(context, validated)
+        if self._audit is None:
+            return await self.repository.update(context, validated)
+        return await self.repository.update(context, validated, audit=self._audit)
 
     async def enter(self, context: ProjectContext) -> ProjectView:
         context.require(Capability.PROJECT_ENTER)

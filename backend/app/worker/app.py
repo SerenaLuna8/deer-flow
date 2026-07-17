@@ -53,13 +53,13 @@ async def run_worker(
             datetime.now(UTC),
         )
         audit_keyring = AuditHmacKeyring.from_environment()
-        from app.audit.models import AuditProcess
-        from app.audit.service import AuditService
+        from app.audit.service import AuditService, _bind_worker_audit_process
         from app.audit.sinks import OperationalAuditSink
 
+        audit_service = AuditService(session_factory, audit_keyring)
         audit_sink = OperationalAuditSink(
-            AuditService(session_factory, audit_keyring),
-            process=AuditProcess.WORKER,
+            audit_service,
+            process_context=_bind_worker_audit_process(audit_service),
         )
         quota_config = getattr(config, "quotas", None) or QuotaConfig()
         quota_enforcer = ProjectQuotaEnforcer(

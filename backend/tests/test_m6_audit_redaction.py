@@ -15,7 +15,11 @@ from app.audit.models import (
     AuditTarget,
     AuditTargetKind,
 )
-from app.audit.service import AuditService
+from app.audit.service import (
+    AuditService,
+    _bind_recovery_audit_process,
+    _bind_scheduler_audit_process,
+)
 from app.reliability.owner_refs import AuditHmacKeyring
 
 
@@ -184,7 +188,7 @@ async def test_action_contract_binds_target_scope_and_elevated_actor() -> None:
 async def test_action_contract_uses_joint_scope_actor_and_metadata_variants() -> None:
     service = AuditService(None, _keyring())
     project_id = uuid.uuid4()
-    scheduler = AuditActor.trusted_process(AuditProcess.SCHEDULER)
+    scheduler = AuditActor.trusted_process(_bind_scheduler_audit_process(service))
     cases = (
         (
             AuditActor.user(uuid.uuid4()),
@@ -225,7 +229,8 @@ async def test_action_contract_uses_joint_scope_actor_and_metadata_variants() ->
 
 
 def test_platform_account_purge_has_an_explicit_recovery_variant() -> None:
-    actor = AuditActor.trusted_process(AuditProcess.RECOVERY)
+    service = AuditService(None, _keyring())
+    actor = AuditActor.trusted_process(_bind_recovery_audit_process(service))
     target = AuditTarget(AuditTargetKind.PURGE, uuid.uuid4(), None)
 
     assert AuditService._action_authorized(

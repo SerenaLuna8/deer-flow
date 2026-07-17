@@ -979,7 +979,7 @@ Expected: FAIL because sinks尚未接入新 repository。
 
 - [x] **Step 3: 接入 typed sinks 并验证**
 
-完成（2026-07-17）：现有 Task 13 domain 已全部接入 caller-owned transaction；Gateway、Worker、Scheduler sink 按进程绑定，M3 adapter 在写入前重新验证数据库 actor authority，system requeue 校验 request/project/predecessor/successor 关联。Task 14 quota-policy HTTP mutation 与 Tasks 16–17 backup/restore/purge caller 尚不存在且继续由各自任务创建；Task 13 只提前提供同事务 `quota_policy_updated` 与 process-bound trusted-operation typed contracts，不创建 recovery placeholder module。focused PostgreSQL audit 39 passed，受影响 service/router/process 290 passed，backend Ruff check 与 format-check 全通过。
+完成并完成独立修复审查（2026-07-17）：Task 13 的 Gateway、Worker、Scheduler audit authority 现在只能由各自 composition root 通过所属 `AuditService` 的私有 registry 签发；context 不可直接构造、复制、变造或跨 service 使用，且没有公开的二次签发入口。Project create/update、删除/恢复/暂停/恢复运行、邀请 create/revoke/redeem+member join、Automation create/update/delete 与既有 governance/run/job mutation 都在 caller-owned 业务事务中写 audit，失败时与领域 mutation 一起回滚；same-role membership update 不增 version、不写 audit。safe requeue 的 harness event 由 repository 内部签发且不暴露 owner/run authority，system path 仅接收 project+dead ID 并在事务内推导 scope，audit sink 不再 naked-load Job。重复 Worker settlement 仅产生一个真实 terminal audit。Task 14 quota-policy HTTP mutation 与 Tasks 16–17 backup/restore/purge caller 尚不存在且继续由各自任务创建；Task 13 只提供同事务 typed contracts，不创建 recovery placeholder module。fresh gates：audit 46 passed，governance 168 passed（1 个既有 deprecation warning），job/private-run/process 91 passed，harness boundary 7 passed。
 
 ```bash
 cd backend
