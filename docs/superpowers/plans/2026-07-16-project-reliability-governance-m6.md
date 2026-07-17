@@ -1060,11 +1060,11 @@ Expected: PASS；无 capability/readiness 时 route 和 sidebar 都不暴露入�
 - Create: `frontend/src/components/admin/operations/{admin-operations-shell,operations-overview,admin-projects,admin-jobs,admin-audit}.tsx`
 - Create: `frontend/src/app/admin/{operations,projects,jobs,audit}/page.tsx`
 - Modify: `frontend/src/app/admin/layout.tsx`
-- Test: `frontend/tests/m6-admin-operations.test.tsx`
+- Test: `frontend/tests/unit/m6-admin-operations.test.tsx`
 
 **Interfaces:** system_admin仅获取健康度、聚合使用量、project ID/status、job type/status/public code、审计元数据；dead job requeue要求显式 safe eligibility + predecessor link；不得读取 owner私有内容或伪造 ProjectContext。
 
-- [ ] **Step 1: 写 privacy boundary RED tests**
+- [x] **Step 1: 写 privacy boundary RED tests**
 
 ```python
 async def test_admin_job_response_has_no_private_fields(system_admin_client, private_dead_job):
@@ -1076,7 +1076,7 @@ async def test_admin_job_response_has_no_private_fields(system_admin_client, pri
 
 覆盖非 admin 404、聚合 pagination、unsafe requeue拒绝、new job predecessor、audit system context、frontend server layout和cache key。
 
-- [ ] **Step 2: 观察 RED**
+- [x] **Step 2: 观察 RED**
 
 ```bash
 cd backend
@@ -1087,7 +1087,7 @@ pnpm test -- m6-admin-operations.test.tsx
 
 Expected: routes/components missing。
 
-- [ ] **Step 3: 实现最小运营面并验证**
+- [x] **Step 3: 实现最小运营面并验证**
 
 ```bash
 cd backend
@@ -1100,6 +1100,10 @@ git commit -m "feat: add system operations console"
 ```
 
 Expected: PASS；平台视图可运营但不获得用户私有数据读取能力。
+
+完成（2026-07-17）：后端新增 `/api/admin/{operations,projects,jobs,audit}` 平台运营面；每个入口都在 caller transaction 内 `FOR UPDATE` 锁定当前 `UserRow.system_role`、签发不可伪造的 `SystemAuditContext` 并要求 M6 Gateway cutover ready，普通认证用户统一 public 404。Project/job 查询只选择公开 allowlist 字段，聚合 usage 不返回 owner 维度；safe requeue 只接收精确 project+dead coordinates，调用 `JobRepository.requeue_safe_system()` 并由同事务 `SystemJobAuditSink` 消费一次性事件，unsafe、跨项目与不存在目标均拒绝。平台 audit listing 也会重新锁定并验证当前 system-admin authority。前端提供 outer operations shell 与 Overview/Projects/Jobs/Audit 四页，保留 nested assets shell；所有 key 都派生自 exact account UUID，响应使用 strict Zod，client identity gate 在挂载 query/mutation hook 前完成，account transition 先 abort/cancel 再 clear，safe requeue 仅对服务端明确 `safe_to_requeue` 的 dead job 暴露。RED 分别证明 backend routers 与 frontend components 缺失；GREEN 为 Task 15 backend 7 passed、后端 affected PostgreSQL 90 passed、frontend focused 8 passed、affected 40 passed、full unit 940 passed，Ruff、`pnpm check`、Prettier 与 `git diff --check` 均通过。
+
+暂停 checkpoint（2026-07-17）：上述实现与门禁已完成，但用户要求先保存进度；Task 15 尚未执行独立代码审查，因此当前只保存为 WIP，不视为正式完成。恢复时先冻结本 checkpoint 相对 `cc916c1e` 的完整差异并独立审查，修复所有 Critical/Important，再重跑受影响门禁并更新 SDD 台账。Task 16 尚未开始。
 
 ### Task 16: 建立 pg_dump custom + chunked AEAD backup archive
 

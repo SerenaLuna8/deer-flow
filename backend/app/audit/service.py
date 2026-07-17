@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, datetime
 
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -40,6 +41,7 @@ from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.audit.sql import AuditRepository
+from deerflow.persistence.user.model import UserRow
 
 _PUBLIC_ERROR = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 
@@ -298,7 +300,36 @@ class AuditService:
     ) -> AuditPage:
         if not is_issued_system_audit_context(context):
             raise TypeError("issued system audit context is required")
-        return await self._list_new_session(
+        if self._sessions is None:
+            raise AuditUnavailable()
+        try:
+            async with self._sessions.begin() as session:
+                return await self.list_platform(
+                    session,
+                    context,
+                    limit=limit,
+                    cursor=cursor,
+                    action=action,
+                    outcome=outcome,
+                    target=target,
+                )
+        except DBAPIError:
+            raise AuditUnavailable() from None
+
+    async def list_platform(
+        self,
+        session: AsyncSession,
+        context: SystemAuditContext,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        action: AuditAction | None = None,
+        outcome: AuditOutcome | None = None,
+        target: AuditTarget | None = None,
+    ) -> AuditPage:
+        await self._require_platform_reader(session, context)
+        return await self._list_in_session(
+            session,
             project_id=None,
             limit=limit,
             cursor=cursor,
@@ -306,6 +337,17 @@ class AuditService:
             outcome=outcome,
             target=target,
         )
+
+    @staticmethod
+    async def _require_platform_reader(
+        session: AsyncSession,
+        context: SystemAuditContext,
+    ) -> None:
+        if not is_issued_system_audit_context(context):
+            raise AuditAuthorityRejected()
+        row = (await session.execute(select(UserRow.id, UserRow.system_role).where(UserRow.id == str(context.user_id)).with_for_update(of=UserRow))).one_or_none()
+        if row is None or row.id != str(context.user_id) or row.system_role != AuditPlatformRole.SYSTEM_ADMIN.value:
+            raise AuditAuthorityRejected()
 
     async def _list_new_session(
         self,

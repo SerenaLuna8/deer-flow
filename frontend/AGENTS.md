@@ -172,13 +172,21 @@ Audit 使用 closed action enum 与逐 action strict metadata schema，不显示
 没有对应 capability 时不得调用该 governance hook。所有 active governance key 都从 exact account+project
 `governanceRoot()` 派生，project/account transition 必须与 private-work/Automation 一起先 cancel，再移除旧 scope
 的 governance queries 与 mutations。页面、状态、表单和分页文案统一使用 typed en-US/zh-CN i18n。
-平台运营面、通用备份恢复与最终 M6 关闭仍属于后续 task。
+Task 15 已提供 outer `/admin` system-operations shell 和 Overview/Projects/Jobs/Audit 页面，同时保留
+`/admin/assets/*` 的 nested asset shell。Server layout 对普通认证用户返回 404，未认证用户只跳转到
+`/login?next=/admin/operations`；client page 在确认当前 `system_admin` identity 前不得挂载任何 operations
+query/mutation hook。所有 query/mutation key 必须从 exact account UUID 的
+`adminOperationsRoot()` 派生，响应使用 strict Zod 并拒绝 owner/run/thread/payload/exception 等未知或私有字段；
+account transition 先 abort safe-requeue controller 和 cancel queries，再 clear 整个 account client。Jobs 只在
+服务端明确返回 dead + safe predecessor eligibility 时显示 requeue，浏览器不得构造 ProjectContext、owner scope
+或读取 raw error。四页 loading/empty/error/data 与 shell/navigation 文案统一使用 typed en-US/zh-CN i18n。
+通用备份恢复与最终 M6 关闭仍属于后续 task。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie
 跨越登录流程，不写入 storage；产品不发送邀请邮件。M2 的退出/移除和删除恢复 UI 只反映
 30 天保留窗口，不代表私有数据或项目数据已被物理清除。M5 已完成，当前进度为 5/8（62.5%）；
-M6 平台运营面/通用备份恢复及最终关闭、M7 legacy cleanup 和 M8 完整发布验收仍未交付，因此不能作为完整多用户
+M6 通用备份恢复及最终关闭、M7 legacy cleanup 和 M8 完整发布验收仍未交付，因此不能作为完整多用户
 SaaS 发布。
 
 - **`hooks/`** — Shared React hooks

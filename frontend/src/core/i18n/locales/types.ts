@@ -214,6 +214,76 @@ export interface Translations {
     };
   };
 
+  adminOperations: {
+    shellTitle: string;
+    shellDescription: string;
+    signOut: string;
+    retry: string;
+    navigation: {
+      overview: string;
+      projects: string;
+      jobs: string;
+      audit: string;
+      assets: string;
+    };
+    overview: {
+      title: string;
+      description: string;
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      counts: {
+        projects: string;
+        suspendedProjects: string;
+        queuedJobs: string;
+        runningJobs: string;
+        deadJobs: string;
+      };
+      usage: {
+        members: string;
+        storage_bytes: string;
+        concurrent_runs: string;
+        mcp_calls_daily: string;
+        used: string;
+        reserved: string;
+      };
+    };
+    projects: {
+      title: string;
+      description: string;
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      older: string;
+      suspended: string;
+    };
+    jobs: {
+      title: string;
+      description: string;
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      older: string;
+      requeue: string;
+      requeueing: string;
+      requeueError: string;
+    };
+    audit: {
+      title: string;
+      description: string;
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      older: string;
+    };
+  };
+
   automation: {
     create: string;
     runNow: string;

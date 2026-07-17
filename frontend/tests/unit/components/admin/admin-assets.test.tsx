@@ -71,7 +71,7 @@ describe("admin asset access and credential safety", () => {
       AdminLayout({ children: createElement("p", null, "restricted") }),
     ).rejects.toMatchObject({
       code: "NEXT_REDIRECT",
-      destination: "/login?next=%2Fadmin%2Fassets",
+      destination: "/login?next=%2Fadmin%2Foperations",
     });
   });
 

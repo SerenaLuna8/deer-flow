@@ -13,6 +13,10 @@ from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_orig
 from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
     admin_assets,
+    admin_audit,
+    admin_jobs,
+    admin_operations,
+    admin_projects,
     agents,
     artifacts,
     assistants_compat,
@@ -490,6 +494,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(project_connections.router)
     app.include_router(admin_assets.admin_router)
     app.include_router(admin_assets.admin_project_router)
+    app.include_router(admin_operations.router)
+    app.include_router(admin_projects.router)
+    app.include_router(admin_jobs.router)
+    app.include_router(admin_audit.router)
 
     # Features API is mounted at /api/features
     app.include_router(features.router)

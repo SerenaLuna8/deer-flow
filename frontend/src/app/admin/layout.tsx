@@ -1,5 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 
+import { AdminOperationsShell } from "@/components/admin/operations/admin-operations-shell";
 import { QueryClientProvider } from "@/components/query-client-provider";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
@@ -19,14 +20,16 @@ export default async function AdminLayout({
       if (result.user.system_role !== "system_admin") notFound();
       return (
         <QueryClientProvider>
-          <AuthProvider initialUser={result.user}>{children}</AuthProvider>
+          <AuthProvider initialUser={result.user}>
+            <AdminOperationsShell>{children}</AdminOperationsShell>
+          </AuthProvider>
         </QueryClientProvider>
       );
     case "needs_setup":
     case "system_setup_required":
       redirect("/setup");
     case "unauthenticated":
-      redirect(buildLoginUrl("/admin/assets"));
+      redirect(buildLoginUrl("/admin/operations"));
     case "gateway_unavailable":
       return (
         <main className="flex min-h-screen items-center justify-center px-6 text-center">

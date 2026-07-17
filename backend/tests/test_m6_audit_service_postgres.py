@@ -24,6 +24,7 @@ from app.projects.models import ProjectRole
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.user.model import UserRow
 
 
 def _keyring(active: str = "audit-v2") -> AuditHmacKeyring:
@@ -309,6 +310,7 @@ async def test_platform_reader_requires_issued_system_governance_context(
                 uuid.uuid4(),
                 request_id="audit-platform-b",
             )
+            await session.execute(update(UserRow).where(UserRow.id == str(seed.owner_a.user_id)).values(system_role="system_admin"))
 
         context = resolve_system_audit_context(
             SimpleNamespace(
