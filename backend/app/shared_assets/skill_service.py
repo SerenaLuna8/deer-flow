@@ -449,9 +449,11 @@ class SkillService:
                 row = await repository.create_system_asset(actor, command)
             return self._asset_view(row)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, result.id, None, "skill.create")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, result.id, None, "skill.create"),
+        )
 
     async def create_version_from_archive(
         self,
@@ -511,9 +513,11 @@ class SkillService:
             await repository.session.flush()
             return self._version_view(record)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, asset_id, result.id, "skill.version.create")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "skill.version.create"),
+        )
 
     async def publish(
         self,
@@ -556,9 +560,11 @@ class SkillService:
             await repository.session.flush()
             return self._version_view(record)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, asset_id, version_id, "skill.publish")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "skill.publish"),
+        )
 
     async def archive(
         self,
@@ -568,9 +574,13 @@ class SkillService:
         expected_asset_version: int,
     ) -> SkillAssetView:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
-        result = await self._change_status(actor, asset_id, expected_asset_version=expected_asset_version, status="archived")
-        self._record_governance(actor, asset_id, None, "skill.archive")
-        return result
+        return await self._change_status(
+            actor,
+            asset_id,
+            expected_asset_version=expected_asset_version,
+            status="archived",
+            audit_action="skill.archive",
+        )
 
     async def suspend(
         self,
@@ -580,9 +590,13 @@ class SkillService:
         expected_asset_version: int,
     ) -> SkillAssetView:
         self._require_capability(actor, Capability.SHARED_ASSETS_MANAGE_BINDINGS)
-        result = await self._change_status(actor, asset_id, expected_asset_version=expected_asset_version, status="suspended")
-        self._record_governance(actor, asset_id, None, "skill.suspend")
-        return result
+        return await self._change_status(
+            actor,
+            asset_id,
+            expected_asset_version=expected_asset_version,
+            status="suspended",
+            audit_action="skill.suspend",
+        )
 
     async def get(self, actor: _Actor, asset_id: uuid.UUID) -> SkillAssetView:
         self._require_capability(actor, Capability.SHARED_ASSETS_READ)
@@ -656,6 +670,7 @@ class SkillService:
         *,
         expected_asset_version: int,
         status: str,
+        audit_action: str,
     ) -> SkillAssetView:
         async def operation(repository: SkillRepository) -> SkillAssetView:
             asset = await self._get_asset(repository, actor, asset_id, for_update=True)
@@ -667,17 +682,25 @@ class SkillService:
             await repository.session.flush()
             return self._asset_view(asset)
 
-        return await self._execute(actor, operation)
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, result.id, None, audit_action),
+        )
 
     async def _execute(
         self,
         actor: _Actor,
         operation: Callable[[SkillRepository], Awaitable[_T]],
+        governance: Callable[[AsyncSession, _T], Awaitable[None]] | None = None,
     ) -> _T:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    return await operation(SkillRepository(session))
+                    result = await operation(SkillRepository(session))
+                    if governance is not None:
+                        await governance(session, result)
+                    return result
         except SharedAssetError:
             raise
         except IntegrityError as exc:
@@ -813,20 +836,35 @@ class SkillService:
             created_at=row.created_at,
         )
 
-    def _record_governance(
+    async def _record_governance(
         self,
+        session: AsyncSession,
         actor: _Actor,
         asset_id: uuid.UUID,
         version_id: uuid.UUID | None,
         action: str,
     ) -> None:
+        if isinstance(actor, ProjectContext):
+            await self._governance_sink.append_project(
+                session,
+                actor=actor.user_id,
+                project_id=actor.project_id,
+                asset_id=asset_id,
+                version_id=version_id,
+                action=action,
+                request_id=actor.request_id,
+                asset_kind="skill",
+            )
+            return
         if not isinstance(actor, SystemAssetGovernanceContext):
             return
-        self._governance_sink.write_override(
+        await self._governance_sink.append_override(
+            session,
             actor=actor.user_id,
             project_id=actor.project_id,
             asset_id=asset_id,
             version_id=version_id,
             action=action,
             request_id=actor.request_id,
+            asset_kind="skill",
         )

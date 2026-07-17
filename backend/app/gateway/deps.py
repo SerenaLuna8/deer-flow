@@ -286,6 +286,18 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.config.quota_config import QuotaConfig
 
         audit_keyring = AuditHmacKeyring.from_environment()
+        from app.audit.service import AuditService
+        from app.audit.sinks import OperationalAuditSink
+
+        audit_service = AuditService(sf, audit_keyring)
+        operational_audit_sink = OperationalAuditSink(audit_service)
+        from app.shared_assets.audit import (
+            DurableSharedAssetGovernanceEventSink,
+        )
+
+        app.state.project_audit_service = audit_service
+        app.state.operational_audit_sink = operational_audit_sink
+        app.state.shared_asset_audit_sink = DurableSharedAssetGovernanceEventSink(audit_service)
         quota_config = getattr(config, "quotas", None) or QuotaConfig()
         project_quota_enforcer = ProjectQuotaEnforcer(
             QuotaService(
@@ -324,10 +336,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.private_run_admission_service = PrivateRunAdmissionService(
             sf,
             quota=project_quota_enforcer,
+            audit=operational_audit_sink,
         )
         app.state.private_run_service = PrivateRunService(
             sf,
             quota=project_quota_enforcer,
+            audit=operational_audit_sink,
         )
         app.state.private_file_streamer = PrivateFileStreamer(sf)
         app.state.project_memory_service = PrivateMemoryService(sf)
@@ -387,6 +401,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             sf,
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
             quota=project_quota_enforcer,
+            audit=operational_audit_sink,
         )
         app.state.automation_scheduler_enabled = effective_scheduler_config.enabled
 
@@ -530,6 +545,12 @@ def get_project_quota_enforcer(request: Request):
     if value is None:
         raise HTTPException(status_code=503, detail="Project quota service not available")
     return value
+
+
+def get_operational_audit_sink(request: Request):
+    """Production installs the sink; isolated compatibility apps may omit it."""
+
+    return getattr(request.app.state, "operational_audit_sink", None)
 
 
 def get_checkpointer(request: Request) -> Checkpointer:

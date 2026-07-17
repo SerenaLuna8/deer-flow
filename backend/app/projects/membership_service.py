@@ -35,6 +35,25 @@ class MembershipQuotaPort(Protocol):
     ) -> None: ...
 
 
+class MembershipAuditPort(Protocol):
+    async def member_role_changed(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        membership_id: uuid.UUID,
+        previous_role: ProjectRole,
+        role: ProjectRole,
+    ) -> None: ...
+
+    async def member_ended(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        membership_id: uuid.UUID,
+        status: str,
+    ) -> None: ...
+
+
 class _NoopMembershipQuota:
     async def release_member(
         self,
@@ -47,6 +66,27 @@ class _NoopMembershipQuota:
         del session, scope, membership_id, membership_version
 
 
+class _NoopMembershipAudit:
+    async def member_role_changed(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        membership_id: uuid.UUID,
+        previous_role: ProjectRole,
+        role: ProjectRole,
+    ) -> None:
+        del session, context, membership_id, previous_role, role
+
+    async def member_ended(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        membership_id: uuid.UUID,
+        status: str,
+    ) -> None:
+        del session, context, membership_id, status
+
+
 class MembershipService:
     def __init__(
         self,
@@ -57,6 +97,7 @@ class MembershipService:
         retention: object = PrivateWorkRetentionService,
         notify_local_cancellation: Callable[[tuple[str, ...], str], object] | None = None,
         quota: MembershipQuotaPort | None = None,
+        audit: MembershipAuditPort | None = None,
     ):
         self.repository = repository
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -64,6 +105,7 @@ class MembershipService:
         self._retention = retention
         self._notifier = notify_local_cancellation
         self._quota = quota or _NoopMembershipQuota()
+        self._audit = audit or _NoopMembershipAudit()
 
     async def list_members(self, context: ProjectContext) -> tuple[MembershipView, ...]:
         context.require(Capability.PROJECT_READ)
@@ -100,6 +142,13 @@ class MembershipService:
                     now=revoked_at,
                 )
             result = await self.repository.set_role(project, target, role)
+            await self._audit.member_role_changed(
+                self.repository.session,
+                context,
+                target.id,
+                target_role,
+                role,
+            )
         await self._notify(run_ids)
         return result
 
@@ -163,6 +212,12 @@ class MembershipService:
             ),
             membership_id=target.id,
             membership_version=active_version,
+        )
+        await self._audit.member_ended(
+            self.repository.session,
+            context,
+            target.id,
+            status,
         )
         return result, run_ids
 

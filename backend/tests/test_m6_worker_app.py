@@ -7,11 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.quotas.models import QuotaSourceRef
+from app.reliability.owner_refs import AuditHmacKeyring
 from app.worker import app as worker_app
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.worker_config import WorkerConfig
-from deerflow.persistence.jobs.sql import JobOwnerRef
 
 
 @asynccontextmanager
@@ -29,7 +28,10 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         run_events=SimpleNamespace(max_trace_content=1024),
         quotas=QuotaConfig(),
     )
-    session_factory = object()
+
+    def session_factory():
+        return None
+
     captured: dict[str, object] = {}
 
     class Guard:
@@ -155,15 +157,10 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         @classmethod
         def from_environment(cls):
             captured["audit_keyring"] = True
-            return cls()
-
-        @staticmethod
-        def job_owner_ref(_owner):
-            return JobOwnerRef(key_id="test", hmac_hex="a" * 64)
-
-        @staticmethod
-        def quota_source_ref(_payload):
-            return QuotaSourceRef(key_id="test", hmac_hex="b" * 64)
+            return AuditHmacKeyring(
+                active_key_id="test",
+                _keys={"test": b"x" * 32},
+            )
 
     monkeypatch.setattr(worker_app, "AuditHmacKeyring", Keyring)
     monkeypatch.setattr(

@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.deps import (
+    get_operational_audit_sink,
     get_project_quota_enforcer,
     get_run_manager,
     project_session,
@@ -97,12 +98,14 @@ async def patch_member(
     body: MembershipMutationRequest,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
     session: AsyncSession = Depends(project_session),
+    audit=Depends(get_operational_audit_sink),
 ):
     try:
         context = await _context(project_id, identity, session)
         view = await MembershipService(
             MembershipRepository(session),
             notify_local_cancellation=_cancellation_notifier(request),
+            audit=audit,
         ).change_role(
             context,
             membership_id,
@@ -123,6 +126,7 @@ async def remove_member(
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
     session: AsyncSession = Depends(project_session),
     quota=Depends(get_project_quota_enforcer),
+    audit=Depends(get_operational_audit_sink),
 ):
     try:
         context = await _context(project_id, identity, session)
@@ -130,6 +134,7 @@ async def remove_member(
             MembershipRepository(session),
             notify_local_cancellation=_cancellation_notifier(request),
             quota=quota,
+            audit=audit,
         ).remove(
             context,
             membership_id,
@@ -148,6 +153,7 @@ async def leave_project(
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
     session: AsyncSession = Depends(project_session),
     quota=Depends(get_project_quota_enforcer),
+    audit=Depends(get_operational_audit_sink),
 ):
     try:
         context = await _context(project_id, identity, session)
@@ -155,6 +161,7 @@ async def leave_project(
             MembershipRepository(session),
             notify_local_cancellation=_cancellation_notifier(request),
             quota=quota,
+            audit=audit,
         ).leave(
             context,
             body.version,

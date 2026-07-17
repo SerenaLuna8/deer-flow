@@ -139,6 +139,7 @@ class JobTerminalEvent:
     public_error_code: str | None
     cancel_reason: str | None
     occurred_at: datetime
+    attempt_count: int = 0
 
 
 class JobAuditPort(Protocol):
@@ -375,6 +376,7 @@ class JobRepository:
                 public_error_code=public_error_code,
                 cancel_reason=row.cancel_reason,
                 occurred_at=now,
+                attempt_count=row.attempt_count,
             ),
         )
 

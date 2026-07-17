@@ -505,24 +505,31 @@ def _factory():
         ) from None
 
 
-def get_agent_service() -> AgentService:
-    return AgentService(_factory())
+def _governance_sink(request: Request):
+    return getattr(request.app.state, "shared_asset_audit_sink", None)
 
 
-def get_skill_service() -> SkillService:
-    return SkillService(_factory())
+def get_agent_service(request: Request) -> AgentService:
+    return AgentService(_factory(), governance_sink=_governance_sink(request))
 
 
-def get_mcp_service() -> McpService:
-    return McpService(_factory())
+def get_skill_service(request: Request) -> SkillService:
+    return SkillService(_factory(), governance_sink=_governance_sink(request))
 
 
-def get_credential_service() -> CredentialService:
-    return CredentialService(_factory())
+def get_mcp_service(request: Request) -> McpService:
+    return McpService(_factory(), governance_sink=_governance_sink(request))
 
 
-def get_binding_service() -> BindingService:
-    return BindingService(_factory())
+def get_credential_service(request: Request) -> CredentialService:
+    return CredentialService(
+        _factory(),
+        governance_sink=_governance_sink(request),
+    )
+
+
+def get_binding_service(request: Request) -> BindingService:
+    return BindingService(_factory(), governance_sink=_governance_sink(request))
 
 
 def _asset_item(view) -> AssetItemResponse:

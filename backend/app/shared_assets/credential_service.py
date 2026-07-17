@@ -179,9 +179,17 @@ class CredentialService:
             await repository.session.flush()
             return self._credential_view(row)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, result.id, result.current_version_id, "credential.create")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                result.id,
+                result.current_version_id,
+                "credential.create",
+            ),
+        )
 
     async def replace(
         self,
@@ -239,9 +247,11 @@ class CredentialService:
             await repository.session.flush()
             return self._version_view(version)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, credential_id, result.id, "credential.replace")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, credential_id, result.id, "credential.replace"),
+        )
 
     async def revoke(
         self,
@@ -271,9 +281,17 @@ class CredentialService:
             await repository.session.flush()
             return self._credential_view(credential)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, credential_id, result.current_version_id, "credential.revoke")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                credential_id,
+                result.current_version_id,
+                "credential.revoke",
+            ),
+        )
 
     async def get(self, actor: _Actor, credential_id: uuid.UUID) -> CredentialView:
         self._require_capability(actor, Capability.SHARED_ASSETS_READ)
@@ -345,11 +363,15 @@ class CredentialService:
         self,
         actor: _Actor,
         operation: Callable[[CredentialRepository], Awaitable[_T]],
+        governance: Callable[[AsyncSession, _T], Awaitable[None]] | None = None,
     ) -> _T:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    return await operation(CredentialRepository(session))
+                    result = await operation(CredentialRepository(session))
+                    if governance is not None:
+                        await governance(session, result)
+                    return result
         except SharedAssetError:
             raise
         except IntegrityError as exc:
@@ -478,20 +500,35 @@ class CredentialService:
             created_at=row.created_at,
         )
 
-    def _record_governance(
+    async def _record_governance(
         self,
+        session: AsyncSession,
         actor: _Actor,
         credential_id: uuid.UUID,
         version_id: uuid.UUID | None,
         action: str,
     ) -> None:
+        if isinstance(actor, ProjectContext):
+            await self._governance_sink.append_project(
+                session,
+                actor=actor.user_id,
+                project_id=actor.project_id,
+                asset_id=credential_id,
+                version_id=version_id,
+                action=action,
+                request_id=actor.request_id,
+                asset_kind="mcp",
+            )
+            return
         if not isinstance(actor, SystemAssetGovernanceContext):
             return
-        self._governance_sink.write_override(
+        await self._governance_sink.append_override(
+            session,
             actor=actor.user_id,
             project_id=actor.project_id,
             asset_id=credential_id,
             version_id=version_id,
             action=action,
             request_id=actor.request_id,
+            asset_kind="mcp",
         )

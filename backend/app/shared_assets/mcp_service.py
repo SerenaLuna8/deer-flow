@@ -212,9 +212,11 @@ class McpService:
                 await repository.create_system_asset(actor, row)
             return self._asset_view(row)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, result.id, None, "mcp.create")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, result.id, None, "mcp.create"),
+        )
 
     async def create_version(
         self,
@@ -273,9 +275,11 @@ class McpService:
             await repository.session.flush()
             return self._version_view(record)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, asset_id, result.id, "mcp.version.create")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "mcp.version.create"),
+        )
 
     async def submit_approval(
         self,
@@ -299,9 +303,11 @@ class McpService:
             await repository.session.flush()
             return self._version_view(record)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, asset_id, version_id, "mcp.submit_approval")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "mcp.submit_approval"),
+        )
 
     async def approve(
         self,
@@ -367,9 +373,11 @@ class McpService:
             await repository.session.flush()
             return self._version_view(McpVersionRecord(record.row, record.slots, grants))
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, asset_id, version_id, "mcp.approve")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "mcp.approve"),
+        )
 
     async def publish(
         self,
@@ -395,9 +403,11 @@ class McpService:
             await repository.session.flush()
             return self._version_view(record)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, asset_id, version_id, "mcp.publish")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "mcp.publish"),
+        )
 
     async def archive(
         self,
@@ -407,9 +417,13 @@ class McpService:
         expected_asset_version: int,
     ) -> McpAssetView:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
-        result = await self._change_status(actor, asset_id, expected_asset_version, "archived")
-        self._record_governance(actor, asset_id, None, "mcp.archive")
-        return result
+        return await self._change_status(
+            actor,
+            asset_id,
+            expected_asset_version,
+            "archived",
+            "mcp.archive",
+        )
 
     async def suspend(
         self,
@@ -419,9 +433,13 @@ class McpService:
         expected_asset_version: int,
     ) -> McpAssetView:
         self._require_capability(actor, Capability.SHARED_ASSETS_MANAGE_BINDINGS)
-        result = await self._change_status(actor, asset_id, expected_asset_version, "suspended")
-        self._record_governance(actor, asset_id, None, "mcp.suspend")
-        return result
+        return await self._change_status(
+            actor,
+            asset_id,
+            expected_asset_version,
+            "suspended",
+            "mcp.suspend",
+        )
 
     async def get(self, actor: _Actor, asset_id: uuid.UUID) -> McpAssetView:
         self._require_capability(actor, Capability.SHARED_ASSETS_READ)
@@ -483,6 +501,7 @@ class McpService:
         asset_id: uuid.UUID,
         expected: int,
         status: str,
+        audit_action: str,
     ) -> McpAssetView:
         async def operation(repository: McpRepository) -> McpAssetView:
             asset = await self._get_asset(repository, actor, asset_id, for_update=True)
@@ -494,17 +513,25 @@ class McpService:
             await repository.session.flush()
             return self._asset_view(asset)
 
-        return await self._execute(actor, operation)
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, result.id, None, audit_action),
+        )
 
     async def _execute(
         self,
         actor: _Actor,
         operation: Callable[[McpRepository], Awaitable[_T]],
+        governance: Callable[[AsyncSession, _T], Awaitable[None]] | None = None,
     ) -> _T:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    return await operation(McpRepository(session))
+                    result = await operation(McpRepository(session))
+                    if governance is not None:
+                        await governance(session, result)
+                    return result
         except SharedAssetError:
             raise
         except IntegrityError as exc:
@@ -950,20 +977,35 @@ class McpService:
             updated_at=row.updated_at,
         )
 
-    def _record_governance(
+    async def _record_governance(
         self,
+        session: AsyncSession,
         actor: _Actor,
         asset_id: uuid.UUID,
         version_id: uuid.UUID | None,
         action: str,
     ) -> None:
+        if isinstance(actor, ProjectContext):
+            await self._governance_sink.append_project(
+                session,
+                actor=actor.user_id,
+                project_id=actor.project_id,
+                asset_id=asset_id,
+                version_id=version_id,
+                action=action,
+                request_id=actor.request_id,
+                asset_kind="mcp",
+            )
+            return
         if not isinstance(actor, SystemAssetGovernanceContext):
             return
-        self._governance_sink.write_override(
+        await self._governance_sink.append_override(
+            session,
             actor=actor.user_id,
             project_id=actor.project_id,
             asset_id=asset_id,
             version_id=version_id,
             action=action,
             request_id=actor.request_id,
+            asset_kind="mcp",
         )

@@ -953,7 +953,7 @@ Expected: PASS；已提交 audit 行不可修改或删除。
 
 **Interfaces:** 保持 M3 `AssetAuditSink` port兼容，adapter写入新 audit repository；治理 mutation、admit/cancel/terminal/dead/requeue、Automation trigger、quota policy、backup/restore/purge 均在业务事务或 trusted-operation事务写 audit。
 
-- [ ] **Step 1: 写 sink RED tests**
+- [x] **Step 1: 写 sink RED tests**
 
 ```python
 async def test_failed_member_removal_writes_no_success_audit(remove_last_admin):
@@ -968,7 +968,7 @@ async def test_dead_job_audit_contains_codes_not_exception(dead_job):
 
 覆盖同事务回滚、M3 sink regression、system operation actor、禁止 payload 泄漏。
 
-- [ ] **Step 2: 观察 RED**
+- [x] **Step 2: 观察 RED**
 
 ```bash
 cd backend
@@ -978,6 +978,8 @@ uv run pytest tests/test_m6_audit_integration_postgres.py tests/test_asset_audit
 Expected: FAIL because sinks尚未接入新 repository。
 
 - [ ] **Step 3: 接入 typed sinks 并验证**
+
+Checkpoint（2026-07-16）：typed sinks、项目/平台共享资产 adapter、成员变更、Run admit/cancel/terminal、Automation trigger、job dead 及 Gateway/Worker/Scheduler 接线已实现；PostgreSQL 相关组 59 passed，受影响 service/router/process 组 228 passed。仍需完成独立复审、全量静态门禁，并补齐本 Step 所列后续 recovery/quota-policy 调用点后再勾选。
 
 ```bash
 cd backend

@@ -112,9 +112,17 @@ class AgentService:
                 row = await repository.create_system_asset(actor, command)
             return self._asset_view(row)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, result.id, None, "agent.create")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                result.id,
+                None,
+                "agent.create",
+            ),
+        )
 
     async def create_version(
         self,
@@ -179,9 +187,17 @@ class AgentService:
             await repository.session.flush()
             return self._version_view(record)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, asset_id, result.id, "agent.version.create")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                asset_id,
+                result.id,
+                "agent.version.create",
+            ),
+        )
 
     async def publish(
         self,
@@ -223,9 +239,17 @@ class AgentService:
             await repository.session.flush()
             return self._version_view(record)
 
-        result = await self._execute(actor, operation)
-        self._record_governance(actor, asset_id, version_id, "agent.publish")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                asset_id,
+                result.id,
+                "agent.publish",
+            ),
+        )
 
     async def archive(
         self,
@@ -235,14 +259,13 @@ class AgentService:
         expected_asset_version: int,
     ) -> AgentAssetView:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
-        result = await self._change_status(
+        return await self._change_status(
             actor,
             asset_id,
             expected_asset_version=expected_asset_version,
             status="archived",
+            audit_action="agent.archive",
         )
-        self._record_governance(actor, asset_id, None, "agent.archive")
-        return result
 
     async def suspend(
         self,
@@ -252,14 +275,13 @@ class AgentService:
         expected_asset_version: int,
     ) -> AgentAssetView:
         self._require_capability(actor, Capability.SHARED_ASSETS_MANAGE_BINDINGS)
-        result = await self._change_status(
+        return await self._change_status(
             actor,
             asset_id,
             expected_asset_version=expected_asset_version,
             status="suspended",
+            audit_action="agent.suspend",
         )
-        self._record_governance(actor, asset_id, None, "agent.suspend")
-        return result
 
     async def get(self, actor: _Actor, asset_id: uuid.UUID) -> AgentAssetView:
         self._require_capability(actor, Capability.SHARED_ASSETS_READ)
@@ -308,6 +330,7 @@ class AgentService:
         *,
         expected_asset_version: int,
         status: str,
+        audit_action: str,
     ) -> AgentAssetView:
         async def operation(repository: AgentRepository) -> AgentAssetView:
             asset = await self._get_asset(repository, actor, asset_id, for_update=True)
@@ -319,17 +342,31 @@ class AgentService:
             await repository.session.flush()
             return self._asset_view(asset)
 
-        return await self._execute(actor, operation)
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                result.id,
+                None,
+                audit_action,
+            ),
+        )
 
     async def _execute(
         self,
         actor: _Actor,
         operation: Callable[[AgentRepository], Awaitable[_T]],
+        governance: Callable[[AsyncSession, _T], Awaitable[None]] | None = None,
     ) -> _T:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    return await operation(AgentRepository(session))
+                    result = await operation(AgentRepository(session))
+                    if governance is not None:
+                        await governance(session, result)
+                    return result
         except SharedAssetError:
             raise
         except IntegrityError as exc:
@@ -517,20 +554,35 @@ class AgentService:
             created_at=row.created_at,
         )
 
-    def _record_governance(
+    async def _record_governance(
         self,
+        session: AsyncSession,
         actor: _Actor,
         asset_id: uuid.UUID,
         version_id: uuid.UUID | None,
         action: str,
     ) -> None:
+        if isinstance(actor, ProjectContext):
+            await self._governance_sink.append_project(
+                session,
+                actor=actor.user_id,
+                project_id=actor.project_id,
+                asset_id=asset_id,
+                version_id=version_id,
+                action=action,
+                request_id=actor.request_id,
+                asset_kind="agent",
+            )
+            return
         if not isinstance(actor, SystemAssetGovernanceContext):
             return
-        self._governance_sink.write_override(
+        await self._governance_sink.append_override(
+            session,
             actor=actor.user_id,
             project_id=actor.project_id,
             asset_id=asset_id,
             version_id=version_id,
             action=action,
             request_id=actor.request_id,
+            asset_kind="agent",
         )

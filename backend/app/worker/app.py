@@ -53,6 +53,12 @@ async def run_worker(
             datetime.now(UTC),
         )
         audit_keyring = AuditHmacKeyring.from_environment()
+        from app.audit.service import AuditService
+        from app.audit.sinks import OperationalAuditSink
+
+        audit_sink = OperationalAuditSink(
+            AuditService(session_factory, audit_keyring),
+        )
         quota_config = getattr(config, "quotas", None) or QuotaConfig()
         quota_enforcer = ProjectQuotaEnforcer(
             QuotaService(
@@ -61,7 +67,10 @@ async def run_worker(
                 source_ref_hasher=audit_keyring,
             )
         )
-        terminal_port = PrivateRunJobTerminalPort(quota=quota_enforcer)
+        terminal_port = PrivateRunJobTerminalPort(
+            quota=quota_enforcer,
+            audit=audit_sink,
+        )
 
         async def reconcile_deferred_automation_terminals() -> None:
             if not terminal_port.take_automation_reconciliation_pending():
@@ -112,6 +121,7 @@ async def run_worker(
                 job_repository_builder=repository_builder,
                 project_checkpointer=project_checkpointer,
                 quota=quota_enforcer,
+                audit=audit_sink,
             )
             active_handlers = {
                 "private_run": private_run_handler,

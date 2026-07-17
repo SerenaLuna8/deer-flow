@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 from typing import Protocol
 
+import sqlalchemy as sa
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -26,6 +28,7 @@ from app.private_work.run_repository import (
 )
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
+from deerflow.persistence.jobs.model import JobRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 TERMINAL_PRIVATE_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
@@ -42,6 +45,30 @@ class PrivateRunQuotaPort(Protocol):
     ) -> None: ...
 
 
+class PrivateRunAuditPort(Protocol):
+    async def run_cancel_requested(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+    ) -> None: ...
+
+    async def run_terminal(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        job_type: str,
+        status: str,
+        public_error_code: str | None,
+        request_id: str,
+    ) -> None: ...
+
+
 class _NoopPrivateRunQuota:
     async def release_concurrent_run(
         self,
@@ -54,6 +81,32 @@ class _NoopPrivateRunQuota:
         del session, scope, run_id, request_id
 
 
+class _NoopPrivateRunAudit:
+    async def run_cancel_requested(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+    ) -> None:
+        del session, context, run_id, job_id
+
+    async def run_terminal(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        job_type: str,
+        status: str,
+        public_error_code: str | None,
+        request_id: str,
+    ) -> None:
+        del session, scope, run_id, job_id, job_type, status, public_error_code, request_id
+
+
 class PrivateRunService:
     """Scoped read/delete boundary for project-owned runs."""
 
@@ -62,11 +115,13 @@ class PrivateRunService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         quota: PrivateRunQuotaPort | None = None,
+        audit: PrivateRunAuditPort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._revalidator = PrivateWorkRevalidator()
         self._automation_reconciler = AutomationReconciler(session_factory)
         self._quota = quota or _NoopPrivateRunQuota()
+        self._audit = audit or _NoopPrivateRunAudit()
 
     @staticmethod
     async def _require_thread(
@@ -225,11 +280,38 @@ class PrivateRunService:
                     job_id=record.job_id,
                     reason=reason,
                 )
+                if cancel_result != "terminal":
+                    await self._audit.run_cancel_requested(
+                        session,
+                        context,
+                        run_id=run_id,
+                        job_id=record.job_id,
+                    )
                 if cancel_result in {"cancelled", "terminal"}:
                     await self._quota.release_concurrent_run(
                         session,
                         context.resource_scope,
                         run_id=run_id,
+                        request_id=context.request_id,
+                    )
+                if cancel_result == "cancelled":
+                    job_type = await session.scalar(
+                        sa.select(JobRow.job_type).where(
+                            JobRow.id == record.job_id,
+                            JobRow.project_id == context.project_id,
+                            JobRow.owner_user_id == str(context.user_id),
+                        )
+                    )
+                    if job_type not in {"private_run", "automation_run"}:
+                        raise PrivateRunConflict
+                    await self._audit.run_terminal(
+                        session,
+                        context.resource_scope,
+                        run_id=run_id,
+                        job_id=record.job_id,
+                        job_type=job_type,
+                        status="interrupted",
+                        public_error_code=None,
                         request_id=context.request_id,
                     )
             if cancel_result in {"cancelled", "terminal"}:

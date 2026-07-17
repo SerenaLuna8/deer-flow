@@ -111,9 +111,11 @@ class BindingService:
             await repository.validate_target_dependencies(actor, selection)
             return self._view(selection.kind, await repository.add_binding(actor, selection))
 
-        result = await self._execute(actor, operation)
-        self._record(actor, selection, "binding.enable")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record(session, actor, selection, "binding.enable"),
+        )
 
     async def list_visible(
         self,
@@ -185,9 +187,11 @@ class BindingService:
             await repository.session.flush()
             return self._view(selection.kind, row)
 
-        result = await self._execute(actor, operation)
-        self._record(actor, selection, "binding.disable")
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record(session, actor, selection, "binding.disable"),
+        )
 
     async def _move(
         self,
@@ -236,19 +240,25 @@ class BindingService:
             await repository.session.flush()
             return self._view(selection.kind, row)
 
-        result = await self._execute(actor, operation)
-        self._record(actor, selection, action)
-        return result
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record(session, actor, selection, action),
+        )
 
     async def _execute(
         self,
         actor: _Actor,
         operation: Callable[[BindingRepository], Awaitable[_T]],
+        governance: Callable[[AsyncSession, _T], Awaitable[None]] | None = None,
     ) -> _T:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    return await operation(BindingRepository(session))
+                    result = await operation(BindingRepository(session))
+                    if governance is not None:
+                        await governance(session, result)
+                    return result
         except SharedAssetError:
             raise
         except IntegrityError as exc:
@@ -329,14 +339,34 @@ class BindingService:
             updated_at=row.updated_at,
         )
 
-    def _record(self, actor: _Actor, selection: AssetSelection, action: str) -> None:
+    async def _record(
+        self,
+        session: AsyncSession,
+        actor: _Actor,
+        selection: AssetSelection,
+        action: str,
+    ) -> None:
+        if isinstance(actor, ProjectContext):
+            await self._governance_sink.append_project(
+                session,
+                actor=actor.user_id,
+                project_id=actor.project_id,
+                asset_id=selection.asset_id,
+                version_id=selection.version_id,
+                action=action,
+                request_id=actor.request_id,
+                asset_kind=selection.kind.value,
+            )
+            return
         if not isinstance(actor, SystemAssetGovernanceContext):
             return
-        self._governance_sink.write_override(
+        await self._governance_sink.append_override(
+            session,
             actor=actor.user_id,
             project_id=actor.project_id,
             asset_id=selection.asset_id,
             version_id=selection.version_id,
             action=action,
             request_id=actor.request_id,
+            asset_kind=selection.kind.value,
         )

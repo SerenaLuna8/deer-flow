@@ -110,6 +110,19 @@ class AutomationQuotaPort(Protocol):
     ) -> None: ...
 
 
+class AutomationAuditPort(Protocol):
+    async def automation_admitted(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        task_id: str,
+        trigger: str,
+        run: PrivateRunRecord,
+        job: AdmittedJobRecord,
+    ) -> None: ...
+
+
 class _NoopAutomationQuota:
     async def reserve_concurrent_run(
         self,
@@ -118,6 +131,20 @@ class _NoopAutomationQuota:
         run: PrivateRunRecord,
     ) -> None:
         del session, context, run
+
+
+class _NoopAutomationAudit:
+    async def automation_admitted(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        task_id: str,
+        trigger: str,
+        run: PrivateRunRecord,
+        job: AdmittedJobRecord,
+    ) -> None:
+        del session, context, task_id, trigger, run, job
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +309,7 @@ class AutomationDispatcher:
         retry_delay: timedelta = timedelta(seconds=30),
         max_concurrent_runs: int = 3,
         quota: AutomationQuotaPort | None = None,
+        audit: AutomationAuditPort | None = None,
     ) -> None:
         if retry_delay <= timedelta(0):
             raise ValueError("retry_delay must be positive")
@@ -294,6 +322,7 @@ class AutomationDispatcher:
         self._retry_delay = retry_delay
         self._max_concurrent_runs = max_concurrent_runs
         self._quota = quota or _NoopAutomationQuota()
+        self._audit = audit or _NoopAutomationAudit()
         self._revalidator = PrivateWorkRevalidator()
         self._resolver = ProjectAssetResolver(session_factory)
         self._snapshots = RunSnapshotRepository(session_factory)
@@ -630,6 +659,14 @@ class AutomationDispatcher:
                     session,
                     context,
                     run,
+                )
+                await self._audit.automation_admitted(
+                    session,
+                    context,
+                    task_id=task.id,
+                    trigger=trigger,
+                    run=run,
+                    job=job,
                 )
                 await self._after_job_attached(session, result)
                 return result

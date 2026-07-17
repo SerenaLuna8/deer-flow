@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -137,6 +138,7 @@ def test_system_admin_override_uses_governance_context_without_membership() -> N
 
 def test_successful_platform_override_emits_governance_event() -> None:
     sink = Mock()
+    sink.append_override = AsyncMock()
     service = AgentService(lambda: None, governance_sink=sink)
     service._execute = AsyncMock(
         return_value=AgentAssetView(
@@ -162,12 +164,25 @@ def test_successful_platform_override_emits_governance_event() -> None:
     )
 
     assert result.status_code == 201
-    event = sink.write_override.call_args.kwargs
+    governance = service._execute.await_args.kwargs["governance"]
+    session = object()
+    asyncio.run(governance(session, service._execute.return_value))
+    assert sink.append_override.await_args.args == (session,)
+    event = sink.append_override.await_args.kwargs
     assert event["actor"] == ADMIN_ID
     assert event["project_id"] == PROJECT_ID
     assert event["asset_id"] == service._execute.return_value.id
     assert event["action"] == "agent.create"
-    assert set(event) == {"actor", "project_id", "asset_id", "version_id", "action", "request_id"}
+    assert set(event) == {
+        "actor",
+        "project_id",
+        "asset_id",
+        "version_id",
+        "action",
+        "request_id",
+        "asset_kind",
+    }
+    assert event["asset_kind"] == "agent"
 
 
 @pytest.mark.asyncio

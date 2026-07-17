@@ -163,6 +163,27 @@ class PrivateRunExecutionQuotaPort(Protocol):
     ) -> None: ...
 
 
+class PrivateRunExecutionAuditPort(Protocol):
+    async def run_terminal(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        job_type: str,
+        status: str,
+        public_error_code: str | None,
+        request_id: str,
+    ) -> None: ...
+
+    async def job_terminalized(
+        self,
+        session: AsyncSession,
+        event: JobTerminalEvent,
+    ) -> None: ...
+
+
 class _NoopPrivateRunExecutionQuota:
     async def release_concurrent_run(
         self,
@@ -173,6 +194,29 @@ class _NoopPrivateRunExecutionQuota:
         request_id: str,
     ) -> None:
         del session, scope, run_id, request_id
+
+
+class _NoopPrivateRunExecutionAudit:
+    async def run_terminal(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        job_type: str,
+        status: str,
+        public_error_code: str | None,
+        request_id: str,
+    ) -> None:
+        del session, scope, run_id, job_id, job_type, status, public_error_code, request_id
+
+    async def job_terminalized(
+        self,
+        session: AsyncSession,
+        event: JobTerminalEvent,
+    ) -> None:
+        del session, event
 
 
 class PrivateRunAgentQuotaPort(Protocol):
@@ -241,9 +285,11 @@ class PrivateRunJobTerminalPort:
         self,
         *,
         quota: PrivateRunExecutionQuotaPort | None = None,
+        audit: PrivateRunExecutionAuditPort | None = None,
     ) -> None:
         self._automation_reconciliation_pending = asyncio.Event()
         self._quota = quota or _NoopPrivateRunExecutionQuota()
+        self._audit = audit or _NoopPrivateRunExecutionAudit()
 
     def take_automation_reconciliation_pending(self) -> bool:
         if not self._automation_reconciliation_pending.is_set():
@@ -260,6 +306,7 @@ class PrivateRunJobTerminalPort:
         event: JobTerminalEvent,
     ) -> None:
         if event.job_type not in {"private_run", "automation_run"}:
+            await self._audit.job_terminalized(session, event)
             return
         if event.owner_user_id is None or event.run_id is None:
             raise RuntimeError("private job terminal authority is incomplete")
@@ -300,14 +347,25 @@ class PrivateRunJobTerminalPort:
             )
         )
         if terminalized.rowcount == 1:
+            scope = PrivateResourceScope(
+                project_id=str(event.project_id),
+                owner_user_id=event.owner_user_id,
+                membership_version=membership_version,
+            )
             await self._quota.release_concurrent_run(
                 session,
-                PrivateResourceScope(
-                    project_id=str(event.project_id),
-                    owner_user_id=event.owner_user_id,
-                    membership_version=membership_version,
-                ),
+                scope,
                 run_id=event.run_id,
+                request_id="worker-job-terminal",
+            )
+            await self._audit.run_terminal(
+                session,
+                scope,
+                run_id=event.run_id,
+                job_id=event.job_id,
+                job_type=event.job_type,
+                status=run_status,
+                public_error_code=event.public_error_code,
                 request_id="worker-job-terminal",
             )
         if event.job_type == "automation_run":
@@ -386,6 +444,7 @@ class PrivateRunJobTerminalPort:
                 PrivateFileRow.status == "staging",
             )
         )
+        await self._audit.job_terminalized(session, event)
 
 
 class LeaseAuthorizedStreamBridge:
@@ -972,6 +1031,7 @@ class PrivateRunJobHandler:
         job_repository_builder=JobRepository,
         project_checkpointer: ProjectScopedCheckpointer | None = None,
         quota: PrivateRunExecutionQuotaPort | None = None,
+        audit: PrivateRunExecutionAuditPort | None = None,
     ) -> None:
         if retry_initial_seconds < 1 or retry_max_seconds < retry_initial_seconds:
             raise ValueError("invalid private Run retry policy")
@@ -982,6 +1042,7 @@ class PrivateRunJobHandler:
         self._job_repository_builder = job_repository_builder
         self._project_checkpointer = project_checkpointer
         self._quota = quota or _NoopPrivateRunExecutionQuota()
+        self._audit = audit or _NoopPrivateRunExecutionAudit()
         self._snapshots = RunSnapshotRepository(session_factory)
         self._events = DbRunEventStore(session_factory)
 
@@ -1221,6 +1282,16 @@ class PrivateRunJobHandler:
                             session,
                             locked_scope,
                             run_id=settled_run.run_id,
+                            request_id="worker-private-run",
+                        )
+                        await self._audit.run_terminal(
+                            session,
+                            locked_scope,
+                            run_id=settled_run.run_id,
+                            job_id=claim.job_id,
+                            job_type=claim.job_type,
+                            status=settled_run.status,
+                            public_error_code=result.public_error_code,
                             request_id="worker-private-run",
                         )
                 if claim.job_type == "automation_run" and settled_run is not None:

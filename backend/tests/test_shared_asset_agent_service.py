@@ -4,6 +4,8 @@ import dataclasses
 import importlib
 import inspect
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -24,6 +26,35 @@ def _editor_context() -> ProjectContext:
         capabilities=capabilities_for(ProjectRole.EDITOR),
         membership_version=1,
         request_id="req-agent-unit",
+    )
+
+
+@pytest.mark.asyncio
+async def test_project_agent_governance_uses_transactional_project_audit_port() -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    sink = SimpleNamespace(append_project=AsyncMock())
+    service = service_module.AgentService(lambda: None, governance_sink=sink)
+    context = _editor_context()
+    session = object()
+    asset_id = uuid.uuid4()
+
+    await service._record_governance(
+        session,
+        context,
+        asset_id,
+        None,
+        "agent.create",
+    )
+
+    sink.append_project.assert_awaited_once_with(
+        session,
+        actor=context.user_id,
+        project_id=context.project_id,
+        asset_id=asset_id,
+        version_id=None,
+        action="agent.create",
+        request_id=context.request_id,
+        asset_kind="agent",
     )
 
 
