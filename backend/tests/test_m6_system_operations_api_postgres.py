@@ -228,6 +228,12 @@ async def test_operations_requires_current_system_admin_and_returns_only_aggrega
             "recovery": "unavailable",
             "quota": "unavailable",
             "audit": "unavailable",
+            "role": "gateway",
+            "worker_count": 0,
+            "worker_capacity": 0,
+            "worker_oldest_heartbeat_age_seconds": None,
+            "scheduler_ownership": "disabled",
+            "cutover": "ready",
         }
         assert set(body["counts"]) == {
             "projects",
@@ -593,6 +599,12 @@ async def test_operations_overview_serializes_injected_closed_component_readines
             "recovery": "closed",
             "quota": "closed",
             "audit": "closed",
+            "role": "gateway",
+            "worker_count": 0,
+            "worker_capacity": 0,
+            "worker_oldest_heartbeat_age_seconds": None,
+            "scheduler_ownership": "unavailable",
+            "cutover": "unknown",
         }
     finally:
         await seed.engine.dispose()
@@ -635,6 +647,12 @@ async def test_operations_overview_returns_closed_readiness_without_querying_m6_
                 "recovery": "closed",
                 "quota": "closed",
                 "audit": "closed",
+                "role": "gateway",
+                "worker_count": 0,
+                "worker_capacity": 0,
+                "worker_oldest_heartbeat_age_seconds": None,
+                "scheduler_ownership": "unavailable",
+                "cutover": "unknown",
             },
             "data_status": "unavailable",
             "counts": None,

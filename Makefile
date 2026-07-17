@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup setup-db setup-m4-migration-db migrate-db migrate-sqlite migrate-assets migrate-private-work migrate-automations backup-db restore-db drill-restore rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.PHONY: help config config-upgrade check install setup setup-db setup-m4-migration-db migrate-db migrate-sqlite migrate-assets migrate-private-work migrate-automations migrate-reliability reconcile-usage backup-db restore-db drill-restore rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon gateway worker scheduler nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -31,6 +31,8 @@ help:
 	@echo "  make migrate-assets  - 显式预检/备份并迁移 legacy shared assets（参数通过 ARGS 传入）"
 	@echo "  make migrate-private-work - 显式 dry-run/execute 迁移 legacy private work（参数通过 ARGS 传入）"
 	@echo "  make migrate-automations - 显式迁移 legacy automations，必须先 dry-run 再 execute（参数通过 ARGS 传入）"
+	@echo "  make migrate-reliability - 显式执行 M6 reliability dry-run/cutover（参数通过 ARGS 传入）"
+	@echo "  make reconcile-usage - 预检或执行 quota reconciliation（参数通过 ARGS 传入）"
 	@echo "  make backup-db      - 创建外部、认证加密 PostgreSQL backup archive（参数通过 ARGS 传入）"
 	@echo "  make restore-db     - 恢复认证 archive 到全新 deerflow_restore_* 数据库（参数通过 ARGS 传入）"
 	@echo "  make drill-restore  - 恢复到随机临时数据库，验证后只删除该临时库（参数通过 ARGS 传入）"
@@ -88,6 +90,21 @@ migrate-private-work:
 
 migrate-automations:
 	@$(MAKE) -C backend migrate-automations ARGS="$(ARGS)"
+
+migrate-reliability:
+	@$(MAKE) -C backend migrate-reliability ARGS="$(ARGS)"
+
+reconcile-usage:
+	@$(MAKE) -C backend reconcile-usage ARGS="$(ARGS)"
+
+gateway:
+	@$(MAKE) -C backend gateway
+
+worker:
+	@$(MAKE) -C backend worker
+
+scheduler:
+	@$(MAKE) -C backend scheduler
 
 backup-db:
 	@$(MAKE) -C backend backup-db ARGS="$(ARGS)"

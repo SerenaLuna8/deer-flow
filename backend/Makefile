@@ -52,6 +52,12 @@ migrate-private-work:
 migrate-automations:
 	PYTHONPATH=. uv run python scripts/migrate_automations.py $(ARGS)
 
+migrate-reliability:
+	PYTHONPATH=. uv run python scripts/migrate_reliability.py $(ARGS)
+
+reconcile-usage:
+	PYTHONPATH=. uv run python scripts/reconcile_usage.py $(ARGS)
+
 backup-db:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python scripts/backup_postgres.py $(ARGS)
 

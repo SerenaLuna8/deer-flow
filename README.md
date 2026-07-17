@@ -1026,6 +1026,26 @@ while the successful audit commit is the durable operation commit point: later c
 engine disposal cannot delete the valid audited archive. Output remains limited to archive ID,
 schema revision, chunk count, and a truncated checksum.
 
+Existing M5 databases use the explicit forward-only M6 cutover runbook in
+`docs/operations/m6-reliability-migration.md`. First create the exact-0013 archive and its
+externally committed sibling receipt, complete an isolated restore rehearsal, create the
+authenticated no-clobber attestation, review the zero-write dry-run, stop every writer, and execute:
+
+```bash
+make backup-db ARGS="--output /secure/m6 --pre-m6-cutover"
+make migrate-reliability ARGS="--attest-backup --archive /secure/m6/<archive_id>.dfba --backup-commit /secure/m6/<archive_id>.dfba.commit.json --proof-output /secure/m6/pre-cutover-proof.json --restore-verified"
+make migrate-reliability ARGS="--dry-run --backup-proof /secure/m6/pre-cutover-proof.json"
+make migrate-reliability ARGS="--execute --maintenance-acknowledged --backup-proof /secure/m6/pre-cutover-proof.json"
+```
+
+The migration attaches pending work to durable Jobs and writes the same per-resource member,
+ready-file, and pending-Run reservations used by online release. It refuses aggregate-only quota
+history, records the pre-M6 receipt through the trusted backup audit sink after `0014`, is resumable
+there, and applies `0015` plus the final marker only after every probe.
+Local launch starts Gateway and Worker separately and starts Scheduler only when
+`scheduler.enabled=true`; Docker uses the same roles and Scheduler profile. System-admin readiness
+returns only aggregate role/fleet/ownership/cutover state and never PIDs, lock keys, URLs, or tokens.
+
 Retention purge additionally requires a separate base64 32-byte
 `DEER_FLOW_RECOVERY_JOURNAL_KEY` and an operator-owned journal outside this repository. Each
 encrypted, hash-chained tombstone is fsynced before physical deletion. File and project candidates

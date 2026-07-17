@@ -72,6 +72,7 @@ class TestCheckPostgres:
             head_revision="0011_private_artifact_tombstone",
             revision_matches=True,
             automation_status="ready",
+            reliability_status="ready",
         )
         monkeypatch.setattr(check_postgres, "run_check", lambda _url: result)
 
@@ -103,6 +104,7 @@ class TestCheckPostgres:
                 "head_revision": "0005_project_foundation",
                 "missing_tables": (),
                 "automation_status": "ready",
+                "reliability_status": "ready",
             },
         )
         result = doctor.check_postgres(tmp_path)
@@ -139,6 +141,32 @@ class TestCheckPostgres:
         assert result.detail == "Automation migration_required"
         assert "make migrate-automations" in (result.fix or "")
         assert secret not in f"{result.detail}\n{result.fix}"
+
+    def test_completed_m5_installation_points_to_reliability_migration(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(
+            "DATABASE_URL",
+            "postgresql://owner:secret@db.internal:5432/deerflow",
+        )
+        monkeypatch.setattr(
+            doctor,
+            "_run_postgres_check",
+            lambda _root, _url: {
+                "healthy": False,
+                "host": "db.internal",
+                "port": 5432,
+                "database": "deerflow",
+                "current_revision": "0013_project_automation_finalize",
+                "head_revision": "0015_project_reliability_finalize",
+                "missing_tables": ("reliability_cutover_state",),
+                "automation_status": "ready",
+                "reliability_status": "migration_required",
+            },
+        )
+
+        result = doctor.check_postgres(tmp_path)
+
+        assert result.detail == "Reliability migration_required"
+        assert "make migrate-reliability" in (result.fix or "")
 
     def test_database_failure_is_generic_and_points_to_existing_commands(self, tmp_path, monkeypatch):
         secret = "credential-must-not-render"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from functools import wraps
 from inspect import isawaitable
@@ -36,7 +37,9 @@ from app.reliability.operations import (
     SystemOperationsRepository,
     resolve_current_system_audit_context,
 )
+from app.reliability.process_readiness import read_process_readiness
 from app.reliability.readiness import ReliabilityReadinessService
+from deerflow.config import get_app_config
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.jobs.sql import JobIdempotencyConflict, JobRequeueForbidden
 from deerflow.trace_context import (
@@ -83,6 +86,12 @@ class OperationsReadinessResponse(BaseModel):
     recovery: str
     quota: str
     audit: str
+    role: str
+    worker_count: int
+    worker_capacity: int
+    worker_oldest_heartbeat_age_seconds: int | None
+    scheduler_ownership: str
+    cutover: str
 
 
 class OperationsCountsResponse(BaseModel):
@@ -182,11 +191,26 @@ async def current_reliability_readiness(
 ) -> ReliabilityReadiness:
     service = getattr(request.app.state, "reliability_readiness_service", None)
     if service is None:
+        try:
+            config = await asyncio.to_thread(get_app_config)
+            scheduler_enabled = config.scheduler.enabled
+            worker_fresh_for_seconds = config.worker.heartbeat_seconds * 3
+        except FileNotFoundError:
+            # Small embedded/test apps may intentionally omit a config file.
+            scheduler_enabled = False
+            worker_fresh_for_seconds = 60
+        process = await read_process_readiness(
+            session,
+            role="gateway",
+            scheduler_enabled=scheduler_enabled,
+            worker_fresh_for_seconds=worker_fresh_for_seconds,
+        )
         service = ReliabilityReadinessService(
             ReliabilityCutoverGuard.for_session(
                 session,
                 request_id=identity[1],
-            )
+            ),
+            process=process,
         )
     result = service.read()
     if not isawaitable(result):
@@ -233,6 +257,12 @@ def overview_response(
                 recovery=readiness.recovery,
                 quota=readiness.quota,
                 audit=readiness.audit,
+                role=readiness.role,
+                worker_count=readiness.worker_count,
+                worker_capacity=readiness.worker_capacity,
+                worker_oldest_heartbeat_age_seconds=readiness.worker_oldest_heartbeat_age_seconds,
+                scheduler_ownership=readiness.scheduler_ownership,
+                cutover=readiness.cutover,
             ),
             data_status="unavailable",
             counts=None,
@@ -251,6 +281,12 @@ def overview_response(
             recovery=readiness.recovery,
             quota=readiness.quota,
             audit=readiness.audit,
+            role=readiness.role,
+            worker_count=readiness.worker_count,
+            worker_capacity=readiness.worker_capacity,
+            worker_oldest_heartbeat_age_seconds=readiness.worker_oldest_heartbeat_age_seconds,
+            scheduler_ownership=readiness.scheduler_ownership,
+            cutover=readiness.cutover,
         ),
         data_status="available",
         counts=OperationsCountsResponse(

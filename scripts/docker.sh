@@ -86,6 +86,20 @@ detect_sandbox_mode() {
     fi
 }
 
+detect_scheduler_enabled() {
+    local config_file="$PROJECT_ROOT/config.yaml"
+    [ -f "$config_file" ] || { echo "false"; return; }
+    awk '
+        /^[[:space:]]*scheduler:[[:space:]]*$/ { in_scheduler=1; next }
+        in_scheduler && /^[^[:space:]#]/ { in_scheduler=0 }
+        in_scheduler && /^[[:space:]]*enabled:[[:space:]]*/ {
+            line=$0; sub(/^[[:space:]]*enabled:[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*/, "", line); gsub(/["\047[:space:]]/, "", line)
+            print (tolower(line)=="true" ? "true" : "false"); exit
+        }
+    ' "$config_file" | head -n 1 | grep -E '^(true|false)$' || echo "false"
+}
+
 # Cleanup function for Ctrl+C
 cleanup() {
     echo ""
@@ -191,9 +205,16 @@ start() {
 
     sandbox_mode="$(detect_sandbox_mode)"
 
-    services="redis frontend gateway nginx"
+    services="redis frontend gateway worker nginx"
+    if [ "$(detect_scheduler_enabled)" = "true" ]; then
+        COMPOSE_CMD="$COMPOSE_CMD --profile scheduler"
+        services="$services scheduler"
+        echo -e "${BLUE}Scheduler enabled${NC}"
+    else
+        echo -e "${BLUE}Scheduler disabled${NC}"
+    fi
     if [ "$sandbox_mode" = "provisioner" ]; then
-        services="redis frontend gateway provisioner nginx"
+        services="$services provisioner"
     fi
 
     # Only aio mode (AioSandboxProvider without provisioner_url) needs the host

@@ -133,7 +133,7 @@ services:
     restart: unless-stopped
 
   # Backend - Gateway API
-  gateway:
+  gateway: &backend-dev-service
     build:
       context: ../
       dockerfile: backend/Dockerfile
@@ -208,6 +208,33 @@ services:
     networks:
       - deer-flow-dev
     restart: unless-stopped
+
+  # Independent durable execution role.
+  worker:
+    <<: *backend-dev-service
+    container_name: deer-flow-worker
+    ports: []
+    command: sh -c "cd backend && PYTHONPATH=. uv run python -m app.worker.app"
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
+  # Optional profile; config.yaml scheduler.enabled remains authoritative.
+  scheduler:
+    <<: *backend-dev-service
+    container_name: deer-flow-scheduler
+    ports: []
+    command: sh -c "cd backend && PYTHONPATH=. uv run python -m app.scheduler.app"
+    profiles: ["scheduler"]
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
 
 volumes:
   # Persist .venv across container restarts so dependencies installed during

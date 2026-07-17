@@ -248,7 +248,7 @@ async def test_fresh_install_bootstraps_final_empty_domain_without_owner_map(
                     )
                 )
             ).one()
-        assert revision == "0013_project_automation_finalize"
+        assert revision == "0015_project_reliability_finalize"
         assert tuple(marker)[:4] == ("cutover_complete", None, True, True)
         assert marker.cutover_at is not None
         assert tuple(counts) == (0, 0, 0, 0)

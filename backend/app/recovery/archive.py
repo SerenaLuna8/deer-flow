@@ -33,6 +33,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from sqlalchemy.engine import make_url
 
+from app.recovery.pre_cutover_backup import (
+    PRE_M6_SCHEMA_REVISION,
+    commit_pre_cutover_backup,
+)
+
 CHUNK_SIZE = 1_048_576
 ARCHIVE_FORMAT_VERSION = 1
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -162,6 +167,8 @@ class BackupConfig:
     key: bytes
     chunk_bytes: int = CHUNK_SIZE
     archive_id: str | None = None
+    pre_m6_cutover: bool = False
+    commit_proof: Path | None = None
 
     def __post_init__(self) -> None:
         _validate_key(self.key)
@@ -171,6 +178,17 @@ class BackupConfig:
             raise ValueError("chunk_bytes must fit the pg_dump header and archive bound")
         if self.archive_id is not None:
             _canonical_uuid(self.archive_id)
+        if type(self.pre_m6_cutover) is not bool:
+            raise ValueError("pre_m6_cutover must be a boolean")
+        if self.pre_m6_cutover:
+            if self.commit_proof is None:
+                raise ValueError("pre-M6 backup commit proof is required")
+            output = self.output.expanduser().absolute()
+            proof = self.commit_proof.expanduser().absolute()
+            if proof.parent != output.parent or proof.name != f"{output.name}.commit.json":
+                raise ValueError("pre-M6 backup commit proof must be the archive sibling")
+        elif self.commit_proof is not None:
+            raise ValueError("backup commit proof is only valid for pre-M6 cutover")
 
 
 @dataclass(frozen=True)
@@ -181,6 +199,7 @@ class BackupSnapshot:
     database_high_watermark: int
     tombstone_journal_sequence: int
     table_count: int
+    pre_m6_recovery_domain_absent: bool = False
 
 
 @dataclass
@@ -1117,10 +1136,10 @@ async def _exported_snapshot(database_url: str) -> AsyncIterator[BackupSnapshot]
                        (SELECT version_num FROM alembic_version LIMIT 1) AS schema_revision,
                        (SELECT system_identifier::text FROM pg_control_system()) AS system_identifier,
                        (SELECT oid::bigint FROM pg_database WHERE datname = current_database()) AS database_oid,
-                       COALESCE((SELECT MAX(high_watermark) FROM thread_event_sequences), 0)::bigint AS database_high_watermark,
-                       (SELECT COUNT(*)::bigint FROM deletion_tombstones) AS tombstone_count,
-                       COALESCE((SELECT MIN(journal_sequence) FROM deletion_tombstones), 0)::bigint AS tombstone_min,
-                       COALESCE((SELECT MAX(journal_sequence) FROM deletion_tombstones), 0)::bigint AS tombstone_max,
+                       to_regclass('audit_logs') IS NOT NULL AS audit_logs_present,
+                       to_regclass('deletion_tombstones') IS NOT NULL AS deletion_tombstones_present,
+                       to_regclass('thread_event_sequences') IS NOT NULL AS thread_event_sequences_present,
+                       to_regclass('recovery_journal_state') IS NOT NULL AS recovery_journal_state_present,
                        (SELECT COUNT(*)::bigint
                           FROM pg_class
                          WHERE relnamespace = current_schema()::regnamespace
@@ -1129,11 +1148,42 @@ async def _exported_snapshot(database_url: str) -> AsyncIterator[BackupSnapshot]
             schema_revision = str(row["schema_revision"])
             system_identifier = str(row["system_identifier"])
             database_oid = int(row["database_oid"])
-            database_high_watermark = int(row["database_high_watermark"])
-            tombstone_count = int(row["tombstone_count"])
-            tombstone_min = int(row["tombstone_min"])
-            tombstone_max = int(row["tombstone_max"])
             table_count = int(row["table_count"])
+            recovery_presence = tuple(
+                bool(row.get(name, True))
+                for name in (
+                    "audit_logs_present",
+                    "deletion_tombstones_present",
+                    "thread_event_sequences_present",
+                    "recovery_journal_state_present",
+                )
+            )
+            if "database_high_watermark" in row:
+                # Unit-level adapters may return the complete legacy shape.
+                metadata = row
+            elif schema_revision == PRE_M6_SCHEMA_REVISION:
+                metadata = await connection.fetchrow(
+                    """SELECT
+                           COALESCE(MAX(seq), 0)::bigint AS database_high_watermark
+                         FROM run_events"""
+                )
+            else:
+                metadata = await connection.fetchrow(
+                    """SELECT
+                           COALESCE((SELECT MAX(high_watermark) FROM thread_event_sequences), 0)::bigint AS database_high_watermark,
+                           (SELECT COUNT(*)::bigint FROM deletion_tombstones) AS tombstone_count,
+                           COALESCE((SELECT MIN(journal_sequence) FROM deletion_tombstones), 0)::bigint AS tombstone_min,
+                           COALESCE((SELECT MAX(journal_sequence) FROM deletion_tombstones), 0)::bigint AS tombstone_max"""
+                )
+            database_high_watermark = int(metadata["database_high_watermark"])
+            if schema_revision == PRE_M6_SCHEMA_REVISION:
+                tombstone_count = 0
+                tombstone_min = 0
+                tombstone_max = 0
+            else:
+                tombstone_count = int(metadata["tombstone_count"])
+                tombstone_min = int(metadata["tombstone_min"])
+                tombstone_max = int(metadata["tombstone_max"])
             if (
                 not snapshot_id
                 or _SCHEMA_REVISION.fullmatch(schema_revision) is None
@@ -1154,6 +1204,7 @@ async def _exported_snapshot(database_url: str) -> AsyncIterator[BackupSnapshot]
                 database_high_watermark=database_high_watermark,
                 tombstone_journal_sequence=tombstone_max,
                 table_count=table_count,
+                pre_m6_recovery_domain_absent=(schema_revision == PRE_M6_SCHEMA_REVISION and not any(recovery_presence)),
             )
         except asyncio.CancelledError:
             raise
@@ -1368,7 +1419,13 @@ async def _record_backup_audit(database_url: str, manifest: BackupManifest) -> N
 
 
 async def create_backup(config: BackupConfig) -> BackupManifest:
-    """Create one audited archive from a single exported PostgreSQL snapshot."""
+    """Create one archive from a single exported PostgreSQL snapshot.
+
+    Normal backups are recorded in the M6 audit ledger. The explicit
+    ``pre_m6_cutover`` mode is limited to revision 0013, whose schema cannot yet
+    contain that ledger; Task 18 binds its authenticated manifest into the
+    reliability migration evidence instead.
+    """
 
     _validate_key_separation(config.key, config.database_url)
     invocation = await _acquire_libpq_invocation(config.database_url, config.output.parent)
@@ -1380,6 +1437,8 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
     try:
         pg_dump_version = await _read_pg_dump_version()
         async with _exported_snapshot(config.database_url) as snapshot:
+            if config.pre_m6_cutover and (snapshot.schema_revision != PRE_M6_SCHEMA_REVISION or not snapshot.pre_m6_recovery_domain_absent or snapshot.tombstone_journal_sequence != 0):
+                raise BackupCommandFailed
             process = await asyncio.create_subprocess_exec(
                 *pg_dump_argv(config.database_url, snapshot_id=snapshot.snapshot_id),
                 stdout=asyncio.subprocess.PIPE,
@@ -1427,9 +1486,31 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
         manifest = await _await_shielded(finalize_task)
         if not isinstance(manifest, BackupManifest):
             raise BackupCommandFailed
-        audit_task = asyncio.create_task(_record_backup_audit(config.database_url, manifest))
-        _, audit_cancelled = await _await_task_through_cancellation(audit_task)
-        audit_committed = True
+        audit_cancelled = False
+        if config.pre_m6_cutover:
+            if config.commit_proof is None:
+                raise BackupCommandFailed
+            if writer._parent_fd is None:
+                raise BackupCommandFailed
+            manifest_body = manifest.as_dict()
+            manifest_envelope = _canonical_json(
+                {
+                    "manifest": manifest_body,
+                    "signature": _manifest_signature(config.key, manifest_body),
+                }
+            )
+            await commit_pre_cutover_backup(
+                parent_fd=writer._parent_fd,
+                name=config.commit_proof.name,
+                manifest=manifest_body,
+                manifest_envelope=manifest_envelope,
+                key=config.key,
+            )
+            audit_committed = True
+        else:
+            audit_task = asyncio.create_task(_record_backup_audit(config.database_url, manifest))
+            _, audit_cancelled = await _await_task_through_cancellation(audit_task)
+            audit_committed = True
         close_task = asyncio.create_task(asyncio.to_thread(writer.close))
         _, close_cancelled = await _await_task_through_cancellation(close_task)
         if audit_cancelled or close_cancelled:

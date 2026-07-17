@@ -123,6 +123,7 @@ _LEGACY_TASK_COLUMNS = AUTOMATION_LEGACY_COLUMNS["scheduled_tasks"]
 _LEGACY_RUN_COLUMNS = AUTOMATION_LEGACY_COLUMNS["scheduled_task_runs"]
 _TARGET_TASK_COLUMNS = AUTOMATION_TARGET_COLUMNS["scheduled_tasks"]
 _TARGET_RUN_COLUMNS = AUTOMATION_TARGET_COLUMNS["scheduled_task_runs"]
+_M6_RUN_COLUMNS = (*_TARGET_RUN_COLUMNS, "job_id")
 _EXPANDED_TASK_COLUMNS = AUTOMATION_EXPANDED_COLUMNS["scheduled_tasks"]
 _EXPANDED_RUN_COLUMNS = AUTOMATION_EXPANDED_COLUMNS["scheduled_task_runs"]
 _TASK_STATUSES = frozenset({"enabled", "paused", "running", "completed", "failed", "cancelled"})
@@ -323,6 +324,7 @@ async def _collect_inventory_connection(
         (_LEGACY_TASK_COLUMNS, _LEGACY_RUN_COLUMNS),
         (_EXPANDED_TASK_COLUMNS, _EXPANDED_RUN_COLUMNS),
         (_TARGET_TASK_COLUMNS, _TARGET_RUN_COLUMNS),
+        (_TARGET_TASK_COLUMNS, _M6_RUN_COLUMNS),
     )
     projections = next(
         ((task_schema, run_schema) for task_schema, run_schema in schemas if task_columns == set(task_schema) and run_columns == set(run_schema)),
@@ -1751,7 +1753,9 @@ async def run_automation_migration(
             engine = create_async_engine(database_url)
 
         if inventory.empty:
-            await _upgrade_database(engine, "head")
+            # M5 owns only its finalize boundary. M6 is an explicit, separately
+            # proven reliability cutover and must never be entered implicitly.
+            await _upgrade_database(engine, _FINAL_REVISION)
             await engine.dispose()
             engine = create_async_engine(database_url)
             async with engine.connect() as connection:
@@ -1767,7 +1771,7 @@ async def run_automation_migration(
             )
 
         await _execute_staging(engine, plan=plan)
-        await _upgrade_database(engine, "head")
+        await _upgrade_database(engine, _FINAL_REVISION)
         await engine.dispose()
         engine = create_async_engine(database_url)
         inventory = await _resume_final_cutover(

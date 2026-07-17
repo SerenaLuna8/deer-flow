@@ -251,6 +251,8 @@ stop_all() {
     echo "Stopping all services..."
     _report_reclaimed_ports
     _kill_repo_processes "uvicorn app.gateway.app:app"
+    _kill_repo_processes "python -m app.worker.app"
+    _kill_repo_processes "python -m app.scheduler.app"
     _kill_repo_processes "next dev"
     _kill_repo_processes "next start"
     _kill_repo_processes "next-server"
@@ -401,6 +403,14 @@ else
     echo "⏩ Skipping dependency install (--skip-install)"
 fi
 
+SCHEDULER_ENABLED="$(
+    cd backend && PYTHONPATH=. uv run python -c \
+        "from deerflow.config import get_app_config; print('true' if get_app_config().scheduler.enabled else 'false')"
+)" || {
+    echo "✗ Unable to resolve scheduler.enabled from DeerFlow config."
+    exit 1
+}
+
 # ── Banner ───────────────────────────────────────────────────────────────────
 
 echo ""
@@ -412,11 +422,44 @@ echo "  Mode: $MODE_LABEL"
 echo ""
 echo "  Services:"
 echo "    Gateway     → localhost:8001  (REST API + agent runtime)"
+echo "    Worker      → background      (durable job execution)"
+if [ "$SCHEDULER_ENABLED" = "true" ]; then
+    echo "    Scheduler   → background      (Automation polling)"
+fi
 echo "    Frontend    → localhost:3000  (Next.js)"
 echo "    Nginx       → localhost:2026  (reverse proxy)"
 echo ""
 
 # ── Cleanup handler ──────────────────────────────────────────────────────────
+
+STARTED_PIDS=""
+
+remember_started_pid() {
+    STARTED_PIDS="$STARTED_PIDS $1"
+}
+
+stop_started() {
+    local pid
+    for pid in $STARTED_PIDS; do
+        kill_process_tree "$pid"
+    done
+    STARTED_PIDS=""
+}
+
+kill_process_tree() {
+    local pid="$1" child
+    while IFS= read -r child; do
+        [ -n "$child" ] && kill_process_tree "$child"
+    done < <(pgrep -P "$pid" 2>/dev/null || true)
+    kill "$pid" 2>/dev/null || true
+}
+
+startup_failure() {
+    local status="${1:-1}"
+    trap - INT TERM
+    stop_started
+    exit "$status"
+}
 
 cleanup() {
     local status="${1:-0}"
@@ -439,7 +482,7 @@ run_service() {
     if _is_port_listening "$port"; then
         echo "✗ $name cannot start because port $port is already in use."
         echo "  If it belongs to this worktree, run 'make stop'; otherwise free the port manually."
-        cleanup 1
+        startup_failure 1
     fi
 
     echo "Starting $name..."
@@ -451,14 +494,39 @@ run_service() {
     else
         sh -c "$cmd" &
     fi
+    remember_started_pid "$!"
 
     ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
         local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
         [ -f "$logfile" ] && tail -20 "$logfile"
-        cleanup 1
+        startup_failure 1
     }
     echo "✓ $name started on localhost:$port"
+}
+
+# run_process NAME COMMAND LOGFILE
+# Background roles have no public port. They are required to remain alive
+# through their startup window; readiness then reports their DB registration.
+run_process() {
+    local name="$1" cmd="$2" logfile="$3" pid attempt
+    echo "Starting $name..."
+    if $DAEMON_MODE; then
+        nohup env DEERFLOW_DAEMON_ROOT="$REPO_ROOT" sh -c "$cmd" > /dev/null 2>&1 &
+    else
+        sh -c "$cmd" &
+    fi
+    pid=$!
+    remember_started_pid "$pid"
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || {
+            echo "✗ $name failed to start."
+            [ -f "$logfile" ] && tail -20 "$logfile"
+            startup_failure 1
+        }
+        sleep 0.2
+    done
+    echo "✓ $name started"
 }
 
 # ── Start services ───────────────────────────────────────────────────────────
@@ -468,17 +536,30 @@ mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && exec env PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
     8001 30
 
-# 2. Frontend
+# 2. Required durable Worker
+run_process "Worker" \
+    "cd backend && exec env PYTHONPATH=. uv run python -m app.worker.app > ../logs/worker.log 2>&1" \
+    "logs/worker.log"
+
+# 3. Optional independent Scheduler. The application config property is
+# scheduler.enabled; disabled mode is legal and intentionally starts no owner.
+if [ "$SCHEDULER_ENABLED" = "true" ]; then
+    run_process "Scheduler" \
+        "cd backend && exec env PYTHONPATH=. uv run python -m app.scheduler.app > ../logs/scheduler.log 2>&1" \
+        "logs/scheduler.log"
+fi
+
+# 4. Frontend
 run_service "Frontend" \
-    "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
+    "cd frontend && exec $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
     3000 120
 
-# 3. Nginx
+# 5. Nginx
 run_service "Nginx" \
-    "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
+    "exec nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
     2026 10
 
 # ── Ready ────────────────────────────────────────────────────────────────────
@@ -494,7 +575,7 @@ echo "  Routing: Frontend → Nginx → Gateway"
 echo "  API:     /api/langgraph/*  →  Gateway agent runtime"
 echo "           /api/*              →  Gateway REST API (8001)"
 echo ""
-echo "  📋 Logs: logs/{gateway,frontend,nginx}.log"
+echo "  📋 Logs: logs/{gateway,worker,scheduler,frontend,nginx}.log"
 echo ""
 
 if $DAEMON_MODE; then

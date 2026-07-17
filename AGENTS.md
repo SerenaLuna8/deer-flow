@@ -100,7 +100,9 @@ M6 审计、外部认证加密 backup、带 PostgreSQL 权威 head/source anchor
 绑定 journal ID/最终 sequence/head digest 的 restore proof 和 disposable drill 已实现；敏感临时文件在
 proof 前按 inode 身份清理并 fsync，未知文件拒绝认领；body 失败时仍在 purge authority 内清理，可靠
 unlock 后的取消也会重抛并删除本次 target。drill 仅在不可伪造的成功 ownership handoff 后删除其随机
-target。Task 18 最终编排/关闭仍待完成。
+target。Task 18 已提供显式 M6 staged migration、认证 backup attestation、逐资源 exact quota/job
+backfill、aggregate-only reconciliation 拒绝、process readiness 与 Gateway+Worker+可选 Scheduler
+本地/Docker 编排；独立关闭审查仍待完成。
 里程碑进度仍为 5/8（62.5%），因为 M6 尚未整体关闭；M6–M8
 尚未交付，因此当前仍不能
 作为完整多用户 SaaS 发布。
@@ -109,6 +111,7 @@ Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks`; under final M6 cutover, `config.yaml -> scheduler.enabled` gates an independent Scheduler process rather than a Gateway lifespan task.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal Worker run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. `AutomationDispatcher` writes that flag as server-owned admission data in the atomic occurrence/Run/job transaction; client-supplied `context.non_interactive` is dropped.
 - Project Automation occurrence, private Run/snapshot, and `automation_run` job now commit atomically. Gateway retains manual admission but never constructs Scheduler ownership or a poller. When enabled, `make scheduler` owns the process-lifetime PostgreSQL session advisory lock on a dedicated connection; each poll verifies the same backend PID and existing lock without reacquiring it, and ownership loss exits polling/process lifetime. A competing Scheduler may take over only after PostgreSQL releases the old session lock. Worker startup always reconciles already-admitted terminal Runs before claiming jobs, and enabled Scheduler startup performs the same idempotent reconciliation before polling; neither path interrupts or replays active Worker work. Disabled Scheduler mode takes no lock or poll task while manual APIs and Worker restart reconciliation remain available.
+- Existing M5 installations follow `docs/operations/m6-reliability-migration.md`: authenticated Task16 archive evidence and maintenance acknowledgment are required before `0014`; `0015` and the complete marker are written only after job/quota/audit/stream/recovery probes.
 
 ## Commands: Root vs. Module
 

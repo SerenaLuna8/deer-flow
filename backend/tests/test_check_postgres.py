@@ -13,6 +13,7 @@ def test_task5_health_check_requires_migration_ledger() -> None:
 
 def test_required_tables_exactly_cover_current_application_and_langgraph_schema() -> None:
     assert set(check_postgres.REQUIRED_TABLES) == {
+        "audit_logs",
         "automation_cutover_state",
         "automation_migration_ledger",
         "automation_migration_runs",
@@ -25,17 +26,31 @@ def test_required_tables_exactly_cover_current_application_and_langgraph_schema(
         "checkpoint_writes",
         "checkpoints",
         "feedback",
+        "jobs",
+        "job_attempts",
+        "dead_jobs",
+        "deletion_tombstones",
         "migration_ledger",
         "project_memberships",
+        "project_quotas",
+        "project_usage_counters",
+        "project_usage_ledger",
         "projects",
         "run_events",
         "runs",
         "scheduled_task_runs",
         "scheduled_tasks",
+        "recovery_journal_state",
+        "reliability_cutover_state",
+        "reliability_migration_ledger",
+        "reliability_migration_runs",
+        "restore_proofs",
         "store",
         "store_migrations",
         "threads_meta",
+        "thread_event_sequences",
         "users",
+        "worker_nodes",
     }
 
 
@@ -60,7 +75,7 @@ def test_health_check_requires_complete_langgraph_schema() -> None:
 
 def _connection(*, revision: str | None = "0003_scheduled_tasks", present_tables=None):
     connection = AsyncMock()
-    connection.fetchval.side_effect = ["PostgreSQL 17.5", revision, True]
+    connection.fetchval.side_effect = ["PostgreSQL 17.5", revision, True, True]
     connection.fetch.return_value = [{"table_name": table} for table in (present_tables or check_postgres.REQUIRED_TABLES)]
     return connection
 
@@ -100,6 +115,40 @@ async def test_check_distinguishes_missing_revision_and_tables(monkeypatch) -> N
     assert result.revision_matches is False
     assert "users" not in result.missing_tables
     assert result.missing_tables
+    assert result.healthy is False
+
+
+@pytest.mark.asyncio
+async def test_completed_m5_marker_routes_0013_installation_to_reliability_migration(monkeypatch) -> None:
+    m6_tables = {
+        "audit_logs",
+        "jobs",
+        "job_attempts",
+        "dead_jobs",
+        "deletion_tombstones",
+        "project_quotas",
+        "project_usage_counters",
+        "project_usage_ledger",
+        "recovery_journal_state",
+        "reliability_cutover_state",
+        "reliability_migration_ledger",
+        "reliability_migration_runs",
+        "restore_proofs",
+        "thread_event_sequences",
+        "worker_nodes",
+    }
+    connection = _connection(
+        revision="0013_project_automation_finalize",
+        present_tables=set(check_postgres.REQUIRED_TABLES) - m6_tables,
+    )
+    monkeypatch.setattr(check_postgres.asyncpg, "connect", AsyncMock(return_value=connection))
+    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: "0015_project_reliability_finalize")
+
+    result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
+
+    assert result.automation_status == "ready"
+    assert result.reliability_status == "migration_required"
+    assert result.revision_matches is False
     assert result.healthy is False
 
 
@@ -144,6 +193,7 @@ def test_check_result_contains_only_safe_connection_metadata() -> None:
         revision_matches=True,
         missing_tables=(),
         automation_status="ready",
+        reliability_status="ready",
     )
     fields = result.__dataclass_fields__
     assert "username" not in fields
@@ -178,6 +228,11 @@ def test_automation_status_is_public_and_bounded() -> None:
         "migration_required",
         "unavailable",
     }
+
+
+def test_reliability_status_is_public_and_bounded() -> None:
+    values = {check_postgres.PostgresCheckResult(host="127.0.0.1", port=5432, database="deerflow", reliability_status=status).reliability_status for status in ("ready", "migration_required", "unavailable")}
+    assert values == {"ready", "migration_required", "unavailable"}
 
 
 def test_check_cli_returns_nonzero_for_unhealthy_result(monkeypatch, capsys) -> None:

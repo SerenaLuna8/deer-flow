@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -46,6 +47,7 @@ from deerflow.persistence.scheduled_tasks import (
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 M5_NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+M5_FINAL_REVISION = "0013_project_automation_finalize"
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +111,7 @@ class M5LegacyMigrationDatabase:
         await asyncio.to_thread(
             command.upgrade,
             _get_alembic_config(self.engine),
-            revision,
+            M5_FINAL_REVISION if revision == "head" else revision,
         )
 
     async def control_relations(self) -> dict[str, bool]:
@@ -392,6 +394,64 @@ async def _seed_m5_migration_thread_and_run(
             )
 
 
+async def _upgrade_empty_database_to_m4_final(engine: AsyncEngine) -> None:
+    """Build the reusable legacy fixture by forward-only migrations."""
+
+    config = _get_alembic_config(engine)
+    await asyncio.to_thread(
+        command.upgrade,
+        config,
+        "0008_project_private_work_expand",
+    )
+    private_finalize = importlib.import_module("deerflow.persistence.migrations.versions.0009_project_private_work_finalize")
+    migration_run_id = uuid.uuid4()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """INSERT INTO private_work_migration_runs
+                   (id,mode,status,source_fingerprint,owner_map_digest,
+                    legacy_source_probe_complete,checkpoint_marker_probe_complete,
+                    cross_scope_probe_complete,completed_at)
+                   VALUES (:id,'execute','completed',:digest,:digest,true,true,true,now())"""
+            ),
+            {"id": migration_run_id, "digest": "c" * 64},
+        )
+        await connection.execute(
+            text(
+                """INSERT INTO private_work_migration_ledger
+                   (migration_run_id,domain,source_key_hash,source_fingerprint,
+                    target_digest,status,row_count,byte_count)
+                   VALUES (:run_id,:domain,:digest,:digest,:digest,'complete',0,0)"""
+            ),
+            [
+                {
+                    "run_id": migration_run_id,
+                    "domain": domain,
+                    "digest": f"{index:064x}",
+                }
+                for index, domain in enumerate(
+                    sorted(private_finalize.FINALIZE_LEDGER_DOMAINS),
+                    start=1,
+                )
+            ],
+        )
+    await asyncio.to_thread(
+        command.upgrade,
+        config,
+        "0011_private_artifact_tombstone",
+    )
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """INSERT INTO private_work_cutover_state
+                   (id,stage,migration_run_id,empty_domain_probe_complete,
+                    checkpoint_marker_probe_complete,cutover_at,updated_at)
+                   VALUES (1,'cutover_complete',:id,false,true,now(),now())"""
+            ),
+            {"id": migration_run_id},
+        )
+
+
 @asynccontextmanager
 async def isolated_m5_legacy_migration_database(
     admin_url: str,
@@ -406,7 +466,7 @@ async def isolated_m5_legacy_migration_database(
 
         bootstrap_engine = create_async_engine(database_url)
         try:
-            await bootstrap_schema(bootstrap_engine)
+            await _upgrade_empty_database_to_m4_final(bootstrap_engine)
         finally:
             await bootstrap_engine.dispose()
 
@@ -423,11 +483,6 @@ async def isolated_m5_legacy_migration_database(
                 seed,
                 thread_id=history_thread_id,
                 run_id=history_run_id,
-            )
-            await asyncio.to_thread(
-                command.downgrade,
-                _get_alembic_config(seed.engine),
-                "0011_private_artifact_tombstone",
             )
             async with seed.engine.begin() as connection:
                 await connection.execute(

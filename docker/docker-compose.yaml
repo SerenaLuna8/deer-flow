@@ -79,7 +79,7 @@ services:
     restart: unless-stopped
 
   # ── Gateway API ────────────────────────────────────────────────────────────
-  gateway:
+  gateway: &backend-service
     build:
       context: ../
       dockerfile: backend/Dockerfile
@@ -143,6 +143,33 @@ services:
     networks:
       - deer-flow
     restart: unless-stopped
+
+  # ── Durable Job Worker ────────────────────────────────────────────────────
+  worker:
+    <<: *backend-service
+    container_name: deer-flow-worker
+    ports: []
+    command: sh -c "cd backend && PYTHONPATH=. uv run python -m app.worker.app"
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
+  # ── Automation Scheduler (opt-in profile; scheduler.enabled must agree) ───
+  scheduler:
+    <<: *backend-service
+    container_name: deer-flow-scheduler
+    ports: []
+    command: sh -c "cd backend && PYTHONPATH=. uv run python -m app.scheduler.app"
+    profiles: ["scheduler"]
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
 
   # ── Sandbox Provisioner (optional, Kubernetes mode) ────────────────────────
   provisioner:

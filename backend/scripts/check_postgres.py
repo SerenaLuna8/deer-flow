@@ -19,6 +19,7 @@ except ModuleNotFoundError:  # Direct ``python scripts/check_postgres.py`` execu
     from setup_postgres import _asyncpg_url, parse_target
 
 REQUIRED_TABLES: tuple[str, ...] = (
+    "audit_logs",
     "automation_cutover_state",
     "automation_migration_ledger",
     "automation_migration_runs",
@@ -31,17 +32,31 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "checkpoint_writes",
     "checkpoints",
     "feedback",
+    "jobs",
+    "job_attempts",
+    "dead_jobs",
+    "deletion_tombstones",
     "migration_ledger",
     "project_memberships",
+    "project_quotas",
+    "project_usage_counters",
+    "project_usage_ledger",
     "projects",
     "run_events",
     "runs",
     "scheduled_task_runs",
     "scheduled_tasks",
+    "recovery_journal_state",
+    "reliability_cutover_state",
+    "reliability_migration_ledger",
+    "reliability_migration_runs",
+    "restore_proofs",
     "store",
     "store_migrations",
     "threads_meta",
+    "thread_event_sequences",
     "users",
+    "worker_nodes",
 )
 
 _UNDEFINED_TABLE_SQLSTATE = "42P01"
@@ -60,10 +75,11 @@ class PostgresCheckResult:
     connected: bool = True
     error: str = ""
     automation_status: Literal["ready", "migration_required", "unavailable"] = "unavailable"
+    reliability_status: Literal["ready", "migration_required", "unavailable"] = "unavailable"
 
     @property
     def healthy(self) -> bool:
-        return self.connected and self.revision_matches and not self.missing_tables and not self.error and self.automation_status == "ready"
+        return self.connected and self.revision_matches and not self.missing_tables and not self.error and self.automation_status == "ready" and self.reliability_status == "ready"
 
 
 def get_head_revision() -> str:
@@ -108,8 +124,30 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
                          AND cutover_at IS NOT NULL
                    )"""
             )
-            if current_revision == head and marker_ready:
+            # A completed M5 marker remains authoritative while the database is
+            # intentionally parked at 0013 for the explicit M6 cutover.
+            if marker_ready:
                 automation_status = "ready"
+        reliability_status: Literal["ready", "migration_required", "unavailable"] = "migration_required"
+        if (
+            not {
+                "reliability_cutover_state",
+                "reliability_migration_ledger",
+                "reliability_migration_runs",
+            }
+            - present
+        ):
+            reliability_ready = await connection.fetchval(
+                """SELECT EXISTS (
+                       SELECT 1 FROM reliability_cutover_state
+                       WHERE id=1 AND stage='cutover_complete'
+                         AND final_schema_probe_complete=true
+                         AND schema_revision='0015_project_reliability_finalize'
+                         AND cutover_at IS NOT NULL
+                   )"""
+            )
+            if current_revision == head and reliability_ready:
+                reliability_status = "ready"
         return PostgresCheckResult(
             host=target.host,
             port=target.port,
@@ -120,6 +158,7 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
             revision_matches=current_revision == head,
             missing_tables=missing_tables,
             automation_status=automation_status,
+            reliability_status=reliability_status,
         )
     except Exception:
         return PostgresCheckResult(
@@ -152,6 +191,7 @@ def print_result(result: PostgresCheckResult) -> None:
     print(f"当前 Alembic revision: {result.current_revision or '缺失'}")
     print(f"目标 Alembic revision: {result.head_revision or '未知'}")
     print(f"Automation: {result.automation_status}")
+    print(f"Reliability: {result.reliability_status}")
     if result.missing_tables:
         print(f"缺失表: {', '.join(result.missing_tables)}")
     if result.error:

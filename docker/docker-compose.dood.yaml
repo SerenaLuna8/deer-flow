@@ -24,3 +24,6 @@ services:
   gateway:
     volumes:
       - ${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+  worker:
+    volumes:
+      - ${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock

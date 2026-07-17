@@ -18,6 +18,12 @@ class ReliabilityReadiness:
     quota: str
     audit: str
     request_id: str
+    role: str = "gateway"
+    worker_count: int = 0
+    worker_capacity: int = 0
+    worker_oldest_heartbeat_age_seconds: int | None = None
+    scheduler_ownership: str = "unavailable"
+    cutover: str = "unknown"
 
 
 __all__ = ["ReliabilityReadiness", "ReliabilityReadinessStatus"]
