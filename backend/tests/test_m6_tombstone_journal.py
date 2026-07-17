@@ -19,6 +19,8 @@ from app.recovery.journal import (
     load_journal_key,
 )
 
+SOURCE_ID = "a" * 64
+
 
 @pytest.fixture
 def journal_key() -> bytes:
@@ -41,7 +43,7 @@ def test_journal_is_aead_hash_chained_monotonic_and_contains_no_plaintext(
     journal_key: bytes,
 ) -> None:
     path = tmp_path / "operator" / "tombstones.jsonl"
-    journal = TombstoneJournal(path, journal_key)
+    journal = TombstoneJournal(path, journal_key, source_installation_id=SOURCE_ID)
 
     first = journal.append_and_fsync(_record(1), committed_sequence=0)
     second = journal.append_and_fsync(_record(2), committed_sequence=1)
@@ -63,7 +65,7 @@ def test_retry_reuses_the_same_sequence_and_conflicting_idempotency_fails_closed
     tmp_path: Path,
     journal_key: bytes,
 ) -> None:
-    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", journal_key)
+    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", journal_key, source_installation_id=SOURCE_ID)
     receipt = journal.append_and_fsync(_record(1), committed_sequence=0)
 
     assert journal.append_and_fsync(_record(1), committed_sequence=0) == receipt
@@ -89,7 +91,7 @@ def test_concurrent_allocation_produces_one_contiguous_prefix(
     def append(index: int):
         # Each process/thread constructs its own journal handle. The file lock is
         # therefore the authority, not one Python object lock.
-        journal = TombstoneJournal(path, journal_key)
+        journal = TombstoneJournal(path, journal_key, source_installation_id=SOURCE_ID)
         while True:
             committed = journal.snapshot().high_watermark
             try:
@@ -101,7 +103,7 @@ def test_concurrent_allocation_produces_one_contiguous_prefix(
         receipts = list(pool.map(append, range(1, 17)))
 
     assert sorted(receipt.sequence for receipt in receipts) == list(range(1, 17))
-    snapshot = TombstoneJournal(path, journal_key).snapshot()
+    snapshot = TombstoneJournal(path, journal_key, source_installation_id=SOURCE_ID).snapshot()
     assert [entry.sequence for entry in snapshot.entries] == list(range(1, 17))
 
 
@@ -110,12 +112,12 @@ def test_wrong_key_tamper_gap_and_high_watermark_rollback_fail_closed(
     journal_key: bytes,
 ) -> None:
     path = tmp_path / "journal" / "tombstones.jsonl"
-    journal = TombstoneJournal(path, journal_key)
+    journal = TombstoneJournal(path, journal_key, source_installation_id=SOURCE_ID)
     journal.append_and_fsync(_record(1), committed_sequence=0)
     journal.append_and_fsync(_record(2), committed_sequence=1)
 
     with pytest.raises(TombstoneAuthenticationFailed):
-        TombstoneJournal(path, b"x" * 32).snapshot()
+        TombstoneJournal(path, b"x" * 32, source_installation_id=SOURCE_ID).snapshot()
     with pytest.raises(TombstoneSequenceRollback):
         journal.replay_after(3)
 
@@ -133,7 +135,7 @@ def test_ciphertext_bit_flip_is_rejected_before_record_release(
     journal_key: bytes,
 ) -> None:
     path = tmp_path / "journal" / "tombstones.jsonl"
-    TombstoneJournal(path, journal_key).append_and_fsync(_record(), committed_sequence=0)
+    TombstoneJournal(path, journal_key, source_installation_id=SOURCE_ID).append_and_fsync(_record(), committed_sequence=0)
     lines = path.read_text(encoding="utf-8").splitlines()
     envelope = json.loads(lines[1])
     ciphertext = bytearray(base64.b64decode(envelope["ciphertext"], validate=True))
@@ -143,7 +145,7 @@ def test_ciphertext_bit_flip_is_rejected_before_record_release(
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     with pytest.raises(TombstoneAuthenticationFailed):
-        TombstoneJournal(path, journal_key).snapshot()
+        TombstoneJournal(path, journal_key, source_installation_id=SOURCE_ID).snapshot()
 
 
 def test_fsync_failure_is_reported_and_never_claimed_as_durable(
@@ -153,7 +155,7 @@ def test_fsync_failure_is_reported_and_never_claimed_as_durable(
 ) -> None:
     import app.recovery.journal as journal_module
 
-    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", journal_key)
+    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", journal_key, source_installation_id=SOURCE_ID)
     journal.snapshot()  # Create and durably publish the header first.
     real_fsync = journal_module.os.fsync
     calls = 0
@@ -170,13 +172,65 @@ def test_fsync_failure_is_reported_and_never_claimed_as_durable(
         journal.append_and_fsync(_record(), committed_sequence=0)
 
 
+def test_entry_nonce_is_random_and_not_reused_after_failed_fsync(
+    tmp_path: Path,
+    journal_key: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.recovery.journal as journal_module
+
+    path = tmp_path / "journal" / "tombstones.jsonl"
+    journal = TombstoneJournal(path, journal_key, source_installation_id=SOURCE_ID)
+    journal.snapshot()
+    real_fsync = journal_module.os.fsync
+    real_urandom = journal_module.os.urandom
+    calls = 0
+    nonces: list[bytes] = []
+
+    def observed_urandom(size: int) -> bytes:
+        value = real_urandom(size)
+        if size == 12:
+            nonces.append(value)
+        return value
+
+    def fail_once(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("disk full")
+        real_fsync(fd)
+
+    monkeypatch.setattr(journal_module.os, "fsync", fail_once)
+    monkeypatch.setattr(journal_module.os, "urandom", observed_urandom)
+    with pytest.raises(TombstoneJournalUnavailable):
+        journal.append_and_fsync(_record(), committed_sequence=0)
+    receipt = journal.append_and_fsync(_record(), committed_sequence=0)
+
+    envelope = json.loads(path.read_text(encoding="utf-8").splitlines()[1])
+    assert len(nonces) == 2
+    assert nonces[0] != nonces[1]
+    assert base64.b64decode(envelope["nonce"], validate=True) == nonces[1]
+    assert base64.b64decode(envelope["nonce"], validate=True) != receipt.sequence.to_bytes(12, "big")
+
+
+def test_authenticated_header_binds_the_source_installation(
+    tmp_path: Path,
+    journal_key: bytes,
+) -> None:
+    path = tmp_path / "journal" / "tombstones.jsonl"
+    TombstoneJournal(path, journal_key, source_installation_id=SOURCE_ID).snapshot()
+
+    with pytest.raises(TombstoneAuthenticationFailed):
+        TombstoneJournal(path, journal_key, source_installation_id="b" * 64).snapshot()
+
+
 @pytest.mark.anyio
 async def test_async_journal_calls_offload_blocking_file_io(
     tmp_path: Path,
     journal_key: bytes,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", journal_key)
+    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", journal_key, source_installation_id=SOURCE_ID)
     loop_thread = __import__("threading").get_ident()
     append_thread: int | None = None
     real_append = journal.append_and_fsync
@@ -196,6 +250,39 @@ def test_journal_key_is_independent_and_required(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(TombstoneJournalUnavailable):
         load_journal_key()
 
+
+def test_journal_key_rejects_credential_keyring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded = base64.b64encode(b"r" * 32).decode("ascii")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    monkeypatch.setenv("AUTH_JWT_SECRET", "distinct-auth-secret")
+    monkeypatch.setenv("DEER_FLOW_RECOVERY_JOURNAL_KEY", encoded)
+    monkeypatch.setenv("DEER_FLOW_CREDENTIAL_KEYRING_JSON", json.dumps({"credential-v1": encoded}))
+
+    with pytest.raises(TombstoneJournalUnavailable):
+        load_journal_key()
+
+
+def test_journal_key_rejects_persisted_auth_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded = base64.b64encode(b"r" * 32).decode("ascii")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".jwt_secret").write_text(encoded, encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    monkeypatch.delenv("AUTH_JWT_SECRET", raising=False)
+    monkeypatch.setenv("DEER_FLOW_RECOVERY_JOURNAL_KEY", encoded)
+    monkeypatch.delenv("DEER_FLOW_CREDENTIAL_KEYRING_JSON", raising=False)
+
+    with pytest.raises(TombstoneJournalUnavailable):
+        load_journal_key()
+
     encoded = base64.b64encode(b"r" * 32).decode("ascii")
     monkeypatch.setenv("DEER_FLOW_RECOVERY_JOURNAL_KEY", encoded)
     monkeypatch.setenv("DEER_FLOW_BACKUP_KEY", encoded)
@@ -209,14 +296,14 @@ def test_repository_local_or_symlink_journal_is_rejected(
 ) -> None:
     repository_path = Path(__file__).parents[2] / ".task17-journal"
     with pytest.raises(TombstoneJournalUnavailable):
-        TombstoneJournal(repository_path, journal_key).snapshot()
+        TombstoneJournal(repository_path, journal_key, source_installation_id=SOURCE_ID).snapshot()
 
     real_parent = tmp_path / "real"
     real_parent.mkdir()
     linked_parent = tmp_path / "linked"
     linked_parent.symlink_to(real_parent, target_is_directory=True)
     with pytest.raises(TombstoneJournalUnavailable):
-        TombstoneJournal(linked_parent / "journal", journal_key).snapshot()
+        TombstoneJournal(linked_parent / "journal", journal_key, source_installation_id=SOURCE_ID).snapshot()
 
 
 def test_recovery_public_facade_exposes_task17_operator_contracts() -> None:
@@ -233,7 +320,7 @@ async def test_cancelled_append_never_returns_a_false_success(
     journal_key: bytes,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", journal_key)
+    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", journal_key, source_installation_id=SOURCE_ID)
     entered = asyncio.Event()
     release = __import__("threading").Event()
     real_append = journal.append_and_fsync

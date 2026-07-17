@@ -346,6 +346,111 @@ async def test_account_rejoin_race_fails_closed_after_candidate_creation(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_account_membership_insert_waits_for_owner_lock_and_exact_set_revalidation_rejects(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingRepository(RetentionPurgeRepository):
+        async def verify_still_eligible(self, session, candidate, *, now):
+            scopes = await super().verify_still_eligible(
+                session,
+                candidate,
+                now=now,
+            )
+            entered.set()
+            await release.wait()
+            return scopes
+
+    try:
+        new_project_id = uuid.uuid4()
+        async with seed.factory() as session, session.begin():
+            await session.execute(
+                update(ProjectMembershipRow)
+                .where(ProjectMembershipRow.user_id == str(seed.owner_a.user_id))
+                .values(
+                    status="left",
+                    ended_at=EXPIRED,
+                    retention_until=EXPIRED,
+                    end_reason="left",
+                    version=ProjectMembershipRow.version + 1,
+                )
+            )
+            session.add(
+                ProjectRow(
+                    id=new_project_id,
+                    slug=f"account-race-{uuid.uuid4().hex[:12]}",
+                    display_name="Account race",
+                    created_by_user_id=str(seed.owner_b.user_id),
+                )
+            )
+        project_ids = tuple(
+            sorted(
+                (seed.owner_a.project_id, seed.project_b_owner_a.project_id),
+                key=str,
+            )
+        )
+        first = RetentionCandidate.account(
+            owner_user_id=str(seed.owner_a.user_id),
+            project_ids=project_ids,
+            retention_until=EXPIRED,
+            idempotency_key=f"account-lock:{seed.owner_a.user_id}",
+            request_id="task17-account-lock",
+        )
+        purger = RetentionPurger(
+            seed.factory,
+            journal=TombstoneJournal(
+                tmp_path / "operator" / "tombstones.jsonl",
+                b"j" * 32,
+            ),
+            keyring=_keyring(),
+            audit=_audit(seed.factory),
+            repository=BlockingRepository(),
+        )
+        purge_task = asyncio.create_task(purger.purge(first, now=NOW))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        async def insert_membership() -> None:
+            async with seed.factory() as session, session.begin():
+                session.add(
+                    ProjectMembershipRow(
+                        project_id=new_project_id,
+                        user_id=str(seed.owner_a.user_id),
+                        role="viewer",
+                        status="active",
+                    )
+                )
+                await session.flush()
+
+        insert_task = asyncio.create_task(insert_membership())
+        await asyncio.sleep(0.1)
+        assert not insert_task.done()
+        release.set()
+        await purge_task
+        await asyncio.wait_for(insert_task, timeout=5)
+
+        retry_with_stale_exact_set = RetentionCandidate.account(
+            owner_user_id=str(seed.owner_a.user_id),
+            project_ids=project_ids,
+            retention_until=EXPIRED,
+            idempotency_key=f"account-revalidate:{seed.owner_a.user_id}",
+            request_id="task17-account-revalidate",
+        )
+        with pytest.raises(RetentionNotEligible):
+            await purger.purge(
+                retry_with_stale_exact_set,
+                now=NOW,
+            )
+    finally:
+        release.set()
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_cancellation_during_journal_fsync_rolls_back_and_keeps_rows(
     migrated_postgres_database_url: str,
     tmp_path: Path,

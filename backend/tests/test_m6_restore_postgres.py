@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
 import re
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,11 +21,17 @@ from app.audit.service import AuditService, _bind_recovery_audit_process
 from app.audit.sinks import TrustedOperationAuditSink
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.recovery import BackupArchiveWriter, BackupConfig, create_backup
-from app.recovery.journal import TombstoneJournal, TombstoneSequenceGap
+from app.recovery.identity import source_installation_id
+from app.recovery.journal import (
+    TombstoneJournal,
+    TombstoneJournalUnavailable,
+    TombstoneSequenceGap,
+)
 from app.recovery.purge import RetentionCandidate, RetentionPurger
 from app.recovery.restore import (
     RecoveryProbeFailed,
     RestoreAuthenticationFailed,
+    RestoreCommandFailed,
     RestoreConfig,
     Restorer,
     RestoreTargetRejected,
@@ -32,12 +40,17 @@ from app.recovery.restore import (
 )
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.private_work.model import PrivateFileRow
-from deerflow.persistence.recovery.model import DeletionTombstoneRow, RestoreProofRow
+from deerflow.persistence.recovery.model import (
+    DeletionTombstoneRow,
+    RecoveryJournalStateRow,
+    RestoreProofRow,
+)
 
 NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
 EXPIRED = NOW - timedelta(days=31)
 BACKUP_KEY = b"b" * 32
 JOURNAL_KEY = b"j" * 32
+UNIT_SOURCE_ID = "1" * 64
 _RESTORE_NAME = re.compile(r"deerflow_restore_[0-9]+_[0-9a-f]{32}\Z")
 
 
@@ -159,12 +172,26 @@ async def _archive_then_purge(source_url: str, tmp_path: Path, monkeypatch: pyte
     return seed, file_id, archive, manifest, journal
 
 
-def _unit_archive(tmp_path: Path, name: str = "unit.dfba") -> Path:
+async def _source_id(database_url: str) -> str:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            return await source_installation_id(connection)
+    finally:
+        await engine.dispose()
+
+
+def _unit_archive(
+    tmp_path: Path,
+    name: str = "unit.dfba",
+    *,
+    source_id: str = UNIT_SOURCE_ID,
+) -> Path:
     archive = tmp_path / name
     with BackupArchiveWriter.atomic(
         archive,
         BACKUP_KEY,
-        source_installation_id="1" * 64,
+        source_installation_id=source_id,
         schema_revision="0015_project_reliability_finalize",
         pg_dump_version="pg_dump (PostgreSQL) 14.19",
         table_count=41,
@@ -216,6 +243,12 @@ async def test_live_archive_restore_replays_tombstone_runs_probes_and_writes_pro
                 proof = await session.get(RestoreProofRow, result.proof_id)
                 assert proof is not None and proof.probes_complete is True
                 assert proof.replayed_through_sequence == 1
+                assert str(proof.journal_id) == journal.snapshot().journal_id
+                assert proof.final_journal_head_digest == journal.snapshot().entries[-1].record_digest
+                state = await session.get(RecoveryJournalStateRow, 1)
+                assert state is not None
+                assert state.high_watermark == 1
+                assert state.head_digest == proof.final_journal_head_digest
                 assert str(file_id) not in repr(proof.__dict__)
         finally:
             await target_engine.dispose()
@@ -229,12 +262,147 @@ async def test_live_archive_restore_replays_tombstone_runs_probes_and_writes_pro
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_restore_holds_purge_authority_through_proof_and_binds_frozen_head(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, _file_id, archive, _manifest, journal = await _archive_then_purge(
+        migrated_postgres_database_url,
+        tmp_path,
+        monkeypatch,
+    )
+    second_file = await _seed_deleted_file(seed)
+    target_url = _restore_url(migrated_postgres_database_url)
+    proof_entered = asyncio.Event()
+    release_proof = asyncio.Event()
+    real_write_proof = restore_module._write_proof_and_completion
+
+    async def paused_write_proof(*args: object, **kwargs: object) -> None:
+        proof_entered.set()
+        await release_proof.wait()
+        await real_write_proof(*args, **kwargs)
+
+    monkeypatch.setattr(
+        restore_module,
+        "_write_proof_and_completion",
+        paused_write_proof,
+    )
+    restore_task = asyncio.create_task(
+        Restorer(
+            RestoreConfig(
+                archive=archive,
+                target_database_url=target_url,
+                current_database_url=migrated_postgres_database_url,
+                journal=journal,
+                backup_key=BACKUP_KEY,
+                keyring=_keyring(),
+            )
+        ).restore()
+    )
+    purge_task: asyncio.Task | None = None
+    try:
+        await asyncio.wait_for(proof_entered.wait(), timeout=10)
+        purger = RetentionPurger(
+            seed.factory,
+            journal=journal,
+            keyring=_keyring(),
+            audit=_recovery_audit(seed.factory),
+        )
+        purge_task = asyncio.create_task(
+            purger.purge(
+                RetentionCandidate.file(
+                    project_id=seed.owner_a.project_id,
+                    owner_user_id=str(seed.owner_a.user_id),
+                    file_id=second_file,
+                    deleted_at=EXPIRED,
+                    idempotency_key=f"restore-concurrent:{second_file}",
+                    request_id="task17-restore-concurrent-purge",
+                ),
+                now=NOW,
+            )
+        )
+        await asyncio.sleep(0.1)
+        assert not purge_task.done()
+        assert journal.snapshot().high_watermark == 1
+        release_proof.set()
+        result = await asyncio.wait_for(restore_task, timeout=10)
+        receipt = await asyncio.wait_for(purge_task, timeout=10)
+        assert result.replayed_through_sequence == 1
+        assert receipt.sequence == 2
+
+        target_engine = create_async_engine(target_url)
+        try:
+            async with async_sessionmaker(target_engine)() as session:
+                proof = await session.get(RestoreProofRow, result.proof_id)
+                assert proof is not None
+                assert proof.replayed_through_sequence == 1
+                assert proof.final_journal_head_digest == journal.snapshot().entries[0].record_digest
+        finally:
+            await target_engine.dispose()
+    finally:
+        release_proof.set()
+        if not restore_task.done():
+            restore_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await restore_task
+        if purge_task is not None and not purge_task.done():
+            purge_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await purge_task
+        await seed.engine.dispose()
+        if await _database_exists(
+            migrated_postgres_database_url,
+            restore_module.database_name(target_url),
+        ):
+            await _drop_restore_database(migrated_postgres_database_url, target_url)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_restore_rejects_a_validly_truncated_journal_against_source_anchor(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, _file_id, archive, _manifest, journal = await _archive_then_purge(
+        migrated_postgres_database_url,
+        tmp_path,
+        monkeypatch,
+    )
+    target_url = _restore_url(migrated_postgres_database_url)
+    from sqlalchemy.engine import make_url
+
+    target_name = make_url(target_url).database or ""
+    lines = journal.path.read_bytes().splitlines(keepends=True)
+    journal.path.write_bytes(b"".join(lines[:-1]))
+    try:
+        with pytest.raises(TombstoneJournalUnavailable):
+            await Restorer(
+                RestoreConfig(
+                    archive=archive,
+                    target_database_url=target_url,
+                    current_database_url=migrated_postgres_database_url,
+                    journal=journal,
+                    backup_key=BACKUP_KEY,
+                    keyring=_keyring(),
+                )
+            ).restore()
+        assert not await _database_exists(migrated_postgres_database_url, target_name)
+    finally:
+        await seed.engine.dispose()
+        if await _database_exists(migrated_postgres_database_url, target_name):
+            await _drop_restore_database(migrated_postgres_database_url, target_url)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_restore_rejects_current_existing_nonempty_and_non_restore_targets(
     migrated_postgres_database_url: str,
     tmp_path: Path,
 ) -> None:
     archive = _unit_archive(tmp_path)
-    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", JOURNAL_KEY)
+    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", JOURNAL_KEY, source_installation_id=UNIT_SOURCE_ID)
     journal.snapshot()
     base = dict(
         archive=archive,
@@ -275,9 +443,10 @@ async def test_restore_wrong_key_tamper_and_journal_gap_fail_before_target_creat
     migrated_postgres_database_url: str,
     tmp_path: Path,
 ) -> None:
-    archive = _unit_archive(tmp_path)
+    source_id = await _source_id(migrated_postgres_database_url)
+    archive = _unit_archive(tmp_path, source_id=source_id)
     journal_path = tmp_path / "journal" / "tombstones.jsonl"
-    journal = TombstoneJournal(journal_path, JOURNAL_KEY)
+    journal = TombstoneJournal(journal_path, JOURNAL_KEY, source_installation_id=source_id)
     journal.append_and_fsync(
         restore_module.TombstoneRecord(
             resource_kind="file",
@@ -303,7 +472,6 @@ async def test_restore_wrong_key_tamper_and_journal_gap_fail_before_target_creat
     with pytest.raises(RestoreAuthenticationFailed):
         await Restorer(RestoreConfig(backup_key=b"x" * 32, **base)).restore()
     assert not await _database_exists(migrated_postgres_database_url, target_name)
-
     chunk_path = archive / "chunks" / "00000000.bin"
     tampered = bytearray(chunk_path.read_bytes())
     tampered[0] ^= 1
@@ -312,7 +480,11 @@ async def test_restore_wrong_key_tamper_and_journal_gap_fail_before_target_creat
         await Restorer(RestoreConfig(backup_key=BACKUP_KEY, **base)).restore()
     assert not await _database_exists(migrated_postgres_database_url, target_name)
 
-    base["archive"] = _unit_archive(tmp_path, "fresh-unit.dfba")
+    base["archive"] = _unit_archive(
+        tmp_path,
+        "fresh-unit.dfba",
+        source_id=source_id,
+    )
 
     lines = journal_path.read_text(encoding="utf-8").splitlines()
     entry = json.loads(lines[1])
@@ -322,6 +494,43 @@ async def test_restore_wrong_key_tamper_and_journal_gap_fail_before_target_creat
     with pytest.raises(TombstoneSequenceGap):
         await Restorer(RestoreConfig(backup_key=BACKUP_KEY, **base)).restore()
     assert not await _database_exists(migrated_postgres_database_url, target_name)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_restore_rejects_cross_source_archive_and_journal_before_target_creation(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _unit_archive(tmp_path)
+    journal = TombstoneJournal(
+        tmp_path / "journal" / "tombstones.jsonl",
+        JOURNAL_KEY,
+        source_installation_id=UNIT_SOURCE_ID,
+    )
+    journal.snapshot()
+    target_url = _restore_url(migrated_postgres_database_url)
+    created = False
+
+    async def create(*_args: object) -> None:
+        nonlocal created
+        created = True
+
+    monkeypatch.setattr(restore_module, "_create_empty_database", create)
+    with pytest.raises(RestoreAuthenticationFailed):
+        await Restorer(
+            RestoreConfig(
+                archive=archive,
+                target_database_url=target_url,
+                current_database_url=migrated_postgres_database_url,
+                journal=journal,
+                backup_key=BACKUP_KEY,
+                keyring=_keyring(),
+            )
+        ).restore()
+
+    assert created is False
 
 
 @pytest.mark.postgres
@@ -370,7 +579,7 @@ async def test_drill_cleans_up_only_the_random_restore_database_it_created(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     archive = _unit_archive(tmp_path)
-    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", JOURNAL_KEY)
+    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", JOURNAL_KEY, source_installation_id=UNIT_SOURCE_ID)
     journal.snapshot()
     created: list[str] = []
     dropped: list[str] = []
@@ -529,6 +738,67 @@ async def test_new_database_is_removed_when_empty_database_verification_fails(
             "deerflow_restore_1_0123456789abcdef0123456789abcdef",
         )
     ]
+
+
+@pytest.mark.anyio
+async def test_sensitive_workspace_cleanup_failure_drops_target_and_never_writes_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _unit_archive(tmp_path)
+    journal = TombstoneJournal(
+        tmp_path / "journal" / "tombstones.jsonl",
+        JOURNAL_KEY,
+        source_installation_id=UNIT_SOURCE_ID,
+    )
+    journal.snapshot()
+    proof_calls = 0
+    dropped: list[str] = []
+
+    async def database_missing(*_args: object) -> bool:
+        return False
+
+    async def no_op(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def proof(*_args: object, **_kwargs: object) -> None:
+        nonlocal proof_calls
+        proof_calls += 1
+
+    async def drop(_current: str, target: str) -> None:
+        dropped.append(target)
+
+    @asynccontextmanager
+    async def source_authority(*_args: object, **_kwargs: object):
+        yield journal.snapshot(require_existing=True)
+
+    def fail_cleanup(*_args: object) -> None:
+        raise RestoreCommandFailed
+
+    monkeypatch.setattr(restore_module, "_database_exists", database_missing)
+    monkeypatch.setattr(restore_module, "_source_recovery_authority", source_authority)
+    monkeypatch.setattr(restore_module, "_record_source_restore_started", no_op)
+    monkeypatch.setattr(restore_module, "_create_empty_database", no_op)
+    monkeypatch.setattr(restore_module, "_run_pg_restore", no_op)
+    monkeypatch.setattr(restore_module, "_cleanup_owned_workspace", fail_cleanup)
+    monkeypatch.setattr(restore_module, "_write_proof_and_completion", proof)
+    monkeypatch.setattr(restore_module, "_drop_created_database", drop)
+    target_url = "postgresql://operator@localhost/deerflow_restore_1_0123456789abcdef0123456789abcdef"
+
+    with pytest.raises(RestoreCommandFailed):
+        await Restorer(
+            RestoreConfig(
+                archive=archive,
+                target_database_url=target_url,
+                current_database_url="postgresql://operator@localhost/deerflow_source",
+                journal=journal,
+                backup_key=BACKUP_KEY,
+                keyring=_keyring(),
+            )
+        ).restore()
+
+    assert dropped == [target_url]
+    assert proof_calls == 0
 
 
 def test_backup_and_journal_keys_cannot_be_reused(monkeypatch: pytest.MonkeyPatch) -> None:

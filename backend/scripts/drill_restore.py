@@ -44,7 +44,10 @@ async def async_main(argv: list[str] | None = None) -> int:
         result = await drill_restore(
             current_database_url=current_url,
             archive=args.archive,
-            journal=TombstoneJournal(args.journal, load_journal_key()),
+            journal=TombstoneJournal(
+                args.journal,
+                load_journal_key(database_url=current_url),
+            ),
             backup_key=load_backup_key(database_url=current_url),
             keyring=AuditHmacKeyring.from_environment(),
         )

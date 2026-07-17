@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import CHAR, BigInteger, Boolean, CheckConstraint, DateTime, Index, String, Uuid, text
+from sqlalchemy import CHAR, BigInteger, Boolean, CheckConstraint, DateTime, Index, SmallInteger, String, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -18,6 +18,7 @@ class DeletionTombstoneRow(Base):
 
     journal_sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     ciphertext_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False, unique=True)
+    record_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False, unique=True)
     resource_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     resource_ref_key_id: Mapped[str] = mapped_column(String(64), nullable=False)
     resource_ref_hmac: Mapped[str] = mapped_column(CHAR(64), nullable=False)
@@ -32,6 +33,22 @@ class DeletionTombstoneRow(Base):
     )
 
 
+class RecoveryJournalStateRow(Base):
+    __tablename__ = "recovery_journal_state"
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1, server_default=text("1"))
+    source_installation_id: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    journal_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, unique=True)
+    high_watermark: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    head_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False, default="0" * 64, server_default="0" * 64)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_recovery_journal_state_singleton"),
+        CheckConstraint("high_watermark >= 0", name="ck_recovery_journal_state_sequence"),
+    )
+
+
 class RestoreProofRow(Base):
     __tablename__ = "restore_proofs"
 
@@ -43,6 +60,8 @@ class RestoreProofRow(Base):
     schema_revision: Mapped[str] = mapped_column(String(64), nullable=False)
     archive_tombstone_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     replayed_through_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    journal_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    final_journal_head_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     probes_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     restored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
 

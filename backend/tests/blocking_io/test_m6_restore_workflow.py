@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.asyncio
+SOURCE_ID = hashlib.sha256(b"restore-blocking-source").hexdigest()
 
 
 def _build_archive(root: Path, key: bytes) -> Path:
@@ -20,7 +22,7 @@ def _build_archive(root: Path, key: bytes) -> Path:
     with BackupArchiveWriter.atomic(
         archive,
         key,
-        source_installation_id=hashlib.sha256(b"restore-blocking-source").hexdigest(),
+        source_installation_id=SOURCE_ID,
         schema_revision="0015_project_reliability_finalize",
         table_count=41,
     ) as writer:
@@ -40,7 +42,11 @@ async def test_restore_archive_and_journal_file_io_does_not_block_event_loop(
 
     key = b"b" * 32
     archive = await asyncio.to_thread(_build_archive, tmp_path / "archive-root", key)
-    journal = TombstoneJournal(tmp_path / "journal-root" / "tombstones.jsonl", b"j" * 32)
+    journal = TombstoneJournal(
+        tmp_path / "journal-root" / "tombstones.jsonl",
+        b"j" * 32,
+        source_installation_id=SOURCE_ID,
+    )
     await asyncio.to_thread(journal.snapshot)
 
     async def database_missing(_url: str, _database: str) -> bool:
@@ -52,7 +58,12 @@ async def test_restore_archive_and_journal_file_io_does_not_block_event_loop(
     async def no_replay(*_args: object, **_kwargs: object) -> int:
         return 0
 
+    @asynccontextmanager
+    async def source_authority(*_args: object, **_kwargs: object):
+        yield await asyncio.to_thread(journal.snapshot, require_existing=True)
+
     monkeypatch.setattr(restore_module, "_database_exists", database_missing)
+    monkeypatch.setattr(restore_module, "_source_recovery_authority", source_authority)
     monkeypatch.setattr(restore_module, "_record_source_restore_started", no_op)
     monkeypatch.setattr(restore_module, "_create_empty_database", no_op)
     monkeypatch.setattr(restore_module, "_run_pg_restore", no_op)

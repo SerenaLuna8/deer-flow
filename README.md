@@ -1031,11 +1031,19 @@ Retention purge additionally requires a separate base64 32-byte
 encrypted, hash-chained tombstone is fsynced before physical deletion. File and project candidates
 must pass the exact 30-day retention recheck. The recovery-only account workflow requires every
 membership to be inactive and expired, deletes only the owner's private data in the exact retained
-project set, and preserves the User row plus governance, job, audit, and recovery evidence.
+project set, and preserves the User row plus governance, job, audit, and recovery evidence. An
+authenticated journal header binds the PostgreSQL installation identity; the singleton database
+anchor stores its journal ID, committed sequence, and complete envelope-head digest. Purge compares
+the full database prefix with that anchor and updates both in one transaction after journal fsync.
 
 Restore only targets a nonexistent, distinct database named
 `deerflow_restore_<pid>_<32hex>`. It authenticates the full archive, restores it, replays the journal
-without sequence gaps, runs M1–M6 probes, and writes a restore proof. It never changes
+without sequence gaps, runs M1–M6 probes, and writes a restore proof bound to the frozen journal ID,
+final sequence, and head digest. Restore holds the same PostgreSQL advisory authority as purge from
+source-anchor verification through replay, probes, proof, and sensitive workspace cleanup, so a
+concurrent tombstone cannot be omitted. The authenticated dump, passfile, and owned workspace are
+identity-checked, removed, and directory-fsynced before proof; cleanup failure drops the invocation's
+new target and cannot return verified. Restore never changes
 `DATABASE_URL`, starts services, overwrites a database, or cuts traffic. For example:
 
 ```bash

@@ -25,7 +25,6 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from sqlalchemy.engine import make_url
 
 _FORMAT_VERSION = 1
 _KEY_BYTES = 32
@@ -37,6 +36,7 @@ _HEADER_INFO = b"deerflow-tombstone-journal-header-v1\x00"
 _ENTRY_INFO = b"deerflow-tombstone-journal-entry-v1\x00"
 _REPOSITORY_ROOT = Path(__file__).parents[3]
 _HEX_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_SOURCE_ID = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class TombstoneJournalUnavailable(RuntimeError):
@@ -175,6 +175,7 @@ class TombstoneEntry:
 @dataclass(frozen=True, slots=True)
 class TombstoneSnapshot:
     journal_id: str
+    source_installation_id: str
     high_watermark: int
     entries: tuple[TombstoneEntry, ...]
 
@@ -256,13 +257,26 @@ def _safe_external_path(path: Path) -> Path:
 class TombstoneJournal:
     """Synchronous file authority with async offload entrypoints."""
 
-    def __init__(self, path: Path, key: bytes) -> None:
+    def __init__(self, path: Path, key: bytes, *, source_installation_id: str | None = None) -> None:
         if not isinstance(path, Path):
             path = Path(path)
         if not isinstance(key, bytes) or len(key) != _KEY_BYTES:
             raise TombstoneJournalUnavailable
         self.path = path
         self._key = key
+        if source_installation_id is not None and _SOURCE_ID.fullmatch(source_installation_id) is None:
+            raise TombstoneJournalUnavailable
+        self.source_installation_id = source_installation_id
+
+    def bind_source_installation(self, source_installation_id: str) -> None:
+        if _SOURCE_ID.fullmatch(source_installation_id) is None:
+            raise TombstoneJournalUnavailable
+        if self.source_installation_id is not None and not hmac.compare_digest(
+            self.source_installation_id,
+            source_installation_id,
+        ):
+            raise TombstoneAuthenticationFailed
+        self.source_installation_id = source_installation_id
 
     def _open_locked(self, *, require_existing: bool) -> tuple[int, Path]:
         path = _safe_external_path(self.path)
@@ -298,10 +312,13 @@ class TombstoneJournal:
             if not lines:
                 if not allow_create_header:
                     raise TombstoneJournalUnavailable
+                if self.source_installation_id is None:
+                    raise TombstoneJournalUnavailable
                 journal_id = str(uuid.uuid4())
                 body = {
                     "version": _FORMAT_VERSION,
                     "journal_id": journal_id,
+                    "source_installation_id": self.source_installation_id,
                     "salt": _b64(os.urandom(_SALT_BYTES)),
                 }
                 header = {**body, "key_check": _header_check(self._key, body)}
@@ -313,20 +330,34 @@ class TombstoneJournal:
                     os.fsync(parent)
                 finally:
                     os.close(parent)
-                return TombstoneSnapshot(journal_id, 0, ())
+                return TombstoneSnapshot(journal_id, self.source_installation_id, 0, ())
             try:
                 header = json.loads(lines[0])
             except (json.JSONDecodeError, UnicodeDecodeError):
                 raise TombstoneAuthenticationFailed from None
-            if not isinstance(header, dict) or set(header) != {"version", "journal_id", "salt", "key_check"}:
+            if not isinstance(header, dict) or set(header) != {
+                "version",
+                "journal_id",
+                "source_installation_id",
+                "salt",
+                "key_check",
+            }:
                 raise TombstoneAuthenticationFailed
-            body = {key: header[key] for key in ("version", "journal_id", "salt")}
+            body = {key: header[key] for key in ("version", "journal_id", "source_installation_id", "salt")}
             if body["version"] != _FORMAT_VERSION:
                 raise TombstoneAuthenticationFailed
             try:
                 journal_id = str(uuid.UUID(str(body["journal_id"])))
             except (TypeError, ValueError, AttributeError):
                 raise TombstoneAuthenticationFailed from None
+            source_installation_id = str(body["source_installation_id"])
+            if _SOURCE_ID.fullmatch(source_installation_id) is None:
+                raise TombstoneAuthenticationFailed
+            if self.source_installation_id is not None and not hmac.compare_digest(
+                source_installation_id,
+                self.source_installation_id,
+            ):
+                raise TombstoneAuthenticationFailed
             _decode_b64(body["salt"], length=_SALT_BYTES)
             if not isinstance(header["key_check"], str) or not hmac.compare_digest(
                 header["key_check"],
@@ -350,7 +381,12 @@ class TombstoneJournal:
                 )
                 entries.append(entry)
                 previous = entry.record_digest
-            return TombstoneSnapshot(journal_id, len(entries), tuple(entries))
+            return TombstoneSnapshot(
+                journal_id,
+                source_installation_id,
+                len(entries),
+                tuple(entries),
+            )
         except TombstoneJournalUnavailable:
             raise
         except Exception:
@@ -387,8 +423,6 @@ class TombstoneJournal:
         if envelope["previous_digest"] != expected_previous:
             raise TombstoneSequenceGap
         nonce = _decode_b64(envelope["nonce"], length=_NONCE_BYTES)
-        if nonce != expected_sequence.to_bytes(_NONCE_BYTES, "big"):
-            raise TombstoneAuthenticationFailed
         ciphertext = _decode_b64(envelope["ciphertext"])
         ciphertext_digest = str(envelope["ciphertext_digest"])
         record_digest = str(envelope["record_digest"])
@@ -470,7 +504,7 @@ class TombstoneJournal:
             journal_id = str(header["journal_id"])
             salt = _decode_b64(header["salt"], length=_SALT_BYTES)
             entry_key = _derive_entry_key(self._key, journal_id=journal_id, salt=salt)
-            nonce = sequence.to_bytes(_NONCE_BYTES, "big")
+            nonce = os.urandom(_NONCE_BYTES)
             aad = _canonical(
                 {
                     "version": _FORMAT_VERSION,
@@ -535,9 +569,11 @@ def _decode_environment_key(name: str, value: str | None) -> bytes:
     return decoded
 
 
-def _known_secret_material() -> tuple[bytes, ...]:
+def _known_secret_material(database_url: str | None) -> tuple[bytes, ...]:
+    from app.recovery import known_deployment_secrets
+
     values: list[bytes] = []
-    for name in ("DEER_FLOW_BACKUP_KEY", "AUTH_JWT_SECRET"):
+    for name in ("DEER_FLOW_BACKUP_KEY",):
         raw = os.getenv(name)
         if not raw:
             continue
@@ -545,31 +581,20 @@ def _known_secret_material() -> tuple[bytes, ...]:
             values.append(base64.b64decode(raw, validate=True))
         except (binascii.Error, ValueError):
             values.append(raw.encode("utf-8"))
-    raw_keyring = os.getenv("DEER_FLOW_AUDIT_KEYRING_JSON")
-    if raw_keyring:
-        try:
-            parsed = json.loads(raw_keyring)
-            if isinstance(parsed, dict):
-                values.extend(base64.b64decode(value, validate=True) for value in parsed.values() if isinstance(value, str))
-        except (json.JSONDecodeError, binascii.Error, ValueError):
-            raise TombstoneJournalUnavailable from None
-    database_url = os.getenv("DATABASE_URL")
-    if database_url:
-        try:
-            password = make_url(database_url).password
-        except Exception:
-            raise TombstoneJournalUnavailable from None
-        if password:
-            values.append(password.encode("utf-8"))
+    try:
+        values.extend(known_deployment_secrets(database_url))
+    except Exception:
+        raise TombstoneJournalUnavailable from None
     return tuple(values)
 
 
-def load_journal_key(value: str | None = None) -> bytes:
+def load_journal_key(value: str | None = None, *, database_url: str | None = None) -> bytes:
     key = _decode_environment_key(
         "DEER_FLOW_RECOVERY_JOURNAL_KEY",
         value if value is not None else os.getenv("DEER_FLOW_RECOVERY_JOURNAL_KEY"),
     )
-    if any(hmac.compare_digest(key, secret) for secret in _known_secret_material()):
+    active_database_url = database_url if database_url is not None else os.getenv("DATABASE_URL")
+    if any(hmac.compare_digest(key, secret) for secret in _known_secret_material(active_database_url)):
         raise TombstoneJournalUnavailable
     return key
 

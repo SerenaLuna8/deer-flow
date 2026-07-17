@@ -58,6 +58,7 @@ def test_filter_includes_deerflow_tables() -> None:
         "project_usage_ledger",
         "audit_logs",
         "deletion_tombstones",
+        "recovery_journal_state",
         "restore_proofs",
         "reliability_migration_runs",
         "reliability_migration_ledger",

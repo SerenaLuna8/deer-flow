@@ -293,9 +293,15 @@ def _known_deployment_secrets(database_url: str | None) -> Iterator[bytes]:
             yield from _decoded_secret_candidates(password)
 
 
+def known_deployment_secrets(database_url: str | None = None) -> tuple[bytes, ...]:
+    """Return deployment secret candidates for recovery-key separation checks."""
+
+    return tuple(_known_deployment_secrets(database_url))
+
+
 def _validate_key_separation(key: bytes, database_url: str | None) -> None:
     _validate_key(key)
-    if any(hmac.compare_digest(key, candidate) for candidate in _known_deployment_secrets(database_url) if len(candidate) == _KEY_BYTES):
+    if any(hmac.compare_digest(key, candidate) for candidate in known_deployment_secrets(database_url) if len(candidate) == _KEY_BYTES):
         raise BackupKeyInvalid
 
 

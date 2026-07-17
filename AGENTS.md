@@ -95,8 +95,10 @@ SSE reconnect 和按 account/project/thread 隔离的前端 cursor/dedupe，以�
 counter/append-only ledger、平台默认值收紧、80% 单次阈值和 dry-run/execute reconciliation core。成员加入/
 退出、文件 finalize/delete/branch/finalization/Thread delete、private/Automation Run admission 与所有终态、实际
 MCP dispatch 均已在原业务事务边界执行 quota；429 使用稳定错误与 `Retry-After`，已运行任务不因后续收紧而中断。
-M6 审计、外部认证加密 backup、journal-first retention purge、new-DB restore、连续 tombstone
-replay、M1–M6 probes、restore proof 和 disposable drill 已实现；Task 18 最终编排/关闭仍待完成。
+M6 审计、外部认证加密 backup、带 PostgreSQL 权威 head/source anchor 的 journal-first retention purge、
+持有同一 purge authority 到 proof 完成的 new-DB restore、连续 tombstone replay、M1–M6 probes、
+绑定 journal ID/最终 sequence/head digest 的 restore proof 和 disposable drill 已实现；敏感临时文件在
+proof 前按 inode 身份清理并 fsync，失败即删除本次 target。Task 18 最终编排/关闭仍待完成。
 里程碑进度仍为 5/8（62.5%），因为 M6 尚未整体关闭；M6–M8
 尚未交付，因此当前仍不能
 作为完整多用户 SaaS 发布。

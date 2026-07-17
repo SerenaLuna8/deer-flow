@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.audit.sinks import TrustedOperationAuditSink
+from app.recovery.identity import source_installation_id
 from app.recovery.journal import (
     TombstoneEntry,
     TombstoneJournal,
@@ -29,10 +30,14 @@ from deerflow.persistence.private_work.model import (
     UserProjectMemoryRow,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
-from deerflow.persistence.recovery.model import DeletionTombstoneRow
+from deerflow.persistence.recovery.model import (
+    DeletionTombstoneRow,
+    RecoveryJournalStateRow,
+)
+from deerflow.persistence.user.model import UserRow
 
 _RETENTION_DAYS = 30
-_PURGE_ADVISORY_LOCK = 0x44465245434F5652
+RECOVERY_PURGE_ADVISORY_LOCK = 0x44465245434F5652
 _PURGE_NAMESPACE = uuid.UUID("1960a83e-df43-4f8c-85f4-b7193c08a9d0")
 
 
@@ -221,6 +226,12 @@ class RetentionPurgeRepository:
             return tuple((candidate.project_id, membership.user_id) for membership in memberships)
 
         assert candidate.owner_user_id is not None
+        owner = await session.scalar(select(UserRow).where(UserRow.id == candidate.owner_user_id).with_for_update())
+        if owner is None:
+            raise RetentionNotEligible
+        projects = (await session.execute(select(ProjectRow).where(ProjectRow.id.in_(candidate.project_ids)).order_by(ProjectRow.id).with_for_update())).scalars().all()
+        if tuple(sorted((project.id for project in projects), key=str)) != candidate.project_ids:
+            raise RetentionNotEligible
         memberships = (
             (await session.execute(select(ProjectMembershipRow).where(ProjectMembershipRow.user_id == candidate.owner_user_id).order_by(ProjectMembershipRow.project_id, ProjectMembershipRow.user_id).with_for_update())).scalars().all()
         )
@@ -505,24 +516,43 @@ class RetentionPurger:
         self.repository = repository or RetentionPurgeRepository()
 
     @staticmethod
-    async def _database_prefix(session: AsyncSession) -> int:
-        row = (
-            await session.execute(
-                select(
-                    func.count(DeletionTombstoneRow.journal_sequence),
-                    func.min(DeletionTombstoneRow.journal_sequence),
-                    func.max(DeletionTombstoneRow.journal_sequence),
-                )
-            )
-        ).one()
-        count, minimum, maximum = int(row[0]), row[1], row[2]
-        if count == 0:
-            if minimum is not None or maximum is not None:
+    async def _validate_authoritative_prefix(
+        session: AsyncSession,
+        *,
+        snapshot,
+        source_identity: str,
+    ) -> RecoveryJournalStateRow:
+        state = await session.scalar(select(RecoveryJournalStateRow).where(RecoveryJournalStateRow.id == 1).with_for_update())
+        rows = (await session.execute(select(DeletionTombstoneRow).order_by(DeletionTombstoneRow.journal_sequence))).scalars().all()
+        if state is None:
+            if rows or snapshot.high_watermark > 1:
                 raise TombstoneJournalUnavailable
-            return 0
-        if int(minimum) != 1 or int(maximum) != count:
+            state = RecoveryJournalStateRow(
+                id=1,
+                source_installation_id=source_identity,
+                journal_id=uuid.UUID(snapshot.journal_id),
+                high_watermark=0,
+                head_digest="0" * 64,
+            )
+            session.add(state)
+            await session.flush()
+        if (
+            state.source_installation_id != source_identity
+            or str(state.journal_id) != snapshot.journal_id
+            or snapshot.source_installation_id != source_identity
+            or state.high_watermark != len(rows)
+            or snapshot.high_watermark not in {state.high_watermark, state.high_watermark + 1}
+        ):
             raise TombstoneJournalUnavailable
-        return count
+        expected_head = "0" * 64
+        for sequence, row in enumerate(rows, start=1):
+            entry = snapshot.entries[sequence - 1]
+            if row.journal_sequence != sequence or row.ciphertext_digest != entry.ciphertext_digest or row.record_digest != entry.record_digest or row.resource_kind != entry.record.resource_kind or row.purge_status != "purged":
+                raise TombstoneJournalUnavailable
+            expected_head = entry.record_digest
+        if state.head_digest != expected_head:
+            raise TombstoneJournalUnavailable
+        return state
 
     async def purge(
         self,
@@ -537,12 +567,17 @@ class RetentionPurger:
         async with self._sessions() as session, session.begin():
             await session.execute(
                 text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                {"lock_key": _PURGE_ADVISORY_LOCK},
+                {"lock_key": RECOVERY_PURGE_ADVISORY_LOCK},
             )
-            database_prefix = await self._database_prefix(session)
+            source_identity = await source_installation_id(session)
+            self.journal.bind_source_installation(source_identity)
             snapshot = await asyncio.to_thread(self.journal.snapshot)
-            if snapshot.high_watermark < database_prefix or snapshot.high_watermark > database_prefix + 1:
-                raise TombstoneJournalUnavailable
+            state = await self._validate_authoritative_prefix(
+                session,
+                snapshot=snapshot,
+                source_identity=source_identity,
+            )
+            database_prefix = state.high_watermark
             pending = next(
                 (entry for entry in snapshot.entries if entry.record.idempotency_key == candidate.idempotency_key),
                 None,
@@ -571,6 +606,7 @@ class RetentionPurger:
                 DeletionTombstoneRow(
                     journal_sequence=receipt.sequence,
                     ciphertext_digest=receipt.ciphertext_digest,
+                    record_digest=receipt.record_digest,
                     resource_kind=candidate.resource_kind,
                     resource_ref_key_id=resource_ref.key_id,
                     resource_ref_hmac=resource_ref.hmac_hex,
@@ -579,6 +615,9 @@ class RetentionPurger:
                     purged_at=purged_at,
                 )
             )
+            state.high_watermark = receipt.sequence
+            state.head_digest = receipt.record_digest
+            state.updated_at = purged_at
             await session.flush()
             await self._audit.purge_completed(
                 session,
@@ -609,6 +648,7 @@ async def apply_replay_entry(
         DeletionTombstoneRow(
             journal_sequence=entry.sequence,
             ciphertext_digest=entry.ciphertext_digest,
+            record_digest=entry.record_digest,
             resource_kind=entry.record.resource_kind,
             resource_ref_key_id=reference.key_id,
             resource_ref_hmac=reference.hmac_hex,
@@ -626,6 +666,7 @@ __all__ = [
     "RetentionNotEligible",
     "RetentionPurgeRepository",
     "RetentionPurger",
+    "RECOVERY_PURGE_ADVISORY_LOCK",
     "apply_replay_entry",
     "apply_tombstone_record",
     "purge_private_scope",

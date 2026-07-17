@@ -59,7 +59,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         if not current_url:
             raise RestoreTargetRejected
         backup_key = load_backup_key(database_url=current_url)
-        journal_key = load_journal_key()
+        journal_key = load_journal_key(database_url=current_url)
         result = await Restorer(
             RestoreConfig(
                 archive=args.archive,

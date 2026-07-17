@@ -26,6 +26,7 @@ M6_TABLES = {
     "project_usage_ledger",
     "audit_logs",
     "deletion_tombstones",
+    "recovery_journal_state",
     "restore_proofs",
     "reliability_migration_runs",
     "reliability_migration_ledger",
@@ -76,6 +77,25 @@ def test_m6_thread_event_sequence_catalog_pins_deletion_stable_cursor() -> None:
     }
     assert "high_watermark" in sequences.columns
     assert {constraint.name for constraint in sequences.constraints if isinstance(constraint, CheckConstraint)} >= {"ck_thread_event_sequences_high_watermark"}
+
+
+def test_m6_recovery_catalog_pins_authoritative_journal_head_and_restore_proof() -> None:
+    tombstones = Base.metadata.tables["deletion_tombstones"]
+    state = Base.metadata.tables["recovery_journal_state"]
+    proofs = Base.metadata.tables["restore_proofs"]
+
+    assert {"ciphertext_digest", "record_digest"} <= set(tombstones.columns.keys())
+    assert {
+        "source_installation_id",
+        "journal_id",
+        "high_watermark",
+        "head_digest",
+    } <= set(state.columns.keys())
+    assert {"journal_id", "final_journal_head_digest"} <= set(proofs.columns.keys())
+    assert {constraint.name for constraint in state.constraints if isinstance(constraint, CheckConstraint)} >= {
+        "ck_recovery_journal_state_singleton",
+        "ck_recovery_journal_state_sequence",
+    }
 
 
 def test_m6_existing_rows_receive_nullable_job_authority_columns() -> None:

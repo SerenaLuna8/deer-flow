@@ -237,6 +237,7 @@ def _create_audit_and_recovery_tables() -> None:
         "deletion_tombstones",
         sa.Column("journal_sequence", sa.BigInteger(), nullable=False),
         sa.Column("ciphertext_digest", sa.CHAR(64), nullable=False),
+        sa.Column("record_digest", sa.CHAR(64), nullable=False),
         sa.Column("resource_kind", sa.String(32), nullable=False),
         sa.Column("resource_ref_key_id", sa.String(64), nullable=False),
         sa.Column("resource_ref_hmac", sa.CHAR(64), nullable=False),
@@ -247,8 +248,23 @@ def _create_audit_and_recovery_tables() -> None:
         sa.CheckConstraint("purge_status IN ('journaled', 'purged')", name="ck_deletion_tombstones_status"),
         sa.PrimaryKeyConstraint("journal_sequence"),
         sa.UniqueConstraint("ciphertext_digest"),
+        sa.UniqueConstraint("record_digest"),
     )
     op.create_index("ix_deletion_tombstones_committed", "deletion_tombstones", ["committed_at", "journal_sequence"])
+
+    op.create_table(
+        "recovery_journal_state",
+        sa.Column("id", sa.SmallInteger(), server_default=sa.text("1"), nullable=False),
+        sa.Column("source_installation_id", sa.CHAR(64), nullable=False),
+        sa.Column("journal_id", sa.Uuid(), nullable=False),
+        sa.Column("high_watermark", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
+        sa.Column("head_digest", sa.CHAR(64), server_default="0" * 64, nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.CheckConstraint("id = 1", name="ck_recovery_journal_state_singleton"),
+        sa.CheckConstraint("high_watermark >= 0", name="ck_recovery_journal_state_sequence"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("journal_id"),
+    )
 
     op.create_table(
         "restore_proofs",
@@ -260,6 +276,8 @@ def _create_audit_and_recovery_tables() -> None:
         sa.Column("schema_revision", sa.String(64), nullable=False),
         sa.Column("archive_tombstone_sequence", sa.BigInteger(), nullable=False),
         sa.Column("replayed_through_sequence", sa.BigInteger(), nullable=False),
+        sa.Column("journal_id", sa.Uuid(), nullable=False),
+        sa.Column("final_journal_head_digest", sa.CHAR(64), nullable=False),
         sa.Column("probes_complete", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("restored_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.CheckConstraint(

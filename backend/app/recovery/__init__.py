@@ -16,6 +16,7 @@ from .archive import (
     BackupManifest,
     BackupSnapshot,
     create_backup,
+    known_deployment_secrets,
     load_backup_key,
     pg_dump_argv,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "create_backup",
     "drill_restore",
     "load_backup_key",
+    "known_deployment_secrets",
     "load_journal_key",
     "pg_dump_argv",
     "RecoveryProbeFailed",
