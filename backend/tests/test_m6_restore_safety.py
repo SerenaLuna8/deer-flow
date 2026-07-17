@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import app.recovery.authority as authority_module
+import app.recovery.cleanup as cleanup_module
 import app.recovery.restore as restore_module
 import app.recovery.restore_process as restore_process_module
 from app.recovery.cleanup import (
@@ -17,6 +18,7 @@ from app.recovery.cleanup import (
     OwnedWorkspace,
     SensitiveCleanupFailed,
     _cleanup_owned_workspace,
+    _create_owned_file,
     _create_owned_workspace,
     _write_owned_file,
 )
@@ -212,6 +214,97 @@ def test_workspace_cleanup_refuses_unknown_files_without_deleting_them(
 
     assert known.read_bytes() == b"secret"
     assert attacker.read_bytes() == b"do-not-own"
+
+
+def test_workspace_cleanup_retry_accepts_owned_file_already_unlinked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _create_owned_workspace(prefix="deerflow-cleanup-retry-")
+    owned = _create_owned_file(
+        workspace.path,
+        prefix="dump-",
+        suffix=".bin",
+    )
+    workspace.register(owned)
+    expected = dict(workspace.files)
+    real_fsync = cleanup_module.os.fsync
+    failures = 2
+
+    def fail_directory_fsync_twice(descriptor: int) -> None:
+        nonlocal failures
+        if failures:
+            failures -= 1
+            raise OSError("transient directory fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(cleanup_module.os, "fsync", fail_directory_fsync_twice)
+    with pytest.raises(SensitiveCleanupFailed):
+        _cleanup_owned_workspace(
+            workspace.path,
+            workspace.identity,
+            expected,
+        )
+
+    assert not owned.path.exists()
+    assert workspace.path.exists()
+    _cleanup_owned_workspace(
+        workspace.path,
+        workspace.identity,
+        expected,
+    )
+    assert not workspace.path.exists()
+
+
+def test_workspace_cleanup_retry_deletes_only_remaining_owned_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _create_owned_workspace(prefix="deerflow-cleanup-retry-many-")
+    dump = _create_owned_file(
+        workspace.path,
+        prefix="00-dump-",
+        suffix=".bin",
+    )
+    passfile = _create_owned_file(
+        workspace.path,
+        prefix="01-passfile-",
+    )
+    workspace.register(dump)
+    workspace.register(passfile)
+    expected = dict(workspace.files)
+    fail_passfile = True
+    real_listdir = cleanup_module.os.listdir
+    real_unlink = cleanup_module.os.unlink
+
+    def sorted_listdir(descriptor: int) -> list[str]:
+        return sorted(real_listdir(descriptor))
+
+    def fail_second_unlink(
+        name: str,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        if fail_passfile and name == passfile.path.name:
+            raise OSError("transient passfile unlink failure")
+        real_unlink(name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(cleanup_module.os, "listdir", sorted_listdir)
+    monkeypatch.setattr(cleanup_module.os, "unlink", fail_second_unlink)
+    with pytest.raises(SensitiveCleanupFailed):
+        _cleanup_owned_workspace(
+            workspace.path,
+            workspace.identity,
+            expected,
+        )
+
+    assert not dump.path.exists()
+    assert passfile.path.exists()
+    fail_passfile = False
+    _cleanup_owned_workspace(
+        workspace.path,
+        workspace.identity,
+        expected,
+    )
+    assert not workspace.path.exists()
 
 
 @pytest.mark.anyio

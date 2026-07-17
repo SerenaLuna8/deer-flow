@@ -185,7 +185,7 @@ def _cleanup_owned_workspace(
         if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != identity:
             raise SensitiveCleanupFailed
         names = os.listdir(directory)
-        if set(names) != set(expected_files):
+        if not set(names).issubset(expected_files):
             raise SensitiveCleanupFailed
         verified: dict[str, tuple[int, int]] = {}
         for name in names:
