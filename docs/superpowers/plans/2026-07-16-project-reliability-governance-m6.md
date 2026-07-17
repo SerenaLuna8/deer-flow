@@ -1311,6 +1311,8 @@ git commit -m "feat: operationalize M6 cutover"
 
 Expected: PASS；marker完成前所有 M6 project/platform endpoints保持关闭。
 
+完成（2026-07-18）：实现提交 `5519d383` 建立显式 `0013 -> 0014 -> 0015` cutover、外部提交并 restore-attested 的 pre-M6 Task 16 备份证明、逐资源 exact reservation/Job/recovery backfill、可恢复 migration receipts，以及 Gateway/Worker/可选 Scheduler 的本地与 Compose 运维入口。审查修复 `752a9606` 关闭 closed readiness 丢失公开 process/cutover 聚合和 audit active-key 轮换后重复 `backup.created` 两项 Important。最终独立复审为 0 Critical/Important/Minor；fresh gates 为 Task 18 migration/process/readiness/admin 38 passed/0 skipped、M5 migration compatibility 7 passed/0 skipped、pre-cutover backup/attestation/archive 78 passed、Make/serve/Compose 5 passed，production/development Compose、shell syntax、Ruff、format 与 `git diff --check` 全绿。Task 19 负责真实多进程、Frontend static、recovery 和 CI release gates。
+
 ### Task 19: 建立真实 PostgreSQL、多进程、Frontend 和 recovery release gates
 
 **Files:**
