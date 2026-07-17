@@ -836,6 +836,128 @@ async def test_passfile_creation_cancellation_retries_transient_unlink(
     assert passfile is not None and not passfile.exists()
 
 
+def test_passfile_open_failure_closes_pinned_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pinned: archive_module._PinnedDirectory | None = None
+    original_open_directory = archive_module._open_external_directory
+    original_open = archive_module.os.open
+
+    def recording_open_directory(path: Path):
+        nonlocal pinned
+        pinned = original_open_directory(path)
+        return pinned
+
+    def failing_open(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if isinstance(path, str) and path.startswith(".pgpass."):
+            raise OSError("passfile open failed")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(archive_module, "_open_external_directory", recording_open_directory)
+    monkeypatch.setattr(archive_module.os, "open", failing_open)
+    with pytest.raises(OSError, match="passfile open failed"):
+        archive_module._create_libpq_invocation("postgresql://user:password@db/test", tmp_path)
+    assert pinned is not None and pinned.descriptor == -1
+    assert not list(tmp_path.glob(".pgpass.*"))
+
+
+@pytest.mark.parametrize("creation_failure", ["control", "write", "fsync", "lseek"])
+@pytest.mark.parametrize("cleanup_failure", ["stat", "unlink", "fsync"])
+def test_passfile_creation_failure_retries_identity_safe_cleanup(
+    creation_failure: str,
+    cleanup_failure: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pinned: archive_module._PinnedDirectory | None = None
+    original_open_directory = archive_module._open_external_directory
+    original_escape = archive_module._escape_pgpass
+    original_write = archive_module._write_fd_all
+    original_fsync = archive_module.os.fsync
+    original_lseek = archive_module.os.lseek
+    original_stat = archive_module.os.stat
+    original_unlink = archive_module.os.unlink
+    original_fsync_directory = archive_module._fsync_directory
+    creation_failed = False
+    cleanup_failed = False
+    cleanup_retried = False
+
+    def recording_open_directory(path: Path):
+        nonlocal pinned
+        pinned = original_open_directory(path)
+        return pinned
+
+    def failing_escape(value: str) -> str:
+        nonlocal creation_failed
+        if creation_failure == "control" and not creation_failed:
+            creation_failed = True
+            raise BackupCommandFailed
+        return original_escape(value)
+
+    def failing_write(descriptor: int, value: bytes) -> None:
+        nonlocal creation_failed
+        original_write(descriptor, value)
+        if creation_failure == "write" and not creation_failed:
+            creation_failed = True
+            raise OSError("passfile write failed")
+
+    def failing_fsync(descriptor: int) -> None:
+        nonlocal creation_failed
+        if creation_failure == "fsync" and not creation_failed and pinned is not None and descriptor != pinned.descriptor:
+            creation_failed = True
+            raise OSError("passfile fsync failed")
+        original_fsync(descriptor)
+
+    def failing_lseek(descriptor: int, offset: int, whence: int) -> int:
+        nonlocal creation_failed
+        if creation_failure == "lseek" and not creation_failed:
+            creation_failed = True
+            raise OSError("passfile lseek failed")
+        return original_lseek(descriptor, offset, whence)
+
+    def fail_once_stat(path: object, *args: object, **kwargs: object):
+        nonlocal cleanup_failed, cleanup_retried
+        if cleanup_failure == "stat" and isinstance(path, str) and path.startswith(".pgpass."):
+            if not cleanup_failed:
+                cleanup_failed = True
+                raise OSError("transient cleanup stat failure")
+            cleanup_retried = True
+        return original_stat(path, *args, **kwargs)
+
+    def fail_once_unlink(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal cleanup_failed, cleanup_retried
+        if cleanup_failure == "unlink" and isinstance(path, str) and path.startswith(".pgpass."):
+            if not cleanup_failed:
+                cleanup_failed = True
+                raise OSError("transient cleanup unlink failure")
+            cleanup_retried = True
+        original_unlink(path, *args, **kwargs)
+
+    def fail_once_directory_fsync(descriptor: int) -> None:
+        nonlocal cleanup_failed, cleanup_retried
+        if cleanup_failure == "fsync":
+            if not cleanup_failed:
+                cleanup_failed = True
+                raise OSError("transient cleanup fsync failure")
+            cleanup_retried = True
+        original_fsync_directory(descriptor)
+
+    monkeypatch.setattr(archive_module, "_open_external_directory", recording_open_directory)
+    monkeypatch.setattr(archive_module, "_escape_pgpass", failing_escape)
+    monkeypatch.setattr(archive_module, "_write_fd_all", failing_write)
+    monkeypatch.setattr(archive_module.os, "fsync", failing_fsync)
+    monkeypatch.setattr(archive_module.os, "lseek", failing_lseek)
+    monkeypatch.setattr(archive_module.os, "stat", fail_once_stat)
+    monkeypatch.setattr(archive_module.os, "unlink", fail_once_unlink)
+    monkeypatch.setattr(archive_module, "_fsync_directory", fail_once_directory_fsync)
+
+    with pytest.raises((BackupCommandFailed, OSError)):
+        archive_module._create_libpq_invocation("postgresql://user:password@db/test", tmp_path)
+    assert creation_failed
+    assert cleanup_failed
+    assert cleanup_retried
+    assert pinned is not None and pinned.descriptor == -1
+    assert not list(tmp_path.glob(".pgpass.*"))
+
+
 @pytest.mark.asyncio
 async def test_passfile_create_and_remove_fsync_the_pinned_directory(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
     parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)

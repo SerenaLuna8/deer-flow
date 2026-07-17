@@ -1002,53 +1002,38 @@ def _create_libpq_invocation(database_url: str, directory: Path) -> _LibpqInvoca
             raise BackupCommandFailed
         env[target] = value
     pinned = _open_external_directory(directory)
-    passfile: Path | None = None
-    passfile_name: str | None = None
-    passfile_identity: tuple[int, int] | None = None
-    passfile_descriptor: int | None = None
+    invocation = _LibpqInvocation(env=env, passfile=None, directory=pinned)
     if parsed.password is not None:
         if os.name != "posix" or not os.path.isdir("/dev/fd"):
-            pinned.close()
+            _finish_libpq_invocation_release(invocation)
             raise BackupCommandFailed
         passfile_name = f".pgpass.{uuid.uuid4().hex}"
-        passfile = pinned.path / passfile_name
-        passfile_descriptor = os.open(
-            passfile_name,
-            os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-            dir_fd=pinned.descriptor,
-        )
         try:
+            passfile_descriptor = os.open(
+                passfile_name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=pinned.descriptor,
+            )
+        except BaseException:
+            _finish_libpq_invocation_release(invocation)
+            raise
+        invocation.passfile = pinned.path / passfile_name
+        invocation.passfile_name = passfile_name
+        invocation.passfile_descriptor = passfile_descriptor
+        try:
+            info = os.fstat(passfile_descriptor)
+            invocation.passfile_identity = (info.st_dev, info.st_ino)
             line = ":".join(_escape_pgpass(value) for value in (host or "*", port, database, username or "*", parsed.password)) + "\n"
             _write_fd_all(passfile_descriptor, line.encode("utf-8"))
             os.fsync(passfile_descriptor)
-            info = os.fstat(passfile_descriptor)
-            passfile_identity = (info.st_dev, info.st_ino)
             os.lseek(passfile_descriptor, 0, os.SEEK_SET)
             _fsync_directory(pinned.descriptor)
         except BaseException:
-            try:
-                os.close(passfile_descriptor)
-            except OSError:
-                pass
-            passfile_descriptor = None
-            try:
-                os.unlink(passfile_name, dir_fd=pinned.descriptor)
-                _fsync_directory(pinned.descriptor)
-            except FileNotFoundError:
-                pass
-            finally:
-                pinned.close()
+            _release_libpq_invocation_retrying_transient_errors(invocation)
             raise
         env["PGPASSFILE"] = f"/dev/fd/{passfile_descriptor}"
-    return _LibpqInvocation(
-        env=env,
-        passfile=passfile,
-        directory=pinned,
-        passfile_name=passfile_name,
-        passfile_identity=passfile_identity,
-        passfile_descriptor=passfile_descriptor,
-    )
+    return invocation
 
 
 def _finish_libpq_invocation_release(invocation: _LibpqInvocation) -> None:
@@ -1071,18 +1056,38 @@ def _release_libpq_invocation(invocation: _LibpqInvocation) -> None:
     directory_descriptor = invocation.directory.descriptor
     if directory_descriptor < 0:
         raise BackupCommandFailed
+    passfile_identity = invocation.passfile_identity
+    if passfile_identity is None:
+        passfile_descriptor = invocation.passfile_descriptor
+        if passfile_descriptor is None:
+            raise BackupCommandFailed
+        owned_info = os.fstat(passfile_descriptor)
+        if not stat.S_ISREG(owned_info.st_mode):
+            raise BackupCommandFailed
+        passfile_identity = (owned_info.st_dev, owned_info.st_ino)
+        invocation.passfile_identity = passfile_identity
     try:
         info = os.stat(passfile_name, dir_fd=directory_descriptor, follow_symlinks=False)
     except FileNotFoundError:
         _fsync_directory(directory_descriptor)
         _finish_libpq_invocation_release(invocation)
         return
-    if not stat.S_ISREG(info.st_mode) or invocation.passfile_identity != (info.st_dev, info.st_ino):
+    if not stat.S_ISREG(info.st_mode) or passfile_identity != (info.st_dev, info.st_ino):
         _finish_libpq_invocation_release(invocation)
         raise BackupCommandFailed
     os.unlink(passfile_name, dir_fd=directory_descriptor)
     _fsync_directory(directory_descriptor)
     _finish_libpq_invocation_release(invocation)
+
+
+def _release_libpq_invocation_retrying_transient_errors(invocation: _LibpqInvocation) -> None:
+    for attempt in range(2):
+        try:
+            _release_libpq_invocation(invocation)
+            return
+        except OSError:
+            if attempt == 1:
+                raise
 
 
 def _asyncpg_url(database_url: str) -> str:
@@ -1296,14 +1301,8 @@ async def _acquire_libpq_invocation(database_url: str, directory: Path) -> _Libp
 
 
 async def _release_owned_libpq_invocation(invocation: _LibpqInvocation) -> None:
-    for attempt in range(2):
-        cleanup_task = asyncio.create_task(asyncio.to_thread(_release_libpq_invocation, invocation))
-        try:
-            await _await_shielded(cleanup_task)
-            return
-        except OSError:
-            if attempt == 1:
-                raise
+    cleanup_task = asyncio.create_task(asyncio.to_thread(_release_libpq_invocation_retrying_transient_errors, invocation))
+    await _await_shielded(cleanup_task)
 
 
 async def _cleanup_backup(process: object | None, stderr_task: asyncio.Task[object] | None, writer: BackupArchiveWriter | None) -> None:

@@ -1013,7 +1013,9 @@ through an inherited `/dev/fd/N` descriptor; mutable absolute passfile paths are
 the child. The file is removed before publication through a retained fd-relative directory handle.
 Every archive-path ancestor is opened with no-follow directory semantics, writer work is settled
 before cancellation cleanup, and transient identity-check/unlink/directory-fsync failures retain
-passfile ownership for safe cleanup retry. When `AUTH_JWT_SECRET` is absent, key separation reads the existing
+passfile ownership for safe cleanup retry. Passfile ownership begins with the pinned parent, so
+open or later write/fsync/lseek/validation failure cannot bypass that cleanup. When
+`AUTH_JWT_SECRET` is absent, key separation reads the existing
 `DEER_FLOW_HOME/.jwt_secret` without creating or rotating it; missing, unsafe, or unreadable Auth
 material fails closed. The archive records the actual Alembic revision, `pg_dump` version,
 non-empty byte/table counts, and a proven contiguous tombstone cursor. It uses per-archive keys
