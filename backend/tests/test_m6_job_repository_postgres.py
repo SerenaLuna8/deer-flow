@@ -23,7 +23,7 @@ from deerflow.persistence.jobs.sql import (
     JobRepository,
     JobRequeueForbidden,
     JobScope,
-    is_issued_dead_job_requeued_event,
+    consume_issued_dead_job_requeued_event,
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -620,7 +620,7 @@ def test_module_signer_cannot_fabricate_requeue_event_without_repository_state()
         retry_safety="safe",
     )
 
-    assert not is_issued_dead_job_requeued_event(fabricated)
+    assert not consume_issued_dead_job_requeued_event(fabricated)
 
 
 @pytest.mark.postgres

@@ -127,7 +127,7 @@ class PrivateRunRepository:
         scope: PrivateResourceScope,
         thread_id: str,
         request: PrivateRunCreate,
-    ) -> PrivateRunSettlement:
+    ) -> PrivateRunRecord:
         project_id, owner_user_id = self.coordinates(scope)
         thread_exists = (
             await self.session.execute(
@@ -553,7 +553,7 @@ class PrivateRunRepository:
         retry_initial_seconds: int = 2,
         retry_max_seconds: int = 300,
         now: datetime | None = None,
-    ) -> PrivateRunRecord:
+    ) -> PrivateRunSettlement:
         if type(cancel_preempts_outcome) is not bool:
             raise PrivateRunConflict
         settled_at = now or datetime.now(UTC)

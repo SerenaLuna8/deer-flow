@@ -1147,6 +1147,153 @@ async def test_system_requeue_sink_binds_admin_and_successor_authority(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_system_requeue_event_capability_is_consumed_after_first_sink_validation(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    predecessor_id = await _seed_safe_dead_job(seed)
+    context = resolve_system_audit_context(
+        SimpleNamespace(
+            id=seed.owner_a.user_id,
+            system_role="system_admin",
+        ),
+        request_id="system-requeue-consume-once",
+    )
+    sink = SystemJobAuditSink(
+        AuditService(seed.factory, _keyring()),
+        context,
+    )
+
+    class RetainingAuditPort:
+        event = None
+
+        async def dead_job_requeued(self, session, event) -> None:
+            self.event = event
+            await sink.dead_job_requeued(session, event)
+
+    retaining = RetainingAuditPort()
+    try:
+        async with seed.factory() as session, session.begin():
+            await JobRepository(session).requeue_safe_system(
+                seed.owner_a.project_id,
+                predecessor_id,
+                idempotency_key="c" * 64,
+                max_attempts=3,
+                request_id=context.request_id,
+                audit_port=retaining,
+            )
+
+        assert retaining.event is not None
+        with pytest.raises(AuditAuthorityRejected):
+            async with seed.factory() as session, session.begin():
+                await sink.dead_job_requeued(session, retaining.event)
+
+        async with seed.factory() as session:
+            audit_ids = (
+                (
+                    await session.execute(
+                        select(AuditLogRow.job_id).where(
+                            AuditLogRow.action == "job.requeued",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(audit_ids) == 1
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_failed_requeue_audit_revokes_event_before_transaction_retry(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    predecessor_id = await _seed_safe_dead_job(seed)
+    context = resolve_system_audit_context(
+        SimpleNamespace(
+            id=seed.owner_a.user_id,
+            system_role="system_admin",
+        ),
+        request_id="system-requeue-rollback-consume",
+    )
+    sink = SystemJobAuditSink(
+        AuditService(seed.factory, _keyring()),
+        context,
+    )
+
+    class RetainThenFailAuditPort:
+        event = None
+
+        async def dead_job_requeued(self, _session, event) -> None:
+            self.event = event
+            raise RuntimeError("audit unavailable after retain")
+
+    failing = RetainThenFailAuditPort()
+    idempotency_key = "d" * 64
+    try:
+        with pytest.raises(RuntimeError, match="audit unavailable after retain"):
+            async with seed.factory() as session, session.begin():
+                await JobRepository(session).requeue_safe_system(
+                    seed.owner_a.project_id,
+                    predecessor_id,
+                    idempotency_key=idempotency_key,
+                    max_attempts=3,
+                    request_id=context.request_id,
+                    audit_port=failing,
+                )
+
+        assert failing.event is not None
+        rolled_back_successor_id = failing.event.successor_job_id
+        async with seed.factory() as session:
+            assert await session.get(JobRow, rolled_back_successor_id) is None
+
+        with pytest.raises(AuditAuthorityRejected):
+            async with seed.factory() as session, session.begin():
+                await sink.dead_job_requeued(session, failing.event)
+
+        async with seed.factory() as session:
+            assert (
+                await session.scalar(
+                    select(AuditLogRow.id).where(
+                        AuditLogRow.action == "job.requeued",
+                    )
+                )
+                is None
+            )
+
+        async with seed.factory() as session, session.begin():
+            retry_successor_id = await JobRepository(session).requeue_safe_system(
+                seed.owner_a.project_id,
+                predecessor_id,
+                idempotency_key=idempotency_key,
+                max_attempts=3,
+                request_id=context.request_id,
+                audit_port=sink,
+            )
+
+        assert retry_successor_id != rolled_back_successor_id
+        async with seed.factory() as session:
+            audit_job_ids = (
+                (
+                    await session.execute(
+                        select(AuditLogRow.job_id).where(
+                            AuditLogRow.action == "job.requeued",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert audit_job_ids == [retry_successor_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_system_requeue_rejects_cross_project_dead_job_scope(
     migrated_postgres_database_url: str,
 ) -> None:

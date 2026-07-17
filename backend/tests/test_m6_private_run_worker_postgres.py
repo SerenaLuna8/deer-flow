@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import pytest
 from langchain_core.messages import BaseMessage
@@ -14,7 +15,9 @@ from app.private_work.errors import PrivateWorkMcpQuotaExceeded
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import (
     PrivateRunCreate,
+    PrivateRunRecord,
     PrivateRunRepository,
+    PrivateRunSettlement,
 )
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.reliability.execution import (
@@ -41,6 +44,11 @@ from deerflow.runtime.events.models import (
 )
 from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
 from deerflow.sandbox.sandbox import AuthorizationRevoked
+
+
+def test_private_run_repository_return_annotations_match_runtime_contract() -> None:
+    assert get_type_hints(PrivateRunRepository.create)["return"] is PrivateRunRecord
+    assert get_type_hints(PrivateRunRepository.settle_execution)["return"] is PrivateRunSettlement
 
 
 async def _admit_and_claim(

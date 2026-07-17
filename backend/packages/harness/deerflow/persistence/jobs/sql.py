@@ -149,13 +149,13 @@ _ISSUED_REQUEUE_EVENTS: dict[
 _ISSUED_REQUEUE_EVENTS_LOCK = Lock()
 
 
-def is_issued_dead_job_requeued_event(
+def consume_issued_dead_job_requeued_event(
     value: object,
 ) -> TypeGuard[DeadJobRequeuedEvent]:
     if type(value) is not DeadJobRequeuedEvent:
         return False
     with _ISSUED_REQUEUE_EVENTS_LOCK:
-        issued = _ISSUED_REQUEUE_EVENTS.get(id(value))
+        issued = _ISSUED_REQUEUE_EVENTS.pop(id(value), None)
     try:
         return (
             issued is not None
@@ -1150,10 +1150,13 @@ class JobRepository:
             reference = weakref.ref(event, discard)
             with _ISSUED_REQUEUE_EVENTS_LOCK:
                 _ISSUED_REQUEUE_EVENTS[identity] = (reference, snapshot)
-            await audit_port.dead_job_requeued(
-                self.session,
-                event,
-            )
+            try:
+                await audit_port.dead_job_requeued(
+                    self.session,
+                    event,
+                )
+            finally:
+                consume_issued_dead_job_requeued_event(event)
         return successor_id
 
 
@@ -1174,6 +1177,6 @@ __all__ = [
     "JobTerminalResult",
     "JobType",
     "RetrySafety",
-    "is_issued_dead_job_requeued_event",
+    "consume_issued_dead_job_requeued_event",
     "retry_backoff_seconds",
 ]

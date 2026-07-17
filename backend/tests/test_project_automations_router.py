@@ -44,6 +44,7 @@ from app.gateway.deps import (
 )
 from app.gateway.routers import project_automations
 from app.gateway.routers.project_automations import create_automation
+from app.gateway.trace_middleware import TraceMiddleware
 from app.private_work.context import PrivateWorkContext
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
@@ -175,6 +176,40 @@ def test_project_automation_routes_are_mounted() -> None:
     assert "/api/projects/{project_id}/automations/{task_id}/trigger" in paths
     assert "/api/projects/{project_id}/automations/{task_id}/runs" in paths
     assert "/api/projects/{project_id}/automations/threads/{thread_id}" in paths
+
+
+@pytest.mark.anyio
+async def test_missing_automation_audit_composition_returns_stable_http_envelope() -> None:
+    context = _context()
+    app = FastAPI()
+    app.add_middleware(TraceMiddleware, enabled=True)
+    app.include_router(project_automations.router)
+    app.state.automation_service = object()
+
+    async def override_context() -> PrivateWorkContext:
+        return context
+
+    async def override_project_open() -> None:
+        return None
+
+    app.dependency_overrides[automation_context] = override_context
+    app.dependency_overrides[require_project_automation_open] = override_project_open
+    request_id = "automation-audit-composition-missing"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            f"/api/projects/{context.project_id}/automations",
+            headers={"X-Trace-Id": request_id},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "AUTOMATION_UNAVAILABLE",
+        "message": AutomationUnavailable.public_message,
+        "request_id": request_id,
+    }
 
 
 def test_readiness_is_mounted_before_dynamic_task_route_and_skips_open_guard() -> None:

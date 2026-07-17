@@ -28,7 +28,7 @@ from app.reliability.jobs import AdmittedJobRecord
 from deerflow.persistence.jobs.sql import (
     DeadJobRequeuedEvent,
     JobTerminalEvent,
-    is_issued_dead_job_requeued_event,
+    consume_issued_dead_job_requeued_event,
 )
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -616,7 +616,7 @@ class SystemJobAuditSink:
         session: AsyncSession,
         event: DeadJobRequeuedEvent,
     ) -> None:
-        if not is_issued_dead_job_requeued_event(event) or event.request_id != self._request_id:
+        if not consume_issued_dead_job_requeued_event(event) or event.request_id != self._request_id:
             raise AuditAuthorityRejected()
         await self._service.append(
             session,
