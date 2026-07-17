@@ -1,3 +1,18 @@
+# M6 Subagent-Driven Development Progress
+
+- Plan: `docs/superpowers/plans/2026-07-16-project-reliability-governance-m6.md`
+- Branch: `codex/m6-reliability-governance`
+- Baseline: `ccceca2e`
+- Worktree: `/Users/jiangfeng/deer-flow/.worktrees/m6-reliability-governance`
+
+## M6 reviewed tasks
+
+- Tasks 1-12: complete through `1f5ff687` (final schema, reliability contracts, durable jobs/Worker/streams, project and Automation admission, quotas, and privacy-safe append-only audit persistence).
+- Task 13: complete at `381f0bd0` (implementation `de7eb9cd..b9f0af85`; four bounded repair waves `ab7d85a4`, `a02d55ab`, `24fd36e7`, `381f0bd0`; final independent review 0 Critical/Important/Minor). Gateway/Worker/Scheduler process authority, governance mutation coverage, safe one-time requeue audit authority, transaction rollback, and exactly-once terminal audit ownership are verified. Fresh final evidence: Automation 167, audit/requeue 71, governance 196, private-run/Worker/Scheduler 93, shared-assets 205, harness boundary 7 passed; Ruff, format, and diff checks clean.
+- Task 14: next — project Admin usage/audit API and UI.
+
+---
+
 # M5 Subagent-Driven Development Progress
 
 - Plan: `docs/superpowers/plans/2026-07-16-project-automation-m5.md`
