@@ -56,17 +56,24 @@ class ReliabilityReadinessService:
         schema: str,
         request_id: str,
     ) -> ReliabilityReadiness:
+        process = self._process
         return ReliabilityReadiness(
             status="closed",
             database=database,
             schema=schema,
-            worker_fleet="closed",
-            scheduler="closed",
+            worker_fleet=process.worker_fleet if process is not None else "closed",
+            scheduler=process.scheduler if process is not None else "closed",
             stream="closed",
             recovery="closed",
             quota="closed",
             audit="closed",
             request_id=request_id,
+            role=process.role if process is not None else "gateway",
+            worker_count=process.worker_count if process is not None else 0,
+            worker_capacity=process.worker_capacity if process is not None else 0,
+            worker_oldest_heartbeat_age_seconds=(process.worker_oldest_heartbeat_age_seconds if process is not None else None),
+            scheduler_ownership=(process.scheduler_ownership if process is not None else "unavailable"),
+            cutover=process.cutover if process is not None else "unknown",
         )
 
     async def read(self) -> ReliabilityReadiness:

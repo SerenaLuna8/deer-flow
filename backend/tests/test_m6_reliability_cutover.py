@@ -29,6 +29,7 @@ from app.reliability.errors import (
     ReliabilityQuotaExceeded,
     ReliabilityWorkerUnavailable,
 )
+from app.reliability.process_readiness import ProcessReadinessSnapshot
 from app.reliability.readiness import ReliabilityReadinessService
 from deerflow.persistence.revisions import RevisionAncestry
 
@@ -271,6 +272,59 @@ async def test_readiness_closes_on_schema_or_database_failure() -> None:
     assert unavailable.status == "closed"
     assert unavailable.database == "unavailable"
     assert unavailable.schema == "unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scheduler", "ownership"),
+    (
+        ("disabled", "disabled"),
+        ("unavailable", "unowned"),
+        ("unavailable", "ownership_lost"),
+    ),
+)
+async def test_closed_readiness_preserves_public_process_snapshot_without_opening_business_domains(
+    scheduler: str,
+    ownership: str,
+) -> None:
+    class ClosedGuard(_OpenGuard):
+        async def require_gateway_open(self) -> None:
+            raise ReliabilityCutover(self.request_id)
+
+    process = ProcessReadinessSnapshot(
+        ready=False,
+        role="gateway",
+        worker_fleet="ready",
+        worker_count=2,
+        worker_capacity=6,
+        worker_oldest_heartbeat_age_seconds=4,
+        scheduler=scheduler,
+        scheduler_ownership=ownership,
+        cutover="migration_required",
+    )
+
+    closed = await ReliabilityReadinessService(ClosedGuard(), process=process).read()
+
+    assert closed.status == "closed"
+    assert closed.database == "ready"
+    assert closed.schema == "migration_required"
+    assert closed.role == "gateway"
+    assert closed.worker_fleet == "ready"
+    assert closed.worker_count == 2
+    assert closed.worker_capacity == 6
+    assert closed.worker_oldest_heartbeat_age_seconds == 4
+    assert closed.scheduler == scheduler
+    assert closed.scheduler_ownership == ownership
+    assert closed.cutover == "migration_required"
+    assert (closed.stream, closed.recovery, closed.quota, closed.audit) == (
+        "closed",
+        "closed",
+        "closed",
+        "closed",
+    )
+    serialized = str(closed).lower()
+    for forbidden in ("pid", "hostname", "lock_key", "postgresql://", "token"):
+        assert forbidden not in serialized
 
 
 @pytest.mark.asyncio

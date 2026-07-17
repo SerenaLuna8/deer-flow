@@ -378,6 +378,63 @@ async def test_recovery_probe_failure_stops_at_expand_and_resume_is_idempotent(
         assert await connection.scalar(text("SELECT count(*) FROM audit_logs WHERE action='backup.created'")) == 1
 
 
+async def test_backup_audit_is_not_duplicated_when_active_audit_key_rotates_before_resume(
+    m6_migration_database: M6MigrationDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.migrate_reliability as migration
+
+    database = m6_migration_database.database
+    original_probe = migration._probe_recovery
+
+    async def fail_after_backup_audit(*_args: object, **_kwargs: object) -> None:
+        raise ReliabilityMigrationError("RECOVERY_PROBE_FAILED")
+
+    monkeypatch.setattr(migration, "_probe_recovery", fail_after_backup_audit)
+    with pytest.raises(ReliabilityMigrationError, match="RECOVERY_PROBE_FAILED"):
+        await run_reliability_migration(
+            database.url,
+            backup_proof=m6_migration_database.proof,
+            execute=True,
+            maintenance_acknowledged=True,
+        )
+    assert await database.current_revision() == "0014_project_reliability_expand"
+    async with database.engine.connect() as connection:
+        assert await connection.scalar(text("SELECT count(*) FROM audit_logs WHERE action='backup.created'")) == 1
+
+    monkeypatch.setenv("DEER_FLOW_AUDIT_ACTIVE_KEY_ID", "test-audit-v2")
+    monkeypatch.setenv(
+        "DEER_FLOW_AUDIT_KEYRING_JSON",
+        json.dumps(
+            {
+                "test-audit-v1": base64.b64encode(b"a" * 32).decode("ascii"),
+                "test-audit-v2": base64.b64encode(b"b" * 32).decode("ascii"),
+            },
+            sort_keys=True,
+        ),
+    )
+    monkeypatch.setattr(migration, "_probe_recovery", original_probe)
+
+    result = await run_reliability_migration(
+        database.url,
+        backup_proof=m6_migration_database.proof,
+        execute=True,
+        maintenance_acknowledged=True,
+    )
+
+    assert result.cutover_complete is True
+    async with database.engine.connect() as connection:
+        audit_rows = (
+            await connection.execute(
+                text(
+                    """SELECT target_ref_key_id FROM audit_logs
+                       WHERE action='backup.created' AND target_kind='backup'"""
+                )
+            )
+        ).all()
+    assert audit_rows == [("test-audit-v1",)]
+
+
 async def test_backup_proof_tamper_and_wrong_source_fail_before_expand(
     m6_migration_database: M6MigrationDatabase,
 ) -> None:

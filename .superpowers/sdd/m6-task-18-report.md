@@ -81,11 +81,32 @@ no-clobber, tamper, wrong-source, and cancellation-settle failures.
 - `reconcile-usage --dry-run` is aggregate-only across projects; execute requires
   one explicit project while retaining identifier-free output.
 
+## Independent-review repairs
+
+The Task 18 follow-up review found and closed two cutover-edge defects:
+
+- closed readiness now preserves the already-collected public process snapshot
+  (role, aggregate Worker fleet/count/capacity/age, Scheduler state/ownership,
+  and `migration_required` cutover) while keeping overall readiness and every
+  business domain closed; no process identifier, hostname, lock key, URL, token,
+  or other secret is added;
+- resumable migration now checks the backup target HMAC under the active and all
+  retained audit keys before appending `backup.created`. The migration advisory
+  lock serializes the check/append transaction, so a failure at `0014`, active
+  key rotation, and resume cannot duplicate the authenticated backup receipt.
+
+Both repairs were driven from failing regression tests, including disabled,
+unowned, and ownership-lost Scheduler snapshots and an exact `v1 -> v2` audit
+key rotation between the failed and resumed migration attempts.
+
 ## Fresh verification
 
 ```text
 Task 18 real PostgreSQL migration/process/admin API:
-23 passed in 9.24s, 0 skipped
+24 passed in 9.95s, 0 skipped
+
+Cutover/readiness contract:
+14 passed, 0 skipped
 
 Task 16 original 98-test affected combination plus new archive coverage:
 101 passed in 0.86s

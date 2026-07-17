@@ -951,18 +951,25 @@ async def _record_authenticated_pre_m6_backup(
         service,
         process_context=_bind_operator_audit_process(service),
     )
-    target_ref = keyring.audit_target_ref("backup", proof.archive_id)
+    target_refs = keyring.audit_target_refs("backup", proof.archive_id)
     async with factory() as session, session.begin():
         exists = await session.scalar(
             text(
                 """SELECT EXISTS (
-                       SELECT 1 FROM audit_logs
-                       WHERE action='backup.created' AND target_kind='backup'
-                         AND target_ref_key_id=:key_id AND target_ref_hmac=:target_ref)"""
+                       SELECT 1
+                       FROM audit_logs AS existing
+                       JOIN unnest(
+                           CAST(:key_ids AS text[]),
+                           CAST(:target_refs AS text[])
+                       ) AS candidate(key_id, target_ref)
+                         ON existing.target_ref_key_id=candidate.key_id
+                        AND existing.target_ref_hmac=candidate.target_ref
+                       WHERE existing.action='backup.created'
+                         AND existing.target_kind='backup')"""
             ),
             {
-                "key_id": target_ref.key_id,
-                "target_ref": target_ref.hmac_hex,
+                "key_ids": [target_ref.key_id for target_ref in target_refs],
+                "target_refs": [target_ref.hmac_hex for target_ref in target_refs],
             },
         )
         if exists is not True:
