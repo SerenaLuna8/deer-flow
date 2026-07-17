@@ -149,62 +149,6 @@ _ISSUED_REQUEUE_EVENTS: dict[
 _ISSUED_REQUEUE_EVENTS_LOCK = Lock()
 
 
-def _issue_dead_job_requeued_event(
-    *,
-    project_id: uuid.UUID,
-    predecessor_job_id: uuid.UUID,
-    successor_job_id: uuid.UUID,
-    request_id: str,
-    job_type: JobType,
-    attempt_count: int,
-    retry_safety: RetrySafety,
-) -> DeadJobRequeuedEvent:
-    try:
-        project_id = uuid.UUID(str(project_id))
-        predecessor_job_id = uuid.UUID(str(predecessor_job_id))
-        successor_job_id = uuid.UUID(str(successor_job_id))
-    except (TypeError, ValueError):
-        raise ValueError("dead job requeue event is invalid") from None
-    if (
-        type(request_id) is not str
-        or not 1 <= len(request_id) <= 512
-        or job_type not in {"private_run", "automation_run", "retention_purge"}
-        or type(attempt_count) is not int
-        or not 0 <= attempt_count <= 20
-        or retry_safety not in {"safe", "unknown", "unsafe"}
-    ):
-        raise ValueError("dead job requeue event is invalid")
-    event = object.__new__(DeadJobRequeuedEvent)
-    object.__setattr__(event, "project_id", project_id)
-    object.__setattr__(event, "predecessor_job_id", predecessor_job_id)
-    object.__setattr__(event, "successor_job_id", successor_job_id)
-    object.__setattr__(event, "request_id", request_id)
-    object.__setattr__(event, "job_type", job_type)
-    object.__setattr__(event, "attempt_count", attempt_count)
-    object.__setattr__(event, "retry_safety", retry_safety)
-    snapshot = (
-        project_id,
-        predecessor_job_id,
-        successor_job_id,
-        request_id,
-        job_type,
-        attempt_count,
-        retry_safety,
-    )
-    identity = id(event)
-
-    def discard(reference: weakref.ReferenceType[DeadJobRequeuedEvent]) -> None:
-        with _ISSUED_REQUEUE_EVENTS_LOCK:
-            current = _ISSUED_REQUEUE_EVENTS.get(identity)
-            if current is not None and current[0] is reference:
-                del _ISSUED_REQUEUE_EVENTS[identity]
-
-    reference = weakref.ref(event, discard)
-    with _ISSUED_REQUEUE_EVENTS_LOCK:
-        _ISSUED_REQUEUE_EVENTS[identity] = (reference, snapshot)
-    return event
-
-
 def is_issued_dead_job_requeued_event(
     value: object,
 ) -> TypeGuard[DeadJobRequeuedEvent]:
@@ -247,6 +191,17 @@ class JobTerminalEvent:
     attempt_count: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class JobTerminalResult:
+    run_terminal_published: bool
+
+
+@dataclass(frozen=True, slots=True)
+class JobRetryResult:
+    changed: bool
+    run_terminal_published: bool
+
+
 class JobAuditPort(Protocol):
     async def dead_job_requeued(
         self,
@@ -260,7 +215,7 @@ class JobTerminalPort(Protocol):
         self,
         session: AsyncSession,
         event: JobTerminalEvent,
-    ) -> None: ...
+    ) -> JobTerminalResult: ...
 
 
 class JobIdempotencyConflict(RuntimeError):
@@ -464,10 +419,10 @@ class JobRepository:
         status: Literal["cancelled", "dead"],
         public_error_code: str | None,
         now: datetime,
-    ) -> None:
+    ) -> JobTerminalResult:
         if self._terminal_port is None:
-            return
-        await self._terminal_port.job_terminalized(
+            return JobTerminalResult(run_terminal_published=False)
+        result = await self._terminal_port.job_terminalized(
             self.session,
             JobTerminalEvent(
                 job_id=row.id,
@@ -484,6 +439,9 @@ class JobRepository:
                 attempt_count=row.attempt_count,
             ),
         )
+        if type(result) is not JobTerminalResult:
+            raise TypeError("job terminal port returned an invalid result")
+        return result
 
     async def _mark_dead(
         self,
@@ -492,7 +450,7 @@ class JobRepository:
         owner_ref: JobOwnerRef | None,
         public_error_code: str,
         now: datetime,
-    ) -> None:
+    ) -> JobTerminalResult:
         row.status = "dead"
         row.public_error_code = public_error_code
         row.lease_owner_id = None
@@ -514,7 +472,7 @@ class JobRepository:
                 dead_at=now,
             )
         )
-        await self._publish_terminal(
+        return await self._publish_terminal(
             row,
             status="dead",
             public_error_code=public_error_code,
@@ -914,11 +872,34 @@ class JobRepository:
         retry_max_seconds: int,
         now: datetime | None = None,
     ) -> bool:
+        result = await self.retry_or_dead_result(
+            job_id,
+            lease_token=lease_token,
+            public_error_code=public_error_code,
+            retry_initial_seconds=retry_initial_seconds,
+            retry_max_seconds=retry_max_seconds,
+            now=now,
+        )
+        return result.changed
+
+    async def retry_or_dead_result(
+        self,
+        job_id: uuid.UUID,
+        *,
+        lease_token: str,
+        public_error_code: str,
+        retry_initial_seconds: int,
+        retry_max_seconds: int,
+        now: datetime | None = None,
+    ) -> JobRetryResult:
         failed_at = self._now(now)
         if not public_error_code or len(public_error_code) > 64:
             raise ValueError("public_error_code must be between 1 and 64 characters")
         if not await self._lock_job_authority(job_id):
-            return False
+            return JobRetryResult(
+                changed=False,
+                run_terminal_published=False,
+            )
         token_hash = _lease_token_hash(lease_token)
         row = (
             await self.session.execute(
@@ -933,7 +914,10 @@ class JobRepository:
             )
         ).scalar_one_or_none()
         if row is None:
-            return False
+            return JobRetryResult(
+                changed=False,
+                run_terminal_published=False,
+            )
         if row.retry_safety == "safe" and row.attempt_count < row.max_attempts:
             delay = retry_backoff_seconds(
                 attempt_count=row.attempt_count,
@@ -954,7 +938,10 @@ class JobRepository:
             row.lease_expires_at = None
             row.heartbeat_at = None
             row.updated_at = failed_at
-            return True
+            return JobRetryResult(
+                changed=True,
+                run_terminal_published=False,
+            )
 
         dead_error_code = "SIDE_EFFECT_STATE_UNKNOWN" if row.retry_safety != "safe" else public_error_code
         owner_ref = self._owner_ref(row.owner_user_id)
@@ -964,13 +951,16 @@ class JobRepository:
             now=failed_at,
             public_error_code=dead_error_code,
         )
-        await self._mark_dead(
+        terminal = await self._mark_dead(
             row,
             owner_ref=owner_ref,
             public_error_code=dead_error_code,
             now=failed_at,
         )
-        return True
+        return JobRetryResult(
+            changed=True,
+            run_terminal_published=terminal.run_terminal_published,
+        )
 
     async def list_dead(
         self,
@@ -1016,9 +1006,8 @@ class JobRepository:
             DeadJobRow.project_id == scope.project_id,
         ]
         predicates.append(JobRow.owner_user_id.is_(None) if scope.owner_user_id is None else JobRow.owner_user_id == scope.owner_user_id)
-        predecessor = await self._lock_safe_dead_predecessor(predicates)
-        return await self._requeue_locked(
-            predecessor,
+        return await self._requeue_safe_exact(
+            predicates,
             idempotency_key=idempotency_key,
             max_attempts=max_attempts,
             request_id=request_id,
@@ -1040,14 +1029,11 @@ class JobRepository:
         except (TypeError, ValueError):
             raise TypeError("system requeue requires a project UUID")
         dead_job_id = self._validate_requeue_request(dead_job_id, request_id)
-        predecessor = await self._lock_safe_dead_predecessor(
+        return await self._requeue_safe_exact(
             [
                 DeadJobRow.job_id == dead_job_id,
                 DeadJobRow.project_id == project_id,
-            ]
-        )
-        return await self._requeue_locked(
-            predecessor,
+            ],
             idempotency_key=idempotency_key,
             max_attempts=max_attempts,
             request_id=request_id,
@@ -1067,26 +1053,34 @@ class JobRepository:
             raise ValueError("request_id must be between 1 and 512 characters")
         return dead_job_id
 
-    async def _lock_safe_dead_predecessor(
+    async def _requeue_safe_exact(
         self,
-        predicates: list[sa.ColumnElement[bool]],
-    ) -> JobRow:
-        result = await self.session.execute(sa.select(DeadJobRow, JobRow).join(JobRow, JobRow.id == DeadJobRow.job_id).where(*predicates).with_for_update(of=JobRow))
-        pair = result.one_or_none()
-        if pair is None or pair[0].retry_safety != "safe":
-            raise JobRequeueForbidden("dead job is unavailable for safe requeue")
-        _dead, predecessor = pair
-        return predecessor
-
-    async def _requeue_locked(
-        self,
-        predecessor: JobRow,
+        predecessor_predicates: list[sa.ColumnElement[bool]],
         *,
         idempotency_key: str,
         max_attempts: int,
         request_id: str,
         audit_port: JobAuditPort,
     ) -> uuid.UUID:
+        pair = (
+            await self.session.execute(
+                sa.select(DeadJobRow, JobRow)
+                .join(
+                    JobRow,
+                    sa.and_(
+                        JobRow.id == DeadJobRow.job_id,
+                        JobRow.project_id == DeadJobRow.project_id,
+                    ),
+                )
+                .where(*predecessor_predicates)
+                .with_for_update(of=(DeadJobRow, JobRow))
+            )
+        ).one_or_none()
+        if pair is None:
+            raise JobRequeueForbidden("dead job is unavailable for safe requeue")
+        dead, predecessor = pair
+        if dead.retry_safety != "safe" or predecessor.status != "dead" or predecessor.retry_safety != "safe":
+            raise JobRequeueForbidden("dead job is unavailable for safe requeue")
         request = EnqueueJob(
             job_type=predecessor.job_type,
             scope=JobScope(predecessor.project_id, predecessor.owner_user_id),
@@ -1100,17 +1094,65 @@ class JobRepository:
         )
         successor_id, created = await self._enqueue(request)
         if created:
+            successor_owner = JobRow.owner_user_id.is_(None) if predecessor.owner_user_id is None else JobRow.owner_user_id == predecessor.owner_user_id
+            successor = (
+                await self.session.execute(
+                    sa.select(JobRow)
+                    .where(
+                        JobRow.id == successor_id,
+                        JobRow.project_id == predecessor.project_id,
+                        successor_owner,
+                        JobRow.job_type == predecessor.job_type,
+                        JobRow.run_id == predecessor.run_id,
+                        JobRow.automation_occurrence_id == predecessor.automation_occurrence_id,
+                        JobRow.predecessor_dead_job_id == predecessor.id,
+                        JobRow.status == "queued",
+                        JobRow.attempt_count == 0,
+                        JobRow.retry_safety == "safe",
+                    )
+                    .with_for_update(of=JobRow)
+                )
+            ).scalar_one_or_none()
+            if successor is None:
+                raise JobRequeueForbidden(
+                    "safe requeue successor authority is invalid",
+                )
+            event = object.__new__(DeadJobRequeuedEvent)
+            event_project_id = uuid.UUID(str(predecessor.project_id))
+            predecessor_id = uuid.UUID(str(predecessor.id))
+            event_successor_id = uuid.UUID(str(successor.id))
+            object.__setattr__(event, "project_id", event_project_id)
+            object.__setattr__(event, "predecessor_job_id", predecessor_id)
+            object.__setattr__(event, "successor_job_id", event_successor_id)
+            object.__setattr__(event, "request_id", request_id)
+            object.__setattr__(event, "job_type", successor.job_type)
+            object.__setattr__(event, "attempt_count", successor.attempt_count)
+            object.__setattr__(event, "retry_safety", successor.retry_safety)
+            snapshot = (
+                event_project_id,
+                predecessor_id,
+                event_successor_id,
+                request_id,
+                successor.job_type,
+                successor.attempt_count,
+                successor.retry_safety,
+            )
+            identity = id(event)
+
+            def discard(
+                reference: weakref.ReferenceType[DeadJobRequeuedEvent],
+            ) -> None:
+                with _ISSUED_REQUEUE_EVENTS_LOCK:
+                    current = _ISSUED_REQUEUE_EVENTS.get(identity)
+                    if current is not None and current[0] is reference:
+                        del _ISSUED_REQUEUE_EVENTS[identity]
+
+            reference = weakref.ref(event, discard)
+            with _ISSUED_REQUEUE_EVENTS_LOCK:
+                _ISSUED_REQUEUE_EVENTS[identity] = (reference, snapshot)
             await audit_port.dead_job_requeued(
                 self.session,
-                _issue_dead_job_requeued_event(
-                    project_id=predecessor.project_id,
-                    predecessor_job_id=predecessor.id,
-                    successor_job_id=successor_id,
-                    request_id=request_id,
-                    job_type=request.job_type,
-                    attempt_count=0,
-                    retry_safety=request.retry_safety,
-                ),
+                event,
             )
         return successor_id
 
@@ -1126,8 +1168,10 @@ __all__ = [
     "JobOwnerRef",
     "JobOwnerRefRequired",
     "JobRepository",
+    "JobRetryResult",
     "JobRequeueForbidden",
     "JobScope",
+    "JobTerminalResult",
     "JobType",
     "RetrySafety",
     "is_issued_dead_job_requeued_event",

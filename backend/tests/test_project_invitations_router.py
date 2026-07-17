@@ -51,6 +51,7 @@ def _invitation() -> InvitationView:
 def _app() -> FastAPI:
     app = FastAPI()
     app.state.project_quota_enforcer = object()
+    app.state.operational_audit_sink = AsyncMock()
     app.include_router(project_invitations.router)
 
     async def fake_session():

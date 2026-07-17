@@ -42,6 +42,7 @@ def _view(*, status: str) -> ProjectView:
 
 def _client() -> TestClient:
     app = FastAPI()
+    app.state.operational_audit_sink = AsyncMock()
     app.include_router(project_lifecycle.router)
 
     async def fake_session():

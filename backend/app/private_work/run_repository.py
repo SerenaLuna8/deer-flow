@@ -53,6 +53,12 @@ class PrivateRunExecutionState:
     cancel_requested: bool
 
 
+@dataclass(frozen=True, slots=True)
+class PrivateRunSettlement:
+    run: PrivateRunRecord
+    run_terminal_published: bool
+
+
 class PrivateRunConflict(Exception):
     """Session-bound invariant failure; public boundaries supply request IDs."""
 
@@ -121,7 +127,7 @@ class PrivateRunRepository:
         scope: PrivateResourceScope,
         thread_id: str,
         request: PrivateRunCreate,
-    ) -> PrivateRunRecord:
+    ) -> PrivateRunSettlement:
         project_id, owner_user_id = self.coordinates(scope)
         thread_exists = (
             await self.session.execute(
@@ -562,7 +568,10 @@ class PrivateRunRepository:
             "cancelled": ("interrupted", "cancelled"),
         }.get(outcome)
         if terminal_pair is not None and (run.status, job.status) == terminal_pair:
-            return self.record(run)
+            return PrivateRunSettlement(
+                run=self.record(run),
+                run_terminal_published=True,
+            )
         if (
             not self._active_job_lease(
                 job,
@@ -585,6 +594,7 @@ class PrivateRunRepository:
             outcome = "cancelled"
             public_error_code = None
 
+        run_terminal_published = False
         if outcome == "succeeded":
             changed = await self.jobs.settle_success(
                 job_id,
@@ -607,7 +617,7 @@ class PrivateRunRepository:
             if ambiguous_side_effect:
                 job.retry_safety = "unknown"
                 await self.session.flush()
-            changed = await self.jobs.retry_or_dead(
+            job_result = await self.jobs.retry_or_dead_result(
                 job_id,
                 lease_token=lease_token,
                 public_error_code=public_error_code,
@@ -615,6 +625,8 @@ class PrivateRunRepository:
                 retry_max_seconds=retry_max_seconds,
                 now=settled_at,
             )
+            changed = job_result.changed
+            run_terminal_published = job_result.run_terminal_published
             if job.status == "retry_wait":
                 run.status = "pending"
                 run.error = None
@@ -628,7 +640,10 @@ class PrivateRunRepository:
         run.execution_heartbeat_at = None
         run.updated_at = settled_at
         await self.session.flush()
-        return self.record(run)
+        return PrivateRunSettlement(
+            run=self.record(run),
+            run_terminal_published=run_terminal_published,
+        )
 
     async def request_cancel(
         self,

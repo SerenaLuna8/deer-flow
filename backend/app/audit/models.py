@@ -423,7 +423,7 @@ class AuditActor:
         if not is_issued_audit_process_context(context):
             raise AuditAuthorityRejected()
         actor = cls(process=context.process)
-        _register_elevated_actor(actor)
+        _register_elevated_actor(actor, process_issuer_id=context.issuer_id)
         return actor
 
 
@@ -495,7 +495,12 @@ _ELEVATED_ACTORS: dict[
     int,
     tuple[
         weakref.ReferenceType[AuditActor],
-        tuple[uuid.UUID | None, AuditProcess | None, AuditPlatformRole | None],
+        tuple[
+            uuid.UUID | None,
+            AuditProcess | None,
+            AuditPlatformRole | None,
+            uuid.UUID | None,
+        ],
     ],
 ] = {}
 
@@ -554,10 +559,25 @@ class _AuditProcessRegistry:
     def owns(self, context: object) -> TypeGuard[AuditProcessContext]:
         return is_issued_audit_process_context(context) and context is self._context and context.issuer_id == self._issuer_id
 
+    @property
+    def issuer_id(self) -> uuid.UUID:
+        return self._issuer_id
 
-def _register_elevated_actor(actor: AuditActor) -> None:
+
+def _register_elevated_actor(
+    actor: AuditActor,
+    *,
+    process_issuer_id: uuid.UUID | None = None,
+) -> None:
+    if (actor.process is None) != (process_issuer_id is None):
+        raise AuditAuthorityRejected()
     identity = id(actor)
-    snapshot = (actor.user_id, actor.process, actor.platform_role)
+    snapshot = (
+        actor.user_id,
+        actor.process,
+        actor.platform_role,
+        process_issuer_id,
+    )
 
     def discard(reference: weakref.ReferenceType[AuditActor]) -> None:
         with _SYSTEM_CONTEXT_LOCK:
@@ -570,7 +590,11 @@ def _register_elevated_actor(actor: AuditActor) -> None:
         _ELEVATED_ACTORS[identity] = (reference, snapshot)
 
 
-def is_issued_elevated_audit_actor(value: object) -> TypeGuard[AuditActor]:
+def is_issued_elevated_audit_actor(
+    value: object,
+    *,
+    process_issuer_id: uuid.UUID | None = None,
+) -> TypeGuard[AuditActor]:
     if type(value) is not AuditActor:
         return False
     with _SYSTEM_CONTEXT_LOCK:
@@ -584,6 +608,7 @@ def is_issued_elevated_audit_actor(value: object) -> TypeGuard[AuditActor]:
                 value.user_id,
                 value.process,
                 value.platform_role,
+                process_issuer_id,
             )
         )
     except AttributeError:

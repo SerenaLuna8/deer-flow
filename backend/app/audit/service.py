@@ -57,12 +57,6 @@ class AuditService:
         self._keyring = keyring
         self.__process_registry = _AuditProcessRegistry()
 
-    def _bind_process_context(
-        self,
-        process: AuditProcess,
-    ) -> AuditProcessContext:
-        return self.__process_registry.bind(process)
-
     def require_process_context(
         self,
         context: object,
@@ -137,8 +131,7 @@ class AuditService:
         )
         return self._record(row)
 
-    @staticmethod
-    def _valid_actor(value: object) -> bool:
+    def _valid_actor(self, value: object) -> bool:
         try:
             if type(value) is not AuditActor:
                 return False
@@ -151,7 +144,12 @@ class AuditService:
             )
             if not valid:
                 return False
-            if value.process is not None or value.platform_role is not None:
+            if value.process is not None:
+                return is_issued_elevated_audit_actor(
+                    value,
+                    process_issuer_id=self.__process_registry.issuer_id,
+                )
+            if value.platform_role is not None:
                 return is_issued_elevated_audit_actor(value)
             return True
         except AttributeError:
@@ -369,32 +367,23 @@ class AuditService:
 
 
 def _bind_gateway_audit_process(service: AuditService) -> AuditProcessContext:
-    return service._bind_process_context(AuditProcess.GATEWAY)
+    return service._AuditService__process_registry.bind(AuditProcess.GATEWAY)
 
 
 def _bind_worker_audit_process(service: AuditService) -> AuditProcessContext:
-    return service._bind_process_context(AuditProcess.WORKER)
+    return service._AuditService__process_registry.bind(AuditProcess.WORKER)
 
 
 def _bind_scheduler_audit_process(service: AuditService) -> AuditProcessContext:
-    return service._bind_process_context(AuditProcess.SCHEDULER)
+    return service._AuditService__process_registry.bind(AuditProcess.SCHEDULER)
 
 
 def _bind_operator_audit_process(service: AuditService) -> AuditProcessContext:
-    return service._bind_process_context(AuditProcess.OPERATOR)
+    return service._AuditService__process_registry.bind(AuditProcess.OPERATOR)
 
 
 def _bind_recovery_audit_process(service: AuditService) -> AuditProcessContext:
-    return service._bind_process_context(AuditProcess.RECOVERY)
-
-
-def _bind_process_audit_for_test(
-    service: AuditService,
-    process: AuditProcess,
-) -> AuditProcessContext:
-    """Private test-only factory for isolated process composition fixtures."""
-
-    return service._bind_process_context(process)
+    return service._AuditService__process_registry.bind(AuditProcess.RECOVERY)
 
 
 __all__ = ["AuditService"]

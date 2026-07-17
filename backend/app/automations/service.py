@@ -359,6 +359,11 @@ class ProjectAutomationService:
                 )
                 if updated is None:
                     raise AutomationVersionConflict(context.request_id)
+                await self._audit.automation_updated(
+                    session,
+                    context,
+                    updated.id,
+                )
             return self._view(updated)
         except Exception as error:
             self._raise_mapped(error, context.request_id)
@@ -449,6 +454,11 @@ class ProjectAutomationService:
                 )
                 if updated is None:
                     raise AutomationVersionConflict(context.request_id)
+                await self._audit.automation_updated(
+                    session,
+                    context,
+                    updated.id,
+                )
             return self._view(updated)
         except Exception as error:
             self._raise_mapped(error, context.request_id)

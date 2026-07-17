@@ -22,6 +22,7 @@ NOW = datetime(2026, 7, 12, 9, 0, tzinfo=UTC)
 def _client() -> TestClient:
     app = FastAPI()
     app.state.project_quota_enforcer = object()
+    app.state.operational_audit_sink = AsyncMock()
     app.include_router(project_members.router)
 
     async def fake_session():

@@ -506,7 +506,11 @@ def _factory():
 
 
 def _governance_sink(request: Request):
-    return getattr(request.app.state, "shared_asset_audit_sink", None)
+    value = getattr(request.app.state, "shared_asset_audit_sink", None)
+    if value is None:
+        request_id = get_current_trace_id() or generate_trace_id()
+        raise_asset_domain(AssetStorageUnavailable(request_id))
+    return value
 
 
 def get_agent_service(request: Request) -> AgentService:

@@ -11,6 +11,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
+import deerflow.persistence.jobs.sql as jobs_sql
 from deerflow.persistence.jobs.model import DeadJobRow, JobAttemptRow, JobRow, WorkerNodeRow
 from deerflow.persistence.jobs.sql import (
     DeadJobRequeuedEvent,
@@ -22,6 +23,7 @@ from deerflow.persistence.jobs.sql import (
     JobRepository,
     JobRequeueForbidden,
     JobScope,
+    is_issued_dead_job_requeued_event,
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -601,6 +603,24 @@ def test_dead_job_requeue_event_cannot_be_fabricated() -> None:
             successor_job_id=uuid.uuid4(),
             request_id="fabricated-system-requeue",
         )
+
+
+def test_module_signer_cannot_fabricate_requeue_event_without_repository_state() -> None:
+    signer = getattr(jobs_sql, "_issue_dead_job_requeued_event", None)
+    if signer is None:
+        return
+
+    fabricated = signer(
+        project_id=uuid.uuid4(),
+        predecessor_job_id=uuid.uuid4(),
+        successor_job_id=uuid.uuid4(),
+        request_id="fabricated-without-repository",
+        job_type="private_run",
+        attempt_count=0,
+        retry_safety="safe",
+    )
+
+    assert not is_issued_dead_job_requeued_event(fabricated)
 
 
 @pytest.mark.postgres

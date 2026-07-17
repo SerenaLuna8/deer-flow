@@ -522,6 +522,7 @@ def _automation_state_dependency(
 
 
 def get_automation_service(request: Request):
+    get_operational_audit_sink(request)
     return _automation_state_dependency(request, "automation_service")
 
 
@@ -552,9 +553,15 @@ def get_project_quota_enforcer(request: Request):
 
 
 def get_operational_audit_sink(request: Request):
-    """Production installs the sink; isolated compatibility apps may omit it."""
+    """Return the transaction-bound governance audit sink or fail closed."""
 
-    return getattr(request.app.state, "operational_audit_sink", None)
+    value = getattr(request.app.state, "operational_audit_sink", None)
+    if value is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Operational audit service not available",
+        )
+    return value
 
 
 def get_checkpointer(request: Request) -> Checkpointer:

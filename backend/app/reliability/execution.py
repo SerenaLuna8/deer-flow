@@ -57,6 +57,7 @@ from deerflow.persistence.jobs.sql import (
     JobClaim,
     JobRepository,
     JobTerminalEvent,
+    JobTerminalResult,
 )
 from deerflow.persistence.private_work.model import PrivateFileRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
@@ -304,10 +305,10 @@ class PrivateRunJobTerminalPort:
         self,
         session: AsyncSession,
         event: JobTerminalEvent,
-    ) -> None:
+    ) -> JobTerminalResult:
         if event.job_type not in {"private_run", "automation_run"}:
             await self._audit.job_terminalized(session, event)
-            return
+            return JobTerminalResult(run_terminal_published=False)
         if event.owner_user_id is None or event.run_id is None:
             raise RuntimeError("private job terminal authority is incomplete")
         project_exists = await session.scalar(sa.select(ProjectRow.id).where(ProjectRow.id == event.project_id).with_for_update(of=ProjectRow))
@@ -368,6 +369,7 @@ class PrivateRunJobTerminalPort:
                 public_error_code=event.public_error_code,
                 request_id="worker-job-terminal",
             )
+        run_terminal_published = terminalized.rowcount == 1
         if event.job_type == "automation_run":
             if event.occurrence_id is None:
                 raise RuntimeError("automation job terminal authority is incomplete")
@@ -445,6 +447,9 @@ class PrivateRunJobTerminalPort:
             )
         )
         await self._audit.job_terminalized(session, event)
+        return JobTerminalResult(
+            run_terminal_published=run_terminal_published,
+        )
 
 
 class LeaseAuthorizedStreamBridge:
@@ -1260,7 +1265,7 @@ class PrivateRunJobHandler:
                     locked_scope = await self._claim_scope(session, claim)
                     if locked_scope.project_id != scope.project_id or locked_scope.owner_user_id != scope.owner_user_id:
                         raise LeaseLost(claim.job_id)
-                    settled_run = await self._runs(session).settle_execution(
+                    settlement = await self._runs(session).settle_execution(
                         scope=locked_scope,
                         run_id=claim.run_id or "",
                         job_id=claim.job_id,
@@ -1272,7 +1277,8 @@ class PrivateRunJobHandler:
                         retry_initial_seconds=self._retry_initial_seconds,
                         retry_max_seconds=self._retry_max_seconds,
                     )
-                    if settled_run.status in {
+                    settled_run = settlement.run
+                    if not settlement.run_terminal_published and settled_run.status in {
                         "success",
                         "error",
                         "timeout",

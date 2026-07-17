@@ -27,6 +27,7 @@ class _NoopQuota:
 def _client() -> TestClient:
     app = FastAPI()
     app.state.project_quota_enforcer = _NoopQuota()
+    app.state.operational_audit_sink = AsyncMock()
     app.include_router(projects.router)
 
     async def fake_session():
@@ -99,6 +100,7 @@ def test_project_response_capabilities_follow_declaration_order_and_hide_private
 def test_project_router_requires_authentication() -> None:
     app = FastAPI()
     app.state.project_quota_enforcer = _NoopQuota()
+    app.state.operational_audit_sink = AsyncMock()
     app.include_router(projects.router)
 
     async def fake_session():
@@ -155,6 +157,7 @@ async def test_project_api_postgres_full_authorization_and_personal_state(
     identity = {"user_id": users["admin"]}
     app = FastAPI()
     app.state.project_quota_enforcer = _NoopQuota()
+    app.state.operational_audit_sink = AsyncMock()
     app.include_router(projects.router)
 
     async def request_session():

@@ -3,23 +3,30 @@ from __future__ import annotations
 import uuid
 from copy import copy
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select, text
 from support.m4_private_threads import seed_m4_thread_database
 
 import app.audit.sinks as audit_sinks
+import app.gateway.deps as gateway_deps
 from app.audit.models import (
+    AuditAction,
+    AuditActor,
     AuditAuthorityRejected,
+    AuditOutcome,
     AuditProcess,
+    AuditTarget,
+    AuditTargetKind,
     resolve_system_audit_context,
 )
 from app.audit.service import (
     AuditService,
     _bind_gateway_audit_process,
     _bind_operator_audit_process,
-    _bind_process_audit_for_test,
     _bind_recovery_audit_process,
     _bind_scheduler_audit_process,
     _bind_worker_audit_process,
@@ -28,6 +35,7 @@ from app.audit.sinks import OperationalAuditSink, SystemJobAuditSink
 from app.automations.dispatcher import AutomationDefinitionRef, AutomationDispatcher
 from app.automations.models import AutomationChanges, AutomationCreate
 from app.automations.service import ProjectAutomationService
+from app.gateway.routers import project_assets
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.run_service import PrivateRunService
@@ -63,6 +71,7 @@ from deerflow.persistence.jobs.sql import (
     JobRequeueForbidden,
     JobTerminalEvent,
 )
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import (
     ScheduledTaskCreate,
@@ -547,7 +556,17 @@ async def test_automation_definition_mutations_write_safe_audit(
                 title="Updated private title",
             ),
         )
-        await service.delete(seed.owner_a, updated.id, updated.version)
+        paused = await service.pause(
+            seed.owner_a,
+            updated.id,
+            updated.version,
+        )
+        resumed = await service.resume(
+            seed.owner_a,
+            paused.id,
+            paused.version,
+        )
+        await service.delete(seed.owner_a, resumed.id, resumed.version)
 
         async with seed.factory() as session:
             rows = (
@@ -573,12 +592,107 @@ async def test_automation_definition_mutations_write_safe_audit(
         assert [row.action for row in rows] == [
             "automation.created",
             "automation.updated",
+            "automation.updated",
+            "automation.updated",
             "automation.deleted",
         ]
         assert all(row.metadata_json == {} for row in rows)
         encoded = repr([row.__dict__ for row in rows])
         assert "Private automation" not in encoded
         assert "Updated private" not in encoded
+    finally:
+        await seed.engine.dispose()
+
+
+class _FailingAutomationUpdateAudit:
+    async def automation_updated(self, *_args, **_kwargs) -> None:
+        raise RuntimeError("automation audit unavailable")
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_automation_pause_resume_roll_back_when_audit_fails(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    sink = _operational_sink(
+        AuditService(seed.factory, _keyring()),
+        AuditProcess.GATEWAY,
+    )
+    service = ProjectAutomationService(
+        seed.factory,
+        lambda: NOW,
+        min_once_delay_seconds=0,
+        audit=sink,
+    )
+    failing_service = ProjectAutomationService(
+        seed.factory,
+        lambda: NOW,
+        min_once_delay_seconds=0,
+        audit=_FailingAutomationUpdateAudit(),
+    )
+    try:
+        created = await service.create(
+            seed.owner_a,
+            AutomationCreate(
+                title="Pause rollback",
+                prompt="Private prompt",
+                context_mode="fresh_thread_per_run",
+                thread_id=None,
+                agent_asset_id=seed.project_agent_id,
+                agent_scope="project",
+                schedule_type="cron",
+                schedule_spec={"cron": "0 * * * *"},
+                timezone="UTC",
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="automation audit unavailable"):
+            await failing_service.pause(
+                seed.owner_a,
+                created.id,
+                created.version,
+            )
+        after_failed_pause = await service.get(seed.owner_a, created.id)
+        assert after_failed_pause.status == "enabled"
+        assert after_failed_pause.version == created.version
+
+        paused = await service.pause(
+            seed.owner_a,
+            created.id,
+            created.version,
+        )
+        with pytest.raises(RuntimeError, match="automation audit unavailable"):
+            await failing_service.resume(
+                seed.owner_a,
+                paused.id,
+                paused.version,
+            )
+        after_failed_resume = await service.get(seed.owner_a, paused.id)
+        assert after_failed_resume.status == "paused"
+        assert after_failed_resume.version == paused.version
+
+        async with seed.factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AuditLogRow)
+                        .where(
+                            AuditLogRow.project_id == seed.owner_a.project_id,
+                            AuditLogRow.action.in_(
+                                ("automation.created", "automation.updated"),
+                            ),
+                        )
+                        .order_by(AuditLogRow.occurred_at, AuditLogRow.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert [row.action for row in rows] == [
+            "automation.created",
+            "automation.updated",
+        ]
     finally:
         await seed.engine.dispose()
 
@@ -723,10 +837,7 @@ def test_process_audit_context_rejects_copy_replacement_and_cross_service_use() 
     gateway_service = AuditService(None, _keyring())
     gateway_context = _bind_gateway_audit_process(gateway_service)
     worker_service = AuditService(None, _keyring())
-    worker_context = _bind_process_audit_for_test(
-        worker_service,
-        AuditProcess.WORKER,
-    )
+    worker_context = _bind_worker_audit_process(worker_service)
 
     OperationalAuditSink(
         gateway_service,
@@ -749,6 +860,79 @@ def test_process_audit_context_rejects_copy_replacement_and_cross_service_use() 
             gateway_service,
             process_context=gateway_context,
         )
+
+
+def test_process_audit_authority_exposes_no_arbitrary_role_signer() -> None:
+    service = AuditService(None, _keyring())
+
+    assert not hasattr(service, "_bind_process_context")
+    assert not hasattr(
+        __import__("app.audit.service", fromlist=["_bind_process_audit_for_test"]),
+        "_bind_process_audit_for_test",
+    )
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    (
+        gateway_deps.get_operational_audit_sink,
+        gateway_deps.get_automation_service,
+        project_assets._governance_sink,
+    ),
+    ids=("project", "automation", "shared-assets"),
+)
+def test_gateway_governance_audit_dependencies_fail_closed_without_composition(
+    dependency,
+) -> None:
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(automation_service=object()),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        dependency(request)
+    assert caught.value.status_code == 503
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_process_actor_from_temporary_service_is_rejected_by_real_service(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    temporary_service = AuditService(seed.factory, _keyring())
+    temporary_context = _bind_worker_audit_process(temporary_service)
+    temporary_actor = AuditActor.trusted_process(temporary_context)
+    real_service = AuditService(seed.factory, _keyring())
+    _bind_worker_audit_process(real_service)
+    try:
+        with pytest.raises(AuditAuthorityRejected):
+            async with seed.factory() as session, session.begin():
+                await real_service.append(
+                    session,
+                    temporary_actor,
+                    AuditAction.JOB_DEAD,
+                    AuditTarget(
+                        AuditTargetKind.JOB,
+                        uuid.uuid4(),
+                        seed.owner_a.project_id,
+                    ),
+                    AuditOutcome.SUCCESS,
+                    {
+                        "job_type": "private_run",
+                        "public_error_code": "SIDE_EFFECT_STATE_UNKNOWN",
+                        "attempt_count": 1,
+                        "retry_safety": "unknown",
+                    },
+                    public_error_code="SIDE_EFFECT_STATE_UNKNOWN",
+                    request_id="temporary-service-actor",
+                )
+
+        async with seed.factory() as session:
+            assert await session.scalar(select(AuditLogRow.id)) is None
+    finally:
+        await seed.engine.dispose()
 
 
 @pytest.mark.postgres
@@ -1066,6 +1250,120 @@ async def test_dead_job_audit_contains_codes_not_exception_text(
             "public_error_code": "SIDE_EFFECT_STATE_UNKNOWN",
         }
         assert "exception" not in repr([row.__dict__ for row in rows]).lower()
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_production_wired_worker_dead_settlement_writes_one_terminal_audit(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    keyring = _keyring()
+    sink = _operational_sink(
+        AuditService(seed.factory, keyring),
+        AuditProcess.WORKER,
+    )
+    terminal_port = PrivateRunJobTerminalPort(audit=sink)
+    repository_builder = partial(
+        JobRepository,
+        owner_ref_hasher=keyring.job_owner_ref,
+        terminal_port=terminal_port,
+    )
+    run_id = str(uuid.uuid4())
+    thread_id = f"m6-production-dead-audit-{uuid.uuid4()}"
+    worker_id = uuid.uuid4()
+    try:
+        async with seed.factory() as session, session.begin():
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="audit-production-test",
+                    capabilities_json=["private_run"],
+                    max_concurrent_jobs=1,
+                )
+            )
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+        admitted = await PrivateRunAdmissionService(seed.factory).admit(
+            seed.owner_a,
+            thread_id,
+            PrivateRunCreate(run_id=run_id),
+        )
+
+        async with seed.factory() as session, session.begin():
+            repository = JobRepository(session)
+            claim = await repository.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=90,
+            )
+            assert claim is not None
+            assert claim.job_id == admitted.job.job_id
+            assert await repository.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+            )
+
+        class Executor:
+            async def execute(self, _execution, _authority):
+                raise RuntimeError("private exception must not enter audit")
+
+        settlement = await PrivateRunJobHandler(
+            seed.factory,
+            executor=Executor(),
+            job_repository_builder=repository_builder,
+            audit=sink,
+        )(
+            claim,
+            JobLeaseAuthority(
+                seed.factory,
+                claim,
+                lease_seconds=90,
+                repository_builder=repository_builder,
+            ),
+        )
+        assert settlement.outcome.public_error_code == "SIDE_EFFECT_STATE_UNKNOWN"
+        await settlement.commit()
+
+        async with seed.factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AuditLogRow)
+                        .where(
+                            AuditLogRow.action.in_(
+                                ("job.dead", "run.terminal"),
+                            ),
+                        )
+                        .order_by(AuditLogRow.occurred_at, AuditLogRow.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            job = await session.get(JobRow, admitted.job.job_id)
+            run = await session.scalar(
+                select(RunRow).where(
+                    RunRow.project_id == seed.owner_a.project_id,
+                    RunRow.owner_user_id == str(seed.owner_a.user_id),
+                    RunRow.run_id == run_id,
+                )
+            )
+        assert [row.action for row in rows].count("job.dead") == 1
+        assert [row.action for row in rows].count("run.terminal") == 1
+        assert job is not None
+        assert job.status == "dead"
+        assert job.public_error_code == "SIDE_EFFECT_STATE_UNKNOWN"
+        assert run is not None
+        assert run.status == "error"
+        assert run.error == "SIDE_EFFECT_STATE_UNKNOWN"
+        assert all(row.public_error_code == "SIDE_EFFECT_STATE_UNKNOWN" for row in rows)
+        assert "private exception" not in repr([row.__dict__ for row in rows])
     finally:
         await seed.engine.dispose()
 
