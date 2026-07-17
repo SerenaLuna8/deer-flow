@@ -55,6 +55,12 @@ migrate-automations:
 backup-db:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python scripts/backup_postgres.py $(ARGS)
 
+restore-db:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python scripts/restore_postgres.py $(ARGS)
+
+drill-restore:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python scripts/drill_restore.py $(ARGS)
+
 rotate-credentials:
 	PYTHONPATH=. uv run python scripts/rotate_credentials.py $(ARGS)
 

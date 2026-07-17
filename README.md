@@ -994,8 +994,8 @@ and manual trigger available; manual trigger uses the same atomic occurrence/Run
 path. PostgreSQL durable stream writing/reading, terminal uniqueness, Gateway SSE reconnect,
 frontend cursor/dedupe, and the atomic project quota core are implemented. Member, storage,
 concurrent-Run, and actual MCP-dispatch quota enforcement are also wired across Gateway,
-Worker, and Scheduler with stable 429/`Retry-After` responses. Task 16 adds an operator-only
-encrypted PostgreSQL archive command. Set a distinct 32-byte
+Worker, and Scheduler with stable 429/`Retry-After` responses. Tasks 16–17 add operator-only
+encrypted PostgreSQL backup, journal-first purge, restore, and drill commands. Set a distinct 32-byte
 base64 `DEER_FLOW_BACKUP_KEY`, `DATABASE_URL`, and the existing
 `DEER_FLOW_AUDIT_ACTIVE_KEY_ID` / `DEER_FLOW_AUDIT_KEYRING_JSON` audit environment, then
 write only to an external secure directory (never this repository):
@@ -1024,8 +1024,28 @@ format permits at most 65,536 chunks of at most 1 MiB (64 GiB plaintext) and a 1
 writer and reader enforce the same limits. A failed or uncommitted audit removes the archive,
 while the successful audit commit is the durable operation commit point: later cancellation or
 engine disposal cannot delete the valid audited archive. Output remains limited to archive ID,
-schema revision, chunk count, and a truncated checksum. Restore, recovery journal, and retention
-purge remain later M6 work.
+schema revision, chunk count, and a truncated checksum.
+
+Retention purge additionally requires a separate base64 32-byte
+`DEER_FLOW_RECOVERY_JOURNAL_KEY` and an operator-owned journal outside this repository. Each
+encrypted, hash-chained tombstone is fsynced before physical deletion. File and project candidates
+must pass the exact 30-day retention recheck. The recovery-only account workflow requires every
+membership to be inactive and expired, deletes only the owner's private data in the exact retained
+project set, and preserves the User row plus governance, job, audit, and recovery evidence.
+
+Restore only targets a nonexistent, distinct database named
+`deerflow_restore_<pid>_<32hex>`. It authenticates the full archive, restores it, replays the journal
+without sequence gaps, runs M1–M6 probes, and writes a restore proof. It never changes
+`DATABASE_URL`, starts services, overwrites a database, or cuts traffic. For example:
+
+```bash
+make restore-db ARGS="--archive /secure/backups/<archive> --target-url postgresql://operator@db/deerflow_restore_1234_0123456789abcdef0123456789abcdef --journal /secure/recovery/tombstones.jsonl --execute"
+make drill-restore ARGS="--archive /secure/backups/<archive> --journal /secure/recovery/tombstones.jsonl"
+```
+
+The drill uses one generated restore database and removes only that database after verification.
+Command output contains only public proof metadata; operators must verify the proof before a
+separate, manual traffic switch.
 
 The project-scoped backend API is available at
 `/api/projects/{project_id}/automations`. It provides strict create, list, read,

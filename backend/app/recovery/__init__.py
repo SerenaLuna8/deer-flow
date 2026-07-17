@@ -19,6 +19,34 @@ from .archive import (
     load_backup_key,
     pg_dump_argv,
 )
+from .journal import (
+    TombstoneAuthenticationFailed,
+    TombstoneEntry,
+    TombstoneJournal,
+    TombstoneJournalUnavailable,
+    TombstoneReceipt,
+    TombstoneRecord,
+    TombstoneSequenceGap,
+    TombstoneSequenceRollback,
+    load_journal_key,
+)
+from .purge import (
+    RetentionCandidate,
+    RetentionNotEligible,
+    RetentionPurger,
+    RetentionPurgeRepository,
+)
+from .restore import (
+    RecoveryProbeFailed,
+    RestoreAuthenticationFailed,
+    RestoreCommandFailed,
+    RestoreConfig,
+    Restorer,
+    RestoreResult,
+    RestoreTargetRejected,
+    drill_restore,
+    replay_tombstones,
+)
 
 __all__ = [
     "ARCHIVE_FORMAT_VERSION",
@@ -36,6 +64,28 @@ __all__ = [
     "BackupManifest",
     "BackupSnapshot",
     "create_backup",
+    "drill_restore",
     "load_backup_key",
+    "load_journal_key",
     "pg_dump_argv",
+    "RecoveryProbeFailed",
+    "RestoreAuthenticationFailed",
+    "RestoreCommandFailed",
+    "RestoreConfig",
+    "RestoreResult",
+    "RestoreTargetRejected",
+    "Restorer",
+    "RetentionCandidate",
+    "RetentionNotEligible",
+    "RetentionPurgeRepository",
+    "RetentionPurger",
+    "TombstoneAuthenticationFailed",
+    "TombstoneEntry",
+    "TombstoneJournal",
+    "TombstoneJournalUnavailable",
+    "TombstoneReceipt",
+    "TombstoneRecord",
+    "TombstoneSequenceGap",
+    "TombstoneSequenceRollback",
+    "replay_tombstones",
 ]

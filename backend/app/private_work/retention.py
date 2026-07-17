@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,10 @@ from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
+if TYPE_CHECKING:
+    from app.recovery.journal import TombstoneReceipt
+    from app.recovery.purge import RetentionCandidate, RetentionPurger
+
 
 @dataclass(frozen=True, slots=True)
 class RetentionChange:
@@ -31,6 +36,17 @@ class RetentionChange:
 
 class PrivateWorkRetentionService:
     """Freeze and restore private rows without deleting user content or credentials."""
+
+    @staticmethod
+    async def purge_expired(
+        purger: RetentionPurger,
+        candidate: RetentionCandidate,
+        *,
+        now: datetime | None = None,
+    ) -> TombstoneReceipt:
+        """Enter the recovery-owned, journal-first physical purge boundary."""
+
+        return await purger.purge(candidate, now=now)
 
     @staticmethod
     async def freeze_owner(

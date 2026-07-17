@@ -95,7 +95,8 @@ SSE reconnect 和按 account/project/thread 隔离的前端 cursor/dedupe，以�
 counter/append-only ledger、平台默认值收紧、80% 单次阈值和 dry-run/execute reconciliation core。成员加入/
 退出、文件 finalize/delete/branch/finalization/Thread delete、private/Automation Run admission 与所有终态、实际
 MCP dispatch 均已在原业务事务边界执行 quota；429 使用稳定错误与 `Retry-After`，已运行任务不因后续收紧而中断。
-完整审计和通用备份恢复仍待后续 M6 task。
+M6 审计、外部认证加密 backup、journal-first retention purge、new-DB restore、连续 tombstone
+replay、M1–M6 probes、restore proof 和 disposable drill 已实现；Task 18 最终编排/关闭仍待完成。
 里程碑进度仍为 5/8（62.5%），因为 M6 尚未整体关闭；M6–M8
 尚未交付，因此当前仍不能
 作为完整多用户 SaaS 发布。
@@ -123,6 +124,9 @@ make migrate-sqlite ARGS="..."  # 只读预检、备份并迁移 legacy SQLite�
 make migrate-assets ARGS="--dry-run ..."  # 脱敏 inventory；execute 前必须先 dry-run
 make migrate-private-work ARGS="--dry-run ..."  # 显式 owner map 的 M4 private-work staged migration
 make migrate-automations ARGS="--dry-run ..."  # 显式 owner/Agent map 的 M5 Automation staged migration
+make backup-db ARGS="--output /secure/backups"  # 外部认证加密 PostgreSQL archive
+make restore-db ARGS="--archive /secure/backups/<archive> --target-url <new-deerflow_restore-url> --journal /secure/recovery/tombstones.jsonl --execute"  # 恢复、重放、probe 并写 proof；不切换 DATABASE_URL
+make drill-restore ARGS="--archive /secure/backups/<archive> --journal /secure/recovery/tombstones.jsonl"  # 随机恢复库演练，仅清理该库
 make rotate-credentials ARGS="--dry-run --key-id m3-next"  # 分批轮换 credential envelope
 make check-db    # 只读检查连接、Alembic head 与必需表
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
