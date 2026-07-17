@@ -18,6 +18,7 @@ def test_gateway_exposes_manual_automation_admission_without_scheduler() -> None
     app = FastAPI()
     dispatcher = object()
     app.state.automation_dispatcher = dispatcher
+    app.state.operational_audit_sink = object()
     app.state.automation_scheduler_enabled = True
     request = SimpleNamespace(app=app)
 

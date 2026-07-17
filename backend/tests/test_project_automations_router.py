@@ -212,6 +212,55 @@ async def test_missing_automation_audit_composition_returns_stable_http_envelope
     }
 
 
+@pytest.mark.anyio
+async def test_trigger_missing_audit_composition_fails_before_dispatch() -> None:
+    context = _context()
+    occurrence = SimpleNamespace(id="occurrence-trigger-audit", status="queued")
+    dispatcher = SimpleNamespace(
+        admit_manual=AsyncMock(
+            return_value=SimpleNamespace(occurrence=occurrence),
+        )
+    )
+    occurrences = SimpleNamespace(
+        get=AsyncMock(return_value=_run_view(occurrence_id=occurrence.id)),
+    )
+    app = FastAPI()
+    app.add_middleware(TraceMiddleware, enabled=True)
+    app.include_router(project_automations.router)
+    app.state.automation_dispatcher = dispatcher
+    app.state.automation_occurrence_service = occurrences
+
+    async def override_context() -> PrivateWorkContext:
+        return context
+
+    async def override_project_open() -> None:
+        return None
+
+    app.dependency_overrides[automation_context] = override_context
+    app.dependency_overrides[require_project_automation_open] = override_project_open
+    request_id = "automation-trigger-audit-composition-missing"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            f"/api/projects/{context.project_id}/automations/task-1/trigger",
+            headers={
+                "Idempotency-Key": str(uuid.uuid4()),
+                "X-Trace-Id": request_id,
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "AUTOMATION_UNAVAILABLE",
+        "message": AutomationUnavailable.public_message,
+        "request_id": request_id,
+    }
+    dispatcher.admit_manual.assert_not_awaited()
+    occurrences.get.assert_not_awaited()
+
+
 def test_readiness_is_mounted_before_dynamic_task_route_and_skips_open_guard() -> None:
     from app.gateway.app import app
 

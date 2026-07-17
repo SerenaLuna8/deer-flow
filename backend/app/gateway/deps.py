@@ -521,13 +521,17 @@ def _automation_state_dependency(
     return value
 
 
-def get_automation_service(request: Request):
+def _require_automation_audit_sink(request: Request):
     try:
-        get_operational_audit_sink(request)
+        return get_operational_audit_sink(request)
     except HTTPException as error:
         if error.status_code != 503:
             raise
         raise automation_http_exception(AutomationUnavailable(get_current_trace_id() or generate_trace_id())) from None
+
+
+def get_automation_service(request: Request):
+    _require_automation_audit_sink(request)
     return _automation_state_dependency(request, "automation_service")
 
 
@@ -536,6 +540,7 @@ def get_automation_occurrence_service(request: Request):
 
 
 def get_automation_dispatcher(request: Request):
+    _require_automation_audit_sink(request)
     return _automation_state_dependency(request, "automation_dispatcher")
 
 
