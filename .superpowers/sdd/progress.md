@@ -9,7 +9,8 @@
 
 - Tasks 1-12: complete through `1f5ff687` (final schema, reliability contracts, durable jobs/Worker/streams, project and Automation admission, quotas, and privacy-safe append-only audit persistence).
 - Task 13: complete at `381f0bd0` (implementation `de7eb9cd..b9f0af85`; four bounded repair waves `ab7d85a4`, `a02d55ab`, `24fd36e7`, `381f0bd0`; final independent review 0 Critical/Important/Minor). Gateway/Worker/Scheduler process authority, governance mutation coverage, safe one-time requeue audit authority, transaction rollback, and exactly-once terminal audit ownership are verified. Fresh final evidence: Automation 167, audit/requeue 71, governance 196, private-run/Worker/Scheduler 93, shared-assets 205, harness boundary 7 passed; Ruff, format, and diff checks clean.
-- Task 14: next — project Admin usage/audit API and UI.
+- Task 14: complete at `2c488e0a` (implementation `d42c4cd0`; bounded repair `43b6ba71`; final stale-context authority repair `2c488e0a`; final independent review 0 Critical/Important/Minor). Project Admin usage/audit API and UI now use exact account+project keys, same-transaction quota/audit writes, locked current audit authority, closed public schemas, transition cleanup, M6/static/capability gates, and typed en/zh copy. Final evidence: backend PostgreSQL 55 passed; frontend full unit 932 passed; Ruff, TypeScript/ESLint, Prettier, and diff checks clean.
+- Task 15: next — system_admin operations/projects/jobs/audit API and UI.
 
 ---
 
