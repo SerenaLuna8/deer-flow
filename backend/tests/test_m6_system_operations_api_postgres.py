@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi import FastAPI, HTTPException, Request
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from support.m4_private_threads import seed_m4_thread_database
 
@@ -44,6 +44,7 @@ from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.jobs.model import DeadJobRow, JobRow
 from deerflow.persistence.quotas.model import ProjectUsageCounterRow
+from deerflow.persistence.reliability import ReliabilityCutoverStateRow
 from deerflow.persistence.user.model import UserRow
 
 NOW = datetime(2026, 7, 17, 6, tzinfo=UTC)
@@ -215,7 +216,8 @@ async def test_operations_requires_current_system_admin_and_returns_only_aggrega
 
         assert response.status_code == 200, response.text
         body = response.json()
-        assert set(body) == {"readiness", "counts", "usage"}
+        assert set(body) == {"readiness", "data_status", "counts", "usage"}
+        assert body["data_status"] == "available"
         assert body["readiness"] == {
             "status": "degraded",
             "database": "ready",
@@ -591,6 +593,52 @@ async def test_operations_overview_serializes_injected_closed_component_readines
             "recovery": "closed",
             "quota": "closed",
             "audit": "closed",
+        }
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_operations_overview_returns_closed_readiness_without_querying_m6_aggregates_when_real_cutover_is_closed(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    await _make_system_admin(seed)
+    async with seed.factory() as session, session.begin():
+        await session.execute(delete(ReliabilityCutoverStateRow).where(ReliabilityCutoverStateRow.id == 1))
+        await session.execute(text("DROP TABLE project_usage_counters"))
+
+    app = _test_app(seed, AuditService(seed.factory, _keyring()))
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/api/admin/operations",
+                headers={
+                    "x-test-user": str(seed.owner_a.user_id),
+                    "x-trace-id": "operations-api-test",
+                },
+            )
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "readiness": {
+                "status": "closed",
+                "database": "ready",
+                "schema": "migration_required",
+                "worker_fleet": "closed",
+                "scheduler": "closed",
+                "stream": "closed",
+                "recovery": "closed",
+                "quota": "closed",
+                "audit": "closed",
+            },
+            "data_status": "unavailable",
+            "counts": None,
+            "usage": None,
         }
     finally:
         await seed.engine.dispose()

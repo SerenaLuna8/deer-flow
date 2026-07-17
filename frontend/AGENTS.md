@@ -180,7 +180,7 @@ query/mutation hook。所有 query/mutation key 必须从 exact account UUID 的
 account transition 先 abort safe-requeue controller 和 cancel queries，再 clear 整个 account client。Jobs 只在
 服务端明确返回 dead + safe predecessor eligibility 且类型为 parentless `retention_purge` 时显示 requeue；pending
 状态按精确 `(project_id, dead_job_id)` 坐标禁用被点击行。Overview 必须渲染后端的 `ready`/`degraded`/`closed`
-readiness 与全部组件状态；浏览器不得构造 ProjectContext、owner scope 或读取 raw error。四页
+readiness 与全部组件状态；closed 响应固定为 `data_status="unavailable"` 且 `counts`/`usage` 为 null，界面只显示真实 readiness 和不可用状态，不能将不可读的聚合误显示为零。浏览器不得构造 ProjectContext、owner scope 或读取 raw error。四页
 loading/empty/error/data 与 shell/navigation（包括 accessibility label）文案统一使用 typed en-US/zh-CN i18n。
 通用备份恢复与最终 M6 关闭仍属于后续 task。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示

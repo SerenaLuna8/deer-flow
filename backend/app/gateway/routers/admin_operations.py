@@ -8,7 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,8 +104,18 @@ class AggregateUsageResponse(BaseModel):
 class OperationsOverviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     readiness: OperationsReadinessResponse
-    counts: OperationsCountsResponse
-    usage: list[AggregateUsageResponse]
+    data_status: Literal["available", "unavailable"]
+    counts: OperationsCountsResponse | None
+    usage: list[AggregateUsageResponse] | None
+
+    @model_validator(mode="after")
+    def validate_aggregate_availability(self) -> OperationsOverviewResponse:
+        closed = self.readiness.status == "closed"
+        if closed and (self.data_status != "unavailable" or self.counts is not None or self.usage is not None):
+            raise ValueError("closed readiness must not represent aggregate data as available")
+        if not closed and (self.data_status != "available" or self.counts is None or self.usage is None):
+            raise ValueError("open readiness requires available aggregate data")
+        return self
 
 
 async def authenticated_system_identity(
@@ -208,9 +218,28 @@ def map_admin_operations_errors(function):
 
 
 def overview_response(
-    value: OperationsOverview,
+    value: OperationsOverview | None,
     readiness: ReliabilityReadiness,
 ) -> OperationsOverviewResponse:
+    if readiness.status == "closed":
+        return OperationsOverviewResponse(
+            readiness=OperationsReadinessResponse(
+                status=readiness.status,
+                database=readiness.database,
+                schema_status=readiness.schema,
+                worker_fleet=readiness.worker_fleet,
+                scheduler=readiness.scheduler,
+                stream=readiness.stream,
+                recovery=readiness.recovery,
+                quota=readiness.quota,
+                audit=readiness.audit,
+            ),
+            data_status="unavailable",
+            counts=None,
+            usage=None,
+        )
+    if value is None:
+        raise ValueError("open readiness requires operations overview")
     return OperationsOverviewResponse(
         readiness=OperationsReadinessResponse(
             status=readiness.status,
@@ -223,6 +252,7 @@ def overview_response(
             quota=readiness.quota,
             audit=readiness.audit,
         ),
+        data_status="available",
         counts=OperationsCountsResponse(
             projects=value.counts.projects,
             suspended_projects=value.counts.suspended_projects,
@@ -249,8 +279,10 @@ async def get_operations_overview(
     session: AsyncSession = Depends(project_session),
 ) -> OperationsOverviewResponse:
     async with session.begin():
-        await current_system_context(session, identity)
+        await resolve_current_system_audit_context(session, identity[0], identity[1])
         readiness = await current_reliability_readiness(request, session, identity)
+        if readiness.status == "closed":
+            return overview_response(None, readiness)
         return overview_response(
             await SystemOperationsRepository(session).overview(),
             readiness,

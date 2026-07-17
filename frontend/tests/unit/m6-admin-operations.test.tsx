@@ -99,6 +99,7 @@ const overview: OperationsOverviewData = {
     quota: "ready",
     audit: "ready",
   },
+  data_status: "available",
   counts: {
     projects: 2,
     suspended_projects: 0,
@@ -295,6 +296,36 @@ describe("M6 system operations console", () => {
             metadata: { ...audit.items[0]!.metadata, owner_user_id: ACCOUNT_A },
           },
         ],
+      }),
+    ).toThrow();
+  });
+
+  test("accepts closed readiness only with an explicit unavailable aggregate state", () => {
+    const closedOverview = {
+      readiness: {
+        status: "closed",
+        database: "ready",
+        schema: "migration_required",
+        worker_fleet: "closed",
+        scheduler: "closed",
+        stream: "closed",
+        recovery: "closed",
+        quota: "closed",
+        audit: "closed",
+      },
+      data_status: "unavailable",
+      counts: null,
+      usage: null,
+    };
+
+    expect(operationsOverviewSchema.parse(closedOverview)).toEqual(
+      closedOverview,
+    );
+    expect(() =>
+      operationsOverviewSchema.parse({
+        ...closedOverview,
+        counts: overview.counts,
+        usage: overview.usage,
       }),
     ).toThrow();
   });

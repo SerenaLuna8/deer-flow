@@ -12,6 +12,7 @@ from sqlalchemy import select
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 import deerflow.persistence.jobs.sql as jobs_sql
+from app.automations.dispatcher import AutomationDefinitionRef, AutomationDispatcher
 from deerflow.persistence.jobs.model import DeadJobRow, JobAttemptRow, JobRow, WorkerNodeRow
 from deerflow.persistence.jobs.sql import (
     DeadJobRequeuedEvent,
@@ -26,6 +27,7 @@ from deerflow.persistence.jobs.sql import (
     consume_issued_dead_job_requeued_event,
 )
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.scheduled_tasks import ScheduledTaskCreate, ScheduledTaskRepository
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 
@@ -48,13 +50,13 @@ async def seed(migrated_postgres_database_url: str) -> JobSeed:
                 WorkerNodeRow(
                     id=worker_a,
                     version="test",
-                    capabilities_json=["private_run", "retention_purge"],
+                    capabilities_json=["automation_run", "private_run", "retention_purge"],
                     max_concurrent_jobs=4,
                 ),
                 WorkerNodeRow(
                     id=worker_b,
                     version="test",
-                    capabilities_json=["private_run", "retention_purge"],
+                    capabilities_json=["automation_run", "private_run", "retention_purge"],
                     max_concurrent_jobs=4,
                 ),
             ]
@@ -136,6 +138,37 @@ def _retention_request(
         retry_safety=retry_safety,  # type: ignore[arg-type]
         available_at=available_at,
     )
+
+
+async def _create_automation_job(seed: JobSeed) -> uuid.UUID:
+    scheduled_for = datetime(2026, 7, 18, tzinfo=UTC)
+    async with seed.data.factory() as session, session.begin():
+        task = await ScheduledTaskRepository(session).create(
+            seed.data.owner_a_scope,
+            ScheduledTaskCreate(
+                task_id=f"automation-requeue-{uuid.uuid4().hex[:20]}",
+                thread_id=None,
+                context_mode="fresh_thread_per_run",
+                agent_asset_id=seed.data.project_agent_id,
+                agent_scope="project",
+                title="Automation requeue boundary",
+                prompt="Do not requeue this automation job through platform operations.",
+                schedule_type="cron",
+                schedule_spec={"cron": "0 * * * *"},
+                timezone="UTC",
+                next_run_at=scheduled_for,
+            ),
+        )
+    admitted = await AutomationDispatcher(seed.data.factory).admit_occurrence(
+        AutomationDefinitionRef(
+            project_id=seed.scope.project_id,
+            owner_user_id=seed.scope.owner_user_id,
+            task_id=task.id,
+            membership_version=seed.data.owner_a.membership_version,
+        ),
+        scheduled_for=scheduled_for,
+    )
+    return admitted.job.job_id
 
 
 @pytest.mark.postgres
@@ -822,6 +855,53 @@ async def test_system_safe_requeue_rejects_private_predecessor_without_rebinding
     assert tuple(successors) == ()
 
     assert run_id
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_system_safe_requeue_rejects_automation_predecessor_without_rebinding_occurrence(
+    seed: JobSeed,
+) -> None:
+    dead_job_id = await _create_automation_job(seed)
+    async with seed.data.factory() as session, session.begin():
+        repository = JobRepository(
+            session,
+            owner_ref_hasher=lambda _owner: JobOwnerRef(
+                key_id="audit-v1",
+                hmac_hex="a" * 64,
+            ),
+        )
+        claim = await repository.claim_next(
+            worker_id=seed.worker_a,
+            capabilities=frozenset({"automation_run"}),
+            lease_seconds=90,
+        )
+        assert claim is not None
+        assert claim.job_id == dead_job_id
+        assert await repository.retry_or_dead(
+            dead_job_id,
+            lease_token=claim.lease_token,
+            public_error_code="AUTOMATION_FINAL_FAILURE",
+            retry_initial_seconds=2,
+            retry_max_seconds=300,
+        )
+
+    audit = _AuditPort()
+    with pytest.raises(JobRequeueForbidden):
+        async with seed.data.factory() as session, session.begin():
+            await JobRepository(session).requeue_safe_system(
+                seed.scope.project_id,
+                dead_job_id,
+                idempotency_key="e" * 64,
+                max_attempts=3,
+                request_id="system-automation-requeue",
+                audit_port=audit,
+            )
+
+    assert audit.events == []
+    async with seed.data.factory() as session:
+        successors = await session.scalars(select(JobRow).where(JobRow.predecessor_dead_job_id == dead_job_id))
+    assert tuple(successors) == ()
 
 
 @pytest.mark.postgres

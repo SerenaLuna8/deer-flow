@@ -35,43 +35,66 @@ const usageItemSchema = z.discriminatedUnion("dimension", [
     .strict(),
 ]);
 
-export const operationsOverviewSchema = z
+const operationsReadinessSchema = z
   .object({
-    readiness: z
-      .object({
-        status: z.enum(["ready", "degraded", "closed"]),
-        database: z.string().min(1),
-        schema: z.string().min(1),
-        worker_fleet: z.string().min(1),
-        scheduler: z.string().min(1),
-        stream: z.string().min(1),
-        recovery: z.string().min(1),
-        quota: z.string().min(1),
-        audit: z.string().min(1),
-      })
-      .strict(),
-    counts: z
-      .object({
-        projects: z.number().int().nonnegative(),
-        suspended_projects: z.number().int().nonnegative(),
-        queued_jobs: z.number().int().nonnegative(),
-        running_jobs: z.number().int().nonnegative(),
-        dead_jobs: z.number().int().nonnegative(),
-      })
-      .strict(),
-    usage: z
-      .array(usageItemSchema)
-      .length(4)
-      .superRefine((items, context) => {
-        if (new Set(items.map((item) => item.dimension)).size !== 4) {
-          context.addIssue({
-            code: "custom",
-            message: "Every aggregate usage dimension is required once",
-          });
-        }
-      }),
+    status: z.enum(["ready", "degraded", "closed"]),
+    database: z.string().min(1),
+    schema: z.string().min(1),
+    worker_fleet: z.string().min(1),
+    scheduler: z.string().min(1),
+    stream: z.string().min(1),
+    recovery: z.string().min(1),
+    quota: z.string().min(1),
+    audit: z.string().min(1),
   })
   .strict();
+
+const operationsCountsSchema = z
+  .object({
+    projects: z.number().int().nonnegative(),
+    suspended_projects: z.number().int().nonnegative(),
+    queued_jobs: z.number().int().nonnegative(),
+    running_jobs: z.number().int().nonnegative(),
+    dead_jobs: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const aggregateUsageSchema = z
+  .array(usageItemSchema)
+  .length(4)
+  .superRefine((items, context) => {
+    if (new Set(items.map((item) => item.dimension)).size !== 4) {
+      context.addIssue({
+        code: "custom",
+        message: "Every aggregate usage dimension is required once",
+      });
+    }
+  });
+
+export const operationsOverviewSchema = z.discriminatedUnion("data_status", [
+  z
+    .object({
+      readiness: operationsReadinessSchema.refine(
+        (readiness) => readiness.status !== "closed",
+        "Available aggregates require open readiness",
+      ),
+      data_status: z.literal("available"),
+      counts: operationsCountsSchema,
+      usage: aggregateUsageSchema,
+    })
+    .strict(),
+  z
+    .object({
+      readiness: operationsReadinessSchema.refine(
+        (readiness) => readiness.status === "closed",
+        "Unavailable aggregates require closed readiness",
+      ),
+      data_status: z.literal("unavailable"),
+      counts: z.null(),
+      usage: z.null(),
+    })
+    .strict(),
+]);
 
 export const adminProjectSchema = z
   .object({
