@@ -573,20 +573,80 @@ async def test_probe_failure_is_fail_closed_and_does_not_leave_target_or_proof(
             await _drop_restore_database(migrated_postgres_database_url, target_url)
 
 
+@pytest.mark.parametrize(
+    ("column", "tampered_value"),
+    [
+        ("journal_id", str(uuid.uuid4())),
+        ("head_digest", "f" * 64),
+    ],
+)
+@pytest.mark.postgres
 @pytest.mark.anyio
-async def test_drill_cleans_up_only_the_random_restore_database_it_created(
+async def test_restore_probe_rejects_tampered_frozen_journal_identity_and_head(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    column: str,
+    tampered_value: str,
+) -> None:
+    seed, _file_id, archive, _manifest, journal = await _archive_then_purge(
+        migrated_postgres_database_url,
+        tmp_path,
+        monkeypatch,
+    )
+    target_url = _restore_url(migrated_postgres_database_url)
+    target_name = restore_module.database_name(target_url)
+    real_probe = restore_module._run_recovery_probes
+
+    async def tamper_then_probe(*args: object, **kwargs: object) -> None:
+        engine = create_async_engine(target_url)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(f"UPDATE recovery_journal_state SET {column}=:tampered WHERE id=1"),
+                    {"tampered": tampered_value},
+                )
+        finally:
+            await engine.dispose()
+        await real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(restore_module, "_run_recovery_probes", tamper_then_probe)
+    try:
+        with pytest.raises(RecoveryProbeFailed):
+            await Restorer(
+                RestoreConfig(
+                    archive=archive,
+                    target_database_url=target_url,
+                    current_database_url=migrated_postgres_database_url,
+                    journal=journal,
+                    backup_key=BACKUP_KEY,
+                    keyring=_keyring(),
+                )
+            ).restore()
+        assert not await _database_exists(
+            migrated_postgres_database_url,
+            target_name,
+        )
+    finally:
+        await seed.engine.dispose()
+        if await _database_exists(migrated_postgres_database_url, target_name):
+            await _drop_restore_database(migrated_postgres_database_url, target_url)
+
+
+@pytest.mark.anyio
+async def test_drill_does_not_drop_when_restorer_fails_before_handing_off_ownership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     archive = _unit_archive(tmp_path)
     journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", JOURNAL_KEY, source_installation_id=UNIT_SOURCE_ID)
     journal.snapshot()
-    created: list[str] = []
+    attempted: list[str] = []
     dropped: list[str] = []
 
     async def fake_restore(self):
-        created.append(self.config.target_database_url)
-        raise RecoveryProbeFailed()
+        attempted.append(self.config.target_database_url)
+        raise RestoreTargetRejected()
 
     async def fake_drop(current_url: str, target_url: str) -> None:
         assert current_url == "postgresql://operator@localhost/postgres"
@@ -594,7 +654,7 @@ async def test_drill_cleans_up_only_the_random_restore_database_it_created(
 
     monkeypatch.setattr(Restorer, "restore", fake_restore)
     monkeypatch.setattr(restore_module, "_drop_created_database", fake_drop)
-    with pytest.raises(RecoveryProbeFailed):
+    with pytest.raises(RestoreTargetRejected):
         await drill_restore(
             current_database_url="postgresql://operator@localhost/postgres",
             archive=archive,
@@ -603,9 +663,58 @@ async def test_drill_cleans_up_only_the_random_restore_database_it_created(
             keyring=_keyring(),
         )
 
-    assert dropped == created
-    assert len(created) == 1
-    assert _RESTORE_NAME.fullmatch(restore_module.database_name(created[0]))
+    assert dropped == []
+    assert len(attempted) == 1
+    assert _RESTORE_NAME.fullmatch(restore_module.database_name(attempted[0]))
+
+
+@pytest.mark.anyio
+async def test_drill_rejects_forged_success_without_dropping_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _unit_archive(tmp_path)
+    journal = TombstoneJournal(
+        tmp_path / "journal" / "tombstones.jsonl",
+        JOURNAL_KEY,
+        source_installation_id=UNIT_SOURCE_ID,
+    )
+    journal.snapshot()
+    dropped: list[str] = []
+
+    async def forged_restore(_self: Restorer) -> restore_module.RestoreResult:
+        return restore_module.RestoreResult(
+            proof_id=uuid.uuid4(),
+            archive_id=str(uuid.uuid4()),
+            schema_revision="0015_project_reliability_finalize",
+            table_count=41,
+            tombstones_replayed=0,
+            replayed_through_sequence=0,
+            probes_complete=True,
+            status="verified",
+            checksum="a" * 64,
+        )
+
+    async def fake_drop(_current: str, target: str) -> None:
+        dropped.append(target)
+
+    async def no_audit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(Restorer, "restore", forged_restore)
+    monkeypatch.setattr(restore_module, "_drop_created_database", fake_drop)
+    monkeypatch.setattr(restore_module, "_record_drill_completion", no_audit)
+
+    with pytest.raises(RestoreCommandFailed):
+        await drill_restore(
+            current_database_url="postgresql://operator@localhost/postgres",
+            archive=archive,
+            journal=journal,
+            backup_key=BACKUP_KEY,
+            keyring=_keyring(),
+        )
+
+    assert dropped == []
 
 
 def test_restore_result_and_cli_contract_are_public_safe() -> None:

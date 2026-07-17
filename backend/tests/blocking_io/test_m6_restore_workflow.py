@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -111,13 +112,35 @@ class _CancellableProcess:
         self._finished.set()
 
 
+class _SlowTerminationProcess(_CancellableProcess):
+    def __init__(self) -> None:
+        super().__init__()
+        self.termination_started = asyncio.Event()
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.termination_started.set()
+
+    def finish_termination(self) -> None:
+        self.returncode = -15
+        self._finished.set()
+
+
 async def test_cancelled_pg_restore_settles_child_and_removes_passfile_off_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import app.recovery.restore as restore_module
+    from app.recovery.cleanup import (
+        _cleanup_owned_workspace,
+        _create_owned_workspace,
+    )
 
     process = _CancellableProcess()
+    workspace = await asyncio.to_thread(
+        _create_owned_workspace,
+        prefix="deerflow-blocking-restore-",
+    )
 
     async def fake_subprocess(*_argv: str, **_kwargs: object) -> _CancellableProcess:
         return process
@@ -127,7 +150,7 @@ async def test_cancelled_pg_restore_settles_child_and_removes_passfile_off_loop(
         restore_module._run_pg_restore(
             "postgresql://operator:secret@127.0.0.1/deerflow_restore_1_0123456789abcdef0123456789abcdef",
             tmp_path / "authenticated.dump",
-            tmp_path,
+            workspace,
         )
     )
     await process.started.wait()
@@ -136,4 +159,61 @@ async def test_cancelled_pg_restore_settles_child_and_removes_passfile_off_loop(
         await task
 
     assert process.terminated
-    assert await asyncio.to_thread(lambda: not any(tmp_path.glob(".restore-pgpass-*")))
+    assert workspace.files == {}
+    await asyncio.to_thread(
+        _cleanup_owned_workspace,
+        workspace.path,
+        workspace.identity,
+        {},
+    )
+
+
+async def test_repeated_cancellation_still_settles_pg_restore_termination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process_module = await asyncio.to_thread(
+        importlib.import_module,
+        "app.recovery.restore_process",
+    )
+    from app.recovery.cleanup import (
+        _cleanup_owned_workspace,
+        _create_owned_workspace,
+    )
+
+    process = _SlowTerminationProcess()
+    workspace = await asyncio.to_thread(
+        _create_owned_workspace,
+        prefix="deerflow-blocking-restore-repeat-",
+    )
+
+    async def fake_subprocess(*_argv: str, **_kwargs: object) -> _SlowTerminationProcess:
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    task = asyncio.create_task(
+        process_module.run_pg_restore(
+            "postgresql://operator@127.0.0.1/deerflow_restore_1_0123456789abcdef0123456789abcdef",
+            tmp_path / "authenticated.dump",
+            workspace,
+        )
+    )
+    await process.started.wait()
+    task.cancel()
+    await process.termination_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    process.finish_termination()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert process.terminated
+    await asyncio.to_thread(
+        _cleanup_owned_workspace,
+        workspace.path,
+        workspace.identity,
+        {},
+    )

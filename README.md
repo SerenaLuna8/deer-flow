@@ -1043,7 +1043,12 @@ final sequence, and head digest. Restore holds the same PostgreSQL advisory auth
 source-anchor verification through replay, probes, proof, and sensitive workspace cleanup, so a
 concurrent tombstone cannot be omitted. The authenticated dump, passfile, and owned workspace are
 identity-checked, removed, and directory-fsynced before proof; cleanup failure drops the invocation's
-new target and cannot return verified. Restore never changes
+new target and cannot return verified. Unknown workspace files are never adopted or removed. Source
+authority release is explicit and cancellation-settled: cancellation during unlock is rethrown only
+after reliable release, then the invocation-owned target is removed rather than returned as verified.
+The drill drops its generated target only after the same `Restorer` instance hands off an unforgeable
+verified ownership token; pre-create failure, a pre-existing target, or a forged result cannot trigger
+DROP. Restore never changes
 `DATABASE_URL`, starts services, overwrites a database, or cuts traffic. For example:
 
 ```bash

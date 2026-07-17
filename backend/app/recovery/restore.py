@@ -8,9 +8,8 @@ import json
 import os
 import re
 import stat
-import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,11 +29,14 @@ from app.recovery.authority import (
     source_recovery_authority as _source_recovery_authority,
 )
 from app.recovery.cleanup import (
+    OwnedFile,
     SensitiveCleanupFailed,
     _cleanup_owned_workspace,
-    _remove_owned_file,
+    _create_owned_file,
+    _create_owned_workspace,
     _settle_async_cleanup,
     _settle_blocking_cleanup,
+    _settle_blocking_result,
 )
 from app.recovery.identity import source_installation_id
 from app.recovery.journal import (
@@ -44,6 +46,12 @@ from app.recovery.journal import (
     TombstoneSnapshot,
 )
 from app.recovery.purge import apply_replay_entry
+from app.recovery.restore_process import (
+    RestoreCommandFailed,
+)
+from app.recovery.restore_process import (
+    run_pg_restore as _run_pg_restore,
+)
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.recovery.model import (
@@ -105,7 +113,6 @@ _REQUIRED_CONSTRAINTS = frozenset(
     }
 )
 _TARGET_REF_NAMESPACE = uuid.UUID("a0658bb5-af1b-47ae-8278-af299dd8aeed")
-_PROCESS_TERM_TIMEOUT_SECONDS = 5.0
 
 
 class RestoreAuthenticationFailed(RuntimeError):
@@ -116,11 +123,6 @@ class RestoreAuthenticationFailed(RuntimeError):
 class RestoreTargetRejected(RuntimeError):
     def __init__(self) -> None:
         super().__init__("RESTORE_TARGET_REJECTED")
-
-
-class RestoreCommandFailed(RuntimeError):
-    def __init__(self) -> None:
-        super().__init__("RESTORE_COMMAND_FAILED")
 
 
 class RecoveryProbeFailed(RuntimeError):
@@ -151,6 +153,11 @@ class RestoreResult:
     probes_complete: bool
     status: str
     checksum: str
+    _handoff_token: object | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,15 +259,29 @@ def _parse_authenticated_manifest(raw: bytes) -> tuple[str, str, str, int, int, 
     return archive_id, schema_revision, source_id, sequence, table_count, hashlib.sha256(raw).hexdigest()
 
 
-def _authenticate_archive(archive: Path, key: bytes, workspace: Path) -> _AuthenticatedArchive:
+def _authenticate_archive(
+    archive: Path,
+    key: bytes,
+    dump: OwnedFile,
+) -> _AuthenticatedArchive:
     before = _read_manifest_bytes(archive)
-    descriptor, dump_name = tempfile.mkstemp(prefix="deerflow-restore-", suffix=".dump", dir=workspace)
-    dump_path = Path(dump_name)
+    parent = os.open(
+        dump.path.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    descriptor = -1
     try:
-        os.fchmod(descriptor, 0o600)
+        descriptor = os.open(
+            dump.path.name,
+            os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent,
+        )
         dump_info = os.fstat(descriptor)
-        dump_identity = (dump_info.st_dev, dump_info.st_ino)
+        if not stat.S_ISREG(dump_info.st_mode) or (dump_info.st_dev, dump_info.st_ino) != dump.identity:
+            raise RestoreAuthenticationFailed
+        os.ftruncate(descriptor, 0)
         with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = -1
             for chunk in BackupArchiveReader(key).verified_chunks(archive):
                 handle.write(chunk)
             handle.flush()
@@ -276,21 +297,17 @@ def _authenticate_archive(archive: Path, key: bytes, workspace: Path) -> _Authen
             sequence,
             table_count,
             digest,
-            dump_path,
-            dump_identity,
+            dump.path,
+            dump.identity,
         )
     except BackupAuthenticationFailed:
-        try:
-            dump_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise RestoreAuthenticationFailed from None
-    except BaseException:
-        try:
-            dump_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    except OSError:
+        raise RestoreAuthenticationFailed from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent)
 
 
 def _maintenance_url(database_url: str) -> str:
@@ -396,126 +413,6 @@ async def _drop_created_database(current_url: str, target_url: str) -> None:
     await _drop_database_on_target(target_url, database)
 
 
-def _pgpass_escape(value: str) -> str:
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
-        raise RestoreCommandFailed
-    return value.replace("\\", "\\\\").replace(":", "\\:")
-
-
-def _libpq_environment(
-    database_url: str,
-    workspace: Path,
-) -> tuple[dict[str, str], Path | None, tuple[int, int] | None]:
-    try:
-        parsed = make_url(database_url)
-        host = parsed.host or ""
-        port = str(parsed.port or 5432)
-        user = parsed.username or ""
-        database = parsed.database or ""
-        if not user or not database:
-            raise ValueError
-        environment = {
-            "PATH": os.environ.get("PATH", ""),
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "PGHOST": host,
-            "PGPORT": port,
-            "PGUSER": user,
-            "PGDATABASE": database,
-        }
-        for query_key, env_key in {
-            "sslmode": "PGSSLMODE",
-            "sslrootcert": "PGSSLROOTCERT",
-            "sslcert": "PGSSLCERT",
-            "sslkey": "PGSSLKEY",
-        }.items():
-            value = parsed.query.get(query_key)
-            if value:
-                environment[env_key] = str(value)
-        passfile: Path | None = None
-        passfile_identity: tuple[int, int] | None = None
-        if parsed.password:
-            descriptor, name = tempfile.mkstemp(prefix=".restore-pgpass-", dir=workspace)
-            passfile = Path(name)
-            os.fchmod(descriptor, 0o600)
-            info = os.fstat(descriptor)
-            passfile_identity = (info.st_dev, info.st_ino)
-            line = ":".join(_pgpass_escape(value) for value in (host or "*", port, database, user, parsed.password))
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            environment["PGPASSFILE"] = str(passfile)
-        return environment, passfile, passfile_identity
-    except RestoreCommandFailed:
-        raise
-    except Exception:
-        raise RestoreCommandFailed from None
-
-
-async def _terminate_process(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
-    try:
-        process.terminate()
-        await asyncio.wait_for(process.wait(), timeout=_PROCESS_TERM_TIMEOUT_SECONDS)
-    except (TimeoutError, ProcessLookupError):
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            await process.wait()
-
-
-async def _run_pg_restore(database_url: str, dump_path: Path, workspace: Path) -> None:
-    database = database_name(database_url)
-    environment, passfile, passfile_identity = await asyncio.to_thread(
-        _libpq_environment,
-        database_url,
-        workspace,
-    )
-    process: asyncio.subprocess.Process | None = None
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "pg_restore",
-            "--exit-on-error",
-            "--no-owner",
-            "--no-acl",
-            f"--dbname={database}",
-            str(dump_path),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=environment,
-        )
-        if await process.wait() != 0:
-            raise RestoreCommandFailed
-    except asyncio.CancelledError:
-        if process is not None:
-            cleanup = asyncio.create_task(_terminate_process(process))
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                await cleanup
-        raise
-    except RestoreCommandFailed:
-        raise
-    except Exception:
-        if process is not None:
-            await _terminate_process(process)
-        raise RestoreCommandFailed from None
-    finally:
-        if passfile is not None:
-            if passfile_identity is None:
-                raise RestoreCommandFailed
-            cancelled = await _settle_blocking_cleanup(
-                _remove_owned_file,
-                passfile,
-                passfile_identity,
-            )
-            if cancelled:
-                raise asyncio.CancelledError
-
-
 async def _validate_tombstone_prefix(
     session,
     snapshot: TombstoneSnapshot,
@@ -594,8 +491,10 @@ async def replay_tombstones(
 async def _run_recovery_probes(
     target_database_url: str,
     archive: _AuthenticatedArchive,
-    replayed_through: int,
+    journal_snapshot: TombstoneSnapshot,
 ) -> None:
+    replayed_through = journal_snapshot.high_watermark
+    expected_head = journal_snapshot.entries[-1].record_digest if journal_snapshot.entries else "0" * 64
     engine = create_async_engine(DatabaseConfig(url=target_database_url).sqlalchemy_url)
     try:
         async with engine.connect() as connection:
@@ -670,12 +569,13 @@ async def _run_recovery_probes(
             state = (
                 await connection.execute(
                     text(
-                        """SELECT source_installation_id,high_watermark,head_digest
+                        """SELECT source_installation_id,journal_id,
+                                  high_watermark,head_digest
                            FROM recovery_journal_state WHERE id=1"""
                     )
                 )
             ).one_or_none()
-            if state is None or state.source_installation_id != archive.source_installation_id or int(state.high_watermark) != replayed_through:
+            if state is None or state.source_installation_id != archive.source_installation_id or str(state.journal_id) != journal_snapshot.journal_id or int(state.high_watermark) != replayed_through or state.head_digest != expected_head:
                 raise RecoveryProbeFailed
     except RecoveryProbeFailed:
         raise
@@ -759,81 +659,140 @@ async def _write_proof_and_completion(
 class Restorer:
     def __init__(self, config: RestoreConfig) -> None:
         self.config = config
+        self._handoff_token = object()
+        self._verified_result: RestoreResult | None = None
+
+    def owns_verified_target(self, result: RestoreResult) -> bool:
+        return self._verified_result is result and result._handoff_token is self._handoff_token
 
     async def restore(self) -> RestoreResult:
+        self._verified_result = None
         target_database = _validate_target(self.config)
         if await _database_exists(self.config.target_database_url, target_database):
             raise RestoreTargetRejected
-        workspace = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="deerflow-restore-work-"))
-        await asyncio.to_thread(os.chmod, workspace, 0o700)
-        workspace_info = await asyncio.to_thread(os.stat, workspace, follow_symlinks=False)
-        workspace_identity = (workspace_info.st_dev, workspace_info.st_ino)
+        workspace, workspace_creation_cancelled = await _settle_blocking_result(
+            _create_owned_workspace,
+            prefix="deerflow-restore-work-",
+        )
         workspace_removed = False
         authenticated: _AuthenticatedArchive | None = None
         created = False
         restore_id = uuid.uuid4()
+
+        async def cleanup_invocation_resources() -> None:
+            nonlocal created, workspace_removed
+            cleanup_error: BaseException | None = None
+            cleanup_cancelled = False
+            if created:
+                try:
+                    cancelled = await _settle_async_cleanup(
+                        _drop_created_database(
+                            self.config.current_database_url,
+                            self.config.target_database_url,
+                        )
+                    )
+                    created = False
+                    cleanup_cancelled = cleanup_cancelled or cancelled
+                except BaseException as exc:
+                    cleanup_error = exc
+            if not workspace_removed:
+                try:
+                    cancelled = await _settle_blocking_cleanup(
+                        _cleanup_owned_workspace,
+                        workspace.path,
+                        workspace.identity,
+                        dict(workspace.files),
+                    )
+                    workspace_removed = True
+                    cleanup_cancelled = cleanup_cancelled or cancelled
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+            if cleanup_error is not None:
+                if isinstance(cleanup_error, asyncio.CancelledError):
+                    raise cleanup_error
+                raise RestoreCommandFailed from None
+            if cleanup_cancelled:
+                raise asyncio.CancelledError
+
         try:
-            authenticated = await asyncio.to_thread(
+            if workspace_creation_cancelled:
+                raise asyncio.CancelledError
+            dump, dump_creation_cancelled = await _settle_blocking_result(
+                _create_owned_file,
+                workspace.path,
+                prefix="deerflow-restore-",
+                suffix=".dump",
+            )
+            workspace.register(dump)
+            if dump_creation_cancelled:
+                raise asyncio.CancelledError
+            authenticated, authentication_cancelled = await _settle_blocking_result(
                 _authenticate_archive,
                 self.config.archive,
                 self.config.backup_key,
-                workspace,
+                dump,
             )
+            if authentication_cancelled:
+                raise asyncio.CancelledError
             async with _source_recovery_authority(
                 self.config.current_database_url,
                 journal=self.config.journal,
                 expected_source_installation_id=authenticated.source_installation_id,
                 archive_tombstone_sequence=authenticated.tombstone_journal_sequence,
             ) as journal_snapshot:
-                await _record_source_restore_started(
-                    self.config.current_database_url,
-                    restore_id=restore_id,
-                    archive=authenticated,
-                    keyring=self.config.keyring,
-                )
-                await _create_empty_database(
-                    self.config.target_database_url,
-                    target_database,
-                )
-                created = True
-                await _run_pg_restore(
-                    self.config.target_database_url,
-                    authenticated.dump_path,
-                    workspace,
-                )
-                cleanup_cancelled = await _settle_blocking_cleanup(
-                    _cleanup_owned_workspace,
-                    workspace,
-                    workspace_identity,
-                    {authenticated.dump_path.name: authenticated.dump_identity},
-                )
-                workspace_removed = True
-                if cleanup_cancelled:
-                    raise asyncio.CancelledError
-                replayed = await replay_tombstones(
-                    self.config.target_database_url,
-                    self.config.journal,
-                    archive_high_watermark=authenticated.tombstone_journal_sequence,
-                    keyring=self.config.keyring,
-                    snapshot=journal_snapshot,
-                )
-                replayed_through = journal_snapshot.high_watermark
-                await _run_recovery_probes(
-                    self.config.target_database_url,
-                    authenticated,
-                    replayed_through,
-                )
-                await _write_proof_and_completion(
-                    self.config.target_database_url,
-                    restore_id=restore_id,
-                    archive=authenticated,
-                    replayed=replayed,
-                    replayed_through=replayed_through,
-                    journal_snapshot=journal_snapshot,
-                    keyring=self.config.keyring,
-                )
-            created = False
-            return RestoreResult(
+                try:
+                    await _record_source_restore_started(
+                        self.config.current_database_url,
+                        restore_id=restore_id,
+                        archive=authenticated,
+                        keyring=self.config.keyring,
+                    )
+                    await _create_empty_database(
+                        self.config.target_database_url,
+                        target_database,
+                    )
+                    created = True
+                    await _run_pg_restore(
+                        self.config.target_database_url,
+                        authenticated.dump_path,
+                        workspace,
+                    )
+                    cleanup_cancelled = await _settle_blocking_cleanup(
+                        _cleanup_owned_workspace,
+                        workspace.path,
+                        workspace.identity,
+                        dict(workspace.files),
+                    )
+                    workspace_removed = True
+                    if cleanup_cancelled:
+                        raise asyncio.CancelledError
+                    replayed = await replay_tombstones(
+                        self.config.target_database_url,
+                        self.config.journal,
+                        archive_high_watermark=authenticated.tombstone_journal_sequence,
+                        keyring=self.config.keyring,
+                        snapshot=journal_snapshot,
+                    )
+                    replayed_through = journal_snapshot.high_watermark
+                    await _run_recovery_probes(
+                        self.config.target_database_url,
+                        authenticated,
+                        journal_snapshot,
+                    )
+                    await _write_proof_and_completion(
+                        self.config.target_database_url,
+                        restore_id=restore_id,
+                        archive=authenticated,
+                        replayed=replayed,
+                        replayed_through=replayed_through,
+                        journal_snapshot=journal_snapshot,
+                        keyring=self.config.keyring,
+                    )
+                except BaseException:
+                    await cleanup_invocation_resources()
+                    raise
+            result = RestoreResult(
                 proof_id=restore_id,
                 archive_id=authenticated.archive_id,
                 schema_revision=authenticated.schema_revision,
@@ -843,7 +802,11 @@ class Restorer:
                 probes_complete=True,
                 status="verified",
                 checksum=authenticated.archive_digest,
+                _handoff_token=self._handoff_token,
             )
+            self._verified_result = result
+            created = False
+            return result
         except (RestoreTargetRejected, RestoreAuthenticationFailed, TombstoneJournalUnavailable, RecoveryProbeFailed):
             raise
         except SourceIdentityMismatch:
@@ -859,34 +822,8 @@ class Restorer:
         except Exception:
             raise RestoreCommandFailed from None
         finally:
-            cleanup_error: BaseException | None = None
-            if created:
-                try:
-                    cleanup_cancelled = await _settle_async_cleanup(
-                        _drop_created_database(
-                            self.config.current_database_url,
-                            self.config.target_database_url,
-                        )
-                    )
-                    if cleanup_cancelled:
-                        cleanup_error = asyncio.CancelledError()
-                except BaseException as exc:
-                    cleanup_error = exc
-            if not workspace_removed:
-                try:
-                    cleanup_cancelled = await _settle_blocking_cleanup(
-                        _cleanup_owned_workspace,
-                        workspace,
-                        workspace_identity,
-                    )
-                    if cleanup_cancelled and cleanup_error is None:
-                        cleanup_error = asyncio.CancelledError()
-                except BaseException as exc:
-                    cleanup_error = exc
-            if cleanup_error is not None:
-                if isinstance(cleanup_error, SensitiveCleanupFailed):
-                    raise RestoreCommandFailed from None
-                raise cleanup_error
+            if created or not workspace_removed:
+                await cleanup_invocation_resources()
 
 
 async def _record_drill_completion(
@@ -921,22 +858,29 @@ async def drill_restore(
     keyring: AuditHmacKeyring,
 ) -> RestoreResult:
     target_url = make_url(current_database_url).set(database=f"deerflow_restore_{os.getpid()}_{uuid.uuid4().hex}").render_as_string(hide_password=False)
-    result: RestoreResult | None = None
+    restorer = Restorer(
+        RestoreConfig(
+            archive=archive,
+            target_database_url=target_url,
+            current_database_url=current_database_url,
+            journal=journal,
+            backup_key=backup_key,
+            keyring=keyring,
+        )
+    )
+    owned = False
     try:
-        result = await Restorer(
-            RestoreConfig(
-                archive=archive,
-                target_database_url=target_url,
-                current_database_url=current_database_url,
-                journal=journal,
-                backup_key=backup_key,
-                keyring=keyring,
-            )
-        ).restore()
+        result = await restorer.restore()
+        if not restorer.owns_verified_target(result):
+            raise RestoreCommandFailed
+        owned = True
         await _record_drill_completion(current_database_url, result=result, keyring=keyring)
         return result
     finally:
-        await _drop_created_database(current_database_url, target_url)
+        if owned:
+            cancelled = await _settle_async_cleanup(_drop_created_database(current_database_url, target_url))
+            if cancelled:
+                raise asyncio.CancelledError
 
 
 __all__ = [

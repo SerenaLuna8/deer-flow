@@ -26,6 +26,32 @@ class RecoveryAuthorityReleaseFailed(RuntimeError):
     pass
 
 
+async def _settle_statement(awaitable):
+    task = asyncio.create_task(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    return task.result(), cancelled
+
+
+async def _release_source_recovery_authority(connection) -> bool:
+    try:
+        result, cancelled = await _settle_statement(
+            connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_key)"),
+                {"lock_key": RECOVERY_PURGE_ADVISORY_LOCK},
+            )
+        )
+    except BaseException:
+        raise RecoveryAuthorityReleaseFailed from None
+    if not bool(result.scalar_one()):
+        raise RecoveryAuthorityReleaseFailed
+    return cancelled
+
+
 async def _verify_source_recovery_anchor(
     connection,
     *,
@@ -86,32 +112,29 @@ async def source_recovery_authority(
     engine = create_async_engine(DatabaseConfig(url=database_url).sqlalchemy_url)
     try:
         async with engine.connect() as connection:
-            await connection.execute(
-                text("SELECT pg_advisory_lock(:lock_key)"),
-                {"lock_key": RECOVERY_PURGE_ADVISORY_LOCK},
-            )
-            snapshot = await _verify_source_recovery_anchor(
-                connection,
-                journal=journal,
-                expected_source_installation_id=expected_source_installation_id,
-                archive_tombstone_sequence=archive_tombstone_sequence,
-            )
+            acquired = False
             try:
-                yield snapshot
-            finally:
-                release = asyncio.create_task(
+                _result, acquisition_cancelled = await _settle_statement(
                     connection.execute(
-                        text("SELECT pg_advisory_unlock(:lock_key)"),
+                        text("SELECT pg_advisory_lock(:lock_key)"),
                         {"lock_key": RECOVERY_PURGE_ADVISORY_LOCK},
                     )
                 )
-                while not release.done():
-                    try:
-                        await asyncio.shield(release)
-                    except asyncio.CancelledError:
-                        continue
-                if not bool(release.result().scalar_one()):
-                    raise RecoveryAuthorityReleaseFailed
+                acquired = True
+                if acquisition_cancelled:
+                    raise asyncio.CancelledError
+                snapshot = await _verify_source_recovery_anchor(
+                    connection,
+                    journal=journal,
+                    expected_source_installation_id=expected_source_installation_id,
+                    archive_tombstone_sequence=archive_tombstone_sequence,
+                )
+                yield snapshot
+            finally:
+                if acquired:
+                    release_cancelled = await _release_source_recovery_authority(connection)
+                    if release_cancelled:
+                        raise asyncio.CancelledError
     finally:
         await engine.dispose()
 
