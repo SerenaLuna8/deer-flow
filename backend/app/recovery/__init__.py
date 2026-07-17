@@ -1,6 +1,7 @@
 """Operator-only encrypted PostgreSQL recovery archive primitives."""
 
 from .archive import (
+    ARCHIVE_FORMAT_VERSION,
     CHUNK_SIZE,
     BackupArchiveReader,
     BackupArchiveWriter,
@@ -10,12 +11,14 @@ from .archive import (
     BackupKeyInvalid,
     BackupKeyMissing,
     BackupManifest,
+    BackupSnapshot,
     create_backup,
     load_backup_key,
     pg_dump_argv,
 )
 
 __all__ = [
+    "ARCHIVE_FORMAT_VERSION",
     "CHUNK_SIZE",
     "BackupArchiveReader",
     "BackupArchiveWriter",
@@ -25,6 +28,7 @@ __all__ = [
     "BackupKeyInvalid",
     "BackupKeyMissing",
     "BackupManifest",
+    "BackupSnapshot",
     "create_backup",
     "load_backup_key",
     "pg_dump_argv",

@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import os
+import stat
 import sys
 import uuid
 from pathlib import Path
@@ -23,16 +24,18 @@ from app.recovery.archive import BackupCommandFailed, BackupConfig, BackupKeyInv
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create an authenticated encrypted PostgreSQL backup archive")
     parser.add_argument("--output", required=True, type=Path, help="External operator archive directory")
-    parser.add_argument("--source-installation-id", required=True)
     return parser
 
 
 def _prepare_external_root(root: Path) -> Path:
-    resolved = root.expanduser().resolve()
+    expanded = root.expanduser().absolute()
+    expanded.mkdir(parents=True, exist_ok=True)
+    if stat.S_ISLNK(os.lstat(expanded).st_mode):
+        raise ValueError("BACKUP_OUTPUT_MUST_NOT_BE_SYMLINK")
+    resolved = expanded.resolve(strict=True)
     repository_root = BACKEND_ROOT.parent.resolve()
     if resolved == repository_root or repository_root in resolved.parents:
         raise ValueError("BACKUP_OUTPUT_MUST_BE_EXTERNAL")
-    resolved.mkdir(parents=True, exist_ok=True)
     os.chmod(resolved, 0o700)
     return resolved
 
@@ -43,7 +46,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         database_url = os.environ.get("DATABASE_URL")
         if not database_url:
             raise BackupCommandFailed
-        key = load_backup_key()
+        key = load_backup_key(database_url=database_url)
         root = await asyncio.to_thread(_prepare_external_root, args.output)
         archive_id = str(uuid.uuid4())
         manifest = await create_backup(
@@ -51,7 +54,6 @@ async def async_main(argv: list[str] | None = None) -> int:
                 database_url=database_url,
                 output=root / f"{archive_id}.dfba",
                 key=key,
-                source_installation_id=args.source_installation_id,
                 archive_id=archive_id,
             )
         )

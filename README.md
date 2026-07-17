@@ -996,17 +996,25 @@ frontend cursor/dedupe, and the atomic project quota core are implemented. Membe
 concurrent-Run, and actual MCP-dispatch quota enforcement are also wired across Gateway,
 Worker, and Scheduler with stable 429/`Retry-After` responses. Complete audit and general
 Task 16 adds an operator-only encrypted PostgreSQL archive command. Set a distinct 32-byte
-base64 `DEER_FLOW_BACKUP_KEY`, set `DATABASE_URL`, and write only to an external secure
-directory (never this repository):
+base64 `DEER_FLOW_BACKUP_KEY`, `DATABASE_URL`, and the existing
+`DEER_FLOW_AUDIT_ACTIVE_KEY_ID` / `DEER_FLOW_AUDIT_KEYRING_JSON` audit environment, then
+write only to an external secure directory (never this repository):
 
 ```bash
-make backup-db ARGS="--output /secure/backups --source-installation-id production-a"
+make backup-db ARGS="--output /secure/backups"
 ```
 
-The command uses fixed `pg_dump --format=custom --no-owner --no-acl` argv, publishes an
-authenticated AES-GCM chunk archive atomically, and prints only archive ID, schema revision,
-chunk count, and a truncated checksum. It never prints the database URL, archive path, key,
-plaintext, or pg_dump output. Restore, recovery journal, and retention purge remain later M6 work.
+The command exports one read-only repeatable-read PostgreSQL snapshot, derives a privacy-safe
+source identity from PostgreSQL system/database authority, and binds that same snapshot to
+fixed `pg_dump --format=custom --no-owner --no-acl --snapshot=...` argv. The database role
+must be allowed to read `pg_control_system()`; otherwise backup fails closed. Connection
+credentials use a temporary `0600` libpq passfile, never process argv, and are removed before
+publication. The archive records the actual Alembic revision, `pg_dump` version, non-empty
+byte/table counts, and a proven contiguous tombstone cursor. It uses per-archive keys with
+counter nonces, no-clobber publication, and a bounded authenticated plaintext spool; a success
+audit is required or the archive is removed. Output remains limited to archive ID, schema
+revision, chunk count, and a truncated checksum. Restore, recovery journal, and retention purge
+remain later M6 work.
 
 The project-scoped backend API is available at
 `/api/projects/{project_id}/automations`. It provides strict create, list, read,
