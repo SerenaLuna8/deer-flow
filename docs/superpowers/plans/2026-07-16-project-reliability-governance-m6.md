@@ -1006,7 +1006,7 @@ Expected: PASS；成功/拒绝/失败事件与领域提交一致。
 
 **Interfaces:** Admin可读 effective limits/current usage/80% state、收紧 project quota、分页读本项目 audit；Member/Viewer 404；query key始终含 account+project；页面受 server capability + M6 readiness gate。
 
-- [ ] **Step 1: 写 API/UI RED tests**
+- [x] **Step 1: 写 API/UI RED tests**
 
 ```ts
 it("does not expose governance links without server capability", () => {
@@ -1018,7 +1018,7 @@ it("does not expose governance links without server capability", () => {
 
 backend覆盖 role、双 scope、cursor、limit收紧、超平台值拒绝；frontend覆盖 cache isolation、loading/empty/error、secret field absence、静态构建门禁。
 
-- [ ] **Step 2: 观察 RED**
+- [x] **Step 2: 观察 RED**
 
 ```bash
 cd backend
@@ -1029,7 +1029,7 @@ pnpm test -- m6-project-governance.test.tsx
 
 Expected: routes/components missing。
 
-- [ ] **Step 3: 实现 strict scoped API/UI 并验证**
+- [x] **Step 3: 实现 strict scoped API/UI 并验证**
 
 ```bash
 cd backend
@@ -1042,6 +1042,8 @@ git commit -m "feat: add project governance console"
 ```
 
 Expected: PASS；无 capability/readiness 时 route 和 sidebar 都不暴露入口。
+
+完成（2026-07-17）：后端新增 project Admin-only usage、optimistic quota tightening 和 privacy-safe descending audit API，所有入口使用 fresh `ProjectContext`、精确 capability 与 M6 cutover guard；Member/Viewer/outsider/cross-project 统一 public 404。Quota policy、80% threshold ledger 与 `quota.policy_updated` audit 共用 caller transaction，audit failure 已由真实 PostgreSQL 用例证明全部回滚。前端实现 account+project-scoped strict queries、Usage/Audit loading/empty/error/data states、direct static gate，并在实际 `project-nav.tsx` 中只于 non-static + exact capability + endpoint readiness 同时满足时显示入口。RED 分别证明 backend dependency 与 frontend component 缺失；GREEN 为后端聚焦回归 56 passed、前端全量 unit 926 passed，`pnpm check` 与 Prettier gate 通过。
 
 ### Task 15: 提供 system_admin operations/projects/jobs/audit API 和 UI
 

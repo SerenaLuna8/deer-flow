@@ -175,7 +175,9 @@ export interface Translations {
   };
 
   project: {
+    audit: string;
     automations: string;
+    usage: string;
   };
 
   automation: {

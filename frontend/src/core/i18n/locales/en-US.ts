@@ -237,7 +237,9 @@ export const enUS: Translations = {
   },
 
   project: {
+    audit: "Audit",
     automations: "Automations",
+    usage: "Usage",
   },
 
   automation: {

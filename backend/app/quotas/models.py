@@ -209,6 +209,22 @@ class ProjectQuotaPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class QuotaUsageDimension:
+    dimension: QuotaDimension
+    bucket: str
+    used: int
+    reserved: int
+    limit: int
+    warning_threshold_reached: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectQuotaUsage:
+    policy: ProjectQuotaPolicy
+    dimensions: tuple[QuotaUsageDimension, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class QuotaMutation:
     dimension: QuotaDimension
     bucket: str
@@ -238,6 +254,7 @@ __all__ = [
     "EffectiveQuotaLimits",
     "ProjectQuotaLimits",
     "ProjectQuotaPolicy",
+    "ProjectQuotaUsage",
     "QUOTA_DIMENSIONS",
     "QuotaConflict",
     "QuotaCompensationAuthority",
@@ -251,4 +268,5 @@ __all__ = [
     "QuotaReconciliationAuthority",
     "QuotaReconciliationReport",
     "QuotaSourceRef",
+    "QuotaUsageDimension",
 ]

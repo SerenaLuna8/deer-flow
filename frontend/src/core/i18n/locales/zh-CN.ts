@@ -228,7 +228,9 @@ export const zhCN: Translations = {
   },
 
   project: {
+    audit: "审计",
     automations: "自动化",
+    usage: "用量",
   },
 
   automation: {

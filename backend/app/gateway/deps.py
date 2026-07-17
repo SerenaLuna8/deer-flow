@@ -302,13 +302,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.operational_audit_sink = operational_audit_sink
         app.state.shared_asset_audit_sink = DurableSharedAssetGovernanceEventSink(audit_service)
         quota_config = getattr(config, "quotas", None) or QuotaConfig()
-        project_quota_enforcer = ProjectQuotaEnforcer(
-            QuotaService(
-                sf,
-                quota_config,
-                source_ref_hasher=audit_keyring,
-            )
+        quota_service = QuotaService(
+            sf,
+            quota_config,
+            source_ref_hasher=audit_keyring,
         )
+        project_quota_enforcer = ProjectQuotaEnforcer(quota_service)
+        app.state.project_quota_service = quota_service
         app.state.project_quota_enforcer = project_quota_enforcer
         from app.private_work.checkpointer import ProjectScopedCheckpointer
 
@@ -559,6 +559,20 @@ def get_project_quota_enforcer(request: Request):
     value = getattr(request.app.state, "project_quota_enforcer", None)
     if value is None:
         raise HTTPException(status_code=503, detail="Project quota service not available")
+    return value
+
+
+def get_project_quota_service(request: Request):
+    value = getattr(request.app.state, "project_quota_service", None)
+    if value is None:
+        raise HTTPException(status_code=503, detail="Project quota service not available")
+    return value
+
+
+def get_project_audit_service(request: Request):
+    value = getattr(request.app.state, "project_audit_service", None)
+    if value is None:
+        raise HTTPException(status_code=503, detail="Project audit service not available")
     return value
 
 

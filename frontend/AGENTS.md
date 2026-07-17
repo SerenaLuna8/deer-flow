@@ -162,13 +162,18 @@ schedule_spec 与 timezone 只有发生规范化后的语义变化才发送，�
 `/workspace/scheduled-tasks` 只根据结构化
 `409 AUTOMATION_CUTOVER` 显示本地化迁移完成说明，不显示服务端文本或任何 legacy mutation 控件。
 当前前端已完成 M5，并已接入 M6 独立 Worker 对应的 PostgreSQL 持久化 SSE：标准重连游标按
-account/project/thread 隔离保存，重复 event ID 与 terminal 会被丢弃；服务编排、配额、审计与通用备份恢复仍属于后续 M6 task。
+account/project/thread 隔离保存，重复 event ID 与 terminal 会被丢弃。Task 14 还提供项目 Admin
+Usage/Audit 页面；两类 query key 都以认证 account UUID 和 entered project UUID 开头，入口必须同时满足
+非 static、精确 server capability 和对应 M6 API readiness，直达页仍由 capability 与 API 的 public-404
+边界关闭。Usage 只显示 configured/effective limit、used/reserved 和 80% 状态，并以 optimistic version
+收紧项目 quota；Audit 只接受严格公共字段，不显示 target HMAC、owner/project 私有标识或 secret。
+平台运营面、通用备份恢复与最终 M6 关闭仍属于后续 task。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie
 跨越登录流程，不写入 storage；产品不发送邀请邮件。M2 的退出/移除和删除恢复 UI 只反映
 30 天保留窗口，不代表私有数据或项目数据已被物理清除。M5 已完成，当前进度为 5/8（62.5%）；
-M6 配额/审计/通用备份恢复、M7 legacy cleanup 和 M8 完整发布验收仍未交付，因此不能作为完整多用户
+M6 平台运营面/通用备份恢复及最终关闭、M7 legacy cleanup 和 M8 完整发布验收仍未交付，因此不能作为完整多用户
 SaaS 发布。
 
 - **`hooks/`** — Shared React hooks

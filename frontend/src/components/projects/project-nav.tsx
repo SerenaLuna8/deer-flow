@@ -7,10 +7,12 @@ import {
   CalendarClockIcon,
   CableIcon,
   FolderKanbanIcon,
+  GaugeIcon,
   KeyRoundIcon,
   MessagesSquareIcon,
   MenuIcon,
   NetworkIcon,
+  ScrollTextIcon,
   SettingsIcon,
   SparklesIcon,
   UsersIcon,
@@ -34,6 +36,8 @@ import {
   useProjectPrivateWorkReadiness,
 } from "@/core/private-work/readiness";
 import { useProjectAutomationReadiness } from "@/core/project-automations/readiness";
+import { useProjectAudit } from "@/core/project-governance/audit";
+import { useProjectUsage } from "@/core/project-governance/usage";
 import {
   PROJECT_AUTOMATION,
   PROJECT_PRIVATE_WORKSPACE,
@@ -46,7 +50,7 @@ import { cn } from "@/lib/utils";
 type ProjectNavigationItem = {
   href: string;
   icon: typeof FolderKanbanIcon;
-  i18nKey?: "automations";
+  i18nKey?: "audit" | "automations" | "usage";
   label: string;
 };
 
@@ -65,6 +69,8 @@ export function projectNavigationItems(
   automationReady = false,
   automationFeatureEnabled: boolean = PROJECT_AUTOMATION,
   staticWebsiteOnly = false,
+  usageReady = false,
+  auditReady = false,
 ): ProjectNavigationItem[] {
   const base = `/projects/${encodeURIComponent(project.slug)}`;
   const items: ProjectNavigationItem[] = [
@@ -126,6 +132,30 @@ export function projectNavigationItems(
       label: "项目设置",
     });
   }
+  if (
+    !staticWebsiteOnly &&
+    usageReady &&
+    project.capabilities.includes("project.usage.read")
+  ) {
+    items.push({
+      href: `${base}/settings/usage`,
+      icon: GaugeIcon,
+      i18nKey: "usage",
+      label: "Usage",
+    });
+  }
+  if (
+    !staticWebsiteOnly &&
+    auditReady &&
+    project.capabilities.includes("project.audit.read")
+  ) {
+    items.push({
+      href: `${base}/settings/audit`,
+      icon: ScrollTextIcon,
+      i18nKey: "audit",
+      label: "Audit",
+    });
+  }
   return items;
 }
 
@@ -163,7 +193,6 @@ function ProjectNavigationLinks({
   project: Project;
   mobile?: boolean;
 }) {
-  const { t } = useI18n();
   const canReadPrivateWork = project.capabilities.includes(
     "private_work.read_own",
   );
@@ -174,15 +203,89 @@ function ProjectNavigationLinks({
   const automationReadiness = useProjectAutomationReadiness(
     PROJECT_AUTOMATION && canReadPrivateWork && !staticWebsiteOnly,
   );
+  const privateWorkReady = readiness.data?.status === "ready";
+  const automationReady =
+    automationReadiness.data?.status === "ready" &&
+    automationReadiness.data.project_private_work_ready &&
+    automationReadiness.data.automation_cutover_ready;
+  if (staticWebsiteOnly) {
+    return (
+      <ProjectNavigationLinksContent
+        project={project}
+        mobile={mobile}
+        privateWorkReady={privateWorkReady}
+        automationReady={automationReady}
+        usageReady={false}
+        auditReady={false}
+        staticWebsiteOnly
+      />
+    );
+  }
+  return (
+    <ProjectNavigationLinksWithGovernance
+      project={project}
+      mobile={mobile}
+      privateWorkReady={privateWorkReady}
+      automationReady={automationReady}
+    />
+  );
+}
+
+function ProjectNavigationLinksWithGovernance({
+  project,
+  mobile,
+  privateWorkReady,
+  automationReady,
+}: {
+  project: Project;
+  mobile: boolean;
+  privateWorkReady: boolean;
+  automationReady: boolean;
+}) {
+  const canReadUsage = project.capabilities.includes("project.usage.read");
+  const canReadAudit = project.capabilities.includes("project.audit.read");
+  const usage = useProjectUsage(canReadUsage);
+  const audit = useProjectAudit(null, 1, canReadAudit);
+  return (
+    <ProjectNavigationLinksContent
+      project={project}
+      mobile={mobile}
+      privateWorkReady={privateWorkReady}
+      automationReady={automationReady}
+      usageReady={usage.isSuccess}
+      auditReady={audit.isSuccess}
+      staticWebsiteOnly={false}
+    />
+  );
+}
+
+function ProjectNavigationLinksContent({
+  project,
+  mobile,
+  privateWorkReady,
+  automationReady,
+  usageReady,
+  auditReady,
+  staticWebsiteOnly,
+}: {
+  project: Project;
+  mobile: boolean;
+  privateWorkReady: boolean;
+  automationReady: boolean;
+  usageReady: boolean;
+  auditReady: boolean;
+  staticWebsiteOnly: boolean;
+}) {
+  const { t } = useI18n();
   const links = projectNavigationItems(
     project,
-    readiness.data?.status === "ready",
+    privateWorkReady,
     PROJECT_PRIVATE_WORKSPACE,
-    automationReadiness.data?.status === "ready" &&
-      automationReadiness.data.project_private_work_ready &&
-      automationReadiness.data.automation_cutover_ready,
+    automationReady,
     PROJECT_AUTOMATION,
     staticWebsiteOnly,
+    usageReady,
+    auditReady,
   ).map(({ href, icon: Icon, i18nKey, label }) => {
     const visibleLabel = i18nKey ? t.project[i18nKey] : label;
     const link = (

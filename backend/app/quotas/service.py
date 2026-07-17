@@ -14,12 +14,15 @@ from app.private_work.context import (
     PrivateWorkContext,
     is_issued_private_work_context,
 )
+from app.projects.capabilities import Capability
+from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.quotas.models import (
     QUOTA_DIMENSIONS,
     EffectiveQuotaLimits,
     ProjectQuotaLimits,
     ProjectQuotaPolicy,
+    ProjectQuotaUsage,
     QuotaCompensationAuthority,
     QuotaConflict,
     QuotaDimension,
@@ -28,6 +31,7 @@ from app.quotas.models import (
     QuotaMutation,
     QuotaPolicyInvalid,
     QuotaSourceRef,
+    QuotaUsageDimension,
     _is_issued_quota_compensation_authority,
 )
 from deerflow.config.quota_config import QuotaConfig
@@ -212,6 +216,90 @@ class QuotaService:
         )
         if any(value is not None and (type(value) is not int or value < minimum or value > maximum) for value, minimum, maximum in values):
             raise QuotaPolicyInvalid("project quota must tighten the platform default")
+
+    @staticmethod
+    async def _require_usage_authority(
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None:
+        if type(context) is not ProjectContext or Capability.PROJECT_USAGE_READ not in context.capabilities:
+            raise QuotaForbidden("project usage authority is required")
+        project = (
+            await session.execute(
+                select(ProjectRow.id).where(
+                    ProjectRow.id == context.project_id,
+                    ProjectRow.status == "active",
+                    ProjectRow.is_suspended.is_(False),
+                )
+            )
+        ).scalar_one_or_none()
+        membership = (
+            await session.execute(
+                select(ProjectMembershipRow.id).where(
+                    ProjectMembershipRow.id == context.membership_id,
+                    ProjectMembershipRow.project_id == context.project_id,
+                    ProjectMembershipRow.user_id == str(context.user_id),
+                    ProjectMembershipRow.status == "active",
+                    ProjectMembershipRow.version == context.membership_version,
+                )
+            )
+        ).scalar_one_or_none()
+        if project is None or membership is None:
+            raise QuotaForbidden("project usage authority is required")
+
+    async def read_usage(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        *,
+        now: datetime | None = None,
+    ) -> ProjectQuotaUsage:
+        await self._require_usage_authority(session, context)
+        selected_time = self._now(now)
+        repository = QuotaRepository(session)
+        row = await repository.policy(context.project_id)
+        configured = ProjectQuotaLimits(
+            member_limit=row.member_limit if row is not None else None,
+            storage_bytes_limit=row.storage_bytes_limit if row is not None else None,
+            concurrent_run_limit=row.concurrent_run_limit if row is not None else None,
+            mcp_calls_daily_limit=row.mcp_calls_daily_limit if row is not None else None,
+        )
+        effective = self._effective_limits(configured)
+        limits = {
+            "members": effective.member_limit,
+            "storage_bytes": effective.storage_bytes_limit,
+            "concurrent_runs": effective.concurrent_run_limit,
+            "mcp_calls_daily": effective.mcp_calls_daily_limit,
+        }
+        dimensions: list[QuotaUsageDimension] = []
+        for dimension in QUOTA_DIMENSIONS:
+            bucket = self.bucket_for(dimension, now=selected_time)
+            counter = await repository.counter(context.project_id, dimension, bucket)
+            used = counter.used if counter is not None else 0
+            reserved = counter.reserved if counter is not None else 0
+            limit = limits[dimension]
+            dimensions.append(
+                QuotaUsageDimension(
+                    dimension=dimension,
+                    bucket=bucket,
+                    used=used,
+                    reserved=reserved,
+                    limit=limit,
+                    warning_threshold_reached=self._threshold_reached(
+                        usage=used + reserved,
+                        limit=limit,
+                        threshold=self._config.warning_threshold,
+                    ),
+                )
+            )
+        return ProjectQuotaUsage(
+            policy=ProjectQuotaPolicy(
+                configured=configured,
+                effective=effective,
+                version=row.version if row is not None else 0,
+            ),
+            dimensions=tuple(dimensions),
+        )
 
     async def set_limits(
         self,
