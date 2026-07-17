@@ -432,6 +432,8 @@ class AuditService:
     @staticmethod
     def _record(row: AuditLogRow) -> AuditRecord:
         try:
+            action = AuditAction(row.action)
+            metadata = AUDIT_METADATA_MODELS[action].model_validate(row.metadata_json).model_dump(mode="json", exclude_none=True)
             return AuditRecord(
                 id=row.id,
                 occurred_at=row.occurred_at,
@@ -439,17 +441,17 @@ class AuditService:
                 actor_process=AuditProcess(row.actor_process) if row.actor_process is not None else None,
                 actor_platform_role=AuditPlatformRole(row.actor_platform_role) if row.actor_platform_role is not None else None,
                 project_id=row.project_id,
-                action=AuditAction(row.action),
+                action=action,
                 target_kind=AuditTargetKind(row.target_kind),
                 outcome=AuditOutcome(row.outcome),
                 public_error_code=row.public_error_code,
                 request_id=row.request_id,
                 job_id=row.job_id,
                 attempt_id=row.attempt_id,
-                metadata=dict(row.metadata_json),
+                metadata=metadata,
             )
-        except (TypeError, ValueError):
-            raise AuditUnavailable() from None
+        except (KeyError, TypeError, ValueError, ValidationError):
+            raise AuditMetadataRejected() from None
 
     @staticmethod
     def _encode_cursor(row: AuditLogRow) -> str:

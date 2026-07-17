@@ -273,6 +273,7 @@ export const zhCN: Translations = {
     signOut: "退出登录",
     retry: "重试",
     navigation: {
+      label: "平台运维导航",
       overview: "概览",
       projects: "项目",
       jobs: "任务",
@@ -285,6 +286,28 @@ export const zhCN: Translations = {
       loading: "正在加载平台运维数据",
       unavailableTitle: "运维数据暂不可用",
       unavailableDescription: "无法加载平台运维数据。",
+      readiness: {
+        title: "就绪状态",
+        states: {
+          ready: "就绪",
+          degraded: "降级",
+          closed: "关闭",
+          unavailable: "不可用",
+          disabled: "已禁用",
+          polling: "轮询中",
+          unknown: "未知",
+        },
+        components: {
+          database: "数据库",
+          schema: "架构",
+          worker_fleet: "Worker 集群",
+          scheduler: "调度器",
+          stream: "事件流",
+          recovery: "恢复",
+          quota: "配额",
+          audit: "审计",
+        },
+      },
       counts: {
         projects: "项目",
         suspendedProjects: "已暂停项目",

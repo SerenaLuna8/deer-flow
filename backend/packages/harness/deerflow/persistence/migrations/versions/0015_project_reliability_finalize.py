@@ -184,6 +184,11 @@ def upgrade() -> None:
         "scheduled_task_runs",
         ["project_id", "owner_user_id", "id"],
     )
+    op.create_unique_constraint(
+        "uq_jobs_predecessor_dead_job",
+        "jobs",
+        ["predecessor_dead_job_id"],
+    )
     op.create_foreign_key(
         "fk_jobs_private_run",
         "jobs",

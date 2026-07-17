@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import uuid
 from functools import wraps
+from inspect import isawaitable
+from typing import Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
@@ -28,11 +30,14 @@ from app.reliability.errors import (
     ReliabilityInvalidStreamCursor,
     ReliabilityNotFound,
 )
+from app.reliability.models import ReliabilityReadiness
 from app.reliability.operations import (
     OperationsOverview,
     SystemOperationsRepository,
     resolve_current_system_audit_context,
 )
+from app.reliability.readiness import ReliabilityReadinessService
+from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.jobs.sql import JobIdempotencyConflict, JobRequeueForbidden
 from deerflow.trace_context import (
     generate_trace_id,
@@ -50,6 +55,7 @@ class AdminOperationsRoute(APIRoute):
                 return await original(request)
             except RequestValidationError:
                 request_id = get_current_trace_id() or normalize_trace_id(request.headers.get("x-trace-id")) or generate_trace_id()
+                await _require_validation_system_admin(request, request_id)
                 raise reliability_http_exception(ReliabilityInvalid(request_id)) from None
 
         return handler
@@ -68,9 +74,15 @@ class OperationsReadinessResponse(BaseModel):
         strict=True,
         populate_by_name=True,
     )
-    status: str
+    status: Literal["ready", "degraded", "closed"]
     database: str
     schema_status: str = Field(alias="schema", serialization_alias="schema")
+    worker_fleet: str
+    scheduler: str
+    stream: str
+    recovery: str
+    quota: str
+    audit: str
 
 
 class OperationsCountsResponse(BaseModel):
@@ -124,6 +136,54 @@ async def current_system_context(
     return context
 
 
+async def _validation_user(request: Request):
+    resolver = request.app.dependency_overrides.get(
+        get_current_user_from_request,
+        get_current_user_from_request,
+    )
+    result = resolver(request)
+    return await result if isawaitable(result) else result
+
+
+async def _require_validation_system_admin(request: Request, request_id: str) -> None:
+    try:
+        user = await _validation_user(request)
+        user_id = uuid.UUID(str(user.id))
+    except HTTPException:
+        raise
+    except (AttributeError, TypeError, ValueError):
+        raise reliability_http_exception(ReliabilityNotFound(request_id)) from None
+
+    session_factory = getattr(request.app.state, "admin_operations_session_factory", None)
+    try:
+        factory = session_factory or get_session_factory()
+        async with factory() as session, session.begin():
+            await resolve_current_system_audit_context(session, user_id, request_id)
+    except AuditAuthorityRejected:
+        raise reliability_http_exception(ReliabilityNotFound(request_id)) from None
+    except (DBAPIError, RuntimeError):
+        raise reliability_http_exception(ReliabilityDatabaseUnavailable(request_id)) from None
+
+
+async def current_reliability_readiness(
+    request: Request,
+    session: AsyncSession,
+    identity: tuple[uuid.UUID, str],
+) -> ReliabilityReadiness:
+    service = getattr(request.app.state, "reliability_readiness_service", None)
+    if service is None:
+        service = ReliabilityReadinessService(
+            ReliabilityCutoverGuard.for_session(
+                session,
+                request_id=identity[1],
+            )
+        )
+    result = service.read()
+    if not isawaitable(result):
+        raise TypeError("reliability readiness service must be async")
+    return await result
+
+
 def map_admin_operations_errors(function):
     @wraps(function)
     async def wrapped(*args, **kwargs):
@@ -147,12 +207,21 @@ def map_admin_operations_errors(function):
     return wrapped
 
 
-def overview_response(value: OperationsOverview) -> OperationsOverviewResponse:
+def overview_response(
+    value: OperationsOverview,
+    readiness: ReliabilityReadiness,
+) -> OperationsOverviewResponse:
     return OperationsOverviewResponse(
         readiness=OperationsReadinessResponse(
-            status="ready",
-            database="ready",
-            schema_status="ready",
+            status=readiness.status,
+            database=readiness.database,
+            schema_status=readiness.schema,
+            worker_fleet=readiness.worker_fleet,
+            scheduler=readiness.scheduler,
+            stream=readiness.stream,
+            recovery=readiness.recovery,
+            quota=readiness.quota,
+            audit=readiness.audit,
         ),
         counts=OperationsCountsResponse(
             projects=value.counts.projects,
@@ -175,17 +244,23 @@ def overview_response(value: OperationsOverview) -> OperationsOverviewResponse:
 @router.get("", response_model=OperationsOverviewResponse)
 @map_admin_operations_errors
 async def get_operations_overview(
+    request: Request,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_system_identity),
     session: AsyncSession = Depends(project_session),
 ) -> OperationsOverviewResponse:
     async with session.begin():
         await current_system_context(session, identity)
-        return overview_response(await SystemOperationsRepository(session).overview())
+        readiness = await current_reliability_readiness(request, session, identity)
+        return overview_response(
+            await SystemOperationsRepository(session).overview(),
+            readiness,
+        )
 
 
 __all__ = [
     "AdminOperationsRoute",
     "authenticated_system_identity",
+    "current_reliability_readiness",
     "current_system_context",
     "map_admin_operations_errors",
     "router",

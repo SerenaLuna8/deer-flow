@@ -18,13 +18,13 @@ export function AdminJobsStateView({
   state,
   onRetry,
   onRequeue,
-  requeueingJobId,
+  requeueingCoordinate,
   requeueError,
 }: {
   state: AdminJobsState;
   onRetry?: () => void;
   onRequeue?: (job: AdminJobPage["items"][number]) => void;
-  requeueingJobId?: string;
+  requeueingCoordinate?: { projectId: string; deadJobId: string };
   requeueError?: boolean;
 }) {
   const { t } = useI18n();
@@ -76,39 +76,43 @@ export function AdminJobsStateView({
         </p>
       ) : null}
       <ol className="space-y-3">
-        {state.data.items.map((job) => (
-          <li key={job.job_id} className="bg-card rounded-xl border p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <code className="text-sm">{job.job_id}</code>
-                <p className="text-muted-foreground mt-1 text-sm">
-                  {job.job_type} · {job.status} · {job.retry_safety}
-                </p>
+        {state.data.items.map((job) => {
+          const isRequeueing =
+            job.dead_job_id !== null &&
+            requeueingCoordinate?.projectId === job.project_id &&
+            requeueingCoordinate.deadJobId === job.dead_job_id;
+          return (
+            <li key={job.job_id} className="bg-card rounded-xl border p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <code className="text-sm">{job.job_id}</code>
+                  <p className="text-muted-foreground mt-1 text-sm">
+                    {job.job_type} · {job.status} · {job.retry_safety}
+                  </p>
+                </div>
+                {job.safe_to_requeue && onRequeue ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={isRequeueing}
+                    onClick={() => onRequeue(job)}
+                  >
+                    {isRequeueing ? labels.requeueing : labels.requeue}
+                  </Button>
+                ) : null}
               </div>
-              {job.safe_to_requeue && onRequeue ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={requeueingJobId === job.job_id}
-                  onClick={() => onRequeue(job)}
-                >
-                  {requeueingJobId === job.job_id
-                    ? labels.requeueing
-                    : labels.requeue}
-                </Button>
+              {job.public_error_code ? (
+                <p className="mt-3 text-sm font-medium text-red-700 dark:text-red-300">
+                  {job.public_error_code}
+                </p>
               ) : null}
-            </div>
-            {job.public_error_code ? (
-              <p className="mt-3 text-sm font-medium text-red-700 dark:text-red-300">
-                {job.public_error_code}
+              <p className="text-muted-foreground mt-2 text-xs">
+                {job.project_id}
               </p>
-            ) : null}
-            <p className="text-muted-foreground mt-2 text-xs">
-              {job.project_id} · attempt {job.attempt_count}
-            </p>
-          </li>
-        ))}
+            </li>
+          );
+        })}
       </ol>
     </div>
   );
@@ -146,8 +150,13 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
         state={state}
         onRetry={() => void jobs.refetch()}
         requeueError={Boolean(requeue.error)}
-        requeueingJobId={
-          requeue.isPending ? requeue.variables.dead_job_id : undefined
+        requeueingCoordinate={
+          requeue.isPending
+            ? {
+                projectId: requeue.variables.project_id,
+                deadJobId: requeue.variables.dead_job_id,
+              }
+            : undefined
         }
         onRequeue={(job) => {
           if (!job.dead_job_id) return;

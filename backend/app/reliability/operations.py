@@ -10,8 +10,9 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Literal
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.audit.models import (
     AuditAuthorityRejected,
@@ -66,8 +67,6 @@ class AdminProjectRecord:
     project_id: uuid.UUID
     status: ProjectStatus
     is_suspended: bool
-    created_at: datetime
-    updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,13 +84,7 @@ class AdminJobRecord:
     status: JobStatus
     retry_safety: str
     safe_to_requeue: bool
-    attempt_count: int
     public_error_code: str | None
-    dead_at: datetime | None
-    created_at: datetime
-    started_at: datetime | None
-    completed_at: datetime | None
-    updated_at: datetime
     predecessor_dead_job_id: uuid.UUID | None
 
 
@@ -218,32 +211,14 @@ class SystemOperationsRepository:
             ProjectRow.id,
             ProjectRow.status,
             ProjectRow.is_suspended,
-            ProjectRow.created_at,
-            ProjectRow.updated_at,
         )
         if selected_cursor is not None:
-            created_at, row_id = selected_cursor
-            statement = statement.where(
-                or_(
-                    ProjectRow.created_at < created_at,
-                    and_(
-                        ProjectRow.created_at == created_at,
-                        ProjectRow.id < row_id,
-                    ),
-                )
-            )
+            statement = statement.where(ProjectRow.id < selected_cursor)
         if status is not None:
             statement = statement.where(ProjectRow.status == status)
         if suspended is not None:
             statement = statement.where(ProjectRow.is_suspended.is_(suspended))
-        rows = (
-            await self.session.execute(
-                statement.order_by(
-                    ProjectRow.created_at.desc(),
-                    ProjectRow.id.desc(),
-                ).limit(limit + 1)
-            )
-        ).all()
+        rows = (await self.session.execute(statement.order_by(ProjectRow.id.desc()).limit(limit + 1))).all()
         page_rows = rows[:limit]
         return AdminProjectPage(
             items=tuple(
@@ -251,14 +226,11 @@ class SystemOperationsRepository:
                     project_id=row.id,
                     status=row.status,
                     is_suspended=row.is_suspended,
-                    created_at=row.created_at,
-                    updated_at=row.updated_at,
                 )
                 for row in page_rows
             ),
             next_cursor=(
                 _encode_cursor(
-                    page_rows[-1].created_at,
                     page_rows[-1].id,
                     kind="project",
                 )
@@ -277,6 +249,7 @@ class SystemOperationsRepository:
         job_type: JobType | None,
     ) -> AdminJobPage:
         selected_cursor = _decode_cursor(cursor, kind="job")
+        successor = aliased(JobRow)
         statement = select(
             JobRow.id,
             DeadJobRow.job_id.label("dead_job_id"),
@@ -284,17 +257,12 @@ class SystemOperationsRepository:
             JobRow.job_type,
             JobRow.status,
             JobRow.retry_safety,
-            JobRow.attempt_count,
             func.coalesce(
                 DeadJobRow.public_error_code,
                 JobRow.public_error_code,
             ).label("public_error_code"),
-            DeadJobRow.dead_at,
-            JobRow.created_at,
-            JobRow.started_at,
-            JobRow.completed_at,
-            JobRow.updated_at,
             JobRow.predecessor_dead_job_id,
+            (~exists(select(successor.id).where(successor.predecessor_dead_job_id == JobRow.id))).label("has_no_successor"),
         ).outerjoin(
             DeadJobRow,
             and_(
@@ -303,26 +271,19 @@ class SystemOperationsRepository:
             ),
         )
         if selected_cursor is not None:
-            created_at, row_id = selected_cursor
-            statement = statement.where(
-                or_(
-                    JobRow.created_at < created_at,
-                    and_(JobRow.created_at == created_at, JobRow.id < row_id),
-                )
-            )
+            statement = statement.where(JobRow.id < selected_cursor)
         if project_id is not None:
             statement = statement.where(JobRow.project_id == project_id)
         if status is not None:
             statement = statement.where(JobRow.status == status)
         if job_type is not None:
             statement = statement.where(JobRow.job_type == job_type)
-        rows = (await self.session.execute(statement.order_by(JobRow.created_at.desc(), JobRow.id.desc()).limit(limit + 1))).all()
+        rows = (await self.session.execute(statement.order_by(JobRow.id.desc()).limit(limit + 1))).all()
         page_rows = rows[:limit]
         return AdminJobPage(
             items=tuple(_job_record(row) for row in page_rows),
             next_cursor=(
                 _encode_cursor(
-                    page_rows[-1].created_at,
                     page_rows[-1].id,
                     kind="job",
                 )
@@ -337,6 +298,7 @@ class SystemOperationsRepository:
         project_id: uuid.UUID,
         job_id: uuid.UUID,
     ) -> AdminJobRecord | None:
+        successor = aliased(JobRow)
         row = (
             await self.session.execute(
                 select(
@@ -346,17 +308,12 @@ class SystemOperationsRepository:
                     JobRow.job_type,
                     JobRow.status,
                     JobRow.retry_safety,
-                    JobRow.attempt_count,
                     func.coalesce(
                         DeadJobRow.public_error_code,
                         JobRow.public_error_code,
                     ).label("public_error_code"),
-                    DeadJobRow.dead_at,
-                    JobRow.created_at,
-                    JobRow.started_at,
-                    JobRow.completed_at,
-                    JobRow.updated_at,
                     JobRow.predecessor_dead_job_id,
+                    (~exists(select(successor.id).where(successor.predecessor_dead_job_id == JobRow.id))).label("has_no_successor"),
                 )
                 .outerjoin(
                     DeadJobRow,
@@ -382,28 +339,16 @@ def _job_record(row) -> AdminJobRecord:
         job_type=row.job_type,
         status=row.status,
         retry_safety=row.retry_safety,
-        safe_to_requeue=(row.status == "dead" and row.dead_job_id is not None and row.retry_safety == "safe"),
-        attempt_count=row.attempt_count,
+        safe_to_requeue=(row.status == "dead" and row.dead_job_id is not None and row.retry_safety == "safe" and row.job_type == "retention_purge" and row.has_no_successor),
         public_error_code=row.public_error_code,
-        dead_at=row.dead_at,
-        created_at=row.created_at,
-        started_at=row.started_at,
-        completed_at=row.completed_at,
-        updated_at=row.updated_at,
         predecessor_dead_job_id=row.predecessor_dead_job_id,
     )
 
 
-def _encode_cursor(
-    occurred_at: datetime,
-    row_id: uuid.UUID,
-    *,
-    kind: Literal["project", "job"],
-) -> str:
+def _encode_cursor(row_id: uuid.UUID, *, kind: Literal["project", "job"]) -> str:
     payload = {
         "v": 1,
         "k": kind,
-        "t": occurred_at.isoformat(),
         "i": str(row_id),
     }
     return (
@@ -423,7 +368,7 @@ def _decode_cursor(
     value: str | None,
     *,
     kind: Literal["project", "job"],
-) -> tuple[datetime, uuid.UUID] | None:
+) -> uuid.UUID | None:
     if value is None:
         return None
     try:
@@ -435,15 +380,12 @@ def _decode_cursor(
             validate=True,
         )
         payload = json.loads(raw.decode("ascii"))
-        if type(payload) is not dict or set(payload) != {"v", "k", "t", "i"}:
+        if type(payload) is not dict or set(payload) != {"v", "k", "i"}:
             raise ValueError
         if payload["v"] != 1 or payload["k"] != kind:
             raise ValueError
-        occurred_at = datetime.fromisoformat(payload["t"])
         row_id = uuid.UUID(payload["i"])
-        if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
-            raise ValueError
-        return occurred_at.astimezone(UTC), row_id
+        return row_id
     except (
         UnicodeDecodeError,
         binascii.Error,

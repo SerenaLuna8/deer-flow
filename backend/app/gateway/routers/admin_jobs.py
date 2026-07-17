@@ -43,13 +43,7 @@ class AdminJobResponse(BaseModel):
     ]
     retry_safety: Literal["safe", "unknown", "unsafe"]
     safe_to_requeue: bool
-    attempt_count: int
     public_error_code: str | None
-    dead_at: str | None
-    created_at: str
-    started_at: str | None
-    completed_at: str | None
-    updated_at: str
     predecessor_dead_job_id: uuid.UUID | None
 
 
@@ -86,13 +80,7 @@ def _response(item: AdminJobRecord) -> AdminJobResponse:
         status=item.status,
         retry_safety=item.retry_safety,
         safe_to_requeue=item.safe_to_requeue,
-        attempt_count=item.attempt_count,
         public_error_code=item.public_error_code,
-        dead_at=item.dead_at.isoformat() if item.dead_at is not None else None,
-        created_at=item.created_at.isoformat(),
-        started_at=item.started_at.isoformat() if item.started_at is not None else None,
-        completed_at=(item.completed_at.isoformat() if item.completed_at is not None else None),
-        updated_at=item.updated_at.isoformat(),
         predecessor_dead_job_id=item.predecessor_dead_job_id,
     )
 
@@ -159,7 +147,7 @@ async def requeue_safe_admin_job(
             project_id=body.project_id,
             job_id=successor_id,
         )
-        if successor is None or successor.project_id != body.project_id or successor.status != "queued" or successor.retry_safety != "safe" or successor.attempt_count != 0 or successor.predecessor_dead_job_id != body.dead_job_id:
+        if successor is None or successor.project_id != body.project_id or successor.status != "queued" or successor.retry_safety != "safe" or successor.predecessor_dead_job_id != body.dead_job_id:
             raise ValueError("safe requeue result is invalid")
         return RequeueJobResponse(
             job_id=successor.job_id,

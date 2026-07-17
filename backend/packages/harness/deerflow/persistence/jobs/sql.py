@@ -1038,6 +1038,7 @@ class JobRepository:
             max_attempts=max_attempts,
             request_id=request_id,
             audit_port=audit_port,
+            platform_requeue=True,
         )
 
     @staticmethod
@@ -1061,6 +1062,7 @@ class JobRepository:
         max_attempts: int,
         request_id: str,
         audit_port: JobAuditPort,
+        platform_requeue: bool = False,
     ) -> uuid.UUID:
         pair = (
             await self.session.execute(
@@ -1081,6 +1083,25 @@ class JobRepository:
         dead, predecessor = pair
         if dead.retry_safety != "safe" or predecessor.status != "dead" or predecessor.retry_safety != "safe":
             raise JobRequeueForbidden("dead job is unavailable for safe requeue")
+        if platform_requeue and (predecessor.job_type != "retention_purge" or predecessor.owner_user_id is not None or predecessor.run_id is not None or predecessor.automation_occurrence_id is not None):
+            raise JobRequeueForbidden("dead job is unavailable for safe requeue")
+
+        existing_successor = (await self.session.execute(sa.select(JobRow).where(JobRow.predecessor_dead_job_id == predecessor.id).with_for_update(of=JobRow))).scalar_one_or_none()
+        if existing_successor is not None:
+            same_owner = existing_successor.owner_user_id is None if predecessor.owner_user_id is None else existing_successor.owner_user_id == predecessor.owner_user_id
+            if (
+                existing_successor.project_id == predecessor.project_id
+                and same_owner
+                and existing_successor.job_type == predecessor.job_type
+                and existing_successor.run_id == predecessor.run_id
+                and existing_successor.automation_occurrence_id == predecessor.automation_occurrence_id
+                and existing_successor.status == "queued"
+                and existing_successor.attempt_count == 0
+                and existing_successor.retry_safety == "safe"
+            ):
+                return existing_successor.id
+            raise JobRequeueForbidden("safe requeue successor authority is invalid")
+
         request = EnqueueJob(
             job_type=predecessor.job_type,
             scope=JobScope(predecessor.project_id, predecessor.owner_user_id),

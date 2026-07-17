@@ -220,6 +220,7 @@ export interface Translations {
     signOut: string;
     retry: string;
     navigation: {
+      label: string;
       overview: string;
       projects: string;
       jobs: string;
@@ -232,6 +233,28 @@ export interface Translations {
       loading: string;
       unavailableTitle: string;
       unavailableDescription: string;
+      readiness: {
+        title: string;
+        states: {
+          ready: string;
+          degraded: string;
+          closed: string;
+          unavailable: string;
+          disabled: string;
+          polling: string;
+          unknown: string;
+        };
+        components: {
+          database: string;
+          schema: string;
+          worker_fleet: string;
+          scheduler: string;
+          stream: string;
+          recovery: string;
+          quota: string;
+          audit: string;
+        };
+      };
       counts: {
         projects: string;
         suspendedProjects: string;

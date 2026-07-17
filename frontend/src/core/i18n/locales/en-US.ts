@@ -283,6 +283,7 @@ export const enUS: Translations = {
     signOut: "Sign out",
     retry: "Retry",
     navigation: {
+      label: "Platform operations navigation",
       overview: "Overview",
       projects: "Projects",
       jobs: "Jobs",
@@ -295,6 +296,28 @@ export const enUS: Translations = {
       loading: "Loading platform operations",
       unavailableTitle: "Operations data is unavailable",
       unavailableDescription: "Platform operations could not be loaded.",
+      readiness: {
+        title: "Readiness",
+        states: {
+          ready: "Ready",
+          degraded: "Degraded",
+          closed: "Closed",
+          unavailable: "Unavailable",
+          disabled: "Disabled",
+          polling: "Polling",
+          unknown: "Unknown",
+        },
+        components: {
+          database: "Database",
+          schema: "Schema",
+          worker_fleet: "Worker fleet",
+          scheduler: "Scheduler",
+          stream: "Stream",
+          recovery: "Recovery",
+          quota: "Quota",
+          audit: "Audit",
+        },
+      },
       counts: {
         projects: "Projects",
         suspendedProjects: "Suspended projects",

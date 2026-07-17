@@ -17,6 +17,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 interface NavigationLabels {
+  label: string;
   overview: string;
   projects: string;
   jobs: string;
@@ -25,6 +26,7 @@ interface NavigationLabels {
 }
 
 const DEFAULT_NAVIGATION_LABELS: NavigationLabels = {
+  label: "Platform operations navigation",
   overview: "Overview",
   projects: "Projects",
   jobs: "Jobs",
@@ -68,10 +70,7 @@ export function AdminOperationsNavigation({
   ] as const;
 
   return (
-    <nav
-      aria-label="Platform operations"
-      className="flex gap-1 overflow-x-auto"
-    >
+    <nav aria-label={labels.label} className="flex gap-1 overflow-x-auto">
       {navigation.map(({ href, label, icon: Icon }) => {
         const active =
           pathname === href ||

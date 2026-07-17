@@ -63,6 +63,7 @@ def test_m6_job_catalog_pins_authority_and_lease_constraints() -> None:
         "ck_jobs_authority_shape",
     }
     assert any(isinstance(constraint, UniqueConstraint) and tuple(column.name for column in constraint.columns) == ("job_type", "idempotency_key") for constraint in jobs.constraints)
+    assert any(isinstance(constraint, UniqueConstraint) and tuple(column.name for column in constraint.columns) == ("predecessor_dead_job_id",) for constraint in jobs.constraints)
     assert {index.name for index in jobs.indexes} >= {"ix_jobs_claim", "ix_jobs_active_lease"}
 
 

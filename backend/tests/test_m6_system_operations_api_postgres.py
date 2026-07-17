@@ -39,6 +39,7 @@ from app.reliability.error_mapping import (
     ReliabilityHTTPException,
     reliability_http_exception_handler,
 )
+from app.reliability.models import ReliabilityReadiness
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.jobs.model import DeadJobRow, JobRow
@@ -60,7 +61,12 @@ async def _make_system_admin(seed) -> None:
         await session.execute(update(UserRow).where(UserRow.id == str(seed.owner_a.user_id)).values(system_role="system_admin"))
 
 
-def _test_app(seed, audit: object) -> FastAPI:
+def _test_app(
+    seed,
+    audit: object,
+    *,
+    readiness: object | None = None,
+) -> FastAPI:
     app = FastAPI()
     app.add_exception_handler(
         ReliabilityHTTPException,
@@ -71,6 +77,9 @@ def _test_app(seed, audit: object) -> FastAPI:
     app.include_router(admin_jobs.router)
     app.include_router(admin_audit.router)
     app.state.project_audit_service = audit
+    app.state.admin_operations_session_factory = seed.factory
+    if readiness is not None:
+        app.state.reliability_readiness_service = readiness
 
     async def request_session():
         async with seed.factory() as session:
@@ -208,9 +217,15 @@ async def test_operations_requires_current_system_admin_and_returns_only_aggrega
         body = response.json()
         assert set(body) == {"readiness", "counts", "usage"}
         assert body["readiness"] == {
-            "status": "ready",
+            "status": "degraded",
             "database": "ready",
             "schema": "ready",
+            "worker_fleet": "unavailable",
+            "scheduler": "disabled",
+            "stream": "unavailable",
+            "recovery": "unavailable",
+            "quota": "unavailable",
+            "audit": "unavailable",
         }
         assert set(body["counts"]) == {
             "projects",
@@ -295,10 +310,8 @@ async def test_projects_are_descending_cursor_paginated_and_private_fields_are_n
             "project_id",
             "status",
             "is_suspended",
-            "created_at",
-            "updated_at",
         }
-        assert first.json()["items"][0]["created_at"] >= second.json()["items"][0]["created_at"]
+        assert first.json()["items"][0]["project_id"] != second.json()["items"][0]["project_id"]
         encoded = json.dumps((first.json(), second.json()), sort_keys=True)
         for private_field in (
             "slug",
@@ -388,10 +401,6 @@ async def test_jobs_are_public_only_and_safe_requeue_is_atomic_and_project_exact
 
         assert listed.status_code == 200
         items = listed.json()["items"]
-        assert [item["dead_at"] for item in items] == sorted(
-            (item["dead_at"] for item in items),
-            reverse=True,
-        )
         assert set(items[0]) == {
             "job_id",
             "dead_job_id",
@@ -400,13 +409,7 @@ async def test_jobs_are_public_only_and_safe_requeue_is_atomic_and_project_exact
             "status",
             "retry_safety",
             "safe_to_requeue",
-            "attempt_count",
             "public_error_code",
-            "dead_at",
-            "created_at",
-            "started_at",
-            "completed_at",
-            "updated_at",
             "predecessor_dead_job_id",
         }
         encoded = json.dumps(listed.json(), sort_keys=True)
@@ -455,6 +458,139 @@ async def test_jobs_are_public_only_and_safe_requeue_is_atomic_and_project_exact
             "job_type": "retention_purge",
             "attempt_count": 0,
             "retry_safety": "safe",
+        }
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            after_requeue = await client.get(
+                "/api/admin/jobs",
+                params={
+                    "project_id": str(seed.owner_a.project_id),
+                    "status": "dead",
+                    "type": "retention_purge",
+                },
+                headers=headers,
+            )
+        predecessor = next(item for item in after_requeue.json()["items"] if item["job_id"] == str(safe_dead))
+        assert predecessor["safe_to_requeue"] is False
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_malformed_admin_requests_revalidate_current_role_before_returning_validation_errors(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    await _make_system_admin(seed)
+    app = _test_app(seed, AuditService(seed.factory, _keyring()))
+    ordinary_headers = {
+        "x-test-user": str(seed.owner_b.user_id),
+        "x-trace-id": "operations-api-test",
+    }
+    admin_headers = {
+        "x-test-user": str(seed.owner_a.user_id),
+        "x-trace-id": "operations-api-test",
+    }
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            unauthenticated = await client.get(
+                "/api/admin/projects",
+                params={"cursor": "x" * 257},
+            )
+            ordinary_query = await client.get(
+                "/api/admin/jobs",
+                params={"cursor": "x" * 257},
+                headers=ordinary_headers,
+            )
+            ordinary_cursor = await client.get(
+                "/api/admin/audit",
+                params={"cursor": "x" * 257},
+                headers=ordinary_headers,
+            )
+            ordinary_body = await client.post(
+                "/api/admin/jobs/requeue",
+                headers=ordinary_headers,
+                json={
+                    "project_id": "not-a-uuid",
+                    "dead_job_id": "not-a-uuid",
+                    "idempotency_key": "invalid",
+                    "max_attempts": 0,
+                },
+            )
+            admin = await client.get(
+                "/api/admin/projects",
+                params={"cursor": "x" * 257},
+                headers=admin_headers,
+            )
+
+        assert unauthenticated.status_code == 401
+        for response in (ordinary_query, ordinary_cursor, ordinary_body):
+            _assert_public_not_found(response)
+        assert admin.status_code == 422
+        assert admin.json()["code"] == "RELIABILITY_INVALID"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_operations_overview_serializes_injected_closed_component_readiness(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    await _make_system_admin(seed)
+
+    class ClosedReadiness:
+        async def read(self) -> ReliabilityReadiness:
+            return ReliabilityReadiness(
+                status="closed",
+                database="unavailable",
+                schema="unknown",
+                worker_fleet="closed",
+                scheduler="closed",
+                stream="closed",
+                recovery="closed",
+                quota="closed",
+                audit="closed",
+                request_id="operations-api-test",
+            )
+
+    app = _test_app(
+        seed,
+        AuditService(seed.factory, _keyring()),
+        readiness=ClosedReadiness(),
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/api/admin/operations",
+                headers={
+                    "x-test-user": str(seed.owner_a.user_id),
+                    "x-trace-id": "operations-api-test",
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["readiness"] == {
+            "status": "closed",
+            "database": "unavailable",
+            "schema": "unknown",
+            "worker_fleet": "closed",
+            "scheduler": "closed",
+            "stream": "closed",
+            "recovery": "closed",
+            "quota": "closed",
+            "audit": "closed",
         }
     finally:
         await seed.engine.dispose()
@@ -685,5 +821,59 @@ async def test_platform_audit_is_descending_cursor_paginated_and_strictly_public
             "raw-trace-must-not-leak",
         ):
             assert private_field not in encoded
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_platform_audit_rejects_persisted_unknown_metadata_before_serialization(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    await _make_system_admin(seed)
+    app = _test_app(seed, AuditService(seed.factory, _keyring()))
+    try:
+        async with seed.factory() as session, session.begin():
+            session.add(
+                AuditLogRow(
+                    id=uuid.uuid4(),
+                    occurred_at=datetime.now(UTC),
+                    actor_user_id=str(seed.owner_a.user_id),
+                    actor_process=None,
+                    actor_platform_role=None,
+                    project_id=seed.owner_a.project_id,
+                    action="job.requeued",
+                    target_kind="job",
+                    target_ref_key_id="operations-v1",
+                    target_ref_hmac="f" * 64,
+                    outcome="success",
+                    public_error_code=None,
+                    request_id=None,
+                    job_id=None,
+                    attempt_id=None,
+                    metadata_json={
+                        "job_type": "retention_purge",
+                        "attempt_count": 0,
+                        "retry_safety": "safe",
+                        "owner_user_id": str(seed.owner_a.user_id),
+                    },
+                )
+            )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/api/admin/audit",
+                headers={
+                    "x-test-user": str(seed.owner_a.user_id),
+                    "x-trace-id": "operations-api-test",
+                },
+            )
+
+        assert response.status_code == 422
+        assert response.json()["code"] == "RELIABILITY_INVALID"
+        assert "owner_user_id" not in response.text
     finally:
         await seed.engine.dispose()

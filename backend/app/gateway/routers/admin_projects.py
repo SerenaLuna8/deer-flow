@@ -28,8 +28,6 @@ class AdminProjectResponse(BaseModel):
     project_id: uuid.UUID
     status: Literal["active", "pending_deletion"]
     is_suspended: bool
-    created_at: str
-    updated_at: str
 
 
 class AdminProjectPageResponse(BaseModel):
@@ -62,8 +60,6 @@ async def list_admin_projects(
                     project_id=item.project_id,
                     status=item.status,
                     is_suspended=item.is_suspended,
-                    created_at=item.created_at.isoformat(),
-                    updated_at=item.updated_at.isoformat(),
                 )
                 for item in page.items
             ],

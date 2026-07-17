@@ -85,9 +85,20 @@ const ACCOUNT_A = "11111111-1111-4111-8111-111111111111";
 const ACCOUNT_B = "22222222-2222-4222-8222-222222222222";
 const PROJECT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const JOB_A = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const DEAD_JOB_A = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 
 const overview: OperationsOverviewData = {
-  readiness: { status: "ready", database: "ready", schema: "ready" },
+  readiness: {
+    status: "degraded",
+    database: "ready",
+    schema: "ready",
+    worker_fleet: "unavailable",
+    scheduler: "disabled",
+    stream: "polling",
+    recovery: "unavailable",
+    quota: "ready",
+    audit: "ready",
+  },
   counts: {
     projects: 2,
     suspended_projects: 0,
@@ -109,8 +120,6 @@ const projects: AdminProjectPage = {
       project_id: PROJECT_A,
       status: "active",
       is_suspended: false,
-      created_at: "2026-07-17T05:00:00Z",
-      updated_at: "2026-07-17T05:30:00Z",
     },
   ],
   next_cursor: null,
@@ -120,19 +129,13 @@ const jobs: AdminJobPage = {
   items: [
     {
       job_id: JOB_A,
-      dead_job_id: JOB_A,
+      dead_job_id: DEAD_JOB_A,
       project_id: PROJECT_A,
       job_type: "retention_purge",
       status: "dead",
       retry_safety: "safe",
       safe_to_requeue: true,
-      attempt_count: 1,
       public_error_code: "PURGE_FAILED",
-      dead_at: "2026-07-17T05:30:00Z",
-      created_at: "2026-07-17T05:00:00Z",
-      started_at: "2026-07-17T05:10:00Z",
-      completed_at: "2026-07-17T05:30:00Z",
-      updated_at: "2026-07-17T05:30:00Z",
       predecessor_dead_job_id: null,
     },
   ],
@@ -296,6 +299,18 @@ describe("M6 system operations console", () => {
     ).toThrow();
   });
 
+  test("accepts a formerly safe retention job after the server records its successor", () => {
+    expect(
+      adminJobPageSchema.parse({
+        items: [{ ...jobs.items[0], safe_to_requeue: false }],
+        next_cursor: null,
+      }),
+    ).toEqual({
+      items: [{ ...jobs.items[0], safe_to_requeue: false }],
+      next_cursor: null,
+    });
+  });
+
   test("executes real account-scoped query options with abortable requests", async () => {
     rs.mocked(fetchWithAuth).mockResolvedValueOnce(response(overview));
     const queryClient = new QueryClient();
@@ -444,9 +459,21 @@ describe("M6 system operations console", () => {
   });
 
   test("renders compact navigation and loading, empty, error, and public data states", () => {
+    const navigationLabels = {
+      label: "Platform operations navigation",
+      overview: "Overview",
+      projects: "Projects",
+      jobs: "Jobs",
+      audit: "Audit",
+      assets: "Assets",
+    };
     const navigation = renderToStaticMarkup(
-      <AdminOperationsNavigation pathname="/admin/operations" />,
+      <AdminOperationsNavigation
+        pathname="/admin/operations"
+        labels={navigationLabels as never}
+      />,
     );
+    expect(navigation).toContain('aria-label="Platform operations navigation"');
     for (const [href, label] of [
       ["/admin/operations", "Overview"],
       ["/admin/projects", "Projects"],
@@ -498,10 +525,28 @@ describe("M6 system operations console", () => {
     ];
     const html = renderWithProviders(<>{states}</>);
     expect(html).toContain("Loading platform operations");
+    expect(html).toContain("Readiness");
+    expect(html).toContain("Degraded");
+    expect(html).toContain("Worker fleet");
     expect(html).toContain("No projects found");
     expect(html).toContain("Operations data is unavailable");
     expect(html).toContain("PURGE_FAILED");
     expect(html).toContain("No audit events found");
     expect(html).not.toContain("owner_user_id");
+  });
+
+  test("disables the clicked dead-job coordinate while its requeue mutation is pending", () => {
+    const props = {
+      state: { status: "ready", data: jobs } satisfies AdminJobsState,
+      onRequeue: rs.fn(),
+      requeueingCoordinate: {
+        projectId: PROJECT_A,
+        deadJobId: DEAD_JOB_A,
+      },
+    } satisfies Parameters<typeof AdminJobsStateView>[0];
+    const html = renderWithProviders(<AdminJobsStateView {...props} />);
+
+    expect(html).toContain("disabled");
+    expect(html).toContain("Requeueing");
   });
 });

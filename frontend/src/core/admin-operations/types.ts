@@ -39,9 +39,15 @@ export const operationsOverviewSchema = z
   .object({
     readiness: z
       .object({
-        status: z.literal("ready"),
-        database: z.literal("ready"),
-        schema: z.literal("ready"),
+        status: z.enum(["ready", "degraded", "closed"]),
+        database: z.string().min(1),
+        schema: z.string().min(1),
+        worker_fleet: z.string().min(1),
+        scheduler: z.string().min(1),
+        stream: z.string().min(1),
+        recovery: z.string().min(1),
+        quota: z.string().min(1),
+        audit: z.string().min(1),
       })
       .strict(),
     counts: z
@@ -72,8 +78,6 @@ export const adminProjectSchema = z
     project_id: z.string().uuid(),
     status: z.enum(["active", "pending_deletion"]),
     is_suspended: z.boolean(),
-    created_at: z.string().datetime({ offset: true }),
-    updated_at: z.string().datetime({ offset: true }),
   })
   .strict();
 
@@ -104,13 +108,7 @@ export const adminJobSchema = z
     ]),
     retry_safety: z.enum(["safe", "unknown", "unsafe"]),
     safe_to_requeue: z.boolean(),
-    attempt_count: z.number().int().min(0).max(20),
     public_error_code: publicErrorCodeSchema.nullable(),
-    dead_at: z.string().datetime({ offset: true }).nullable(),
-    created_at: z.string().datetime({ offset: true }),
-    started_at: z.string().datetime({ offset: true }).nullable(),
-    completed_at: z.string().datetime({ offset: true }).nullable(),
-    updated_at: z.string().datetime({ offset: true }),
     predecessor_dead_job_id: z.string().uuid().nullable(),
   })
   .strict()
@@ -118,8 +116,9 @@ export const adminJobSchema = z
     const safe =
       item.status === "dead" &&
       item.dead_job_id !== null &&
-      item.retry_safety === "safe";
-    if (item.safe_to_requeue !== safe) {
+      item.retry_safety === "safe" &&
+      item.job_type === "retention_purge";
+    if (item.safe_to_requeue && !safe) {
       context.addIssue({
         code: "custom",
         path: ["safe_to_requeue"],

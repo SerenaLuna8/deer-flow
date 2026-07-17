@@ -61,8 +61,43 @@ export function OperationsOverviewStateView({
     [labels.counts.runningJobs, state.data.counts.running_jobs],
     [labels.counts.deadJobs, state.data.counts.dead_jobs],
   ] as const;
+  const readiness = state.data.readiness;
+  const readinessComponents = [
+    ["database", readiness.database],
+    ["schema", readiness.schema],
+    ["worker_fleet", readiness.worker_fleet],
+    ["scheduler", readiness.scheduler],
+    ["stream", readiness.stream],
+    ["recovery", readiness.recovery],
+    ["quota", readiness.quota],
+    ["audit", readiness.audit],
+  ] as const;
+  const readinessState = (value: string) => {
+    const states = labels.readiness.states;
+    return value in states
+      ? states[value as keyof typeof states]
+      : states.unknown;
+  };
   return (
     <div className="space-y-6">
+      <section className="bg-card rounded-xl border p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-medium">{labels.readiness.title}</h2>
+          <span className="text-sm font-medium">
+            {readinessState(readiness.status)}
+          </span>
+        </div>
+        <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+          {readinessComponents.map(([component, value]) => (
+            <div key={component}>
+              <dt className="text-muted-foreground">
+                {labels.readiness.components[component]}
+              </dt>
+              <dd>{readinessState(value)}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
       <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {counts.map(([label, value]) => (
           <div key={label} className="bg-card rounded-xl border p-4">

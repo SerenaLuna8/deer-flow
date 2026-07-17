@@ -76,12 +76,6 @@ export function AdminProjectsStateView({
               {project.is_suspended ? ` · ${labels.suspended}` : ""}
             </span>
           </div>
-          <time
-            className="text-muted-foreground mt-2 block text-xs"
-            dateTime={project.updated_at}
-          >
-            {new Date(project.updated_at).toLocaleString()}
-          </time>
         </li>
       ))}
     </ol>

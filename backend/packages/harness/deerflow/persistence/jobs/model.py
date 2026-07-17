@@ -60,6 +60,10 @@ class JobRow(Base):
 
     __table_args__ = (
         UniqueConstraint("job_type", "idempotency_key", name="uq_jobs_type_idempotency"),
+        UniqueConstraint(
+            "predecessor_dead_job_id",
+            name="uq_jobs_predecessor_dead_job",
+        ),
         ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_jobs_project", ondelete="RESTRICT"),
         ForeignKeyConstraint(["lease_owner_id"], ["worker_nodes.id"], name="fk_jobs_lease_worker", ondelete="SET NULL"),
         ForeignKeyConstraint(
