@@ -52,6 +52,9 @@ migrate-private-work:
 migrate-automations:
 	PYTHONPATH=. uv run python scripts/migrate_automations.py $(ARGS)
 
+backup-db:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python scripts/backup_postgres.py $(ARGS)
+
 rotate-credentials:
 	PYTHONPATH=. uv run python scripts/rotate_credentials.py $(ARGS)
 

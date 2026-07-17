@@ -995,7 +995,18 @@ path. PostgreSQL durable stream writing/reading, terminal uniqueness, Gateway SS
 frontend cursor/dedupe, and the atomic project quota core are implemented. Member, storage,
 concurrent-Run, and actual MCP-dispatch quota enforcement are also wired across Gateway,
 Worker, and Scheduler with stable 429/`Retry-After` responses. Complete audit and general
-backup/restore remain later M6 work.
+Task 16 adds an operator-only encrypted PostgreSQL archive command. Set a distinct 32-byte
+base64 `DEER_FLOW_BACKUP_KEY`, set `DATABASE_URL`, and write only to an external secure
+directory (never this repository):
+
+```bash
+make backup-db ARGS="--output /secure/backups --source-installation-id production-a"
+```
+
+The command uses fixed `pg_dump --format=custom --no-owner --no-acl` argv, publishes an
+authenticated AES-GCM chunk archive atomically, and prints only archive ID, schema revision,
+chunk count, and a truncated checksum. It never prints the database URL, archive path, key,
+plaintext, or pg_dump output. Restore, recovery journal, and retention purge remain later M6 work.
 
 The project-scoped backend API is available at
 `/api/projects/{project_id}/automations`. It provides strict create, list, read,

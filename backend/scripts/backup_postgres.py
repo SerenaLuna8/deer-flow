@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+# ruff: noqa: E402
+"""Create an operator-only encrypted PostgreSQL backup archive."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import os
+import sys
+import uuid
+from pathlib import Path
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from app.recovery.archive import BackupCommandFailed, BackupConfig, BackupKeyInvalid, BackupKeyMissing, create_backup, load_backup_key
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Create an authenticated encrypted PostgreSQL backup archive")
+    parser.add_argument("--output", required=True, type=Path, help="External operator archive directory")
+    parser.add_argument("--source-installation-id", required=True)
+    return parser
+
+
+def _prepare_external_root(root: Path) -> Path:
+    resolved = root.expanduser().resolve()
+    repository_root = BACKEND_ROOT.parent.resolve()
+    if resolved == repository_root or repository_root in resolved.parents:
+        raise ValueError("BACKUP_OUTPUT_MUST_BE_EXTERNAL")
+    resolved.mkdir(parents=True, exist_ok=True)
+    os.chmod(resolved, 0o700)
+    return resolved
+
+
+async def async_main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise BackupCommandFailed
+        key = load_backup_key()
+        root = await asyncio.to_thread(_prepare_external_root, args.output)
+        archive_id = str(uuid.uuid4())
+        manifest = await create_backup(
+            BackupConfig(
+                database_url=database_url,
+                output=root / f"{archive_id}.dfba",
+                key=key,
+                source_installation_id=args.source_installation_id,
+                archive_id=archive_id,
+            )
+        )
+    except (BackupCommandFailed, BackupKeyInvalid, BackupKeyMissing, ValueError, OSError):
+        print("BACKUP_FAILED", file=sys.stderr)
+        return 1
+    digest = hashlib.sha256(json.dumps(manifest.as_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+    print(json.dumps({"archive_id": manifest.archive_id, "schema_revision": manifest.schema_revision, "chunk_count": manifest.chunk_count, "checksum": digest}, sort_keys=True))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return asyncio.run(async_main(argv))
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised by make backup-db
+    raise SystemExit(main())
