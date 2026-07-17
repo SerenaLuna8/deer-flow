@@ -1047,6 +1047,8 @@ Expected: PASS；无 capability/readiness 时 route 和 sidebar 都不暴露入�
 
 独立审查修复（2026-07-17）：后端新增 caller-session audit list，route 在同一 `session.begin()` 内锁定 Project→Membership、检查 capability/cutover 并完成 audit query；真实 PostgreSQL `lock_timeout` 回归证明 suspension/downgrade 不能插入 authorization/list 间隙，兼容 `list_project_new_session()` 保留，cursor 长度在路由层固定为 256。前端 audit 改为 closed action enum + 与 backend `AUDIT_METADATA_MODELS` 对齐的逐 action strict schema；Usage 固定四个唯一 dimension 与 lifetime/UTC-day bucket；capability/static parent gate 和 navigation fixed hook variants 确保未授权 hook 不挂载；active key 全部从 account+project `governanceRoot()` 派生并纳入 project transition cancel/remove；所有新增页面文案接入 typed en-US/zh-CN i18n。修复 RED：backend 2 expected failures，frontend 10 expected failures；GREEN：backend Task 14 5 passed、backend audit/cutover 49 passed、frontend focused 14 passed、frontend nav/static/scope/project-switch 27 passed、frontend full 932 passed；Ruff、`pnpm check`、Prettier 与 `git diff --check` 全部通过。
 
+有界复审修复（2026-07-17）：`AuditService.list_project()` 不再信任先前有效的 `ProjectContext`，每次调用都在 caller transaction 内 `FOR UPDATE` 锁定并重验 exact user/project/membership/version/active/role/capability；stale 或失权统一为 `AuditAuthorityRejected`，database unavailable 继续收敛为 audit unavailable。兼容 `list_project_new_session()` 改用 `sessions.begin()`，保证 revalidation locks 穿过 audit listing。真实 PostgreSQL direct-service RED 覆盖 new-session/caller-session × suspension/removal/Admin downgrade 共 6 个预期失败；GREEN 为 focused 6 passed，Task 14 + audit service/integration/cutover 55 passed。
+
 ### Task 15: 提供 system_admin operations/projects/jobs/audit API 和 UI
 
 **Files:**

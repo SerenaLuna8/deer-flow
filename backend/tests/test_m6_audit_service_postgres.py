@@ -11,6 +11,7 @@ from support.m4_private_threads import seed_m4_thread_database
 from app.audit.models import (
     AuditAction,
     AuditActor,
+    AuditAuthorityRejected,
     AuditOutcome,
     AuditTarget,
     AuditTargetKind,
@@ -22,6 +23,7 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.audit.model import AuditLogRow
+from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
 
 def _keyring(active: str = "audit-v2") -> AuditHmacKeyring:
@@ -64,6 +66,34 @@ async def _append_run(
         {"job_type": "private_run", "non_interactive": False},
         request_id=request_id,
     )
+
+
+async def _invalidate_project_audit_authority(factory, context, change: str) -> None:
+    async with factory.begin() as session:
+        if change == "project_suspended":
+            await session.execute(update(ProjectRow).where(ProjectRow.id == context.project_id).values(is_suspended=True))
+            return
+        if change == "membership_removed":
+            await session.execute(
+                update(ProjectMembershipRow)
+                .where(ProjectMembershipRow.id == context.membership_id)
+                .values(
+                    status="removed",
+                    version=ProjectMembershipRow.version + 1,
+                )
+            )
+            return
+        if change == "admin_downgraded":
+            await session.execute(
+                update(ProjectMembershipRow)
+                .where(ProjectMembershipRow.id == context.membership_id)
+                .values(
+                    role=ProjectRole.VIEWER.value,
+                    version=ProjectMembershipRow.version + 1,
+                )
+            )
+            return
+        raise AssertionError(f"unsupported authority change: {change}")
 
 
 @pytest.mark.postgres
@@ -199,6 +229,59 @@ async def test_project_reader_is_scoped_and_rotation_lookup_finds_old_ref(
         assert tuple(item.id for item in project_b.items) == (second.id,)
         assert all(item.target_kind is AuditTargetKind.RUN for item in project_a.items)
         assert all(not hasattr(item, "target_ref_hmac") for item in project_a.items)
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "authority_change",
+    ("project_suspended", "membership_removed", "admin_downgraded"),
+)
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_project_new_session_reader_rejects_stale_project_authority(
+    migrated_postgres_database_url: str,
+    authority_change: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    service = AuditService(seed.factory, _keyring())
+    context = _project_context(seed.owner_a)
+    try:
+        await _invalidate_project_audit_authority(
+            seed.factory,
+            context,
+            authority_change,
+        )
+
+        with pytest.raises(AuditAuthorityRejected):
+            await service.list_project_new_session(context)
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "authority_change",
+    ("project_suspended", "membership_removed", "admin_downgraded"),
+)
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_project_session_reader_rejects_stale_project_authority(
+    migrated_postgres_database_url: str,
+    authority_change: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    service = AuditService(seed.factory, _keyring())
+    context = _project_context(seed.owner_a)
+    try:
+        await _invalidate_project_audit_authority(
+            seed.factory,
+            context,
+            authority_change,
+        )
+
+        with pytest.raises(AuditAuthorityRejected):
+            async with seed.factory.begin() as session:
+                await service.list_project(session, context)
     finally:
         await seed.engine.dispose()
 

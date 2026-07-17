@@ -35,7 +35,8 @@ from app.audit.models import (
     is_issued_system_audit_context,
 )
 from app.projects.capabilities import Capability
-from app.projects.context import ProjectContext
+from app.projects.context import ProjectContext, resolve_project_context_in_transaction
+from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.audit.sql import AuditRepository
@@ -216,7 +217,7 @@ class AuditService:
         if self._sessions is None:
             raise AuditUnavailable()
         try:
-            async with self._sessions() as session:
+            async with self._sessions.begin() as session:
                 return await self.list_project(
                     session,
                     context,
@@ -240,20 +241,50 @@ class AuditService:
         outcome: AuditOutcome | None = None,
         target: AuditTarget | None = None,
     ) -> AuditPage:
-        if type(context) is not ProjectContext:
-            raise AuditAuthorityRejected()
-        context.require(Capability.PROJECT_AUDIT_READ)
-        if target is not None and (type(target) is not AuditTarget or target.project_id != context.project_id):
+        current = await self._require_project_reader(session, context)
+        if target is not None and (type(target) is not AuditTarget or target.project_id != current.project_id):
             raise AuditAuthorityRejected()
         return await self._list_in_session(
             session,
-            project_id=context.project_id,
+            project_id=current.project_id,
             limit=limit,
             cursor=cursor,
             action=action,
             outcome=outcome,
             target=target,
         )
+
+    @staticmethod
+    async def _require_project_reader(
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> ProjectContext:
+        if type(context) is not ProjectContext:
+            raise AuditAuthorityRejected()
+        try:
+            current = await resolve_project_context_in_transaction(
+                session,
+                context.user_id,
+                context.project_id,
+                context.request_id,
+                lock=True,
+            )
+        except ProjectNotFound:
+            raise AuditAuthorityRejected() from None
+        except ProjectDatabaseUnavailable:
+            raise AuditUnavailable() from None
+        if (
+            type(current) is not ProjectContext
+            or current.user_id != context.user_id
+            or current.project_id != context.project_id
+            or current.membership_id != context.membership_id
+            or current.membership_version != context.membership_version
+            or current.role is not context.role
+            or current.capabilities != context.capabilities
+            or Capability.PROJECT_AUDIT_READ not in current.capabilities
+        ):
+            raise AuditAuthorityRejected()
+        return current
 
     async def list_platform_new_session(
         self,
