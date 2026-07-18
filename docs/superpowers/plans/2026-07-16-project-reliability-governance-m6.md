@@ -1372,6 +1372,8 @@ git commit -m "test: gate M6 reliability release"
 
 Expected: PASS with 0 skip in M6 PostgreSQL evidence。
 
+完成（2026-07-18）：实现提交 `0b3a4073` 建立单一固定 20 文件 M1–M6 PostgreSQL/CI gate、真实 Scheduler/Worker/Gateway 多进程接管与 SSE replay、recovery/配额/审计/Frontend static gates；审查修复 `6dc749df` 关闭 Windows Make 兼容、SSE 严格顺序、真实 mutation cache 和 M5 revision 文案三项 Important/一项 Minor，并让随机 UUID ledger 断言按权威 source kind 确定；`2323cb6b` 补回精确两行基数。最终独立复审为 0 Critical/Important/Minor。Fresh evidence：targeted 10 passed/0 skipped，固定 M1–M6 159 passed/0 skipped，Frontend 947 passed/0 skipped，Ruff、1170-file format、`pnpm check`、workflow/Make/diff、残留数据库与子进程检查全绿。Task 20 负责文档同步、fresh whole-branch gates 和 M6 最终关闭审查。
+
 ### Task 20: 同步文档、运行全量门禁并完成独立关闭审查
 
 **Files:**
