@@ -5,13 +5,13 @@ from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.final_schema import FinalSchemaProbe, FinalSchemaRequired, FinalSchemaUnavailable
 from app.private_work.context import PrivateWorkContext
-from app.private_work.cutover import PrivateWorkCutoverGuard
-from app.private_work.errors import PrivateWorkCutover, PrivateWorkUnavailable
+from app.private_work.errors import PrivateWorkUnavailable
 
 PRIVATE_WORK_READY = "PRIVATE_WORK_READY"
 
-ReadinessStatus = Literal["ready", "migration_required", "unavailable"]
+ReadinessStatus = Literal["ready", "unavailable"]
 
 
 @dataclass(frozen=True)
@@ -28,17 +28,8 @@ class PrivateWorkReadinessService:
         context: PrivateWorkContext,
     ) -> PrivateWorkReadiness:
         try:
-            await PrivateWorkCutoverGuard.for_session(
-                session,
-                request_id=context.request_id,
-            ).require_project_open()
-        except PrivateWorkCutover:
-            return PrivateWorkReadiness(
-                status="migration_required",
-                code=PrivateWorkCutover.code,
-                request_id=context.request_id,
-            )
-        except PrivateWorkUnavailable:
+            await FinalSchemaProbe().require_ready(session)
+        except (FinalSchemaRequired, FinalSchemaUnavailable):
             return PrivateWorkReadiness(
                 status="unavailable",
                 code=PrivateWorkUnavailable.code,

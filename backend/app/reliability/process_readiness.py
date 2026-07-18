@@ -7,9 +7,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.automations.ownership import AUTOMATION_SCHEDULER_OWNERSHIP_LOCK_KEY
+from app.final_schema import FinalSchemaProbe
 
 
 class _SchedulerOwnership(Protocol):
@@ -30,7 +32,7 @@ class ProcessReadinessSnapshot:
     worker_oldest_heartbeat_age_seconds: int | None
     scheduler: str
     scheduler_ownership: str
-    cutover: str
+    schema_state: str
 
     def as_public_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -62,7 +64,7 @@ async def read_process_readiness(
     scheduler_ownership: _SchedulerOwnership | None = None,
     now: datetime | None = None,
 ) -> ProcessReadinessSnapshot:
-    """Read only redacted fleet aggregates and cutover state."""
+    """Read only redacted fleet aggregates and final schema state."""
 
     if role not in {"gateway", "worker", "scheduler"}:
         raise ValueError("process role is invalid")
@@ -72,13 +74,11 @@ async def read_process_readiness(
     if selected_now.tzinfo is None or selected_now.utcoffset() is None:
         raise ValueError("process readiness time must be timezone aware")
     selected_now = selected_now.astimezone(UTC)
-    relations_ready = await session.scalar(
-        text(
-            """SELECT to_regclass('worker_nodes') IS NOT NULL
-                      AND to_regclass('reliability_cutover_state') IS NOT NULL"""
-        )
-    )
-    if relations_ready is not True:
+    try:
+        schema = await FinalSchemaProbe().read(session)
+    except SQLAlchemyError:
+        schema = None
+    if schema is None or not schema.ready:
         scheduler = "disabled" if not scheduler_enabled else "unavailable"
         scheduler_state = "disabled" if not scheduler_enabled else "unowned"
         return ProcessReadinessSnapshot(
@@ -90,7 +90,22 @@ async def read_process_readiness(
             worker_oldest_heartbeat_age_seconds=None,
             scheduler=scheduler,
             scheduler_ownership=scheduler_state,
-            cutover="migration_required",
+            schema_state="unavailable" if schema is None else "migration_required",
+        )
+    worker_relation_ready = await session.scalar(text("SELECT to_regclass('worker_nodes') IS NOT NULL"))
+    if worker_relation_ready is not True:
+        scheduler = "disabled" if not scheduler_enabled else "unavailable"
+        scheduler_state = "disabled" if not scheduler_enabled else "unowned"
+        return ProcessReadinessSnapshot(
+            ready=False,
+            role=role,
+            worker_fleet="unavailable",
+            worker_count=0,
+            worker_capacity=0,
+            worker_oldest_heartbeat_age_seconds=None,
+            scheduler=scheduler,
+            scheduler_ownership=scheduler_state,
+            schema_state="migration_required",
         )
     cutoff = selected_now - timedelta(seconds=worker_fresh_for_seconds)
     worker = (
@@ -126,18 +141,7 @@ async def read_process_readiness(
         scheduler = "ready" if owned else "unavailable"
         scheduler_state = "owned" if owned else "unowned"
 
-    cutover_ready = await session.scalar(
-        text(
-            """SELECT EXISTS (
-                 SELECT 1 FROM reliability_cutover_state
-                 WHERE id=1 AND stage='cutover_complete'
-                   AND final_schema_probe_complete
-                   AND schema_revision='0015_project_reliability_finalize'
-                   AND cutover_at IS NOT NULL)"""
-        )
-    )
-    cutover = "ready" if cutover_ready else "migration_required"
-    ready = worker_fleet == "ready" and cutover == "ready" and (scheduler == "ready" or scheduler == "disabled")
+    ready = worker_fleet == "ready" and (scheduler == "ready" or scheduler == "disabled")
     return ProcessReadinessSnapshot(
         ready=ready,
         role=role,
@@ -147,7 +151,7 @@ async def read_process_readiness(
         worker_oldest_heartbeat_age_seconds=oldest_age,
         scheduler=scheduler,
         scheduler_ownership=scheduler_state,
-        cutover=cutover,
+        schema_state="ready",
     )
 
 

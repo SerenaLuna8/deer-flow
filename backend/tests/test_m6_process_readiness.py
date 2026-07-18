@@ -16,7 +16,7 @@ async def test_pre_expand_missing_relations_report_migration_required_without_ag
     class PreExpandSession:
         calls = 0
 
-        async def scalar(self, _query: object) -> bool:
+        async def scalar(self, _query: object, _params: object = None) -> bool:
             self.calls += 1
             return False
 
@@ -31,11 +31,11 @@ async def test_pre_expand_missing_relations_report_migration_required_without_ag
         worker_fresh_for_seconds=60,
     )
 
-    assert session.calls == 1
+    assert session.calls == 2
     assert snapshot.ready is False
     assert snapshot.worker_fleet == "unavailable"
     assert snapshot.scheduler_ownership == "unowned"
-    assert snapshot.cutover == "migration_required"
+    assert snapshot.schema_state == "migration_required"
 
 
 @pytest.mark.postgres
@@ -103,7 +103,7 @@ async def test_process_readiness_reports_only_public_aggregate_fields(
             "worker_oldest_heartbeat_age_seconds": 0,
             "scheduler": "disabled",
             "scheduler_ownership": "disabled",
-            "cutover": "ready",
+            "schema_state": "ready",
         }
         serialized = str(payload).lower()
         for forbidden in (

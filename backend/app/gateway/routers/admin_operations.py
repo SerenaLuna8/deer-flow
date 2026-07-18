@@ -20,8 +20,8 @@ from app.audit.models import (
     AuditUnavailable,
     SystemAuditContext,
 )
+from app.final_schema import FinalSchemaProbe, FinalSchemaRequired, FinalSchemaUnavailable
 from app.gateway.deps import get_current_user_from_request, project_session
-from app.reliability.cutover import ReliabilityCutoverGuard
 from app.reliability.error_mapping import reliability_http_exception
 from app.reliability.errors import (
     ReliabilityConflict,
@@ -91,7 +91,7 @@ class OperationsReadinessResponse(BaseModel):
     worker_capacity: int
     worker_oldest_heartbeat_age_seconds: int | None
     scheduler_ownership: str
-    cutover: str
+    schema_state: str
 
 
 class OperationsCountsResponse(BaseModel):
@@ -148,10 +148,10 @@ async def current_system_context(
         identity[0],
         identity[1],
     )
-    await ReliabilityCutoverGuard.for_session(
-        session,
-        request_id=identity[1],
-    ).require_gateway_open()
+    try:
+        await FinalSchemaProbe().require_ready(session)
+    except (FinalSchemaRequired, FinalSchemaUnavailable):
+        raise ReliabilityDatabaseUnavailable(identity[1]) from None
     return context
 
 
@@ -206,10 +206,9 @@ async def current_reliability_readiness(
             worker_fresh_for_seconds=worker_fresh_for_seconds,
         )
         service = ReliabilityReadinessService(
-            ReliabilityCutoverGuard.for_session(
-                session,
-                request_id=identity[1],
-            ),
+            FinalSchemaProbe(),
+            session,
+            identity[1],
             process=process,
         )
     result = service.read()
@@ -262,7 +261,7 @@ def overview_response(
                 worker_capacity=readiness.worker_capacity,
                 worker_oldest_heartbeat_age_seconds=readiness.worker_oldest_heartbeat_age_seconds,
                 scheduler_ownership=readiness.scheduler_ownership,
-                cutover=readiness.cutover,
+                schema_state=readiness.schema_state,
             ),
             data_status="unavailable",
             counts=None,
@@ -286,7 +285,7 @@ def overview_response(
             worker_capacity=readiness.worker_capacity,
             worker_oldest_heartbeat_age_seconds=readiness.worker_oldest_heartbeat_age_seconds,
             scheduler_ownership=readiness.scheduler_ownership,
-            cutover=readiness.cutover,
+            schema_state=readiness.schema_state,
         ),
         data_status="available",
         counts=OperationsCountsResponse(

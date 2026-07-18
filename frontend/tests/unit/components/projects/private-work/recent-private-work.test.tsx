@@ -77,26 +77,20 @@ describe("recent project private work", () => {
     expect(html).toContain("还没有私有对话");
   });
 
-  test.each(["migration_required", "unavailable"] as const)(
-    "does not query or render recent work while readiness is %s",
-    (status) => {
-      rs.mocked(isStaticWebsiteOnly).mockReturnValue(false);
-      rs.mocked(useProjectPrivateWorkReadiness).mockReturnValue({
-        data: { status, code: status, request_id: `request-${status}` },
-      } as never);
+  test("does not query or render recent work while readiness is unavailable", () => {
+    const status = "unavailable" as const;
+    rs.mocked(isStaticWebsiteOnly).mockReturnValue(false);
+    rs.mocked(useProjectPrivateWorkReadiness).mockReturnValue({
+      data: { status, code: status, request_id: `request-${status}` },
+    } as never);
 
-      const html = renderToStaticMarkup(
-        <RecentPrivateWork project={project} />,
-      );
+    const html = renderToStaticMarkup(<RecentPrivateWork project={project} />);
 
-      expect(html).toBe("");
-      expect(useThreads).toHaveBeenLastCalledWith(
-        expect.any(Object),
-        undefined,
-        { enabled: false },
-      );
-    },
-  );
+    expect(html).toBe("");
+    expect(useThreads).toHaveBeenLastCalledWith(expect.any(Object), undefined, {
+      enabled: false,
+    });
+  });
 
   test("does not enable readiness or Thread search in a static build", () => {
     rs.mocked(isStaticWebsiteOnly).mockReturnValue(true);

@@ -229,15 +229,12 @@ describe("ProjectAutomationsPage", () => {
     expect(useProjectAutomations).toHaveBeenLastCalledWith({}, true);
   });
 
-  test.each([
-    ["migration_required", "automation-migration-required"],
-    ["unavailable", "automation-unavailable"],
-  ] as const)("fails closed for %s readiness", (status, testId) => {
+  test("fails closed for unavailable readiness", () => {
     prepare({
       readiness: {
         ...AUTOMATION_READINESS,
-        status,
-        code: `AUTOMATION_${status.toUpperCase()}`,
+        status: "unavailable",
+        code: "AUTOMATION_UNAVAILABLE",
       },
     });
 
@@ -245,13 +242,13 @@ describe("ProjectAutomationsPage", () => {
       <ProjectAutomationsPage project={PROJECT} />,
     );
 
-    expect(html).toContain(`data-testid="${testId}"`);
+    expect(html).toContain('data-testid="automation-unavailable"');
     expect(useProjectAutomations).toHaveBeenLastCalledWith({}, false);
   });
 
   test.each([
     ["project_private_work_ready", false],
-    ["automation_cutover_ready", false],
+    ["schema_ready", false],
   ] as const)("fails closed when ready has %s=%s", (field, value) => {
     prepare({
       readiness: { ...AUTOMATION_READINESS, [field]: value },

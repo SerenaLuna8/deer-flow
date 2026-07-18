@@ -29,28 +29,22 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         quotas=QuotaConfig(),
     )
 
+    @asynccontextmanager
+    async def request_session():
+        yield object()
+
     def session_factory():
-        return None
+        return request_session()
 
     captured: dict[str, object] = {}
 
-    class Guard:
-        def __init__(self, factory) -> None:
-            assert factory is session_factory
-
-        async def require_worker_open(self) -> None:
-            captured["guard"] = True
+    class SchemaProbe:
+        async def require_ready(self, _session) -> None:
+            captured["schema_probe"] = True
 
     class Registry:
         def __init__(self, factory, *, version) -> None:
             captured["registry"] = (factory, version)
-
-    class AutomationGuard:
-        def __init__(self, factory) -> None:
-            assert factory is session_factory
-
-        async def require_project_open(self) -> None:
-            captured["automation_guard"] = True
 
     class Reconciler:
         def __init__(self, factory) -> None:
@@ -128,13 +122,7 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         "get_session_factory",
         lambda: session_factory,
     )
-    monkeypatch.setattr(worker_app, "ReliabilityCutoverGuard", Guard)
-    monkeypatch.setattr(
-        worker_app,
-        "AutomationCutoverGuard",
-        AutomationGuard,
-        raising=False,
-    )
+    monkeypatch.setattr(worker_app, "FinalSchemaProbe", SchemaProbe)
     monkeypatch.setattr(
         worker_app,
         "AutomationReconciler",
@@ -194,8 +182,7 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
     repository = repository_builder(object())
     assert repository._owner_ref(str(uuid.uuid4())).key_id == "test"
     assert captured["stop_event"] is stop_event
-    assert captured["guard"] is True
-    assert captured["automation_guard"] is True
+    assert captured["schema_probe"] is True
     assert captured["automation_reconciled"] == 2
     assert captured["terminal_port"].pending is False
     assert captured["audit_keyring"] is True

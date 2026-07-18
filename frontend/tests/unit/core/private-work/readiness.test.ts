@@ -43,9 +43,29 @@ describe("project private-work readiness", () => {
     expect(projectPrivateWorkEntryEnabled(true, true, "ready")).toBe(true);
     expect(projectPrivateWorkEntryEnabled(false, true, "ready")).toBe(false);
     expect(projectPrivateWorkEntryEnabled(true, false, "ready")).toBe(false);
-    expect(
-      projectPrivateWorkEntryEnabled(true, true, "migration_required"),
-    ).toBe(false);
+    expect(projectPrivateWorkEntryEnabled(true, true, "unavailable")).toBe(
+      false,
+    );
     expect(projectPrivateWorkEntryEnabled(true, true, undefined)).toBe(false);
+  });
+
+  test("rejects the retired migration readiness status", async () => {
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async () =>
+        Response.json({
+          status: "migration_required",
+          code: "PRIVATE_WORK_CUTOVER",
+          request_id: "req-retired",
+        }),
+      ),
+    );
+
+    await expect(
+      fetchProjectPrivateWorkReadiness({
+        apiBaseURL:
+          "http://localhost:2026/api/projects/11111111-1111-4111-8111-111111111111/private-work",
+      }),
+    ).rejects.toThrow();
   });
 });

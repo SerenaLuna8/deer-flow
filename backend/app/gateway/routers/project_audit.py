@@ -17,13 +17,13 @@ from app.audit.models import (
     AuditRecord,
     AuditUnavailable,
 )
+from app.final_schema import FinalSchemaProbe, FinalSchemaRequired, FinalSchemaUnavailable
 from app.gateway.deps import get_project_audit_service, project_session
 from app.gateway.routers.project_usage import ProjectGovernanceRoute
 from app.gateway.routers.projects import authenticated_project_identity
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound
-from app.reliability.cutover import ReliabilityCutoverGuard
 from app.reliability.error_mapping import reliability_http_exception
 from app.reliability.errors import (
     ReliabilityDatabaseUnavailable,
@@ -126,10 +126,10 @@ async def list_project_audit(
         )
         if Capability.PROJECT_AUDIT_READ not in context.capabilities:
             raise ProjectForbidden(Capability.PROJECT_AUDIT_READ)
-        await ReliabilityCutoverGuard.for_session(
-            session,
-            request_id=identity[1],
-        ).require_gateway_open()
+        try:
+            await FinalSchemaProbe().require_ready(session)
+        except (FinalSchemaRequired, FinalSchemaUnavailable):
+            raise ReliabilityDatabaseUnavailable(identity[1]) from None
         return _response(
             await audit.list_project(
                 session,

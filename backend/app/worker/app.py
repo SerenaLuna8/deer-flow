@@ -8,12 +8,11 @@ from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from functools import partial
 
-from app.automations.cutover import AutomationCutoverGuard
 from app.automations.reconciliation import AutomationReconciler
+from app.final_schema import FinalSchemaProbe
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
-from app.reliability.cutover import ReliabilityCutoverGuard
 from app.reliability.execution import (
     PrivateRunJobHandler,
     PrivateRunJobTerminalPort,
@@ -46,8 +45,8 @@ async def run_worker(
         await init_engine(config.database)
         stack.push_async_callback(close_engine)
         session_factory = get_session_factory()
-        await ReliabilityCutoverGuard(session_factory).require_worker_open()
-        await AutomationCutoverGuard(session_factory).require_project_open()
+        async with session_factory() as session:
+            await FinalSchemaProbe().require_ready(session)
         automation_reconciler = AutomationReconciler(session_factory)
         await automation_reconciler.reconcile_restart(
             datetime.now(UTC),

@@ -92,12 +92,18 @@ const overview: OperationsOverviewData = {
     status: "degraded",
     database: "ready",
     schema: "ready",
+    schema_state: "ready",
     worker_fleet: "unavailable",
     scheduler: "disabled",
     stream: "polling",
     recovery: "unavailable",
     quota: "ready",
     audit: "ready",
+    role: "gateway",
+    worker_count: 0,
+    worker_capacity: 0,
+    worker_oldest_heartbeat_age_seconds: null,
+    scheduler_ownership: "disabled",
   },
   data_status: "available",
   counts: {
@@ -306,12 +312,18 @@ describe("M6 system operations console", () => {
         status: "closed",
         database: "ready",
         schema: "migration_required",
+        schema_state: "migration_required",
         worker_fleet: "closed",
         scheduler: "closed",
         stream: "closed",
         recovery: "closed",
         quota: "closed",
         audit: "closed",
+        role: "gateway",
+        worker_count: 0,
+        worker_capacity: 0,
+        worker_oldest_heartbeat_age_seconds: null,
+        scheduler_ownership: "disabled",
       },
       data_status: "unavailable",
       counts: null,
@@ -321,6 +333,12 @@ describe("M6 system operations console", () => {
     expect(operationsOverviewSchema.parse(closedOverview)).toEqual(
       closedOverview,
     );
+    expect(() =>
+      operationsOverviewSchema.parse({
+        ...closedOverview,
+        readiness: { ...closedOverview.readiness, cutover: "ready" },
+      }),
+    ).toThrow();
     expect(() =>
       operationsOverviewSchema.parse({
         ...closedOverview,

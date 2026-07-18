@@ -42,6 +42,6 @@ export const AUTOMATION_READINESS = {
   scheduler_enabled: true,
   scheduler_status: "running" as const,
   project_private_work_ready: true,
-  automation_cutover_ready: true,
+  schema_ready: true,
   request_id: "req-ready",
 };

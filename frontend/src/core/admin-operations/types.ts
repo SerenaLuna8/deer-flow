@@ -40,12 +40,22 @@ const operationsReadinessSchema = z
     status: z.enum(["ready", "degraded", "closed"]),
     database: z.string().min(1),
     schema: z.string().min(1),
+    schema_state: z.string().min(1),
     worker_fleet: z.string().min(1),
     scheduler: z.string().min(1),
     stream: z.string().min(1),
     recovery: z.string().min(1),
     quota: z.string().min(1),
     audit: z.string().min(1),
+    role: z.enum(["gateway", "worker", "scheduler"]),
+    worker_count: z.number().int().nonnegative(),
+    worker_capacity: z.number().int().nonnegative(),
+    worker_oldest_heartbeat_age_seconds: z
+      .number()
+      .int()
+      .nonnegative()
+      .nullable(),
+    scheduler_ownership: z.string().min(1),
   })
   .strict();
 

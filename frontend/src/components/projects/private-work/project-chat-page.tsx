@@ -100,7 +100,7 @@ export function ProjectChatPage({ project }: { project: Project }) {
   const automationReady = Boolean(
     automationReadiness.data?.status === "ready" &&
     automationReadiness.data.project_private_work_ready &&
-    automationReadiness.data.automation_cutover_ready,
+    automationReadiness.data.schema_ready,
   );
   const scope = useMemo(
     () => ({

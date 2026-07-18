@@ -6,14 +6,13 @@ import asyncio
 import signal
 from dataclasses import dataclass
 
-from app.automations.cutover import AutomationCutoverGuard
 from app.automations.dispatcher import AutomationDispatcher
 from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.ownership import AutomationSchedulerOwnership
 from app.automations.reconciliation import AutomationReconciler
+from app.final_schema import FinalSchemaProbe
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
-from app.reliability.cutover import ReliabilityCutoverGuard
 from app.reliability.owner_refs import AuditHmacKeyring
 from app.scheduler.service import ScheduledTaskService
 from deerflow.config import get_app_config
@@ -69,8 +68,8 @@ async def run_scheduler(
     await init_engine(config.database)
     try:
         session_factory = get_session_factory()
-        await AutomationCutoverGuard(session_factory).require_project_open()
-        await ReliabilityCutoverGuard(session_factory).require_queue_open()
+        async with session_factory() as session:
+            await FinalSchemaProbe().require_ready(session)
         engine = get_engine()
         if engine is None:
             raise RuntimeError("scheduler persistence engine is unavailable")

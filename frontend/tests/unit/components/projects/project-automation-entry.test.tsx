@@ -59,9 +59,6 @@ describe("project Automation entry", () => {
       false,
     );
     expect(
-      projectAutomationEntryEnabled(true, false, true, "migration_required"),
-    ).toBe(false);
-    expect(
       projectAutomationEntryEnabled(true, false, true, "unavailable"),
     ).toBe(false);
     expect(projectAutomationEntryEnabled(true, false, true, undefined)).toBe(

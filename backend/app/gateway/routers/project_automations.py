@@ -79,7 +79,7 @@ async def get_automation_readiness(
         scheduler_enabled=result.scheduler_enabled,
         scheduler_status=result.scheduler_status,
         project_private_work_ready=result.project_private_work_ready,
-        automation_cutover_ready=result.automation_cutover_ready,
+        schema_ready=result.schema_ready,
         request_id=result.request_id,
     )
 

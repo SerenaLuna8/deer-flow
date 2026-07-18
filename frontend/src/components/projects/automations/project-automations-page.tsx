@@ -118,33 +118,21 @@ function AutomationPageSkeleton() {
 }
 
 function AutomationUnavailableState({
-  migrationRequired,
   code,
   onRetry,
 }: {
-  migrationRequired: boolean;
   code?: string;
   onRetry?: () => void;
 }) {
   return (
     <main className="mx-auto flex min-h-[60vh] max-w-xl flex-col items-center justify-center p-6 text-center">
       <section
-        data-testid={
-          migrationRequired
-            ? "automation-migration-required"
-            : "automation-unavailable"
-        }
+        data-testid="automation-unavailable"
         className="bg-card w-full rounded-2xl border p-8"
       >
-        <h1 className="text-xl font-semibold">
-          {migrationRequired
-            ? "Automation 尚未完成迁移"
-            : "Automation 暂时不可用"}
-        </h1>
+        <h1 className="text-xl font-semibold">Automation 暂时不可用</h1>
         <p className="text-muted-foreground mt-3 text-sm">
-          {migrationRequired
-            ? "项目 Automation 在迁移完成前保持关闭。"
-            : "服务当前无法安全读取 Automation，请稍后重试。"}
+          服务当前无法安全读取 Automation，请稍后重试。
         </p>
         {code ? (
           <p className="text-muted-foreground mt-2 text-xs">{code}</p>
@@ -176,7 +164,7 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
   const readinessReady =
     readiness.data?.status === "ready" &&
     readiness.data.project_private_work_ready &&
-    readiness.data.automation_cutover_ready;
+    readiness.data.schema_ready;
   const listEnabled =
     permissions.canRead && readinessReady && !invalidThreadFilter;
   const allAutomations = useProjectAutomations(
@@ -256,18 +244,9 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
   };
 
   if (readiness.isLoading) return <AutomationPageSkeleton />;
-  if (readiness.data?.status === "migration_required") {
-    return (
-      <AutomationUnavailableState
-        migrationRequired
-        code={readiness.data.code}
-      />
-    );
-  }
   if (readiness.data?.status === "unavailable" || readiness.error) {
     return (
       <AutomationUnavailableState
-        migrationRequired={false}
         code={readiness.data?.code}
         onRetry={() => void readiness.refetch()}
       />
@@ -276,7 +255,6 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
   if (readiness.data?.status === "ready" && !readinessReady) {
     return (
       <AutomationUnavailableState
-        migrationRequired={false}
         code="AUTOMATION_READINESS_INCONSISTENT"
         onRetry={() => void readiness.refetch()}
       />
@@ -284,17 +262,13 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
   }
   if (invalidThreadFilter) {
     return (
-      <AutomationUnavailableState
-        migrationRequired={false}
-        code="AUTOMATION_THREAD_FILTER_INVALID"
-      />
+      <AutomationUnavailableState code="AUTOMATION_THREAD_FILTER_INVALID" />
     );
   }
   if (listQuery.isLoading) return <AutomationPageSkeleton />;
   if (listQuery.error) {
     return (
       <AutomationUnavailableState
-        migrationRequired={false}
         code="AUTOMATION_LIST_UNAVAILABLE"
         onRetry={() => void listQuery.refetch()}
       />

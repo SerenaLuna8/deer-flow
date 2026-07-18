@@ -53,14 +53,11 @@ export function ProjectPrivateWorkCta({ project }: { project: Project }) {
             </p>
             {!entryEnabled && (
               <p role="status" className="text-muted-foreground mt-1 text-xs">
-                {readiness.data?.status === "migration_required"
-                  ? "私有工作数据迁移尚未完成。"
-                  : readiness.data?.status === "unavailable" ||
-                      readiness.isError
-                    ? "暂时无法确认私有工作服务状态。"
-                    : readiness.isLoading
-                      ? "正在确认私有工作服务状态。"
-                      : "私有工作服务尚未就绪。"}
+                {readiness.data?.status === "unavailable" || readiness.isError
+                  ? "暂时无法确认私有工作服务状态。"
+                  : readiness.isLoading
+                    ? "正在确认私有工作服务状态。"
+                    : "私有工作服务尚未就绪。"}
               </p>
             )}
           </div>

@@ -77,7 +77,7 @@ def _assert_public_response(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_readiness_reports_ready_incomplete_and_missing_marker(
+async def test_readiness_ignores_cutover_marker_state(
     seed: M4ThreadSeed,
 ) -> None:
     app = _app(seed)
@@ -96,19 +96,11 @@ async def test_readiness_reports_ready_incomplete_and_missing_marker(
                 WHERE id=1"""
             )
         )
-    _assert_public_response(
-        await _get(app, seed),
-        status="migration_required",
-        code="PRIVATE_WORK_CUTOVER",
-    )
+    _assert_public_response(await _get(app, seed), status="ready", code="PRIVATE_WORK_READY")
 
     async with seed.engine.begin() as connection:
         await connection.execute(text("DELETE FROM private_work_cutover_state WHERE id=1"))
-    _assert_public_response(
-        await _get(app, seed),
-        status="migration_required",
-        code="PRIVATE_WORK_CUTOVER",
-    )
+    _assert_public_response(await _get(app, seed), status="ready", code="PRIVATE_WORK_READY")
 
 
 @pytest.mark.postgres
@@ -127,8 +119,8 @@ async def test_readiness_requires_final_schema_even_with_complete_marker(
 
     _assert_public_response(
         await _get(app, seed),
-        status="migration_required",
-        code="PRIVATE_WORK_CUTOVER",
+        status="unavailable",
+        code="PRIVATE_WORK_UNAVAILABLE",
     )
 
 

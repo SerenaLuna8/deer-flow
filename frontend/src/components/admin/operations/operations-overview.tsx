@@ -57,7 +57,7 @@ export function OperationsOverviewStateView({
   const readiness = state.data.readiness;
   const readinessComponents = [
     ["database", readiness.database],
-    ["schema", readiness.schema],
+    ["schema", readiness.schema_state],
     ["worker_fleet", readiness.worker_fleet],
     ["scheduler", readiness.scheduler],
     ["stream", readiness.stream],

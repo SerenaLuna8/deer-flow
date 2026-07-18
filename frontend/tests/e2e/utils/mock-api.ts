@@ -1387,7 +1387,7 @@ export async function mockProjectAutomationAPI(
         scheduler_enabled: true,
         scheduler_status: "running",
         project_private_work_ready: true,
-        automation_cutover_ready: true,
+        schema_ready: true,
         request_id: `automation-ready-${account.id}-${currentProject.id}`,
       });
     }

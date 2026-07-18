@@ -250,12 +250,12 @@ class AutomationRunListResponse(StrictAutomationResponse):
 
 
 class AutomationReadinessResponse(StrictAutomationResponse):
-    status: Literal["ready", "migration_required", "unavailable"]
+    status: Literal["ready", "unavailable"]
     code: str
     scheduler_enabled: bool
     scheduler_status: Literal["disabled", "stopped", "running", "ownership_lost"]
     project_private_work_ready: bool
-    automation_cutover_ready: bool
+    schema_ready: bool
     request_id: str
 
 

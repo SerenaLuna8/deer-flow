@@ -72,7 +72,7 @@ export const automationRunListSchema = z
 
 export const automationReadinessSchema = z
   .object({
-    status: z.enum(["ready", "migration_required", "unavailable"]),
+    status: z.enum(["ready", "unavailable"]),
     code: z.string().min(1),
     scheduler_enabled: z.boolean(),
     scheduler_status: z.enum([
@@ -82,7 +82,7 @@ export const automationReadinessSchema = z
       "ownership_lost",
     ]),
     project_private_work_ready: z.boolean(),
-    automation_cutover_ready: z.boolean(),
+    schema_ready: z.boolean(),
     request_id: z.string().min(1),
   })
   .strict();

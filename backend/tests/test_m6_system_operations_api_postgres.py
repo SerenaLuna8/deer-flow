@@ -233,7 +233,7 @@ async def test_operations_requires_current_system_admin_and_returns_only_aggrega
             "worker_capacity": 0,
             "worker_oldest_heartbeat_age_seconds": None,
             "scheduler_ownership": "disabled",
-            "cutover": "ready",
+            "schema_state": "ready",
         }
         assert set(body["counts"]) == {
             "projects",
@@ -604,7 +604,7 @@ async def test_operations_overview_serializes_injected_closed_component_readines
             "worker_capacity": 0,
             "worker_oldest_heartbeat_age_seconds": None,
             "scheduler_ownership": "unavailable",
-            "cutover": "unknown",
+            "schema_state": "unknown",
         }
     finally:
         await seed.engine.dispose()
@@ -612,14 +612,14 @@ async def test_operations_overview_serializes_injected_closed_component_readines
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_operations_overview_returns_closed_readiness_without_querying_m6_aggregates_when_real_cutover_is_closed(
+async def test_operations_overview_returns_closed_readiness_without_querying_aggregates_when_final_schema_is_incomplete(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     await _make_system_admin(seed)
     async with seed.factory() as session, session.begin():
         await session.execute(delete(ReliabilityCutoverStateRow).where(ReliabilityCutoverStateRow.id == 1))
-        await session.execute(text("DROP TABLE project_usage_counters"))
+        await session.execute(text("DROP TABLE project_usage_ledger"))
 
     app = _test_app(seed, AuditService(seed.factory, _keyring()))
     try:
@@ -640,7 +640,8 @@ async def test_operations_overview_returns_closed_readiness_without_querying_m6_
             "readiness": {
                 "status": "closed",
                 "database": "ready",
-                "schema": "migration_required",
+                "schema": "unavailable",
+                "schema_state": "migration_required",
                 "worker_fleet": "unavailable",
                 "scheduler": "disabled",
                 "stream": "closed",
@@ -652,7 +653,6 @@ async def test_operations_overview_returns_closed_readiness_without_querying_m6_
                 "worker_capacity": 0,
                 "worker_oldest_heartbeat_age_seconds": None,
                 "scheduler_ownership": "disabled",
-                "cutover": "migration_required",
             },
             "data_status": "unavailable",
             "counts": None,

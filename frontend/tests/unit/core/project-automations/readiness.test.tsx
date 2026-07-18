@@ -61,6 +61,16 @@ describe("project automation readiness", () => {
     await expect(fetchAutomationReadiness(SCOPE)).rejects.toMatchObject({
       code: "AUTOMATION_RESPONSE_INVALID",
     });
+
+    mockedFetch.mockResolvedValueOnce(
+      Response.json({
+        ...AUTOMATION_READINESS,
+        automation_cutover_ready: true,
+      }),
+    );
+    await expect(fetchAutomationReadiness(SCOPE)).rejects.toMatchObject({
+      code: "AUTOMATION_RESPONSE_INVALID",
+    });
   });
 
   test("disables readiness without current provider identity", () => {
@@ -76,7 +86,6 @@ describe("project automation readiness", () => {
   test("requires both server readiness and automation capability", () => {
     expect(automationManagementReady(true, "ready")).toBe(true);
     expect(automationManagementReady(false, "ready")).toBe(false);
-    expect(automationManagementReady(true, "migration_required")).toBe(false);
     expect(automationManagementReady(true, "unavailable")).toBe(false);
     expect(automationManagementReady(true, undefined)).toBe(false);
   });

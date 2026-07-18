@@ -3,18 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Protocol
 
-from app.reliability.errors import ReliabilityCutover, ReliabilityDatabaseUnavailable
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.final_schema import FinalSchemaProbe, FinalSchemaRequired, FinalSchemaUnavailable
 from app.reliability.models import ReliabilityReadiness
 from app.reliability.process_readiness import ProcessReadinessSnapshot
-
-
-class _GatewayGuard(Protocol):
-    @property
-    def request_id(self) -> str: ...
-
-    async def require_gateway_open(self) -> None: ...
 
 
 class ReliabilityReadinessService:
@@ -22,7 +16,9 @@ class ReliabilityReadinessService:
 
     def __init__(
         self,
-        guard: _GatewayGuard,
+        probe: FinalSchemaProbe,
+        session: AsyncSession,
+        request_id: str,
         *,
         worker_fleet: Callable[[], str] | None = None,
         scheduler: Callable[[], str] | None = None,
@@ -32,7 +28,9 @@ class ReliabilityReadinessService:
         audit: Callable[[], str] | None = None,
         process: ProcessReadinessSnapshot | None = None,
     ) -> None:
-        self._guard = guard
+        self._probe = probe
+        self._session = session
+        self._request_id = request_id
         self._providers = {
             "worker_fleet": worker_fleet,
             "scheduler": scheduler,
@@ -73,23 +71,23 @@ class ReliabilityReadinessService:
             worker_capacity=process.worker_capacity if process is not None else 0,
             worker_oldest_heartbeat_age_seconds=(process.worker_oldest_heartbeat_age_seconds if process is not None else None),
             scheduler_ownership=(process.scheduler_ownership if process is not None else "unavailable"),
-            cutover=process.cutover if process is not None else "unknown",
+            schema_state=process.schema_state if process is not None else schema,
         )
 
     async def read(self) -> ReliabilityReadiness:
         try:
-            await self._guard.require_gateway_open()
-        except ReliabilityCutover as error:
+            await self._probe.require_ready(self._session)
+        except FinalSchemaRequired:
             return self._closed(
                 database="ready",
-                schema="migration_required",
-                request_id=error.request_id,
+                schema="unavailable",
+                request_id=self._request_id,
             )
-        except ReliabilityDatabaseUnavailable as error:
+        except FinalSchemaUnavailable:
             return self._closed(
                 database="unavailable",
                 schema="unknown",
-                request_id=error.request_id,
+                request_id=self._request_id,
             )
 
         components = {name: self._component(name) for name in self._providers}
@@ -102,13 +100,13 @@ class ReliabilityReadinessService:
             status="ready" if healthy else "degraded",
             database="ready",
             schema="ready",
-            request_id=self._guard.request_id,
+            request_id=self._request_id,
             role=process.role if process is not None else "gateway",
             worker_count=process.worker_count if process is not None else 0,
             worker_capacity=process.worker_capacity if process is not None else 0,
             worker_oldest_heartbeat_age_seconds=(process.worker_oldest_heartbeat_age_seconds if process is not None else None),
             scheduler_ownership=(process.scheduler_ownership if process is not None else "unavailable"),
-            cutover=process.cutover if process is not None else "ready",
+            schema_state=process.schema_state if process is not None else "ready",
             **components,
         )
 

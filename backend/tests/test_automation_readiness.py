@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
-from app.automations.errors import AutomationCutover, AutomationUnavailable
+from app.automations.errors import AutomationUnavailable
 from app.automations.readiness import (
     AUTOMATION_READY,
     AutomationReadinessService,
@@ -39,13 +39,13 @@ async def test_readiness_reports_scheduler_disabled_without_closing_project_api(
     assert result.scheduler_enabled is False
     assert result.scheduler_status == "disabled"
     assert result.project_private_work_ready is True
-    assert result.automation_cutover_ready is True
+    assert result.schema_ready is True
     assert result.request_id == seed.owner_a.request_id
 
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_readiness_reports_incomplete_automation_marker_without_writing(
+async def test_readiness_ignores_incomplete_automation_marker_without_writing(
     seed: M4ThreadSeed,
 ) -> None:
     async with seed.engine.begin() as connection:
@@ -78,18 +78,18 @@ async def test_readiness_reports_incomplete_automation_marker_without_writing(
             )
         ).one()
 
-    assert result.status == "migration_required"
-    assert result.code == AutomationCutover.code
+    assert result.status == "ready"
+    assert result.code == AUTOMATION_READY
     assert result.scheduler_enabled is True
     assert result.scheduler_status == "stopped"
     assert result.project_private_work_ready is True
-    assert result.automation_cutover_ready is False
+    assert result.schema_ready is True
     assert after_row == before_row
 
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_readiness_requires_m4_marker_even_when_m5_is_complete(
+async def test_readiness_ignores_m4_marker_when_schema_is_final(
     seed: M4ThreadSeed,
 ) -> None:
     async with seed.engine.begin() as connection:
@@ -107,10 +107,10 @@ async def test_readiness_requires_m4_marker_even_when_m5_is_complete(
             scheduler_enabled=True,
         )
 
-    assert result.status == "migration_required"
-    assert result.code == AutomationCutover.code
-    assert result.project_private_work_ready is False
-    assert result.automation_cutover_ready is False
+    assert result.status == "ready"
+    assert result.code == AUTOMATION_READY
+    assert result.project_private_work_ready is True
+    assert result.schema_ready is True
 
 
 @pytest.mark.postgres
@@ -128,10 +128,10 @@ async def test_readiness_reports_final_revision_gap_separately_from_m4(
             scheduler_enabled=True,
         )
 
-    assert result.status == "migration_required"
-    assert result.code == AutomationCutover.code
-    assert result.project_private_work_ready is True
-    assert result.automation_cutover_ready is False
+    assert result.status == "unavailable"
+    assert result.code == AutomationUnavailable.code
+    assert result.project_private_work_ready is False
+    assert result.schema_ready is False
 
 
 @pytest.mark.asyncio
@@ -152,7 +152,7 @@ async def test_readiness_reports_database_unavailable_without_exception_text() -
     assert result.request_id == "safe-request"
     assert result.scheduler_enabled is True
     assert result.project_private_work_ready is False
-    assert result.automation_cutover_ready is False
+    assert result.schema_ready is False
     assert "secret" not in repr(result)
 
 
@@ -173,4 +173,4 @@ async def test_readiness_reports_lost_scheduler_without_closing_project_api(
     assert result.scheduler_enabled is True
     assert result.scheduler_status == "ownership_lost"
     assert result.project_private_work_ready is True
-    assert result.automation_cutover_ready is True
+    assert result.schema_ready is True

@@ -23,7 +23,7 @@ class ReliabilityReadiness:
     worker_capacity: int = 0
     worker_oldest_heartbeat_age_seconds: int | None = None
     scheduler_ownership: str = "unavailable"
-    cutover: str = "unknown"
+    schema_state: str = "unknown"
 
 
 __all__ = ["ReliabilityReadiness", "ReliabilityReadinessStatus"]

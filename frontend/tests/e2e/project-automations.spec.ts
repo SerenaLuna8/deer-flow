@@ -458,13 +458,13 @@ test("manual retry reuses one Idempotency-Key after a safe 503 response", async 
   expect(keys[1]).toBe(keys[0]);
 });
 
-test("scheduler disabled keeps manual execution while migration required never lists", async ({
+test("scheduler disabled keeps manual execution while unavailable schema never lists", async ({
   page,
 }) => {
   const state = await mockProjectAutomationAPI(page, [
     ownerAccount([ALPHA, BETA], {
       [PROJECT_ALPHA]: [automation(TASK_ALPHA, "Manual only")],
-      [PROJECT_BETA]: [automation(TASK_BETA, "Migration blocked")],
+      [PROJECT_BETA]: [automation(TASK_BETA, "Schema blocked")],
     }),
   ]);
   state.setReadiness(ACCOUNT_A, PROJECT_ALPHA, {
@@ -472,12 +472,12 @@ test("scheduler disabled keeps manual execution while migration required never l
     scheduler_status: "disabled",
   });
   state.setReadiness(ACCOUNT_A, PROJECT_BETA, {
-    status: "migration_required",
-    code: "AUTOMATION_MIGRATION_REQUIRED",
+    status: "unavailable",
+    code: "AUTOMATION_UNAVAILABLE",
     scheduler_enabled: false,
     scheduler_status: "stopped",
-    project_private_work_ready: true,
-    automation_cutover_ready: false,
+    project_private_work_ready: false,
+    schema_ready: false,
   });
 
   await page.goto("/projects/alpha/automations");
@@ -486,7 +486,7 @@ test("scheduler disabled keeps manual execution while migration required never l
   await expect(page.getByText("手动 · 排队中")).toBeVisible();
 
   await page.goto("/projects/beta/automations");
-  await expect(page.getByTestId("automation-migration-required")).toBeVisible();
+  await expect(page.getByTestId("automation-unavailable")).toBeVisible();
   expect(
     state.requests.some(
       ({ projectId, method, path }) =>

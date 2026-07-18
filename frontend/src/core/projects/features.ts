@@ -6,7 +6,7 @@ export function projectAutomationEntryEnabled(
   featureEnabled: boolean,
   staticWebsiteOnly: boolean,
   canReadPrivateWork: boolean,
-  readiness: "ready" | "migration_required" | "unavailable" | undefined,
+  readiness: "ready" | "unavailable" | undefined,
 ): boolean {
   return (
     featureEnabled &&

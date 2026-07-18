@@ -104,7 +104,10 @@ target。显式 M6 staged migration、认证 backup attestation、逐资源 exac
 backfill、aggregate-only reconciliation 拒绝、process readiness 与 Gateway+Worker+可选 Scheduler
 本地/Docker 编排均已交付。Task 19 固定 20 文件 M1–M6 PostgreSQL gate，并以真实 Scheduler/Worker/Gateway
 多进程、SSE reconnect、Frontend static/cache 和新库 restore 覆盖发布边界；Task 20 的全量门禁和独立关闭
-审查于 2026-07-18 完成。里程碑进度为 6/8（75%）；M7 legacy source/API 清理与 M8 完整发布验收
+审查于 2026-07-18 完成。M7 Task 1 已建立 marker-free final-schema readiness contract：运行时只检查
+Alembic revision 与最终必需 relations，Tasks 1–7 期间临时接受 `0015_project_reliability_finalize` 和
+未来的 `0001_project_saas_baseline`，不再用 M4/M5/M6 cutover marker 决定 project readiness、治理 API、
+Worker 或 Scheduler 是否开放。里程碑进度仍为 6/8（75%）；M7 其余 legacy source/API 清理与 M8 完整发布验收
 尚未交付，因此当前仍不能
 作为完整多用户 SaaS 发布。
 

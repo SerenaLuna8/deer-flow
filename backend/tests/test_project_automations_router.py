@@ -159,7 +159,7 @@ def _test_app(
                 scheduler_enabled=False,
                 scheduler_status="disabled",
                 project_private_work_ready=True,
-                automation_cutover_ready=True,
+                schema_ready=True,
                 request_id=context.request_id,
             )
         )

@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.models import AuditError
+from app.final_schema import FinalSchemaProbe, FinalSchemaRequired, FinalSchemaUnavailable
 from app.gateway.deps import (
     get_operational_audit_sink,
     get_project_quota_service,
@@ -30,7 +31,6 @@ from app.quotas.models import (
     QuotaForbidden,
     QuotaPolicyInvalid,
 )
-from app.reliability.cutover import ReliabilityCutoverGuard
 from app.reliability.error_mapping import reliability_http_exception
 from app.reliability.errors import (
     ReliabilityConflict,
@@ -196,10 +196,10 @@ async def _project_context(
     )
     if Capability.PROJECT_USAGE_READ not in context.capabilities:
         raise QuotaForbidden("project usage authority is required")
-    await ReliabilityCutoverGuard.for_session(
-        session,
-        request_id=identity[1],
-    ).require_gateway_open()
+    try:
+        await FinalSchemaProbe().require_ready(session)
+    except (FinalSchemaRequired, FinalSchemaUnavailable):
+        raise ReliabilityDatabaseUnavailable(identity[1]) from None
     return context
 
 

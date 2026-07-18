@@ -10,7 +10,7 @@ import type { PrivateWorkAccess } from "./types";
 
 const projectPrivateWorkReadinessSchema = z
   .object({
-    status: z.enum(["ready", "migration_required", "unavailable"]),
+    status: z.enum(["ready", "unavailable"]),
     code: z.string().min(1),
     request_id: z.string().min(1),
   })

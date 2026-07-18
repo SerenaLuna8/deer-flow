@@ -210,7 +210,7 @@ function ProjectNavigationLinks({
   const automationReady =
     automationReadiness.data?.status === "ready" &&
     automationReadiness.data.project_private_work_ready &&
-    automationReadiness.data.automation_cutover_ready;
+    automationReadiness.data.schema_ready;
   if (staticWebsiteOnly) {
     return (
       <ProjectNavigationLinksContent

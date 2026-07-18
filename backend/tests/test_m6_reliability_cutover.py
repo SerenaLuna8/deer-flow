@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.final_schema import FinalSchemaRequired, FinalSchemaState, FinalSchemaUnavailable
 from app.reliability.cutover import ReliabilityCutoverGuard
 from app.reliability.error_mapping import (
     ReliabilityHTTPException,
@@ -224,9 +225,7 @@ async def test_guard_maps_database_errors_without_leaking_details() -> None:
 
 
 class _OpenGuard:
-    request_id = "ready-request"
-
-    async def require_gateway_open(self) -> None:
+    async def require_ready(self, _session) -> None:
         return None
 
 
@@ -240,14 +239,14 @@ async def test_readiness_reports_each_component_and_degrades_independently() -> 
         "quota": lambda: "ready",
         "audit": lambda: "ready",
     }
-    ready = await ReliabilityReadinessService(_OpenGuard(), **providers).read()
+    ready = await ReliabilityReadinessService(_OpenGuard(), object(), "ready-request", **providers).read()
     assert ready.status == "ready"
     assert ready.database == ready.schema == "ready"
     assert ready.scheduler == "disabled"
     assert ready.request_id == "ready-request"
 
     providers["stream"] = lambda: "polling"
-    degraded = await ReliabilityReadinessService(_OpenGuard(), **providers).read()
+    degraded = await ReliabilityReadinessService(_OpenGuard(), object(), "ready-request", **providers).read()
     assert degraded.status == "degraded"
     assert degraded.stream == "polling"
     assert degraded.worker_fleet == "ready"
@@ -256,19 +255,19 @@ async def test_readiness_reports_each_component_and_degrades_independently() -> 
 @pytest.mark.asyncio
 async def test_readiness_closes_on_schema_or_database_failure() -> None:
     class ClosedGuard(_OpenGuard):
-        async def require_gateway_open(self) -> None:
-            raise ReliabilityCutover(self.request_id)
+        async def require_ready(self, _session) -> None:
+            raise FinalSchemaRequired(FinalSchemaState("old-revision", (), False))
 
-    closed = await ReliabilityReadinessService(ClosedGuard()).read()
+    closed = await ReliabilityReadinessService(ClosedGuard(), object(), "schema-request").read()
     assert closed.status == "closed"
     assert closed.database == "ready"
-    assert closed.schema == "migration_required"
+    assert closed.schema == "unavailable"
 
     class UnavailableGuard(_OpenGuard):
-        async def require_gateway_open(self) -> None:
-            raise ReliabilityDatabaseUnavailable(self.request_id)
+        async def require_ready(self, _session) -> None:
+            raise FinalSchemaUnavailable()
 
-    unavailable = await ReliabilityReadinessService(UnavailableGuard()).read()
+    unavailable = await ReliabilityReadinessService(UnavailableGuard(), object(), "db-request").read()
     assert unavailable.status == "closed"
     assert unavailable.database == "unavailable"
     assert unavailable.schema == "unknown"
@@ -288,8 +287,8 @@ async def test_closed_readiness_preserves_public_process_snapshot_without_openin
     ownership: str,
 ) -> None:
     class ClosedGuard(_OpenGuard):
-        async def require_gateway_open(self) -> None:
-            raise ReliabilityCutover(self.request_id)
+        async def require_ready(self, _session) -> None:
+            raise FinalSchemaRequired(FinalSchemaState("old-revision", (), False))
 
     process = ProcessReadinessSnapshot(
         ready=False,
@@ -300,14 +299,14 @@ async def test_closed_readiness_preserves_public_process_snapshot_without_openin
         worker_oldest_heartbeat_age_seconds=4,
         scheduler=scheduler,
         scheduler_ownership=ownership,
-        cutover="migration_required",
+        schema_state="migration_required",
     )
 
-    closed = await ReliabilityReadinessService(ClosedGuard(), process=process).read()
+    closed = await ReliabilityReadinessService(ClosedGuard(), object(), "schema-request", process=process).read()
 
     assert closed.status == "closed"
     assert closed.database == "ready"
-    assert closed.schema == "migration_required"
+    assert closed.schema == "unavailable"
     assert closed.role == "gateway"
     assert closed.worker_fleet == "ready"
     assert closed.worker_count == 2
@@ -315,7 +314,7 @@ async def test_closed_readiness_preserves_public_process_snapshot_without_openin
     assert closed.worker_oldest_heartbeat_age_seconds == 4
     assert closed.scheduler == scheduler
     assert closed.scheduler_ownership == ownership
-    assert closed.cutover == "migration_required"
+    assert closed.schema_state == "migration_required"
     assert (closed.stream, closed.recovery, closed.quota, closed.audit) == (
         "closed",
         "closed",
@@ -328,17 +327,10 @@ async def test_closed_readiness_preserves_public_process_snapshot_without_openin
 
 
 @pytest.mark.asyncio
-async def test_readiness_preserves_the_cutover_failure_request_id() -> None:
-    class RotatingRequestGuard:
-        def __init__(self) -> None:
-            self.ids = iter(("failure-request", "different-request"))
+async def test_readiness_preserves_the_explicit_failure_request_id() -> None:
+    class RequiredProbe:
+        async def require_ready(self, _session) -> None:
+            raise FinalSchemaRequired(FinalSchemaState("old-revision", (), False))
 
-        @property
-        def request_id(self) -> str:
-            return next(self.ids)
-
-        async def require_gateway_open(self) -> None:
-            raise ReliabilityCutover(self.request_id)
-
-    readiness = await ReliabilityReadinessService(RotatingRequestGuard()).read()
+    readiness = await ReliabilityReadinessService(RequiredProbe(), object(), "failure-request").read()
     assert readiness.request_id == "failure-request"
