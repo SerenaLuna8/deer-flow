@@ -53,9 +53,6 @@ def _setup_executor_module():
 
     for name in _MOCKED_MODULE_NAMES:
         sys.modules[name] = MagicMock()
-    storage_module = ModuleType("deerflow.skills.storage")
-    storage_module.get_or_new_skill_storage = lambda **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
-    sys.modules["deerflow.skills.storage"] = storage_module
 
     from deerflow.subagents.config import SubagentConfig
     from deerflow.subagents.executor import SubagentExecutor

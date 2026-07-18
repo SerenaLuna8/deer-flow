@@ -13,7 +13,7 @@ from types import MappingProxyType
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,9 +34,16 @@ from deerflow.persistence.shared_assets import (
     AgentVersionMcpRefRow,
     AgentVersionRow,
     AgentVersionSkillRefRow,
+    CredentialEnvelopeRow,
+    CredentialGrantRow,
+    CredentialRow,
+    CredentialVersionRow,
     McpCredentialSlotRow,
     McpServerRow,
     McpServerVersionRow,
+    ProjectSystemAgentBindingRow,
+    ProjectSystemMcpBindingRow,
+    ProjectSystemSkillBindingRow,
     SkillRow,
     SkillVersionFileRow,
     SkillVersionRow,
@@ -177,6 +184,44 @@ async def _ensure_builtin_principal(session: AsyncSession) -> None:
     if membership is not None:
         raise BootstrapConflict("builtin asset principal cannot have project membership")
 
+    credential_actor_columns = (
+        (CredentialRow, (CredentialRow.created_by_user_id, CredentialRow.revoked_by_user_id)),
+        (
+            CredentialVersionRow,
+            (CredentialVersionRow.created_by_user_id, CredentialVersionRow.revoked_by_user_id),
+        ),
+        (CredentialEnvelopeRow, (CredentialEnvelopeRow.created_by_user_id,)),
+        (
+            CredentialGrantRow,
+            (CredentialGrantRow.created_by_user_id, CredentialGrantRow.revoked_by_user_id),
+        ),
+    )
+    for model, columns in credential_actor_columns:
+        reference = (await session.execute(select(model).where(or_(*(column == principal_id for column in columns))).limit(1))).scalar_one_or_none()
+        if reference is not None:
+            raise BootstrapConflict("builtin asset principal cannot reference credentials")
+
+    binding_actor_columns = (
+        ProjectSystemAgentBindingRow,
+        ProjectSystemSkillBindingRow,
+        ProjectSystemMcpBindingRow,
+    )
+    for model in binding_actor_columns:
+        reference = (
+            await session.execute(
+                select(model)
+                .where(
+                    or_(
+                        model.created_by_user_id == principal_id,
+                        model.updated_by_user_id == principal_id,
+                    )
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if reference is not None:
+            raise BootstrapConflict("builtin asset principal cannot reference project bindings")
+
 
 async def _existing_asset(session: AsyncSession, entry: BootstrapEntry):
     model = {"agent": AgentRow, "skill": SkillRow, "mcp": McpServerRow}[entry.kind]
@@ -184,8 +229,22 @@ async def _existing_asset(session: AsyncSession, entry: BootstrapEntry):
 
 
 def _validate_asset_row(row, entry: BootstrapEntry) -> None:
-    if row.id != _stable_id(entry.source_key) or row.scope != "system" or row.project_id is not None or row.slug != entry.slug or row.display_name != entry.display_name or row.status != "active":
+    if (
+        row.id != _stable_id(entry.source_key)
+        or row.scope != "system"
+        or row.project_id is not None
+        or row.slug != entry.slug
+        or row.display_name != entry.display_name
+        or row.status != "active"
+        or row.version != 1
+        or row.source_key != entry.source_key
+        or row.created_by_user_id != str(BUILTIN_ASSET_USER_ID)
+    ):
         raise BootstrapConflict("existing system asset conflicts with canonical manifest")
+
+
+def _matches(row: object, **expected: object) -> bool:
+    return all(getattr(row, name) == value for name, value in expected.items())
 
 
 async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: BootstrapEntry) -> bool:
@@ -199,8 +258,41 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
     if asset is not None:
         _validate_asset_row(asset, entry)
         version = await session.get(SkillVersionRow, version_id)
-        if version is None or version.skill_id != asset_id or version.version_number != entry.version or version.workflow_status != "published" or version.payload_checksum != checksum or asset.current_published_version_id != version_id:
+        if version is None or not _matches(
+            version,
+            skill_id=asset_id,
+            version_number=entry.version,
+            workflow_status="published",
+            description=description,
+            frontmatter=frontmatter,
+            compatibility=None,
+            secret_requirements=requirements,
+            scan_decision="allow",
+            scan_summary={"source": "builtin-bootstrap"},
+            supersedes_version_id=None,
+            payload_checksum=checksum,
+            submitted_at=None,
+            reviewed_at=None,
+            reviewed_by_user_id=None,
+            review_note=None,
+            created_by_user_id=str(BUILTIN_ASSET_USER_ID),
+        ):
             raise BootstrapConflict("existing system Skill conflicts with canonical payload")
+        files = (await session.execute(select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == version_id).order_by(SkillVersionFileRow.path))).scalars().all()
+        if (
+            asset.current_published_version_id != version_id
+            or len(files) != 1
+            or not _matches(
+                files[0],
+                skill_version_id=version_id,
+                path="SKILL.md",
+                media_type="text/markdown",
+                size_bytes=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+                content=content,
+            )
+        ):
+            raise BootstrapConflict("existing system Skill files conflict with canonical payload")
         return False
 
     asset = SkillRow(
@@ -284,8 +376,34 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
     if asset is not None:
         _validate_asset_row(asset, entry)
         version = await session.get(AgentVersionRow, version_id)
-        if version is None or version.agent_id != asset_id or version.version_number != entry.version or version.workflow_status != "published" or version.payload_checksum != checksum or asset.current_published_version_id != version_id:
+        if version is None or not _matches(
+            version,
+            agent_id=asset_id,
+            version_number=entry.version,
+            workflow_status="published",
+            description=payload.description,
+            soul=payload.soul,
+            model_ref=payload.model_ref,
+            tool_groups=list(payload.tool_groups),
+            supersedes_version_id=None,
+            payload_checksum=checksum,
+            submitted_at=None,
+            reviewed_at=None,
+            reviewed_by_user_id=None,
+            review_note=None,
+            created_by_user_id=str(BUILTIN_ASSET_USER_ID),
+        ):
             raise BootstrapConflict("existing system Agent conflicts with canonical payload")
+        skill_refs = (
+            (await session.execute(select(AgentVersionSkillRefRow).where(AgentVersionSkillRefRow.agent_version_id == version_id).order_by(AgentVersionSkillRefRow.sort_order, AgentVersionSkillRefRow.skill_version_id))).scalars().all()
+        )
+        mcp_refs = (await session.execute(select(AgentVersionMcpRefRow).where(AgentVersionMcpRefRow.agent_version_id == version_id).order_by(AgentVersionMcpRefRow.sort_order, AgentVersionMcpRefRow.mcp_server_version_id))).scalars().all()
+        actual_skills = [(row.agent_version_id, row.skill_version_id, row.sort_order) for row in skill_refs]
+        expected_skills = [(version_id, skill_version_id, index) for index, skill_version_id in enumerate(payload.skill_version_ids)]
+        actual_mcps = [(row.agent_version_id, row.mcp_server_version_id, row.sort_order) for row in mcp_refs]
+        expected_mcps = [(version_id, mcp_version_id, index) for index, mcp_version_id in enumerate(payload.mcp_version_ids)]
+        if asset.current_published_version_id != version_id or actual_skills != expected_skills or actual_mcps != expected_mcps:
+            raise BootstrapConflict("existing system Agent references conflict with canonical payload")
         return False
 
     asset = AgentRow(
@@ -371,15 +489,46 @@ async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: Boo
     if asset is not None:
         _validate_asset_row(asset, entry)
         version = await session.get(McpServerVersionRow, version_id)
-        if (
-            version is None
-            or version.mcp_server_id != asset_id
-            or version.version_number != entry.version
-            or version.workflow_status != "published"
-            or version.payload_checksum != checksum
-            or asset.current_published_version_id != version_id
+        if version is None or not _matches(
+            version,
+            mcp_server_id=asset_id,
+            version_number=entry.version,
+            workflow_status="published",
+            description=raw.description,
+            transport=raw.transport,
+            command=raw.command,
+            args=list(raw.args),
+            url=raw.url,
+            non_secret_env=raw.env,
+            non_secret_headers=raw.headers,
+            oauth_metadata=raw.oauth,
+            routing=raw.routing,
+            tool_overrides=raw.tool_overrides,
+            timeout_seconds=raw.timeout_seconds,
+            supersedes_version_id=None,
+            payload_checksum=checksum,
+            submitted_at=None,
+            reviewed_at=None,
+            reviewed_by_user_id=None,
+            review_note=None,
+            created_by_user_id=str(BUILTIN_ASSET_USER_ID),
         ):
             raise BootstrapConflict("existing system MCP conflicts with canonical payload")
+        slots = (await session.execute(select(McpCredentialSlotRow).where(McpCredentialSlotRow.mcp_server_version_id == version_id).order_by(McpCredentialSlotRow.name))).scalars().all()
+        expected_slots = sorted(raw.credential_slots, key=lambda slot: slot.name)
+        if asset.current_published_version_id != version_id or len(slots) != len(expected_slots):
+            raise BootstrapConflict("existing system MCP slots conflict with canonical payload")
+        for slot, expected in zip(slots, expected_slots, strict=True):
+            if not _matches(
+                slot,
+                id=_stable_id(f"{entry.source_key}:version:{entry.version}:slot:{expected.name}"),
+                mcp_server_version_id=version_id,
+                name=expected.name,
+                purpose=expected.purpose,
+                payload_schema=expected.payload_schema,
+                required=expected.required,
+            ):
+                raise BootstrapConflict("existing system MCP slots conflict with canonical payload")
         return False
 
     asset = McpServerRow(

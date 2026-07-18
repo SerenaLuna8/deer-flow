@@ -356,7 +356,7 @@ async def test_private_factory_never_falls_back_to_legacy_callable() -> None:
     assert calls == 0
 
 
-def test_exact_skill_prompt_does_not_touch_legacy_global_cache(tmp_path) -> None:
+def test_exact_skill_prompt_cache_is_keyed_by_run_read_only_metadata(tmp_path) -> None:
     from deerflow.agents.lead_agent.prompt import (
         _get_cached_skills_prompt_section,
         apply_prompt_template,
@@ -368,8 +368,10 @@ def test_exact_skill_prompt_does_not_touch_legacy_global_cache(tmp_path) -> None
     skill_root.mkdir(parents=True)
     skill_file = skill_root / "SKILL.md"
     skill_file.write_text("---\nname: exact\ndescription: exact project skill\n---\nbody\n", encoding="utf-8")
-    skill = parse_skill_file(skill_file, SkillCategory.CUSTOM, skill_root.relative_to(tmp_path / "custom"))
-    assert skill is not None
+    parsed = parse_skill_file(skill_file, SkillCategory.CUSTOM, skill_root.relative_to(tmp_path / "custom"))
+    assert parsed is not None
+    skill = dataclasses.replace(parsed, runtime_read_only=True)
+    _get_cached_skills_prompt_section.cache_clear()
     before = _get_cached_skills_prompt_section.cache_info()
 
     prompt = apply_prompt_template(
@@ -380,9 +382,17 @@ def test_exact_skill_prompt_does_not_touch_legacy_global_cache(tmp_path) -> None
     )
 
     after = _get_cached_skills_prompt_section.cache_info()
-    assert after.currsize == before.currsize
-    assert after.hits == before.hits
+    assert after.currsize == before.currsize + 1
+    assert after.misses == before.misses + 1
+    apply_prompt_template(
+        exact_soul="exact soul",
+        exact_skills=(skill,),
+        exact_skills_container_path=str(tmp_path),
+        available_skills={"exact"},
+    )
+    assert _get_cached_skills_prompt_section.cache_info().hits == after.hits + 1
     assert "exact soul" in prompt
+    assert "[run exact, read-only]" in prompt
     assert str(tmp_path / "custom" / "exact" / "SKILL.md") in prompt
 
 
@@ -415,12 +425,6 @@ def test_exact_runtime_slash_skill_is_read_only_and_never_uses_catalog_storage(
         runtime_skills=(skill,),
         runtime_skills_root=tmp_path,
     )
-    monkeypatch.setattr(
-        middleware,
-        "_storage",
-        lambda: (_ for _ in ()).throw(AssertionError("run temp must not be exposed as catalog storage")),
-    )
-
     resolution = middleware._resolve_activation("/exact do the exact task")
 
     assert resolution is not None
@@ -615,10 +619,6 @@ def test_exact_run_skill_read_and_list_never_touch_global_skill_state(
             "__run_read_only_mounts": (mount,),
         },
         config={},
-    )
-    monkeypatch.setattr(
-        "deerflow.skills.storage.get_or_new_user_skill_storage",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("global user Skill storage must remain untouched")),
     )
     set_sandbox_provider(provider)
     try:

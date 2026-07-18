@@ -145,7 +145,12 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
     return []
 
 
-def _skill_mutability_label(category: SkillCategory | str) -> str:
+def _skill_mutability_label(
+    category: SkillCategory | str,
+    runtime_read_only: bool,
+) -> str:
+    if runtime_read_only:
+        return "[run exact, read-only]"
     if category == SkillCategory.CUSTOM:
         return "[custom, editable]"
     return "[built-in]"
@@ -639,26 +644,28 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
 
 
 def _render_skills_prompt_section(
-    skill_signature: tuple[tuple[str, str, str, str], ...],
-    disabled_skill_signature: tuple[tuple[str, str, str, str], ...],
+    skill_signature: tuple[tuple[str, str, str, str, bool], ...],
+    disabled_skill_signature: tuple[tuple[str, str, str, str, bool], ...],
     available_skills_key: tuple[str, ...] | None,
     container_base_path: str,
     skill_evolution_section: str,
 ) -> str:
-    filtered = [(name, description, category, location) for name, description, category, location in skill_signature if available_skills_key is None or name in available_skills_key]
+    filtered = [(name, description, category, location, runtime_read_only) for name, description, category, location, runtime_read_only in skill_signature if available_skills_key is None or name in available_skills_key]
     skills_list = ""
     if filtered:
         skill_items = "\n".join(
-            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category)}</description>\n        <location>{location}</location>\n    </skill>"
-            for name, description, category, location in filtered
+            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category, runtime_read_only)}</description>\n        <location>{location}</location>\n    </skill>"
+            for name, description, category, location, runtime_read_only in filtered
         )
         skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
 
     disabled_section = ""
     if disabled_skill_signature:
-        disabled_filtered = [(name, description, category, location) for name, description, category, location in disabled_skill_signature if available_skills_key is None or name in available_skills_key]
+        disabled_filtered = [
+            (name, description, category, location, runtime_read_only) for name, description, category, location, runtime_read_only in disabled_skill_signature if available_skills_key is None or name in available_skills_key
+        ]
         if disabled_filtered:
-            disabled_items = "\n".join(f"    - {name} ({category})" for name, description, category, location in disabled_filtered)
+            disabled_items = "\n".join(f"    - {name} ({category})" for name, _description, category, _location, _runtime_read_only in disabled_filtered)
             disabled_section = f"""<disabled_skills>
 The following skills are INSTALLED but DISABLED. You MUST NOT read,
 reference, or use any of these skills — including their SKILL.md,
@@ -692,8 +699,8 @@ You have access to skills that provide optimized workflows for specific tasks. E
 
 @lru_cache(maxsize=32)
 def _get_cached_skills_prompt_section(
-    skill_signature: tuple[tuple[str, str, str, str], ...],
-    disabled_skill_signature: tuple[tuple[str, str, str, str], ...],
+    skill_signature: tuple[tuple[str, str, str, str, bool], ...],
+    disabled_skill_signature: tuple[tuple[str, str, str, str, bool], ...],
     available_skills_key: tuple[str, ...] | None,
     container_base_path: str,
     skill_evolution_section: str,
@@ -865,10 +872,11 @@ def apply_prompt_template(
                 str(getattr(skill, "description")),
                 str(getattr(skill, "category")),
                 str(skill.get_container_file_path(container_path)),
+                bool(getattr(skill, "runtime_read_only", False)),
             )
             for skill in exact_skills
         )
-        skills_section = _render_skills_prompt_section(
+        skills_section = _get_cached_skills_prompt_section(
             signature,
             (),
             tuple(sorted(available_skills)) if available_skills is not None else None,

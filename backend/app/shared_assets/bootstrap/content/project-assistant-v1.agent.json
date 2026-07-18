@@ -4,5 +4,5 @@
   "model_ref": "default",
   "tool_groups": [],
   "skill_source_keys": ["builtin:skill:deerflow-core"],
-  "mcp_source_keys": []
+  "mcp_source_keys": ["builtin:mcp:deerflow-docs"]
 }

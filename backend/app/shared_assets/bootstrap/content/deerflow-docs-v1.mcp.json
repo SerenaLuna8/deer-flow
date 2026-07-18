@@ -1,0 +1,24 @@
+{
+  "description": "Canonical DeerFlow documentation MCP definition.",
+  "transport": "http",
+  "url": "https://docs.deerflow.invalid/mcp",
+  "env": {},
+  "headers": {},
+  "oauth": {},
+  "routing": {"namespace": "deerflow-docs"},
+  "tool_overrides": {},
+  "timeout_seconds": 30,
+  "credential_slots": [
+    {
+      "name": "api-key",
+      "purpose": "Authenticate documentation requests when configured.",
+      "payload_schema": {
+        "type": "object",
+        "properties": {"api_key": {"type": "string"}},
+        "required": ["api_key"],
+        "additionalProperties": false
+      },
+      "required": false
+    }
+  ]
+}

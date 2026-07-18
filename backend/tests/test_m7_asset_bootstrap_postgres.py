@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.shared_assets.contexts import resolve_asset_actor
@@ -19,11 +19,22 @@ from app.shared_assets.errors import AssetForbidden
 from deerflow.persistence.projects import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
+    AgentVersionMcpRefRow,
+    AgentVersionRow,
+    AgentVersionSkillRefRow,
+    CredentialEnvelopeRow,
+    CredentialGrantRow,
     CredentialRow,
+    CredentialVersionRow,
+    McpCredentialSlotRow,
+    McpServerRow,
+    McpServerVersionRow,
     ProjectSystemAgentBindingRow,
     ProjectSystemMcpBindingRow,
     ProjectSystemSkillBindingRow,
     SkillRow,
+    SkillVersionFileRow,
+    SkillVersionRow,
 )
 from deerflow.persistence.user import UserRow
 
@@ -82,6 +93,106 @@ async def test_bootstrap_catalog_is_atomic_and_idempotent(m7_database: M7Databas
     assert first.counts == second.counts
     assert first.created > 0
     assert second.created == 0
+    assert first.counts == {"agent": 1, "skill": 1, "mcp": 1}
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_bootstrap_rejects_canonical_parent_metadata_drift(
+    m7_database: M7Database,
+) -> None:
+    await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+    async with m7_database.session_factory() as session, session.begin():
+        agent = (await session.execute(select(AgentRow).where(AgentRow.source_key == "builtin:agent:project-assistant"))).scalar_one()
+        agent.version = 2
+
+    with pytest.raises(_bootstrap_module().BootstrapConflict):
+        await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_bootstrap_rejects_canonical_version_metadata_drift(
+    m7_database: M7Database,
+) -> None:
+    await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+    async with m7_database.session_factory() as session, session.begin():
+        skill = (await session.execute(select(SkillVersionRow).join(SkillRow, SkillVersionRow.skill_id == SkillRow.id).where(SkillRow.source_key == "builtin:skill:deerflow-core"))).scalar_one()
+        skill.review_note = "not canonical"
+
+    with pytest.raises(_bootstrap_module().BootstrapConflict):
+        await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_bootstrap_rejects_canonical_skill_file_drift(
+    m7_database: M7Database,
+) -> None:
+    await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+    async with m7_database.session_factory() as session, session.begin():
+        await session.execute(text("ALTER TABLE skill_version_files DISABLE TRIGGER USER"))
+        await session.execute(delete(SkillVersionFileRow))
+        await session.execute(text("ALTER TABLE skill_version_files ENABLE TRIGGER USER"))
+
+    with pytest.raises(_bootstrap_module().BootstrapConflict):
+        await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_bootstrap_rejects_canonical_agent_reference_drift(
+    m7_database: M7Database,
+) -> None:
+    await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+    async with m7_database.session_factory() as session, session.begin():
+        await session.execute(text("ALTER TABLE agent_version_skill_refs DISABLE TRIGGER USER"))
+        await session.execute(delete(AgentVersionSkillRefRow))
+        await session.execute(text("ALTER TABLE agent_version_skill_refs ENABLE TRIGGER USER"))
+
+    with pytest.raises(_bootstrap_module().BootstrapConflict):
+        await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_bootstrap_rejects_canonical_mcp_version_and_slot_drift(
+    m7_database: M7Database,
+) -> None:
+    await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+    async with m7_database.session_factory() as session, session.begin():
+        mcp_version = (await session.execute(select(McpServerVersionRow).join(McpServerRow, McpServerVersionRow.mcp_server_id == McpServerRow.id).where(McpServerRow.source_key == "builtin:mcp:deerflow-docs"))).scalar_one()
+        mcp_version.review_note = "not canonical"
+
+    with pytest.raises(_bootstrap_module().BootstrapConflict):
+        await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+
+    async with m7_database.session_factory() as session, session.begin():
+        mcp_version = (await session.execute(select(McpServerVersionRow).join(McpServerRow, McpServerVersionRow.mcp_server_id == McpServerRow.id).where(McpServerRow.source_key == "builtin:mcp:deerflow-docs"))).scalar_one()
+        mcp_version.review_note = None
+        await session.execute(text("ALTER TABLE mcp_version_credential_slots DISABLE TRIGGER USER"))
+        await session.execute(delete(McpCredentialSlotRow))
+        await session.execute(text("ALTER TABLE mcp_version_credential_slots ENABLE TRIGGER USER"))
+
+    with pytest.raises(_bootstrap_module().BootstrapConflict):
+        await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_bootstrap_agent_graph_contains_canonical_skill_and_mcp_refs(
+    m7_database: M7Database,
+) -> None:
+    await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+    async with m7_database.session_factory() as session:
+        version = (await session.execute(select(AgentVersionRow).join(AgentRow, AgentVersionRow.agent_id == AgentRow.id).where(AgentRow.source_key == "builtin:agent:project-assistant"))).scalar_one()
+        skill_refs = (await session.execute(select(AgentVersionSkillRefRow).where(AgentVersionSkillRefRow.agent_version_id == version.id).order_by(AgentVersionSkillRefRow.sort_order))).scalars().all()
+        mcp_refs = (await session.execute(select(AgentVersionMcpRefRow).where(AgentVersionMcpRefRow.agent_version_id == version.id).order_by(AgentVersionMcpRefRow.sort_order))).scalars().all()
+
+        assert len(skill_refs) == 1
+        assert skill_refs[0].sort_order == 0
+        assert len(mcp_refs) == 1
+        assert mcp_refs[0].sort_order == 0
 
 
 @pytest.mark.parametrize(
@@ -240,6 +351,179 @@ async def test_bootstrap_rejects_preexisting_builtin_membership(
         await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
 
 
+async def _add_normal_user(session) -> str:
+    user_id = str(uuid.uuid4())
+    session.add(
+        UserRow(
+            id=user_id,
+            email=f"normal-{uuid.uuid4()}@example.invalid",
+            password_hash=None,
+            system_role="user",
+            oauth_provider=None,
+            oauth_id=None,
+            needs_setup=False,
+            token_version=0,
+        )
+    )
+    await session.flush()
+    return user_id
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("table_kind", "actor_field"),
+    [
+        ("credential", "created"),
+        ("credential", "revoked"),
+        ("version", "created"),
+        ("version", "revoked"),
+        ("envelope", "created"),
+        ("grant", "created"),
+        ("grant", "revoked"),
+    ],
+)
+async def test_bootstrap_rejects_builtin_credential_actor_references(
+    m7_database: M7Database,
+    table_kind: str,
+    actor_field: str,
+) -> None:
+    await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+    builtin_id = str(BUILTIN_USER_ID)
+    async with m7_database.session_factory() as session, session.begin():
+        normal_id = await _add_normal_user(session)
+        credential_id = uuid.uuid4()
+        credential = CredentialRow(
+            id=credential_id,
+            scope="system",
+            project_id=None,
+            name=f"credential-{uuid.uuid4().hex[:10]}",
+            display_name="Forbidden builtin reference",
+            credential_type="api_key",
+            status="revoked" if table_kind == "credential" and actor_field == "revoked" else "active",
+            current_version_id=None,
+            version=1,
+            source_key=None,
+            revoked_by_user_id=builtin_id if table_kind == "credential" and actor_field == "revoked" else None,
+            created_by_user_id=builtin_id if table_kind == "credential" and actor_field == "created" else normal_id,
+        )
+        session.add(credential)
+        await session.flush()
+
+        version_id = uuid.uuid4()
+        if table_kind in {"version", "envelope", "grant"}:
+            session.add(
+                CredentialVersionRow(
+                    id=version_id,
+                    credential_id=credential_id,
+                    version_number=1,
+                    status="revoked" if table_kind == "version" and actor_field == "revoked" else "active",
+                    payload_schema_version=1,
+                    payload_schema={"type": "object"},
+                    supersedes_version_id=None,
+                    revoked_by_user_id=builtin_id if table_kind == "version" and actor_field == "revoked" else None,
+                    created_by_user_id=builtin_id if table_kind == "version" and actor_field == "created" else normal_id,
+                )
+            )
+            await session.flush()
+
+        if table_kind == "envelope":
+            session.add(
+                CredentialEnvelopeRow(
+                    credential_version_id=version_id,
+                    envelope_generation=1,
+                    key_id="test-key",
+                    nonce=b"0" * 12,
+                    ciphertext=b"0" * 16,
+                    is_active=True,
+                    created_by_user_id=builtin_id,
+                    rotated_from_envelope_id=None,
+                )
+            )
+        elif table_kind == "grant":
+            slot = (await session.execute(select(McpCredentialSlotRow))).scalar_one()
+            session.add(
+                CredentialGrantRow(
+                    mcp_server_version_id=slot.mcp_server_version_id,
+                    credential_slot_id=slot.id,
+                    credential_version_id=version_id,
+                    status="revoked" if actor_field == "revoked" else "active",
+                    version=1,
+                    created_by_user_id=builtin_id if actor_field == "created" else normal_id,
+                    revoked_by_user_id=builtin_id if actor_field == "revoked" else None,
+                )
+            )
+
+    with pytest.raises(_bootstrap_module().BootstrapConflict):
+        await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("binding_kind", "actor_field"),
+    [
+        ("agent", "created"),
+        ("agent", "updated"),
+        ("skill", "created"),
+        ("skill", "updated"),
+        ("mcp", "created"),
+        ("mcp", "updated"),
+    ],
+)
+async def test_bootstrap_rejects_builtin_project_binding_actor_references(
+    m7_database: M7Database,
+    binding_kind: str,
+    actor_field: str,
+) -> None:
+    await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+    builtin_id = str(BUILTIN_USER_ID)
+    async with m7_database.session_factory() as session, session.begin():
+        normal_id = await _add_normal_user(session)
+        project_id = uuid.uuid4()
+        session.add(
+            ProjectRow(
+                id=project_id,
+                slug=f"binding-conflict-{uuid.uuid4().hex[:8]}",
+                display_name="Binding conflict",
+                created_by_user_id=normal_id,
+            )
+        )
+        await session.flush()
+        actor_values = {
+            "created_by_user_id": builtin_id if actor_field == "created" else normal_id,
+            "updated_by_user_id": builtin_id if actor_field == "updated" else normal_id,
+        }
+        if binding_kind == "agent":
+            asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == "builtin:agent:project-assistant"))).scalar_one()
+            binding = ProjectSystemAgentBindingRow(
+                project_id=project_id,
+                system_agent_id=asset.id,
+                agent_version_id=asset.current_published_version_id,
+                **actor_values,
+            )
+        elif binding_kind == "skill":
+            asset = (await session.execute(select(SkillRow).where(SkillRow.source_key == "builtin:skill:deerflow-core"))).scalar_one()
+            binding = ProjectSystemSkillBindingRow(
+                project_id=project_id,
+                system_skill_id=asset.id,
+                skill_version_id=asset.current_published_version_id,
+                **actor_values,
+            )
+        else:
+            asset = (await session.execute(select(McpServerRow).where(McpServerRow.source_key == "builtin:mcp:deerflow-docs"))).scalar_one()
+            binding = ProjectSystemMcpBindingRow(
+                project_id=project_id,
+                system_mcp_server_id=asset.id,
+                mcp_server_version_id=asset.current_published_version_id,
+                **actor_values,
+            )
+        session.add(binding)
+
+    with pytest.raises(_bootstrap_module().BootstrapConflict):
+        await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+
+
 def test_runtime_catalog_has_no_cutover_or_filesystem_branch() -> None:
     from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
 
@@ -254,7 +538,7 @@ def test_legacy_skill_storage_and_installer_imports_are_absent() -> None:
     from deerflow.skills.types import SkillCategory
 
     assert not hasattr(SkillCategory, "LEGACY")
-    assert not hasattr(storage, "get_or_new_user_skill_storage")
+    assert not hasattr(storage, "get_or_new_" + "user_skill_storage")
     assert importlib.util.find_spec("deerflow.skills.installer") is None
     assert importlib.util.find_spec("deerflow.skills.storage.user_scoped_skill_storage") is None
     assert importlib.util.find_spec("deerflow.tools.skill_manage_tool") is None

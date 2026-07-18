@@ -11,13 +11,22 @@
       "sha256": "7c4ad88ee087dd9c0f9aa386f2c067c08706befeae442f1e2b451524619e3f03"
     },
     {
+      "source_key": "builtin:mcp:deerflow-docs",
+      "kind": "mcp",
+      "slug": "deerflow-docs",
+      "display_name": "DeerFlow Docs",
+      "version": 1,
+      "payload_path": "content/deerflow-docs-v1.mcp.json",
+      "sha256": "0a99b4936001a23c4db380bd7363f262e43d3abe6b3cb3a1dff5dea5c302ac3a"
+    },
+    {
       "source_key": "builtin:agent:project-assistant",
       "kind": "agent",
       "slug": "project-assistant",
       "display_name": "Project Assistant",
       "version": 1,
       "payload_path": "content/project-assistant-v1.agent.json",
-      "sha256": "c2747b90d4230994159419d53317820cffff341cdeaaa0d487cec2ff1bccaf41"
+      "sha256": "5deb8b7b94dad26ad2a82db6a48258fc022bd966853b43dce40a1dfd118c9f9b"
     }
   ]
 }

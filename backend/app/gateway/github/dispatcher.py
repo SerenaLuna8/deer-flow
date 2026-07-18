@@ -23,7 +23,6 @@ delivery timeout is never at risk.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -141,12 +140,10 @@ async def fanout_event(
 
     repo, number = target
 
-    # 2. Bound-agent lookup. The registry is mtime-cached internally so
-    #    the warm path is iterdir + stat only — but the cold path (and
-    #    every first call after an operator edit) parses every
-    #    config.yaml on disk. Run it off the event loop in both cases so
-    #    a slow filesystem can't push us past GitHub's 10s timeout.
-    registry = await asyncio.to_thread(build_github_agent_registry)
+    # 2. Bound-agent lookup. M7 fails this ownerless/global path closed until
+    #    an authenticated project binding can be resolved. In particular,
+    #    webhook delivery must never discover legacy agents from disk.
+    registry = build_github_agent_registry()
     matches = lookup_agents(registry, repo, event)
     if not matches:
         return {"matched_agents": [], "fired_agents": [], "skipped": []}

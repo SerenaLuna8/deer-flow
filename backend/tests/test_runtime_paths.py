@@ -13,7 +13,6 @@ from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import Paths
 from deerflow.config.runtime_paths import project_root
 from deerflow.config.skills_config import SkillsConfig
-from deerflow.skills.storage import get_or_new_skill_storage
 
 
 def _clear_path_env(monkeypatch):
@@ -42,7 +41,6 @@ def test_default_runtime_paths_resolve_from_current_project(tmp_path: Path, monk
     assert ExtensionsConfig.resolve_config_path() == tmp_path / "extensions_config.json"
     assert Paths().base_dir == tmp_path / ".deer-flow"
     assert SkillsConfig().get_skills_path() == tmp_path / "skills"
-    assert get_or_new_skill_storage(skills_path=SkillsConfig().get_skills_path()).get_skills_root_path() == tmp_path / "skills"
 
 
 def test_deer_flow_project_root_overrides_current_directory(tmp_path: Path, monkeypatch):
@@ -72,7 +70,6 @@ def test_deer_flow_skills_path_overrides_project_default(tmp_path: Path, monkeyp
     monkeypatch.setenv("DEER_FLOW_SKILLS_PATH", "team-skills")
 
     assert SkillsConfig().get_skills_path() == tmp_path / "team-skills"
-    assert get_or_new_skill_storage(skills_path=SkillsConfig().get_skills_path()).get_skills_root_path() == tmp_path / "team-skills"
 
 
 def test_deer_flow_project_root_must_exist(tmp_path: Path, monkeypatch):

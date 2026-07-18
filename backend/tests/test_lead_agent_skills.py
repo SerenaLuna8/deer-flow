@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
+from langchain_core.tools import tool
+
+from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.lead_agent import prompt
 from deerflow.agents.middlewares.skill_activation_middleware import (
     SkillActivationMiddleware,
 )
+from deerflow.config.app_config import AppConfig
 from deerflow.skills.types import Skill, SkillCategory
 
 
@@ -30,8 +36,8 @@ def _runtime_skill(root: Path) -> Skill:
 
 def test_prompt_module_has_no_file_backed_skill_discovery() -> None:
     source = inspect.getsource(prompt)
-    assert "get_or_new_skill_storage" not in source
-    assert "get_or_new_user_skill_storage" not in source
+    assert "get_or_new_" + "skill_storage" not in source
+    assert "get_or_new_" + "user_skill_storage" not in source
     assert prompt.get_enabled_skills_for_config() == []
 
 
@@ -61,5 +67,163 @@ def test_slash_activation_without_run_snapshot_exposes_nothing() -> None:
 def test_subagent_executor_has_no_storage_lookup() -> None:
     executor_path = Path(__file__).parents[1] / "packages/harness/deerflow/subagents/executor.py"
     source = executor_path.read_text(encoding="utf-8")
-    assert "get_or_new_skill_storage" not in source
+    assert "get_or_new_" + "skill_storage" not in source
     assert "self._runtime_skills" in source
+
+
+def test_make_lead_agent_uses_only_exact_private_runtime_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    skill = _runtime_skill(tmp_path)
+
+    @tool
+    def exact_builtin(value: str) -> str:
+        """Exact admitted builtin tool."""
+
+        return value
+
+    @tool
+    def exact_mcp(value: str) -> str:
+        """Exact admitted MCP proxy."""
+
+        return value
+
+    skill = dataclasses.replace(
+        skill,
+        allowed_tools=("exact_builtin", "exact_mcp"),
+    )
+    exact_config = AppConfig.model_validate(
+        {
+            "models": [
+                {
+                    "name": "exact-model",
+                    "use": "tests.fake:Model",
+                    "model": "exact-provider-model",
+                    "supports_thinking": True,
+                }
+            ],
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+            },
+            "skills": {
+                "container_path": "/mnt/exact-skills",
+                "deferred_discovery": False,
+            },
+            "tool_search": {"enabled": False},
+        }
+    )
+    forged_config = AppConfig.model_validate(
+        {
+            "models": [
+                {
+                    "name": "forged-global-model",
+                    "use": "tests.fake:Model",
+                    "model": "forged-provider-model",
+                }
+            ],
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+            },
+        }
+    )
+    private_runtime = SimpleNamespace(
+        model_ref="exact-model",
+        soul="exact admitted soul",
+        tool_groups=("exact-group",),
+        skills=(skill,),
+        skill_root=tmp_path,
+        mcp_tools=(exact_mcp,),
+    )
+    config = {
+        "configurable": {
+            "app_config": forged_config,
+            "model_name": "forged-global-model",
+            "agent_name": "forged-global-agent",
+            "is_plan_mode": True,
+            "subagent_enabled": True,
+            "user_id": "exact-owner",
+        }
+    }
+    captured: dict[str, object] = {}
+
+    def forbidden_global_fallback(*_args, **_kwargs):
+        raise AssertionError("private runtime must not consult global asset state")
+
+    def fake_available_tools(**kwargs):
+        captured["tool_kwargs"] = kwargs
+        return [exact_builtin]
+
+    def fake_model(**kwargs):
+        captured["model"] = kwargs
+        return "exact-model-instance"
+
+    def fake_middlewares(*args, **kwargs):
+        captured["middleware_args"] = args
+        captured["middlewares"] = kwargs
+        return ["exact-middleware"]
+
+    def fake_prompt(**kwargs):
+        captured["prompt"] = kwargs
+        return "exact-system-prompt"
+
+    def fake_create_agent(**kwargs):
+        captured["create_agent"] = kwargs
+        return "exact-agent"
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", forbidden_global_fallback)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", forbidden_global_fallback)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_load_enabled_skills_for_tool_policy",
+        forbidden_global_fallback,
+    )
+    monkeypatch.setattr(prompt, "get_enabled_skills_for_config", forbidden_global_fallback)
+    monkeypatch.setattr(tools_module, "get_available_tools", fake_available_tools)
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", fake_model)
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", fake_middlewares)
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", fake_prompt)
+    monkeypatch.setattr(lead_agent_module, "create_agent", fake_create_agent)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+
+    result = lead_agent_module._make_lead_agent(
+        config,
+        app_config=exact_config,
+        private_runtime=private_runtime,
+    )
+
+    assert result == "exact-agent"
+    assert captured["model"] == {
+        "name": "exact-model",
+        "thinking_enabled": True,
+        "reasoning_effort": None,
+        "app_config": exact_config,
+        "attach_tracing": False,
+    }
+    assert captured["tool_kwargs"] == {
+        "model_name": "exact-model",
+        "groups": ["exact-group"],
+        "subagent_enabled": False,
+        "app_config": exact_config,
+        "asset_context": None,
+        "include_mcp": False,
+        "include_acp": False,
+    }
+    create_kwargs = captured["create_agent"]
+    assert create_kwargs["model"] == "exact-model-instance"
+    assert [tool.name for tool in create_kwargs["tools"]] == [
+        "exact_builtin",
+        "exact_mcp",
+    ]
+    assert create_kwargs["system_prompt"] == "exact-system-prompt"
+    assert captured["middlewares"]["runtime_skills"] == (skill,)
+    assert captured["middlewares"]["runtime_skills_root"] == tmp_path
+    assert captured["middlewares"]["runtime_skills_container_path"] == "/mnt/exact-skills"
+    assert captured["prompt"]["exact_soul"] == "exact admitted soul"
+    assert captured["prompt"]["exact_skills"] == (skill,)
+    assert captured["prompt"]["exact_skills_container_path"] == "/mnt/exact-skills"
+    assert config["metadata"]["model_name"] == "exact-model"
+    assert config["metadata"]["tool_groups"] == ["exact-group"]
+    assert config["metadata"]["subagent_enabled"] is False

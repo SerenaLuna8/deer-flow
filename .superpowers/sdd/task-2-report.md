@@ -88,3 +88,97 @@ git diff --check: passed.
 
 - Task 2 intentionally leaves later M7 cleanup work (including final configuration/module deletion and baseline migration collapse) untouched.
 - The complete backend suite was not run; verification used the task's mandatory PostgreSQL gate plus directly affected adjacent unit/E2E slices.
+
+## Independent review repair (2026-07-18)
+
+### Status
+
+PASS — the five Important and one Minor independent-review findings were repaired on the Task 2 branch. This remains a Task 2-only result: it does not start M7 Tasks 3-11, claim the M7 milestone complete, or claim release readiness.
+
+### Findings closed
+
+- GitHub's ownerless webhook path now returns an empty authoritative registry and performs no global, per-user, or legacy filesystem Agent discovery. A real `fanout_event()` regression test forbids `Path.exists()`, `Path.iterdir()`, `Path.stat()`, and the legacy `load_agent_config()` entry point.
+- Existing bootstrap rows are validated as the complete canonical Agent/Skill/MCP graph: parent identity and metadata, version metadata, Skill file bytes and identity, ordered Agent Skill/MCP references, and MCP credential slots. The packaged catalog now contains one canonical unbound MCP definition so every graph type is exercised.
+- The builtin principal is rejected when referenced from every credential actor field and from creator/updater fields on Agent, Skill, or MCP project bindings.
+- Obsolete tests were deleted or ported to exact admitted runtime Skills. The full backend collection and exact static scan no longer encounter removed storage factories, `SkillCategory.LEGACY`, or `user_should_see_legacy_skills`.
+- A real `_make_lead_agent(config, app_config=..., private_runtime=...)` contract test proves exact model, soul, tool group, builtin/MCP tools, Skill mount/read-only state, and subagent disabling while legacy/global fallbacks are fail-fast.
+- Exact admitted Skills render as `[run exact, read-only]`, and `runtime_read_only` participates in the prompt cache signature.
+
+### Repair TDD evidence
+
+Focused RED evidence before the production repairs:
+
+```text
+GitHub ownerless fan-out: 1 failed
+E   AssertionError: GitHub webhook fan-out must not inspect legacy agent files
+
+Canonical bootstrap graph: 7 failed
+The previous implementation accepted changed/missing child graph rows and had no canonical MCP graph.
+
+Builtin-principal authority references: 13 failed, 21 deselected
+E   Failed: DID NOT RAISE <class 'app.shared_assets.bootstrap.service.BootstrapConflict'>
+
+Full backend collection: 8600 tests collected, 3 errors
+The errors were obsolete imports in test_remote_sandbox_backend.py,
+test_runtime_paths.py, and test_skills_loader.py.
+
+Exact Skill prompt/cache behavior: 2 failed, 2 passed
+The exact Skill lacked the read-only label and the old cache renderer unpacked a four-field signature.
+```
+
+The exact private lead-agent wiring characterization test passed immediately against the Task 2 implementation, so it exposed no production wiring defect; it was retained as the requested security-sensitive regression contract.
+
+Focused GREEN evidence after repair:
+
+```text
+GitHub registry/dispatcher/real fan-out: 4 passed in 0.24s
+Canonical bootstrap graph slice: 7 passed, 14 deselected
+Builtin-principal authority slice: 13 passed, 21 deselected
+Migrated exact-runtime/residue suite: 259 passed in 1.74s
+Exact lead-agent/prompt gate: 43 passed in 0.67s
+Full backend collection: 8623 tests collected in 3.15s, 0 errors
+```
+
+### Final repair verification
+
+Required randomized-PostgreSQL affected gate:
+
+```text
+POSTGRES_TEST_URL=postgresql+asyncpg://jiangfeng@127.0.0.1:55437/postgres \
+PYTHONPATH=packages/harness .venv/bin/pytest \
+  tests/test_m7_asset_bootstrap_postgres.py \
+  tests/test_asset_catalog_provider.py \
+  tests/test_private_asset_runtime.py \
+  tests/integration/test_m3_asset_resolution_postgres.py \
+  tests/test_harness_boundary.py -q --tb=short -rs
+
+82 passed in 19.37s
+```
+
+PostgreSQL skips: **0**. The gate used only randomized `deerflow_test_*` databases through the designated disposable PostgreSQL listener.
+
+Additional final gates:
+
+```text
+All modified non-PostgreSQL test files: 306 passed in 1.90s
+Client/ACP/sandbox adjacency: 325 passed, 11 skipped in 1.79s
+Updated client E2E selected slice: 13 passed, 1 skipped, 23 deselected in 0.30s
+Full backend collection: 8623 tests collected in 3.15s, 0 errors
+Ruff: All checks passed for all 19 modified Python files
+Ruff format: 19 files already formatted
+compileall: app and packages/harness/deerflow passed
+OpenAPI: removed Agent/Skill/MCP config/Features routes absent
+Removed-symbol static scan: zero hits
+GitHub filesystem-authority static scan: zero hits
+git diff --check: passed
+```
+
+The 11 adjacent skips are all external-LLM E2E cases whose API key is not configured; they are outside the required PostgreSQL gate, which had zero skips.
+
+### Repair self-review and remaining concerns
+
+- The existing-row bootstrap path compares every non-generated canonical parent/version/child field; database timestamps are intentionally not canonical payload data.
+- Ownerless GitHub delivery intentionally produces no Agent matches until a later scoped design can resolve an authenticated PostgreSQL project binding. It never falls back to disk.
+- Deleted tests only exercised APIs removed by Task 2; mixed suites were ported to exact runtime snapshots and remain collected.
+- The branch still preserves later M7 Tasks 3-11 and the 6/8 milestone boundary unchanged.
+- The complete backend test suite was not executed; full collection was executed to prove zero collection errors, alongside the complete Task 2 PostgreSQL gate and affected adjacency gates above.

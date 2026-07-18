@@ -24,7 +24,33 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from deerflow.skills.types import Skill
+from deerflow.skills.types import Skill, SkillCategory
+
+
+def _runtime_skill(
+    root: Path,
+    name: str,
+    content: str,
+    *,
+    allowed_tools: tuple[str, ...] | None = None,
+) -> Skill:
+    skill_dir = root / name
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(content, encoding="utf-8")
+    return Skill(
+        name=name,
+        description=f"Description for {name}",
+        license="MIT",
+        skill_dir=skill_dir,
+        skill_file=skill_file,
+        relative_path=Path(name),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+        allowed_tools=allowed_tools,
+        runtime_read_only=True,
+    )
+
 
 # Module names that need to be mocked to break circular imports
 _MOCKED_MODULE_NAMES = [
@@ -74,9 +100,6 @@ def _setup_executor_classes():
     # Set up mocks
     for name in _MOCKED_MODULE_NAMES:
         sys.modules[name] = MagicMock()
-    storage_module = ModuleType("deerflow.skills.storage")
-    storage_module.get_or_new_skill_storage = lambda **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
-    sys.modules["deerflow.skills.storage"] = storage_module
 
     # Import real classes inside fixture
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -333,40 +356,31 @@ class TestAgentConstruction:
         assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
 
     @pytest.mark.anyio
-    async def test_load_skill_messages_uses_explicit_app_config_for_skill_storage(
+    async def test_load_skill_messages_uses_exact_runtime_skills(
         self,
         classes,
         base_config,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path,
     ):
-        """Explicit app_config must be threaded into subagent skill storage lookup."""
+        """Subagents load only the parent run's immutable Skill snapshot."""
         SubagentExecutor = classes["SubagentExecutor"]
 
         app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
-        skill_dir = tmp_path / "demo-skill"
-        skill_dir.mkdir()
-        skill_file = skill_dir / "SKILL.md"
-        skill_file.write_text("Use demo skill", encoding="utf-8")
-        captured: dict[str, object] = {}
-
-        def fake_get_or_new_skill_storage(*, app_config=None):
-            captured["app_config"] = app_config
-            return SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="demo-skill", skill_file=skill_file)])
-
-        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_skill_storage", fake_get_or_new_skill_storage)
+        skill = _runtime_skill(tmp_path, "demo-skill", "Use demo skill")
 
         executor = SubagentExecutor(
             config=base_config,
             tools=[],
             app_config=app_config,
             thread_id="test-thread",
+            runtime_skills=(skill,),
         )
 
         skills = await executor._load_skills()
         messages = await executor._load_skill_messages(skills)
 
-        assert captured["app_config"] is app_config
+        assert skills == [skill]
         assert len(messages) == 1
         assert "Use demo skill" in messages[0].content
 
@@ -381,21 +395,13 @@ class TestAgentConstruction:
         """_build_initial_state merges system_prompt and skills into one SystemMessage."""
         SubagentExecutor = classes["SubagentExecutor"]
 
-        skill_dir = tmp_path / "my-skill"
-        skill_dir.mkdir()
-        skill_file = skill_dir / "SKILL.md"
-        skill_file.write_text("Skill instructions here", encoding="utf-8")
-
-        monkeypatch.setattr(
-            sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
-        )
+        skill = _runtime_skill(tmp_path, "my-skill", "Skill instructions here")
 
         executor = SubagentExecutor(
             config=base_config,
             tools=[],
             thread_id="test-thread",
+            runtime_skills=(skill,),
         )
 
         state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
@@ -423,12 +429,6 @@ class TestAgentConstruction:
     ):
         """_build_initial_state works when there are no skills."""
         SubagentExecutor = classes["SubagentExecutor"]
-
-        monkeypatch.setattr(
-            sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
-        )
 
         executor = SubagentExecutor(
             config=base_config,
@@ -464,19 +464,15 @@ class TestAgentConstruction:
             timeout_seconds=60,
         )
 
-        skill_dir = tmp_path / "my-skill"
-        skill_dir.mkdir()
-        skill_file = skill_dir / "SKILL.md"
-        skill_file.write_text("Skill content", encoding="utf-8")
-
-        monkeypatch.setattr(
-            sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
-        )
+        skill = _runtime_skill(tmp_path, "my-skill", "Skill content")
 
         SubagentExecutor = classes["SubagentExecutor"]
-        executor = SubagentExecutor(config=config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=config,
+            tools=[],
+            thread_id="test-thread",
+            runtime_skills=(skill,),
+        )
 
         state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
 
@@ -505,11 +501,6 @@ class TestAgentConstruction:
 
         SubagentExecutor = classes["SubagentExecutor"]
 
-        monkeypatch.setattr(
-            sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
-        )
         monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=True)))
 
         @as_tool
@@ -546,11 +537,6 @@ class TestAgentConstruction:
 
         SubagentExecutor = classes["SubagentExecutor"]
 
-        monkeypatch.setattr(
-            sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
-        )
         monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=False)))
 
         @as_tool
@@ -591,11 +577,6 @@ class TestAgentConstruction:
         SubagentConfig = classes["SubagentConfig"]
         SubagentExecutor = classes["SubagentExecutor"]
 
-        monkeypatch.setattr(
-            sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
-        )
         monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=True)))
 
         @as_tool
@@ -1120,14 +1101,10 @@ class TestAsyncExecutionPath:
 
         # Set up a skill so both system_prompt AND skill content are present,
         # maximising the chance of catching a double-SystemMessage regression.
-        skill_dir = tmp_path / "regression-skill"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("Skill instruction text", encoding="utf-8")
-
-        monkeypatch.setattr(
-            sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md", allowed_tools=None)]),
+        skill = _runtime_skill(
+            tmp_path,
+            "regression-skill",
+            "Skill instruction text",
         )
 
         captured_states: list[dict] = []
@@ -1143,6 +1120,7 @@ class TestAsyncExecutionPath:
             config=base_config,
             tools=[],
             thread_id="test-thread",
+            runtime_skills=(skill,),
         )
 
         with patch.object(executor, "_create_agent", return_value=mock_agent):

@@ -17,8 +17,25 @@ import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.skills.types import SecretRequirement, Skill, SkillCategory
+
+_RUNTIME_SKILLS: list[Skill] = []
+
+
+@pytest.fixture(autouse=True)
+def _exact_runtime_skill_constructor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _RUNTIME_SKILLS.clear()
+    original_init = SkillActivationMiddleware.__init__
+
+    def exact_init(self, **kwargs):
+        kwargs.setdefault("runtime_skills", tuple(_RUNTIME_SKILLS))
+        kwargs.setdefault("runtime_skills_root", tmp_path)
+        kwargs.setdefault("runtime_skills_container_path", "/mnt/skills")
+        original_init(self, **kwargs)
+
+    monkeypatch.setattr(SkillActivationMiddleware, "__init__", exact_init)
 
 
 class TestLocalSandboxEnvInjection:
@@ -359,7 +376,7 @@ def _make_secret_skill(tmp_path: Path, name: str, required_secrets, *, enabled: 
     skill_dir.mkdir()
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(f"# {name}\n", encoding="utf-8")
-    return Skill(
+    skill = Skill(
         name=name,
         description=f"Description for {name}",
         license="MIT",
@@ -371,21 +388,16 @@ def _make_secret_skill(tmp_path: Path, name: str, required_secrets, *, enabled: 
         required_secrets=tuple(required_secrets),
         secrets_autonomous=secrets_autonomous,
     )
+    _RUNTIME_SKILLS.append(skill)
+    return skill
 
 
 class TestActivationBindsSecrets:
     """Binding point A: activation turn resolves declared secrets into the per-run injection set."""
 
     def _activate(self, tmp_path, monkeypatch, skill, context):
-        from deerflow.agents.middlewares import skill_activation_middleware as mw
         from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 
-        storage = SimpleNamespace(
-            load_skills=lambda *, enabled_only: [skill],
-            get_container_root=lambda: "/mnt/skills",
-            get_skills_root_path=lambda: tmp_path,
-        )
-        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
         middleware = SkillActivationMiddleware()
         request = ModelRequest(
             model=object(),
@@ -457,20 +469,12 @@ class TestActivationBindsSecrets:
         sees it. Slash activation (and therefore secret resolution) must still fire — it
         relies on the original content being recoverable. Regression for the gateway
         path where no upload preserved it."""
-        from deerflow.agents.middlewares import skill_activation_middleware as mw
         from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
         from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
         from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
         from deerflow.runtime.secret_context import read_active_secrets
 
-        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
-        storage = SimpleNamespace(
-            load_skills=lambda *, enabled_only: [skill],
-            get_container_root=lambda: "/mnt/skills",
-            get_skills_root_path=lambda: tmp_path,
-        )
-        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
-
+        _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
         context = {"secrets": {"ERP_TOKEN": "tok-xyz"}}
         request = ModelRequest(
             model=object(),
@@ -500,23 +504,13 @@ class TestActivationBindsSecrets:
         Turn 1 activates /skill-a (declares A_TOKEN, caller supplies it) → injected.
         Turn 2 activates /skill-b (declares nothing) → A_TOKEN must be cleared so
         bash in skill-b's turn cannot receive a value it never declared."""
-        from deerflow.agents.middlewares import skill_activation_middleware as mw
         from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
         from deerflow.runtime.secret_context import read_active_secrets
 
-        skill_a = _make_secret_skill(tmp_path, "skill-a", [SecretRequirement("A_TOKEN")])
-        skill_b = _make_secret_skill(tmp_path, "skill-b", [])
-
-        def _storage(skills):
-            return SimpleNamespace(
-                load_skills=lambda *, enabled_only: skills,
-                get_container_root=lambda: "/mnt/skills",
-                get_skills_root_path=lambda: tmp_path,
-            )
+        _make_secret_skill(tmp_path, "skill-a", [SecretRequirement("A_TOKEN")])
+        _make_secret_skill(tmp_path, "skill-b", [])
 
         context = {"secrets": {"A_TOKEN": "v-a"}}
-
-        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: _storage([skill_a]))
         SkillActivationMiddleware().wrap_model_call(
             ModelRequest(
                 model=object(),
@@ -527,8 +521,6 @@ class TestActivationBindsSecrets:
             lambda r: AIMessage(content="ok"),
         )
         assert read_active_secrets(context) == {"A_TOKEN": "v-a"}
-
-        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: _storage([skill_b]))
         SkillActivationMiddleware().wrap_model_call(
             ModelRequest(
                 model=object(),
@@ -544,18 +536,10 @@ class TestActivationBindsSecrets:
         """Even when the next skill DOES declare a required secret, if the caller
         omits it the prior skill's value must not linger — the injection set ends
         up empty, not stale."""
-        from deerflow.agents.middlewares import skill_activation_middleware as mw
         from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
         from deerflow.runtime.secret_context import read_active_secrets
 
-        skill = _make_secret_skill(tmp_path, "erp", [SecretRequirement("ERP_TOKEN")])
-        storage = SimpleNamespace(
-            load_skills=lambda *, enabled_only: [skill],
-            get_container_root=lambda: "/mnt/skills",
-            get_skills_root_path=lambda: tmp_path,
-        )
-        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
-
+        _make_secret_skill(tmp_path, "erp", [SecretRequirement("ERP_TOKEN")])
         # Turn 1: caller supplies ERP_TOKEN → injected.
         context = {"secrets": {"ERP_TOKEN": "tok-1"}}
         mw_inst = SkillActivationMiddleware()
@@ -603,15 +587,8 @@ class TestInContextBindsSecrets:
     """
 
     def _run_call(self, tmp_path, monkeypatch, skills, *, context, skill_context=None, message="continue the report", available_skills=None, middleware=None, container_root="/mnt/skills"):
-        from deerflow.agents.middlewares import skill_activation_middleware as mw
         from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 
-        storage = SimpleNamespace(
-            load_skills=lambda *, enabled_only: list(skills),
-            get_container_root=lambda: container_root,
-            get_skills_root_path=lambda: tmp_path,
-        )
-        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
         mw_inst = middleware or SkillActivationMiddleware(available_skills=available_skills)
         mw_inst.wrap_model_call(
             ModelRequest(
@@ -962,17 +939,9 @@ class TestLeakSurfaces:
     """Assert the secret value is absent from all five leak surfaces (#3861)."""
 
     def _activate_with_secret(self, tmp_path, monkeypatch):
-        from deerflow.agents.middlewares import skill_activation_middleware as mw
         from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 
-        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
-        storage = SimpleNamespace(
-            load_skills=lambda *, enabled_only: [skill],
-            get_container_root=lambda: "/mnt/skills",
-            get_skills_root_path=lambda: tmp_path,
-        )
-        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
-
+        _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
         journal_records: list[dict] = []
         journal = SimpleNamespace(record_middleware=lambda *a, **k: journal_records.append({"a": a, "k": k}))
         context = {"secrets": {"ERP_TOKEN": _SECRET}, "__run_journal": journal}
@@ -1079,19 +1048,12 @@ class TestEndToEndRealSubprocess:
     cannot see it."""
 
     def test_secret_reaches_real_subprocess_only_via_env_and_is_scoped(self, tmp_path, monkeypatch):
-        from deerflow.agents.middlewares import skill_activation_middleware as mw
         from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
         from deerflow.runtime.secret_context import read_active_secrets
         from deerflow.sandbox.tools import mask_secret_values
 
         # 1. Activate a skill that declares ERP_TOKEN; caller supplies it in context.secrets.
-        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
-        storage = SimpleNamespace(
-            load_skills=lambda *, enabled_only: [skill],
-            get_container_root=lambda: "/mnt/skills",
-            get_skills_root_path=lambda: tmp_path,
-        )
-        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
+        _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
         # A platform secret is present on the host and must NOT leak to the subprocess.
         monkeypatch.setenv("OPENAI_API_KEY", "sk-host-platform-secret")
         context = {"secrets": {"ERP_TOKEN": _SECRET}}
