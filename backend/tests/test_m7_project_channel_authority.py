@@ -10,7 +10,7 @@ import pytest
 
 from app.channels import manager
 from app.channels.manager import ChannelManager
-from app.channels.message_bus import InboundMessage, MessageBus
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.channels.run_policy import ChannelRunPolicy
 from app.channels.store import ChannelStore
 from app.gateway.app import app
@@ -54,6 +54,16 @@ def test_channel_manager_has_no_auth_disabled_or_external_user_identity_fallback
     assert not hasattr(ChannelManager, "_handle_legacy_chat")
 
 
+def test_channel_manager_has_no_legacy_goal_command_gateway_path() -> None:
+    source = inspect.getsource(manager)
+
+    assert "parse_goal_command" not in source
+    assert "_goal_request" not in source
+    assert "_handle_goal_command" not in source
+    assert not hasattr(ChannelManager, "_goal_request")
+    assert not hasattr(ChannelManager, "_handle_goal_command")
+
+
 def _manager_with_project_dispatcher(
     *,
     dispatcher: AsyncMock | None = None,
@@ -95,6 +105,23 @@ def test_channel_policy_cannot_opt_out_of_project_inbound_dispatch() -> None:
             user_id="user-1",
             workspace_id="team-1",
             text="hello",
+        )
+    )
+
+
+@pytest.mark.parametrize("command", ["/bootstrap", "/goal", "/new", "/status", "/memory"])
+@pytest.mark.parametrize("msg_type", [InboundMessageType.CHAT, InboundMessageType.COMMAND])
+def test_removed_channel_commands_never_dispatch_a_project_run(command: str, msg_type: InboundMessageType) -> None:
+    channel_manager, _ = _manager_with_project_dispatcher()
+
+    assert not channel_manager._should_dispatch_project_inbound(
+        InboundMessage(
+            channel_name="slack",
+            chat_id="channel-1",
+            user_id="user-1",
+            workspace_id="team-1",
+            text=f"{command} ignored arguments",
+            msg_type=msg_type,
         )
     )
 

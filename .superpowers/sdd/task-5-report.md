@@ -9,6 +9,49 @@ HTTP surfaces. It leaves project connections at
 
 No Task 6 work was started and `.superpowers/sdd/progress.md` was not changed.
 
+## 2026-07-19 final command-contract and channel-test repair
+
+The frozen follow-up review reported 0 Critical, 2 Important, and 0 Minor
+findings. This bounded repair closes exactly those two Important findings.
+
+- Final IM command ownership is now only `/help`, the safe read-only `/models`,
+  and enabled slash-skill activation after PostgreSQL binding. `/bootstrap`,
+  `/goal`, `/new`, `/status`, and `/memory` were removed from the active command
+  set, provider parsing, Telegram registration, help, configuration guidance,
+  and user documentation. They remain only as explicit tombstones so delivery
+  as either `CHAT` or `COMMAND` returns the stable unknown-command response and
+  can never become an ordinary project prompt. The direct `_goal_request()` and
+  `_handle_goal_command()` Gateway path plus `parse_goal_command` import were
+  deleted; no project command compatibility layer was rebuilt.
+- `pytest --last-failed tests/test_channels.py -q` reproduced the frozen 53-node
+  failure set. Tests whose subject was the deleted legacy SDK Thread/reuse,
+  wait/streaming, artifact/attachment, fire-and-forget, run-parameter, or legacy
+  control-command path were removed. Durable inbound dedupe, project dispatcher,
+  PostgreSQL binding fail-closed behavior, outbound metadata/clarification, and
+  provider adapter/menu contracts were migrated and retained. The complete
+  channel file is now green at 167 tests; its last-failed rerun also executes
+  167/167 green. None of these nodes were deferred to Task 7.
+
+### Final follow-up verification
+
+```text
+Prior 87-node Task 5 PostgreSQL file set, expanded by 11 command regressions:
+98 passed in 14.93s, 0 skipped (dedicated temporary cluster on port 55437)
+Task 5 authority plus blocking-I/O: 22 passed
+Complete backend test_channels.py: 167 passed
+Frontend focused unit gate: 31 files, 151 passed, 0 skipped
+Frontend pnpm check: eslint pass; tsc --noEmit pass
+Changed Chromium cases: 4 passed
+Backend Ruff/format and git diff check: pass
+Complete backend collection: 8113 tests, 0 collection errors
+Current last-failed collection: 119/446 selected; Task 5: 0
+```
+
+The remaining last-failed classification is unchanged from the frozen later
+milestone inventory: Task 2: 60, Task 7: 3, Task 8: 56, Task 5: 0, other: 0.
+Task 7 still owns only true config/extensions/fallback-store removal; it does
+not own deleted `ChannelManager` SDK execution behavior.
+
 ## 2026-07-19 independent-review repair
 
 The frozen Task 5 review reported three Important findings. This repair closes
@@ -56,13 +99,13 @@ Requested Chromium pair: 2 passed
 All changed Chromium cases: 4 passed
 Backend Ruff/format and git diff check: pass
 Complete backend collection: 8183 tests, 0 collection errors
-Current last-failed collection: 172/517 selected
+Current last-failed collection at that checkpoint: 172/517 selected
 ```
 
-The current last-failed classification is Task 2: 60, Task 7: 56, Task 8: 56,
-Task 5: 0, other: 0. The 53 newly visible `test_channels.py` nodes are tests of
-the now-deleted legacy SDK execution helper and remain in Task 7's channel
-legacy cleanup boundary; this repair did not restore that executable bypass.
+At that intermediate checkpoint the classification was Task 2: 60, Task 7: 56,
+Task 8: 56, Task 5: 0, other: 0. The 53 newly visible `test_channels.py` nodes
+were subsequently resolved by the bounded final follow-up above; they were not
+deferred to Task 7 and no executable legacy bypass was restored.
 Final production/config/document residue searches found zero
 `require_bound_identity`, `requires_bound_identity`, or
 `_handle_legacy_chat` symbols. The implicit-project/global-route scan has only

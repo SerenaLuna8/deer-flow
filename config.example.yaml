@@ -1656,7 +1656,7 @@ recovery:
 #   #   langgraph_url: http://gateway:8001/api
 #   #   gateway_url: http://gateway:8001
 #   langgraph_url: http://localhost:8001/api
-#   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
+#   # Gateway API URL for the read-only /models query (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001
 #   #
 #   # Docker Compose note:

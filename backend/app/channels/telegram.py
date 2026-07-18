@@ -82,12 +82,7 @@ class TelegramChannel(Channel):
 
         # Command handlers
         app.add_handler(CommandHandler("start", self._cmd_start))
-        app.add_handler(CommandHandler("bootstrap", self._cmd_generic))
-        app.add_handler(CommandHandler("new", self._cmd_generic))
-        app.add_handler(CommandHandler("status", self._cmd_generic))
         app.add_handler(CommandHandler("models", self._cmd_generic))
-        app.add_handler(CommandHandler("memory", self._cmd_generic))
-        app.add_handler(CommandHandler("goal", self._cmd_generic))
         app.add_handler(CommandHandler("help", self._cmd_generic))
 
         # Slash skill commands are dynamic and cannot all be pre-registered
@@ -500,7 +495,7 @@ class TelegramChannel(Channel):
         msg_id = str(update.message.message_id)
 
         # Use the same topic_id logic as _on_text so that commands
-        # like /new target the correct thread mapping.
+        # like /models target the correct thread mapping.
         if update.effective_chat.type == "private":
             topic_id = None
         else:

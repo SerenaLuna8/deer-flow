@@ -9,15 +9,14 @@ import re
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 from langgraph_sdk.errors import ConflictError
 
-from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.commands import KNOWN_CHANNEL_COMMANDS, is_removed_channel_command
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
@@ -37,7 +36,6 @@ from app.private_work.connection_inbound import (
 from app.private_work.errors import PrivateWorkNotFound
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
-from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
@@ -1129,6 +1127,13 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
         try:
+            # Former channel commands remain explicit unsupported controls. A
+            # provider may deliver an unknown slash token as CHAT (for dynamic
+            # slash-skill support), so normalize tombstones before routing and
+            # never let them become ordinary project prompts.
+            if is_removed_channel_command(msg.text):
+                msg = replace(msg, msg_type=InboundMessageType.COMMAND)
+
             if self._should_dispatch_project_inbound(msg):
                 async with self._semaphore:
                     await self._handle_project_inbound_chat(msg)
@@ -1181,12 +1186,13 @@ class ChannelManager:
     # -- chat handling -----------------------------------------------------
 
     def _should_dispatch_project_inbound(self, msg: InboundMessage) -> bool:
+        if is_removed_channel_command(msg.text):
+            return False
         if msg.msg_type == InboundMessageType.CHAT:
             return True
         if msg.msg_type != InboundMessageType.COMMAND:
             return False
-        command = msg.text.strip().split(maxsplit=1)[0].lower()
-        return command in {"/bootstrap", "/goal", "/new"} or parse_slash_skill_reference(msg.text) is not None
+        return parse_slash_skill_reference(msg.text) is not None
 
     async def _handle_project_inbound_chat(self, msg: InboundMessage) -> None:
         dispatcher = self._private_inbound_dispatcher
@@ -1569,11 +1575,25 @@ class ChannelManager:
     # -- command handling --------------------------------------------------
 
     async def _handle_command(self, msg: InboundMessage) -> None:
-        # Commands are the other run-creation entry point besides chat: /new
-        # calls _create_thread() directly, and /bootstrap routes into
-        # _handle_chat(). Apply the same bound-identity admission boundary here
-        # so unbound platform users cannot create unowned threads/checkpoints or
-        # query Gateway state via commands. Provider-level binding flows
+        raw_text = msg.text
+        if is_removed_channel_command(raw_text):
+            command = raw_text.split(maxsplit=1)[0].lower().removeprefix("/")
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel_name=msg.channel_name,
+                    chat_id=msg.chat_id,
+                    thread_id="",
+                    text=_unknown_command_reply(command),
+                    thread_ts=msg.thread_ts,
+                    connection_id=msg.connection_id,
+                    owner_user_id=msg.owner_user_id,
+                    metadata=_slim_metadata(msg.metadata),
+                )
+            )
+            return
+
+        # Apply the same bound-identity boundary to read-only commands and slash
+        # skills. Provider-level binding flows
         # (/connect <code>, /start <code>) are consumed by the provider adapter
         # before the message reaches the manager, so they are unaffected.
         bound_identity_rejection = await self._get_bound_identity_rejection(msg)
@@ -1581,7 +1601,6 @@ class ChannelManager:
             await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
             return
 
-        raw_text = msg.text
         text = raw_text.strip()
         parts = text.split(maxsplit=1)
         reply: str | None = None
@@ -1594,42 +1613,10 @@ class ChannelManager:
         if reply is None and not raw_text.startswith("/"):
             reply = _unknown_command_reply(command)
 
-        if reply is None and command == "bootstrap":
-            from dataclasses import replace as _dc_replace
-
-            chat_text = parts[1] if len(parts) > 1 else "Initialize workspace"
-            chat_msg = _dc_replace(msg, text=chat_text, msg_type=InboundMessageType.CHAT)
-            await self._handle_chat(chat_msg, extra_context={"is_bootstrap": True}, bound_identity_checked=True)
-            return
-
-        if reply is None and command == "new":
-            # Create a new thread through Gateway
-            client = self._get_client()
-            await self._create_thread(client, msg)
-            reply = "New conversation started."
-        elif reply is None and command == "status":
-            thread_id = await self._lookup_thread_id(msg)
-            reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
-        elif reply is None and command == "models":
+        if reply is None and command == "models":
             reply = await self._fetch_gateway("/api/models", "models", msg=msg)
-        elif reply is None and command == "memory":
-            reply = await self._fetch_gateway("/api/memory", "memory", msg=msg)
-        elif reply is None and command == "goal":
-            reply = await self._handle_goal_command(msg, parts[1] if len(parts) > 1 else "")
-            if reply is None:
-                return
         elif reply is None and command == "help":
-            reply = (
-                "Available commands:\n"
-                "/bootstrap — Start a bootstrap session (enables agent setup)\n"
-                "/goal [condition|clear] — Set, show, or clear an active goal\n"
-                "/new — Start a new conversation\n"
-                "/status — Show current thread info\n"
-                "/models — List available models\n"
-                "/memory — Show memory status\n"
-                "/<skill-name> <task> — Activate an enabled skill for one turn\n"
-                "/help — Show this help"
-            )
+            reply = "Available commands:\n/models — List available models\n/<skill-name> <task> — Activate an enabled skill for one turn\n/help — Show this help"
         elif reply is None:
             slash_resolution = await asyncio.to_thread(
                 lambda: _resolve_slash_skill_command(
@@ -1640,9 +1627,7 @@ class ChannelManager:
             if slash_resolution and slash_resolution.failure_message:
                 reply = slash_resolution.failure_message
             elif slash_resolution and slash_resolution.route_to_chat:
-                from dataclasses import replace as _dc_replace
-
-                chat_msg = _dc_replace(msg, msg_type=InboundMessageType.CHAT)
+                chat_msg = replace(msg, msg_type=InboundMessageType.CHAT)
                 await self._handle_chat(chat_msg, bound_identity_checked=True)
                 return
             else:
@@ -1659,63 +1644,6 @@ class ChannelManager:
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
-
-    async def _goal_request(
-        self,
-        method: str,
-        thread_id: str,
-        *,
-        headers: dict[str, str],
-        json: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        async with httpx.AsyncClient() as http:
-            request = getattr(http, method.lower())
-            kwargs: dict[str, Any] = {"timeout": 10, "headers": headers}
-            if json is not None:
-                kwargs["json"] = json
-            response = await request(f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal", **kwargs)
-            response.raise_for_status()
-            return response.json() or {}
-
-    async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str | None:
-        command = parse_goal_command(args)
-        thread_id = await self._lookup_thread_id(msg)
-        headers = _owner_headers(msg) or create_internal_auth_headers()
-
-        if command.kind == "status":
-            if not thread_id:
-                return "No active goal."
-            try:
-                goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
-            except Exception:
-                logger.exception("Failed to fetch goal from gateway")
-                return "Failed to fetch goal information."
-            return f"Goal: {goal.get('objective')}" if goal else "No active goal."
-
-        if command.kind == "clear":
-            if not thread_id:
-                return "Goal cleared."
-            try:
-                await self._goal_request("delete", thread_id, headers=headers)
-            except Exception:
-                logger.exception("Failed to clear goal through gateway")
-                return "Failed to clear goal."
-            return "Goal cleared."
-
-        if not thread_id:
-            thread_id = await self._create_thread(self._get_client(), msg)
-
-        try:
-            await self._goal_request("put", thread_id, headers=headers, json={"objective": command.objective})
-        except Exception:
-            logger.exception("Failed to set goal through gateway")
-            return "Failed to set goal."
-
-        from dataclasses import replace as _dc_replace
-
-        chat_msg = _dc_replace(msg, text=command.objective, msg_type=InboundMessageType.CHAT)
-        await self._handle_chat(chat_msg, bound_identity_checked=True)
-        return None
 
     async def _fetch_gateway(self, path: str, kind: str, *, msg: InboundMessage | None = None) -> str:
         """Fetch data from the Gateway API for command responses."""
@@ -1738,9 +1666,6 @@ class ChannelManager:
         if kind == "models":
             names = [m["name"] for m in data.get("models", [])]
             return ("Available models:\n" + "\n".join(f"• {n}" for n in names)) if names else "No models configured."
-        elif kind == "memory":
-            facts = data.get("facts", [])
-            return f"Memory contains {len(facts)} fact(s)."
         return str(data)
 
     # -- error helper ------------------------------------------------------

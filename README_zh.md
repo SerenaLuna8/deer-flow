@@ -638,13 +638,11 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 
 | 命令 | 说明 |
 |---------|-------------|
-| `/new` | 开启新对话 |
-| `/status` | 查看当前 thread 信息 |
 | `/models` | 列出可用模型 |
-| `/memory` | 查看 memory |
 | `/help` | 查看帮助 |
+| `/<skill-name> <task>` | 在项目作用域内激活一个技能执行本轮任务 |
 
-> 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
+> 没有命令前缀的消息会被当作普通项目聊天处理。已移除的旧命令（`/bootstrap`、`/goal`、`/new`、`/status`、`/memory`）会返回不支持命令的稳定响应，绝不会作为普通 prompt 提交。
 
 #### LangSmith 链路追踪
 
@@ -749,7 +747,7 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容拿去和激活的 goal 比对。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。
 
-Web UI 会在输入框上方展示当前激活的 goal。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
+Web UI 会在输入框上方展示当前激活的 goal，TUI 也支持同一命令。IM 渠道不再提供 `/goal`；项目绑定的 IM run 使用普通消息或已启用的 slash skill。
 
 ### 手动上下文压缩
 

@@ -707,7 +707,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
 
 
-When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. Auxiliary channel commands that use `channels.gateway_url` must target the Gateway service name (for example `http://gateway:8001`), not `localhost`. Project-bound Run admission is process-local and does not use `channels.langgraph_url`.
+When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. The read-only `/models` channel command uses `channels.gateway_url`, which must target the Gateway service name (for example `http://gateway:8001`), not `localhost`. Project-bound Run admission is process-local and does not use `channels.langgraph_url`.
 
 **Commands**
 
@@ -715,13 +715,11 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 
 | Command | Description |
 |---------|-------------|
-| `/new` | Start a new conversation |
-| `/status` | Show current thread info |
 | `/models` | List available models |
-| `/memory` | View memory |
 | `/help` | Show help |
+| `/<skill-name> <task>` | Activate an enabled skill for one project-scoped turn |
 
-> Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
+> Messages without a command prefix are treated as regular project chat. Removed legacy commands (`/bootstrap`, `/goal`, `/new`, `/status`, and `/memory`) return an unsupported-command response and are never submitted as ordinary prompts.
 
 #### Request Trace Correlation
 
@@ -806,7 +804,7 @@ Skills are loaded progressively — only when the task needs them, not all at on
 
 In the Web UI, administrators can open a read-only rendered `SKILL.md` preview directly from the workspace Skills list without leaving it.
 
-Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
+Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and the final read-only channel commands `/models` and `/help`.
 
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
@@ -878,7 +876,7 @@ Supported commands:
 
 After each Gateway-backed run, DeerFlow evaluates the visible conversation against the active goal with a non-thinking evaluator model. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the goal is satisfied, DeerFlow clears it automatically and publishes the updated thread state.
 
-The Web UI shows the active goal above the composer. The same command is available from the TUI and supported IM channels. In the Web UI and supported IM channels, setting `/goal <completion condition>` also starts a run with the condition as the task; status and clear commands only manage goal state.
+The Web UI shows the active goal above the composer, and the same command is available from the TUI. IM channels do not expose `/goal`; project-bound IM runs use ordinary messages or an enabled slash skill.
 
 ### Manual Context Compaction
 

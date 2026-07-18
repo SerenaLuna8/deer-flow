@@ -8,17 +8,13 @@ required.
 
 from __future__ import annotations
 
-KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset(
-    {
-        "/bootstrap",
-        "/goal",
-        "/new",
-        "/status",
-        "/models",
-        "/memory",
-        "/help",
-    }
-)
+KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset({"/help", "/models"})
+
+# These former commands are intentionally tombstoned instead of becoming
+# ordinary prompts. Provider adapters no longer advertise or classify them as
+# active commands; the manager recognizes them defensively and returns the
+# stable unsupported-command response without admitting a project Run.
+REMOVED_CHANNEL_COMMANDS: frozenset[str] = frozenset({"/bootstrap", "/goal", "/memory", "/new", "/status"})
 
 
 def extract_connect_code(text: str) -> str | None:
@@ -37,3 +33,10 @@ def is_known_channel_command(text: str) -> bool:
     if not text.startswith("/"):
         return False
     return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
+
+
+def is_removed_channel_command(text: str) -> bool:
+    """Return whether text starts with a tombstoned channel command."""
+    if not text.startswith("/"):
+        return False
+    return text.split(maxsplit=1)[0].lower() in REMOVED_CHANNEL_COMMANDS
