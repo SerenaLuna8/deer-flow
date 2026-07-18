@@ -1,3 +1,17 @@
+# M7 Subagent-Driven Development Progress
+
+- Plan: `docs/superpowers/plans/2026-07-18-project-legacy-cleanup-m7.md`
+- Branch: `codex/m7-legacy-cleanup`
+- Baseline: `70a36a5c`
+- Worktree: `/Users/jiangfeng/deer-flow/.worktrees/m7-legacy-cleanup`
+- Baseline verification: backend focused readiness `3 passed, 11 skipped` because `POSTGRES_TEST_URL` is not set; frontend readiness/admin `16 passed, 0 skipped`. No implementation failure found; real PostgreSQL must be provisioned before M7 PostgreSQL gates.
+
+## M7 reviewed tasks
+
+- No task completed yet. Task 1 is next.
+
+---
+
 # M6 Subagent-Driven Development Progress
 
 - Plan: `docs/superpowers/plans/2026-07-16-project-reliability-governance-m6.md`

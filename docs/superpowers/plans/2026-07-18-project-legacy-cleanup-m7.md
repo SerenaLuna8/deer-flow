@@ -147,7 +147,7 @@ def test_public_readiness_contract_has_no_cutover_field():
 cd backend
 uv run pytest tests/test_m7_final_schema_runtime.py tests/test_private_work_readiness_router.py tests/test_automation_readiness.py tests/test_m6_process_readiness.py -q
 cd ../frontend
-pnpm test --run tests/unit/core/private-work/readiness.test.ts tests/unit/core/project-automations/readiness.test.tsx
+pnpm test tests/unit/core/private-work/readiness.test.ts tests/unit/core/project-automations/readiness.test.tsx
 ```
 
 Expected: FAIL because `app.final_schema`/`schema_ready`/`schema_state` do not exist and current services query marker tables.
@@ -236,7 +236,7 @@ cd backend
 uv run pytest tests/test_m7_final_schema_runtime.py tests/test_private_work_readiness_router.py tests/test_automation_readiness.py tests/test_m6_process_readiness.py tests/test_m6_system_operations_api_postgres.py -q
 uvx ruff check app/final_schema.py app/private_work/readiness_service.py app/automations/readiness.py app/reliability app/gateway/automation_schemas.py app/gateway/routers/project_automations.py
 cd ../frontend
-pnpm test --run tests/unit/core/private-work/readiness.test.ts tests/unit/core/project-automations/readiness.test.tsx tests/unit/m6-admin-operations.test.tsx
+pnpm test tests/unit/core/private-work/readiness.test.ts tests/unit/core/project-automations/readiness.test.tsx tests/unit/m6-admin-operations.test.tsx
 pnpm check
 cd ..
 git add backend/app/final_schema.py backend/app/private_work/readiness_service.py backend/app/automations/readiness.py backend/app/reliability backend/app/gateway backend/tests/test_m7_final_schema_runtime.py backend/tests/test_private_work_readiness_router.py backend/tests/test_automation_readiness.py backend/tests/test_m6_process_readiness.py frontend/src/core frontend/tests AGENTS.md backend/AGENTS.md frontend/AGENTS.md
@@ -703,7 +703,7 @@ uv run pytest tests/test_m7_project_channel_authority.py tests/test_channel_runt
 uv run pytest tests/blocking_io/test_channels_ingest.py tests/blocking_io/test_channel_runtime_config_store.py -q
 uvx ruff check app/channels app/private_work/connection_inbound.py app/gateway/channel_schemas.py app/gateway/routers/project_connections.py app/gateway/routers/project_input_polish.py
 cd ../frontend
-pnpm test --run tests/unit/components/projects tests/unit/core/private-work
+pnpm test tests/unit/components/projects tests/unit/core/private-work
 pnpm check
 cd ..
 rg -n "default.project|recent.project|unique.membership|/api/(channels|channel-connections|console|input-polish)" backend/app frontend/src
@@ -806,7 +806,7 @@ Browser cases: old URLs render Next not-found without redirect; project chat/mem
 
 ```bash
 cd frontend
-pnpm test --run tests/unit/m7-legacy-surface.test.tsx tests/unit/components/projects/automations/automation-form.test.tsx
+pnpm test tests/unit/m7-legacy-surface.test.tsx tests/unit/components/projects/automations/automation-form.test.tsx
 pnpm exec playwright test tests/e2e/m7-project-only-routes.spec.ts
 ```
 
@@ -834,7 +834,7 @@ Remove compatibility components/providers、Thread scheduled-task link、workspa
 
 ```bash
 cd frontend
-pnpm test --run tests/unit/m7-legacy-surface.test.tsx tests/unit/core/project-automations tests/unit/core/private-work tests/unit/components/projects tests/unit/components/workspace
+pnpm test tests/unit/m7-legacy-surface.test.tsx tests/unit/core/project-automations tests/unit/core/private-work tests/unit/components/projects tests/unit/components/workspace
 pnpm exec playwright test tests/e2e/m7-project-only-routes.spec.ts tests/e2e/project-automations.spec.ts
 pnpm exec playwright test --config playwright.static.config.ts tests/e2e-static/project-automation-static.spec.ts
 pnpm check
