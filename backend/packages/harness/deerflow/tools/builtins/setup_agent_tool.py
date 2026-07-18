@@ -5,7 +5,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
-from deerflow.assets.catalog import reject_legacy_asset_mutation_after_cutover
+from deerflow.assets.catalog import AssetCatalogUnavailable
 from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -29,7 +29,7 @@ def setup_agent(
         skills: Optional list of skill names this agent should use. None means use all enabled skills, empty list means no skills.
     """
 
-    reject_legacy_asset_mutation_after_cutover()
+    raise AssetCatalogUnavailable("file-backed Agent setup was removed; use project asset version APIs")
 
     # Reject empty / whitespace-only soul before touching the filesystem.
     # Without this guard the tool would happily persist an empty SOUL.md and

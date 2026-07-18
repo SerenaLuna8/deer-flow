@@ -25,7 +25,7 @@ from langchain_core.tools import tool
 from langgraph.types import Command
 from pydantic import BeforeValidator
 
-from deerflow.assets.catalog import reject_legacy_asset_mutation_after_cutover
+from deerflow.assets.catalog import AssetCatalogUnavailable
 from deerflow.config.agents_config import load_agent_config, preserve_non_managed_fields, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
@@ -126,7 +126,7 @@ def update_agent(
         on the next user turn (when the lead agent is rebuilt with the fresh
         SOUL.md and config.yaml).
     """
-    reject_legacy_asset_mutation_after_cutover()
+    raise AssetCatalogUnavailable("file-backed Agent mutation was removed; use project asset version APIs")
 
     tool_call_id = runtime.tool_call_id
     agent_name_raw: str | None = runtime.context.get("agent_name") if runtime.context else None

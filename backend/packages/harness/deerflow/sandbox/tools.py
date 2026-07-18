@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import posixpath
@@ -130,27 +129,7 @@ def _get_skills_container_path() -> str:
 
 
 def _get_skills_host_path() -> str | None:
-    """Get the skills host filesystem path from config.
-
-    Returns None if the skills directory does not exist or config cannot be
-    loaded.  Only successful lookups are cached; failures are retried on the
-    next call so that a transiently unavailable skills directory does not
-    permanently disable skills access.
-    """
-    cached = getattr(_get_skills_host_path, "_cached", None)
-    if cached is not None:
-        return cached
-    try:
-        from deerflow.config import get_app_config
-
-        config = get_app_config()
-        skills_path = config.skills.get_skills_path()
-        if skills_path.exists():
-            value = str(skills_path)
-            _get_skills_host_path._cached = value  # type: ignore[attr-defined]
-            return value
-    except Exception:
-        pass
+    """Global host Skill roots are not runtime authority."""
     return None
 
 
@@ -191,58 +170,8 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
 
 
 def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
-    """Check if a path belongs to a disabled skill.
-
-    PUBLIC skill enabled state is read from the global
-    ``extensions_config.json``.  CUSTOM / LEGACY skill enabled state is
-    read from the per-user ``_skill_states.json`` so that two users with
-    same-named custom skills can toggle independently.
-
-    Returns False for non-skills paths or paths whose skill is enabled.
-    """
-    skill_name = _extract_skill_name_from_skills_path(path)
-    if skill_name is None:
-        return False
-    try:
-        from deerflow.runtime.user_context import get_effective_user_id
-        from deerflow.skills.storage import get_or_new_user_skill_storage
-
-        # Determine the category from the path
-        skills_prefix = _get_skills_container_path()
-        relative = path[len(skills_prefix) :].lstrip("/")
-        if relative.startswith("public/"):
-            category = "public"
-        elif relative.startswith("custom/"):
-            category = "custom"
-        elif relative.startswith("legacy/"):
-            category = "legacy"
-        else:
-            # Try to infer from storage
-            effective_uid = user_id or get_effective_user_id()
-            storage = get_or_new_user_skill_storage(effective_uid)
-            all_skills = storage.load_skills(enabled_only=False)
-            matching = next((s for s in all_skills if s.name == skill_name), None)
-            if matching is None:
-                return False  # Skill doesn't exist, not a disabled skill path
-            category = matching.category.value
-
-        if category == "public":
-            from deerflow.config.extensions_config import ExtensionsConfig
-
-            ext_config = ExtensionsConfig.from_file()
-            return not ext_config.is_skill_enabled(skill_name, category)
-        else:
-            # CUSTOM / LEGACY: use per-user state
-            effective_uid = user_id or get_effective_user_id()
-            storage = get_or_new_user_skill_storage(effective_uid)
-            return not storage.get_skill_enabled_state(skill_name)
-    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        # Access-control check must fail closed: when we can't determine the
-        # enabled state (corrupt _skill_states.json, mid-write race, missing
-        # config), refuse access rather than silently serving a disabled
-        # skill's files. See review feedback on PR #3889.
-        logger.warning("Failed to determine enabled state, denying access: %s", exc)
-        return True
+    """Deny every Skill path not covered by a server-issued run mount."""
+    return _is_skills_path(path)
 
 
 def _is_trusted_run_scoped_skill_path(runtime: Runtime | None, path: str) -> bool:
@@ -265,56 +194,8 @@ def _is_trusted_run_scoped_skill_path(runtime: Runtime | None, path: str) -> boo
 
 
 def _resolve_skills_path(path: str) -> str:
-    """Resolve a virtual skills path to a host filesystem path.
-
-    WARNING: For per-user custom skills (``/mnt/skills/custom/...``), this
-    function uses ``get_effective_user_id()`` from the contextvar, which may
-    differ from the sandbox PathMapping's user_id (set during acquire via
-    ``resolve_runtime_user_id``). In local sandbox mode, skills paths should
-    be resolved by the sandbox's PathMapping instead of this function. This
-    function is retained for output masking (``mask_local_paths_in_output``)
-    and non-sandbox code paths.
-
-    Args:
-        path: Virtual skills path (e.g. /mnt/skills/public/bootstrap/SKILL.md)
-
-    Returns:
-        Resolved host path.
-
-    Raises:
-        FileNotFoundError: If skills directory is not configured or doesn't exist.
-    """
-    skills_container = _get_skills_container_path()
-    skills_host = _get_skills_host_path()
-    if skills_host is None:
-        raise FileNotFoundError(f"Skills directory not available for path: {path}")
-
-    if path == skills_container:
-        return skills_host
-
-    relative = path[len(skills_container) :].lstrip("/")
-
-    # Per-user custom skills: resolve to user-specific directory.
-    # ``skill_manage_tool`` writes custom skills to the per-user directory,
-    # and ``LocalSandboxProvider._build_thread_path_mappings`` mounts
-    # ``/mnt/skills/custom`` to that same per-user dir.  Without this
-    # branch, ``_resolve_skills_path("/mnt/skills/custom")`` would map to
-    # the global ``{skills_host}/custom/`` which is the repository-level
-    # ``skills/custom/`` — an entirely different directory that may be
-    # empty or contain legacy skills only.
-    if relative == "custom" or relative.startswith("custom/"):
-        from deerflow.config.paths import get_paths
-        from deerflow.runtime.user_context import get_effective_user_id
-
-        user_id = get_effective_user_id()
-        paths = get_paths()
-        user_custom_dir = paths.user_custom_skills_dir(user_id)
-        custom_relative = relative[len("custom") :].lstrip("/")
-        if custom_relative:
-            return str(user_custom_dir / custom_relative)
-        return str(user_custom_dir)
-
-    return _join_path_preserving_style(skills_host, relative)
+    """Reject attempts to resolve a global Skill root."""
+    raise PermissionError(f"Skill path is not authorized by this run: {path}")
 
 
 def _is_acp_workspace_path(path: str) -> bool:
@@ -475,32 +356,12 @@ def _resolve_acp_workspace_path(path: str, thread_id: str | None = None) -> str:
 
 
 def _get_mcp_allowed_paths() -> list[str]:
-    """Get the list of allowed paths from MCP config for file system server."""
-    allowed_paths = []
-    try:
-        from deerflow.config.extensions_config import get_extensions_config
+    """Reject legacy filesystem allowances from extensions configuration.
 
-        extensions_config = get_extensions_config()
-
-        for _, server in extensions_config.mcp_servers.items():
-            if not server.enabled:
-                continue
-
-            # Only check the filesystem server
-            args = server.args or []
-            # Check if args has server-filesystem package
-            has_filesystem = any("server-filesystem" in arg for arg in args)
-            if not has_filesystem:
-                continue
-            # Unpack the allowed file system paths in config
-            for arg in args:
-                if not arg.startswith("-") and arg.startswith("/"):
-                    allowed_paths.append(arg.rstrip("/") + "/")
-
-    except Exception:
-        pass
-
-    return allowed_paths
+    M7 runtime access is derived from the immutable admitted-run snapshot. A
+    process-local extensions file is not an authorization source.
+    """
+    return []
 
 
 def _get_tool_config_int(name: str, key: str, default: int) -> int:

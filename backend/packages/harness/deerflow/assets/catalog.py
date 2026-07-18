@@ -13,10 +13,6 @@ class AssetCatalogUnavailable(RuntimeError):
     """The PostgreSQL system catalog cannot safely serve a runtime lookup."""
 
 
-ASSET_CATALOG_CUTOVER_CODE = "ASSET_CATALOG_CUTOVER"
-ASSET_CATALOG_CUTOVER_MESSAGE = "System assets are managed through /admin/assets after catalog cutover."
-
-
 class AssetCatalogScope(StrEnum):
     SYSTEM = "system"
     PROJECT = "project"
@@ -87,8 +83,6 @@ def require_system_asset(snapshot: CatalogSnapshot) -> CatalogSnapshot:
 class AssetCatalogProvider(Protocol):
     def run_sync(self, operation: str, *args: object) -> object: ...
 
-    async def is_cutover_enabled(self) -> bool: ...
-
     async def get_system_agent(self, slug: str) -> AssetCatalogAgentSnapshot: ...
 
     async def list_system_agents(self) -> tuple[AssetCatalogAgentSnapshot, ...]: ...
@@ -116,6 +110,13 @@ def get_asset_catalog_provider() -> AssetCatalogProvider | None:
     return _provider
 
 
+def require_asset_catalog_provider() -> AssetCatalogProvider:
+    provider = get_asset_catalog_provider()
+    if provider is None:
+        raise AssetCatalogUnavailable("PostgreSQL asset catalog provider is unavailable")
+    return provider
+
+
 def trusted_asset_context(value: object | None) -> object | None:
     """Accept only an opaque, internally supplied context object.
 
@@ -137,26 +138,6 @@ def run_asset_catalog_lookup(provider: AssetCatalogProvider, operation: str, *ar
     return provider.run_sync(operation, *args)
 
 
-def _cutover_mutation_error() -> AssetCatalogUnavailable:
-    return AssetCatalogUnavailable(f"{ASSET_CATALOG_CUTOVER_CODE}: {ASSET_CATALOG_CUTOVER_MESSAGE}")
-
-
-def reject_legacy_asset_mutation_after_cutover() -> None:
-    """Stop sync file-backed asset writes once PostgreSQL owns the catalog."""
-
-    provider = get_asset_catalog_provider()
-    if provider is not None and bool(run_asset_catalog_lookup(provider, "is_cutover_enabled")):
-        raise _cutover_mutation_error()
-
-
-async def areject_legacy_asset_mutation_after_cutover() -> None:
-    """Stop async file-backed asset writes once PostgreSQL owns the catalog."""
-
-    provider = get_asset_catalog_provider()
-    if provider is not None and await provider.is_cutover_enabled():
-        raise _cutover_mutation_error()
-
-
 __all__ = [
     "AssetCatalogAgentSnapshot",
     "AssetCatalogMcpSnapshot",
@@ -165,12 +146,9 @@ __all__ = [
     "AssetCatalogSkillFile",
     "AssetCatalogSkillSnapshot",
     "AssetCatalogUnavailable",
-    "ASSET_CATALOG_CUTOVER_CODE",
-    "ASSET_CATALOG_CUTOVER_MESSAGE",
-    "areject_legacy_asset_mutation_after_cutover",
     "get_asset_catalog_provider",
+    "require_asset_catalog_provider",
     "require_system_asset",
-    "reject_legacy_asset_mutation_after_cutover",
     "run_asset_catalog_lookup",
     "set_asset_catalog_provider",
     "trusted_asset_context",

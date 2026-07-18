@@ -65,7 +65,6 @@ def _freeze(value: object) -> object:
 @dataclass
 class _TestCatalog:
     generation: int = 0
-    cutover: bool = False
     agents: tuple[AssetCatalogAgentSnapshot, ...] = ()
     skills: tuple[AssetCatalogSkillSnapshot, ...] = ()
     mcp: tuple[AssetCatalogMcpSnapshot, ...] = ()
@@ -104,7 +103,6 @@ class PostgresAssetCatalogProvider:
         cls,
         *,
         generation: int = 0,
-        cutover: bool = False,
         agents: tuple[AssetCatalogAgentSnapshot, ...] = (),
         skills: tuple[AssetCatalogSkillSnapshot, ...] = (),
         mcp: tuple[AssetCatalogMcpSnapshot, ...] = (),
@@ -118,14 +116,9 @@ class PostgresAssetCatalogProvider:
         provider._skills = None
         provider._mcp = None
         provider._cache_lock = threading.Lock()
-        provider._test_catalog = _TestCatalog(generation, cutover, agents, skills, mcp)
+        provider._test_catalog = _TestCatalog(generation, agents, skills, mcp)
         provider._test_load_counts = {"agent": 0, "skill": 0, "mcp": 0}
         return provider
-
-    async def mark_cutover_for_test(self) -> None:
-        if self._test_catalog is None:
-            raise RuntimeError("test-only catalog operation")
-        self._test_catalog.cutover = True
 
     def replace_test_catalog(
         self,
@@ -140,7 +133,7 @@ class PostgresAssetCatalogProvider:
             raise RuntimeError("test-only catalog operation")
         if mutation not in {"publish", "suspend", "grant_revoke"}:
             raise ValueError("unknown test mutation")
-        self._test_catalog = _TestCatalog(generation, True, agents, skills, mcp)
+        self._test_catalog = _TestCatalog(generation, agents, skills, mcp)
 
     def cache_load_counts_for_test(self) -> dict[str, int]:
         if self._test_catalog is None:
@@ -154,7 +147,6 @@ class PostgresAssetCatalogProvider:
 
     def run_sync(self, operation: str, *args: object) -> object:
         methods = {
-            "is_cutover_enabled": self.is_cutover_enabled,
             "get_system_agent": self.get_system_agent,
             "list_system_agents": self.list_system_agents,
             "list_system_skills": self.list_system_skills,
@@ -174,19 +166,6 @@ class PostgresAssetCatalogProvider:
             raise AssetCatalogUnavailable("synchronous asset catalog lookup cannot block its owning loop")
         future = asyncio.run_coroutine_threadsafe(method(*args), self._owner_loop)
         return future.result()
-
-    async def is_cutover_enabled(self) -> bool:
-        try:
-            if self._test_catalog is not None:
-                return self._test_catalog.cutover
-            async with self._session() as session:
-                async with session.begin():
-                    _generation, cutover = await self._read_state(session)
-                    return cutover
-        except AssetCatalogUnavailable:
-            raise
-        except (DBAPIError, SATimeoutError):
-            raise AssetCatalogUnavailable("asset catalog state is unavailable") from None
 
     async def get_system_agent(self, slug: str) -> AssetCatalogAgentSnapshot:
         if not isinstance(slug, str) or not slug:
@@ -252,21 +231,20 @@ class PostgresAssetCatalogProvider:
             self._last_lookup_loop_id = id(asyncio.get_running_loop())
             if self._test_catalog is not None:
                 generation = self._test_catalog.generation
-                cutover = self._test_catalog.cutover
-                self._prepare_cache(generation, cutover)
+                self._prepare_cache(generation)
                 return self._lookup_test(kind, generation)
 
             async with self._session() as session:
                 async with session.begin():
-                    generation, cutover = await self._read_state(session)
-                    self._prepare_cache(generation, cutover)
+                    generation = await self._read_state(session)
+                    self._prepare_cache(generation)
                     cached = self._cached(kind)
                     if cached is not None:
                         return cached
                     loaded = await self._load(session, kind, generation)
                     self._validate_loaded(loaded, generation)
-                    final_generation, final_cutover = await self._read_state(session)
-                    if not final_cutover or final_generation != generation:
+                    final_generation = await self._read_state(session)
+                    if final_generation != generation:
                         raise AssetCatalogUnavailable("system asset catalog changed during lookup")
                     self._store(kind, loaded, expected_generation=generation)
                     return loaded
@@ -277,22 +255,13 @@ class PostgresAssetCatalogProvider:
         except (DBAPIError, SATimeoutError):
             raise AssetCatalogUnavailable("asset catalog database is unavailable") from None
 
-    async def _read_state(self, session: AsyncSession) -> tuple[int, bool]:
-        row = (
-            await session.execute(
-                select(
-                    AssetCatalogStateRow.generation,
-                    AssetCatalogStateRow.cutover_at,
-                ).where(AssetCatalogStateRow.id == 1)
-            )
-        ).one_or_none()
+    async def _read_state(self, session: AsyncSession) -> int:
+        row = (await session.execute(select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1))).scalar_one_or_none()
         if row is None:
-            return 0, False
-        return int(row.generation), row.cutover_at is not None
+            return 0
+        return int(row)
 
-    def _prepare_cache(self, generation: int, cutover: bool) -> None:
-        if not cutover:
-            raise AssetCatalogUnavailable("asset catalog cutover is not enabled")
+    def _prepare_cache(self, generation: int) -> None:
         with self._cache_lock:
             if self._generation != generation:
                 self._agents = None
@@ -339,8 +308,6 @@ class PostgresAssetCatalogProvider:
 
     @staticmethod
     def _validate_loaded(snapshots: SnapshotTuple, generation: int) -> None:
-        if not snapshots:
-            raise AssetCatalogUnavailable("published system asset catalog is empty")
         for snapshot in snapshots:
             require_system_asset(snapshot)
             if type(snapshot.generation) is not int or snapshot.generation != generation:

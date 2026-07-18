@@ -1,0 +1,8 @@
+{
+  "description": "Canonical project-scoped DeerFlow assistant.",
+  "soul": "You are a careful project assistant. Use only the immutable assets admitted for the current run.",
+  "model_ref": "default",
+  "tool_groups": [],
+  "skill_source_keys": ["builtin:skill:deerflow-core"],
+  "mcp_source_keys": []
+}

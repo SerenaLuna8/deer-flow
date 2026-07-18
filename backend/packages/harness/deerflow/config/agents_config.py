@@ -10,9 +10,7 @@ per-user layout.
 import logging
 import re
 from pathlib import Path
-from typing import Any
 
-import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from deerflow.config.paths import get_paths
@@ -201,23 +199,7 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
 
 
 def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentConfig | None:
-    """Load the custom or default agent's config from its directory.
-
-    Reads from the per-user layout first; falls back to the legacy shared layout
-    for installations that have not yet been migrated.
-
-    Args:
-        name: The agent name.
-        user_id: Owner of the agent. Defaults to the effective user from the
-            current request context.
-
-    Returns:
-        AgentConfig instance, or ``None`` if ``name`` is ``None``.
-
-    Raises:
-        FileNotFoundError: If the agent directory or config.yaml does not exist.
-        ValueError: If config.yaml cannot be parsed.
-    """
+    """Load a named system Agent from the mandatory PostgreSQL catalog."""
 
     if name is None:
         return None
@@ -225,165 +207,70 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
     name = validate_agent_name(name)
     from deerflow.assets.catalog import (
         AssetCatalogAgentSnapshot,
-        get_asset_catalog_provider,
+        AssetCatalogUnavailable,
+        require_asset_catalog_provider,
         require_system_asset,
         run_asset_catalog_lookup,
     )
 
-    provider = get_asset_catalog_provider()
-    if provider is not None and run_asset_catalog_lookup(provider, "is_cutover_enabled"):
-        snapshot = run_asset_catalog_lookup(provider, "get_system_agent", name)
-        if not isinstance(snapshot, AssetCatalogAgentSnapshot):
-            from deerflow.assets.catalog import AssetCatalogUnavailable
-
-            raise AssetCatalogUnavailable("system agent snapshot is invalid")
-        require_system_asset(snapshot)
-        return AgentConfig(
-            name=snapshot.slug,
-            description=snapshot.description,
-            model=snapshot.model_ref or None,
-            tool_groups=list(snapshot.tool_groups),
-            skills=list(snapshot.skill_slugs),
-        )
-    agent_dir = resolve_agent_dir(name, user_id=user_id)
-    config_file = agent_dir / "config.yaml"
-
-    if not agent_dir.exists():
-        raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
-
-    if not config_file.exists():
-        raise FileNotFoundError(f"Agent config not found: {config_file}")
-
-    try:
-        with open(config_file, encoding="utf-8") as f:
-            data: dict[str, Any] = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        raise ValueError(f"Failed to parse agent config {config_file}: {e}") from e
-
-    # Ensure name is set from directory name if not in file
-    if "name" not in data:
-        data["name"] = name
-
-    # Strip unknown fields before passing to Pydantic (e.g. legacy prompt_file)
-    known_fields = set(AgentConfig.model_fields.keys())
-    data = {k: v for k, v in data.items() if k in known_fields}
-
-    return AgentConfig(**data)
+    snapshot = run_asset_catalog_lookup(require_asset_catalog_provider(), "get_system_agent", name)
+    if not isinstance(snapshot, AssetCatalogAgentSnapshot):
+        raise AssetCatalogUnavailable("system agent snapshot is invalid")
+    require_system_asset(snapshot)
+    return AgentConfig(
+        name=snapshot.slug,
+        description=snapshot.description,
+        model=snapshot.model_ref or None,
+        tool_groups=list(snapshot.tool_groups),
+        skills=list(snapshot.skill_slugs),
+    )
 
 
 def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str | None:
-    """Read the SOUL.md file for a custom agent, if it exists.
-
-    SOUL.md defines the agent's personality, values, and behavioral guardrails.
-    It is injected into the lead agent's system prompt as additional context.
-
-    Args:
-        agent_name: The name of the agent or None for the default agent.
-        user_id: Owner of the agent. Defaults to the effective user from the
-            current request context.
-
-    Returns:
-        The SOUL.md content as a string, or None if the file does not exist.
-    """
-    if agent_name:
-        from deerflow.assets.catalog import (
-            AssetCatalogAgentSnapshot,
-            AssetCatalogUnavailable,
-            get_asset_catalog_provider,
-            require_system_asset,
-            run_asset_catalog_lookup,
-        )
-
-        provider = get_asset_catalog_provider()
-        if provider is not None and run_asset_catalog_lookup(provider, "is_cutover_enabled"):
-            snapshot = run_asset_catalog_lookup(provider, "get_system_agent", agent_name)
-            if not isinstance(snapshot, AssetCatalogAgentSnapshot):
-                raise AssetCatalogUnavailable("system agent snapshot is invalid")
-            require_system_asset(snapshot)
-            return snapshot.soul.strip() or None
-        agent_dir = resolve_agent_dir(agent_name, user_id=user_id)
-    else:
-        agent_dir = get_paths().base_dir
-    soul_path = agent_dir / SOUL_FILENAME
-    if not soul_path.exists():
+    """Return the PostgreSQL system Agent soul, or no soul for the default."""
+    if not agent_name:
         return None
-    content = soul_path.read_text(encoding="utf-8").strip()
-    return content or None
-
-
-def list_custom_agents(*, user_id: str | None = None) -> list[AgentConfig]:
-    """Scan the agents directory and return all valid custom agents.
-
-    Returns the union of agents in the per-user layout and the legacy shared
-    layout, so that pre-migration installations remain visible until they are
-    migrated. Per-user entries shadow legacy entries with the same name.
-
-    Args:
-        user_id: Owner whose agents to list. Defaults to the effective user
-            from the current request context.
-
-    Returns:
-        List of AgentConfig for each valid agent directory found.
-    """
     from deerflow.assets.catalog import (
         AssetCatalogAgentSnapshot,
         AssetCatalogUnavailable,
-        get_asset_catalog_provider,
+        require_asset_catalog_provider,
         require_system_asset,
         run_asset_catalog_lookup,
     )
 
-    provider = get_asset_catalog_provider()
-    if provider is not None and run_asset_catalog_lookup(provider, "is_cutover_enabled"):
-        snapshots = run_asset_catalog_lookup(provider, "list_system_agents")
-        if not isinstance(snapshots, tuple):
-            raise AssetCatalogUnavailable("system agent catalog is invalid")
-        agents: list[AgentConfig] = []
-        for snapshot in snapshots:
-            if not isinstance(snapshot, AssetCatalogAgentSnapshot):
-                raise AssetCatalogUnavailable("system agent snapshot is invalid")
-            require_system_asset(snapshot)
-            agents.append(
-                AgentConfig(
-                    name=snapshot.slug,
-                    description=snapshot.description,
-                    model=snapshot.model_ref or None,
-                    tool_groups=list(snapshot.tool_groups),
-                    skills=list(snapshot.skill_slugs),
-                )
-            )
-        return agents
+    snapshot = run_asset_catalog_lookup(require_asset_catalog_provider(), "get_system_agent", agent_name)
+    if not isinstance(snapshot, AssetCatalogAgentSnapshot):
+        raise AssetCatalogUnavailable("system agent snapshot is invalid")
+    require_system_asset(snapshot)
+    return snapshot.soul.strip() or None
 
-    paths = get_paths()
-    effective_user = user_id or get_effective_user_id()
 
-    seen: set[str] = set()
+def list_custom_agents(*, user_id: str | None = None) -> list[AgentConfig]:
+    """List system Agents from the mandatory PostgreSQL catalog."""
+    from deerflow.assets.catalog import (
+        AssetCatalogAgentSnapshot,
+        AssetCatalogUnavailable,
+        require_asset_catalog_provider,
+        require_system_asset,
+        run_asset_catalog_lookup,
+    )
+
+    snapshots = run_asset_catalog_lookup(require_asset_catalog_provider(), "list_system_agents")
+    if not isinstance(snapshots, tuple):
+        raise AssetCatalogUnavailable("system agent catalog is invalid")
     agents: list[AgentConfig] = []
-
-    user_root = paths.user_agents_dir(effective_user)
-    legacy_root = paths.agents_dir
-
-    for root in (user_root, legacy_root):
-        if not root.exists():
-            continue
-        for entry in sorted(root.iterdir()):
-            if not entry.is_dir():
-                continue
-            if entry.name in seen:
-                continue
-            config_file = entry / "config.yaml"
-            if not config_file.exists():
-                logger.debug(f"Skipping {entry.name}: no config.yaml")
-                continue
-
-            try:
-                agent_cfg = load_agent_config(entry.name, user_id=effective_user)
-                if agent_cfg is None:
-                    continue
-                agents.append(agent_cfg)
-                seen.add(entry.name)
-            except Exception as e:
-                logger.warning(f"Skipping agent '{entry.name}': {e}")
-
+    for snapshot in snapshots:
+        if not isinstance(snapshot, AssetCatalogAgentSnapshot):
+            raise AssetCatalogUnavailable("system agent snapshot is invalid")
+        require_system_asset(snapshot)
+        agents.append(
+            AgentConfig(
+                name=snapshot.slug,
+                description=snapshot.description,
+                model=snapshot.model_ref or None,
+                tool_groups=list(snapshot.tool_groups),
+                skills=list(snapshot.skill_slugs),
+            )
+        )
     agents.sort(key=lambda a: a.name)
     return agents

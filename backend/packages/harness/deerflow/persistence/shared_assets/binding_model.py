@@ -127,7 +127,6 @@ class AssetCatalogStateRow(Base):
 
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1, server_default=text("1"))
     generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
-    cutover_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now, server_default=text("now()"))
 
     __table_args__ = (

@@ -18,7 +18,6 @@ from deerflow.sandbox.sandbox_provider import (
     SandboxProvider,
     private_sandbox_relative_root,
 )
-from deerflow.skills.storage import user_should_see_legacy_skills
 
 logger = logging.getLogger(__name__)
 
@@ -99,59 +98,23 @@ class LocalSandboxProvider(SandboxProvider):
         """
         Setup static path mappings shared by every sandbox this provider yields.
 
-        Static mappings cover the **public** skills directory and any custom
-        mounts from ``config.yaml`` — both are process-wide and identical for
-        every thread.  Per-thread ``/mnt/user-data/...``, ``/mnt/acp-workspace``
-        and ``/mnt/skills/custom`` mappings are appended inside
-        :meth:`_build_thread_path_mappings` because they depend on
-        ``thread_id`` and the effective ``user_id``.
+        Static mappings cover only operator-configured custom mounts. Skill
+        files enter a sandbox through run-scoped read-only mounts.
 
         Returns:
             List of static path mappings
         """
         mappings: list[PathMapping] = []
 
-        # Map skills: split mount for public + legacy + custom
         try:
             from deerflow.config import get_app_config
 
             config = get_app_config()
-            skills_path = config.skills.get_skills_path()
             container_path = config.skills.container_path
-
-            # Public skills: global, read-only — static, shared by all threads
-            public_skills_path = skills_path / "public"
-            if public_skills_path.exists():
-                mappings.append(
-                    PathMapping(
-                        container_path=f"{container_path}/public",
-                        local_path=str(public_skills_path),
-                        read_only=True,
-                    )
-                )
-
-            # NOTE: Legacy skills mount is NOT included here because it must
-            # only be exposed to users who have no per-user custom skills yet
-            # (mirroring ``UserScopedSkillStorage._iter_skill_files`` which only
-            # surfaces SkillCategory.LEGACY to such users). Including it for
-            # every user would let users with per-user custom skills still
-            # ``read_file("/mnt/skills/legacy/<name>/SKILL.md")`` and read
-            # content the listing layer told them doesn't exist. See review
-            # feedback on PR #3889 — the legacy mount is now built in
-            # ``_build_thread_path_mappings`` after we know the user_id.
-
-            # NOTE: Custom skills mount is NOT included here because it is
-            # per-user and must be built dynamically per-thread inside
-            # ``_build_thread_path_mappings``.  The static mount that previously
-            # bound ``get_effective_user_id()`` at init time was incorrect:
-            # every subsequent user's sandbox would resolve
-            # ``/mnt/skills/custom`` to the init-time user's directory.
 
             # Map custom mounts from sandbox config
             _RESERVED_CONTAINER_PREFIXES = [
-                f"{container_path}/public",
-                f"{container_path}/custom",
-                f"{container_path}/legacy",
+                container_path,
                 _ACP_WORKSPACE_VIRTUAL_PREFIX,
                 _USER_DATA_VIRTUAL_PREFIX,
             ]
@@ -247,15 +210,7 @@ class LocalSandboxProvider(SandboxProvider):
 
     @staticmethod
     def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None) -> list[PathMapping]:
-        """Build per-thread path mappings for /mnt/user-data, /mnt/acp-workspace,
-        and /mnt/skills/custom.
-
-        Uses the explicitly resolved user id when provided, falling back to
-        :func:`get_effective_user_id` for legacy callers.  Custom skills are
-        mounted per-user (read-only) because agent writes custom skills via
-        ``skill_manage_tool`` on the host filesystem, not inside the sandbox.
-        """
-        from deerflow.config import get_app_config
+        """Build per-thread data mappings; run mounts own Skill access."""
         from deerflow.config.paths import get_paths
 
         paths = get_paths()
@@ -294,48 +249,6 @@ class LocalSandboxProvider(SandboxProvider):
                 read_only=False,
             ),
         ]
-
-        # Per-user custom skills mount (read-only).  This must be per-thread
-        # because ``/mnt/skills/custom`` resolves to different host directories
-        # for different users.
-        try:
-            config = get_app_config()
-            skills_container_path = config.skills.container_path
-            user_custom_path = paths.user_custom_skills_dir(effective_user_id)
-            user_custom_path.mkdir(parents=True, exist_ok=True)
-
-            mappings.append(
-                PathMapping(
-                    container_path=f"{skills_container_path}/custom",
-                    local_path=str(user_custom_path),
-                    read_only=True,
-                )
-            )
-        except Exception as exc:
-            logger.warning("Could not setup per-thread custom skills mount: %s", exc, exc_info=True)
-
-        # Legacy (pre-migration global-custom) skills: only mount for users
-        # who have no per-user custom skills yet, mirroring the
-        # ``UserScopedSkillStorage._iter_skill_files`` visibility rule. Users
-        # with their own per-user custom skills cannot see LEGACY in the
-        # listing/prompt and must not be able to read it via the sandbox
-        # either — otherwise the listing layer and the sandbox layer disagree
-        # about visibility, and the sandbox layer is the more permissive one.
-        try:
-            config = get_app_config()
-            skills_container_path = config.skills.container_path
-            user_custom_path = paths.user_custom_skills_dir(effective_user_id)
-            legacy_skills_path = config.skills.get_skills_path() / "custom"
-            if user_should_see_legacy_skills(effective_user_id, host_path=str(config.skills.get_skills_path())) and legacy_skills_path.exists():
-                mappings.append(
-                    PathMapping(
-                        container_path=f"{skills_container_path}/legacy",
-                        local_path=str(legacy_skills_path),
-                        read_only=True,
-                    )
-                )
-        except Exception as exc:
-            logger.warning("Could not setup per-thread legacy skills mount: %s", exc, exc_info=True)
 
         return mappings
 

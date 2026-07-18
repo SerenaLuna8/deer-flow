@@ -42,7 +42,7 @@ other `/api/*` go straight to the Gateway REST routers. See
 deer-flow/
 ├── Makefile                        # Root orchestration: drives the full stack (dev/start/stop, docker, setup)
 ├── config.example.yaml             # Template → copy to config.yaml (gitignored) at repo root
-├── extensions_config.example.json  # Template → copy to extensions_config.json (gitignored): MCP servers + skills
+├── extensions_config.example.json  # Legacy compatibility template; not runtime asset authority in M7
 ├── backend/                        # Python backend — see backend/AGENTS.md
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
@@ -56,10 +56,11 @@ deer-flow/
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
 
-Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
-(main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
-servers + skills). Both real files are gitignored and may be edited at runtime via the
-Gateway API. Config schema and resolution order are documented in
+Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`.
+M7 Task 2 makes PostgreSQL the only Agent/Skill/MCP authority; the legacy
+`extensions_config.json` template remains temporarily for later configuration cleanup but
+is not loaded for runtime assets and has no Gateway mutation API. Config schema and
+resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
 
 Persistence configuration is PostgreSQL-only: `database.url` resolves from
@@ -110,6 +111,13 @@ Alembic revision 与最终必需 relations，Tasks 1–7 期间临时接受 `001
 Worker 或 Scheduler 是否开放。里程碑进度仍为 6/8（75%）；M7 其余 legacy source/API 清理与 M8 完整发布验收
 尚未交付，因此当前仍不能
 作为完整多用户 SaaS 发布。
+
+M7 Task 2 已建立严格、digest 校验、单事务且幂等的 packaged system asset bootstrap；固定 non-login
+builtin principal 只写 PostgreSQL published system Agent/Skill/MCP rows，不创建项目 membership、binding
+或 credential。`AssetCatalogStateRow` 与 provider 不再有 asset cutover 状态，harness lookup 必须有
+PostgreSQL provider。运行期 Skill/MCP 只来自 admission 持久化的 exact snapshot 与 run-local
+read-only materialization；repo/user/custom/extensions scan、archive install、`skill_manage` 文件 mutation
+以及 `/api/agents`、`/api/skills`、`/api/mcp/config`、`/api/features` 已删除。M7 仍未整体完成。
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks`; under final M6 cutover, `config.yaml -> scheduler.enabled` gates an independent Scheduler process rather than a Gateway lifespan task.

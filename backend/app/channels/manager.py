@@ -37,8 +37,6 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
-from deerflow.skills.storage import get_or_new_skill_storage
-from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -571,27 +569,14 @@ def _channel_storage_user_id(msg: InboundMessage) -> str | None:
 def _resolve_slash_skill_command(
     text: str,
     available_skills: set[str] | None = None,
-    storage: SkillStorage | Callable[[], SkillStorage] | None = None,
 ) -> _SlashSkillCommandResolution | None:
+    """Route slash syntax to the run, where the admitted snapshot resolves it."""
     reference = parse_slash_skill_reference(text)
     if reference is None:
         return None
-    try:
-        resolved_storage = storage() if callable(storage) else storage or get_or_new_skill_storage()
-        skills = resolved_storage.load_skills(enabled_only=False)
-
-        skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
-        if skill is None:
-            return None
-        if not skill.enabled:
-            return _SlashSkillCommandResolution(failure_message=f"Skill `/{reference.name}` is installed but disabled. Enable it before using slash activation.")
-        if available_skills is not None and reference.name not in available_skills:
-            return _SlashSkillCommandResolution(failure_message=f"Skill `/{reference.name}` is not available for this agent.")
-
-        return _SlashSkillCommandResolution(route_to_chat=True)
-    except Exception as exc:
-        logger.exception("[Manager] failed to resolve slash skill command")
-        raise SlashSkillCommandResolutionError("Failed to resolve slash skill command. Please check the skill configuration.") from exc
+    if available_skills is not None and reference.name not in available_skills:
+        return _SlashSkillCommandResolution(failure_message=f"Skill `/{reference.name}` is not available for this agent.")
+    return _SlashSkillCommandResolution(route_to_chat=True)
 
 
 def _resolve_attachments(thread_id: str, artifacts: list[str], *, user_id: str | None = None) -> list[ResolvedAttachment]:
@@ -826,7 +811,6 @@ class ChannelManager:
         # Per-conversation locks so concurrent inbound messages for the same
         # chat don't race to create duplicate threads (see _get_or_create_thread).
         self._thread_create_locks: dict[tuple[str, str, str | None], asyncio.Lock] = {}
-        self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
@@ -1023,11 +1007,6 @@ class ChannelManager:
                 },
             )
         return self._client
-
-    def _get_skill_storage(self) -> SkillStorage:
-        if self._skill_storage is None:
-            self._skill_storage = get_or_new_skill_storage()
-        return self._skill_storage
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -1835,7 +1814,6 @@ class ChannelManager:
                 lambda: _resolve_slash_skill_command(
                     raw_text,
                     self._resolve_available_skill_names(msg),
-                    self._get_skill_storage,
                 )
             )
             if slash_resolution and slash_resolution.failure_message:

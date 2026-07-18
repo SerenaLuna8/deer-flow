@@ -15,7 +15,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
 from deerflow.assets.catalog import AssetCatalogUnavailable
-from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig, McpServerConfig, resolve_effective_mcp_routing
+from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
@@ -637,44 +637,7 @@ def _catalog_oauth_configs(
 async def _load_runtime_extensions_config(
     asset_context: object | None,
 ) -> tuple[ExtensionsConfig, dict[str, Mapping[str, Mapping[str, object]]]]:
-    from deerflow.assets.catalog import (
-        AssetCatalogMcpSnapshot,
-        AssetCatalogUnavailable,
-        get_asset_catalog_provider,
-        require_system_asset,
-    )
-
-    provider = get_asset_catalog_provider()
-    if provider is None or not await asyncio.to_thread(provider.run_sync, "is_cutover_enabled"):
-        return ExtensionsConfig.from_file(), {}
-    snapshots = await asyncio.to_thread(provider.run_sync, "list_system_mcp")
-    if not isinstance(snapshots, tuple) or not snapshots:
-        raise AssetCatalogUnavailable("published system MCP catalog is empty")
-    servers: dict[str, McpServerConfig] = {}
-    secrets_by_server: dict[str, Mapping[str, Mapping[str, object]]] = {}
-    try:
-        for snapshot in snapshots:
-            if not isinstance(snapshot, AssetCatalogMcpSnapshot):
-                raise ValueError
-            require_system_asset(snapshot)
-            materialized: Mapping[str, Mapping[str, object]] = {}
-            if snapshot.credential_grant_ids:
-                if asset_context is None:
-                    raise AssetCatalogUnavailable("trusted project context is required for MCP credentials")
-                materialized = await asyncio.to_thread(
-                    provider.run_sync,
-                    "materialize_mcp_secrets",
-                    asset_context,
-                    snapshot,
-                )
-                secrets_by_server[snapshot.slug] = materialized
-            raw = _catalog_mcp_definition(snapshot.definition)
-            servers[snapshot.slug] = McpServerConfig.model_validate(raw)
-    except AssetCatalogUnavailable:
-        raise
-    except (AttributeError, TypeError, ValueError):
-        raise AssetCatalogUnavailable("system MCP catalog is invalid") from None
-    return ExtensionsConfig(mcpServers=servers), secrets_by_server
+    raise AssetCatalogUnavailable("global MCP discovery was removed; use the admitted run MCP snapshot")
 
 
 async def get_mcp_tools(*, asset_context: object | None = None) -> list[BaseTool]:

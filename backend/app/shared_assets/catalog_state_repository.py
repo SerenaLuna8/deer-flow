@@ -26,6 +26,13 @@ class CatalogStateRepository:
         value = (await self.session.execute(statement)).scalar_one_or_none()
         return 0 if value is None else int(value)
 
+    async def ensure_and_lock(self) -> int:
+        """Create the singleton state row when absent and lock it for bootstrap."""
+
+        await self.session.execute(insert(AssetCatalogStateRow).values(id=1, generation=1).on_conflict_do_nothing(index_elements=[AssetCatalogStateRow.id]))
+        value = (await self.session.execute(select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1).with_for_update())).scalar_one()
+        return int(value)
+
     async def bump_generation(self) -> int:
         statement = (
             insert(AssetCatalogStateRow)

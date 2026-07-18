@@ -51,47 +51,17 @@ def _get_work_dir(thread_id: str | None) -> str:
 
 
 def _build_mcp_servers() -> dict[str, dict[str, Any]]:
-    """Build ACP ``mcpServers`` config from DeerFlow's enabled MCP servers."""
-    from deerflow.config.extensions_config import ExtensionsConfig
-    from deerflow.mcp.client import build_servers_config
-
-    return build_servers_config(ExtensionsConfig.from_file())
+    """Reject legacy process-local MCP configuration for ACP agents."""
+    return {}
 
 
 def _build_acp_mcp_servers() -> list[dict[str, Any]]:
-    """Build ACP ``mcpServers`` payload for ``new_session``.
+    """Reject ambient MCP servers from extensions configuration.
 
-    The ACP client expects a list of server objects, while DeerFlow's MCP helper
-    returns a name -> config mapping for the LangChain MCP adapter. This helper
-    converts the enabled servers into the ACP wire format.
+    M7 does not bridge process-local extensions configuration into an admitted
+    run. ACP invocation therefore receives no ambient MCP servers.
     """
-    from deerflow.config.extensions_config import ExtensionsConfig
-
-    extensions_config = ExtensionsConfig.from_file()
-    enabled_servers = extensions_config.get_enabled_mcp_servers()
-
-    mcp_servers: list[dict[str, Any]] = []
-    for name, server_config in enabled_servers.items():
-        transport_type = server_config.type or "stdio"
-        payload: dict[str, Any] = {"name": name, "type": transport_type}
-
-        if transport_type == "stdio":
-            if not server_config.command:
-                raise ValueError(f"MCP server '{name}' with stdio transport requires 'command' field")
-            payload["command"] = server_config.command
-            payload["args"] = server_config.args
-            payload["env"] = [{"name": key, "value": value} for key, value in server_config.env.items()]
-        elif transport_type in ("http", "sse"):
-            if not server_config.url:
-                raise ValueError(f"MCP server '{name}' with {transport_type} transport requires 'url' field")
-            payload["url"] = server_config.url
-            payload["headers"] = [{"name": key, "value": value} for key, value in server_config.headers.items()]
-        else:
-            raise ValueError(f"MCP server '{name}' has unsupported transport type: {transport_type}")
-
-        mcp_servers.append(payload)
-
-    return mcp_servers
+    return []
 
 
 def _build_permission_response(options: list[Any], *, auto_approve: bool) -> Any:

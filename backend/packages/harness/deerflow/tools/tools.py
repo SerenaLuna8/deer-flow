@@ -49,7 +49,6 @@ def get_available_tools(
     *,
     app_config: AppConfig | None = None,
     asset_context: object | None = None,
-    include_skill_manage: bool = True,
     include_acp: bool = True,
 ) -> list[BaseTool]:
     """Get all available tools from config.
@@ -62,8 +61,6 @@ def get_available_tools(
         include_mcp: Whether to include tools from MCP servers (default: True).
         model_name: Optional model name to determine if vision tools should be included.
         subagent_enabled: Whether to include subagent tools (task, task_status).
-        include_skill_manage: Whether global Skill evolution may add its
-            mutation tool. Defaults to True for legacy/system runtimes.
         include_acp: Whether global ACP configuration may add its delegation
             tool. Defaults to True for legacy/system runtimes.
 
@@ -96,12 +93,6 @@ def get_available_tools(
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
-    skill_evolution_config = getattr(config, "skill_evolution", None)
-    if include_skill_manage and getattr(skill_evolution_config, "enabled", False):
-        from deerflow.tools.skill_manage_tool import skill_manage_tool
-
-        builtin_tools.append(skill_manage_tool)
-
     # Add subagent tools only if enabled via runtime parameter
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)

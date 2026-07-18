@@ -24,8 +24,6 @@ from deerflow.runtime.secret_context import (
     extract_request_secrets,
 )
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
-from deerflow.skills.storage import get_catalog_skills_if_cutover, get_or_new_skill_storage, get_or_new_user_skill_storage
-from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
 from deerflow.utils.messages import get_original_user_content_text, is_real_user_message
 
@@ -92,35 +90,20 @@ class SkillActivationMiddleware(AgentMiddleware):
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._app_config = app_config
         self._user_id = user_id
-        self._runtime_skills = runtime_skills
+        self._runtime_skills = tuple(runtime_skills or ())
         self._runtime_skills_root = runtime_skills_root
         self._runtime_skills_container_path = runtime_skills_container_path
 
-    def _storage(self) -> SkillStorage:
-        if self._user_id is not None:
-            return get_or_new_user_skill_storage(self._user_id, app_config=self._app_config)
-        if self._app_config is not None:
-            return get_or_new_skill_storage(app_config=self._app_config)
-        return get_or_new_skill_storage()
-
     @staticmethod
-    def _read_skill_content(skill_file: Path, skills_root: Path, *, storage: SkillStorage | None = None) -> str:
+    def _read_skill_content(skill_file: Path, skills_root: Path) -> str:
         if skill_file.name != SKILL_MD_FILE:
             raise ValueError(f"Expected {SKILL_MD_FILE}, got {skill_file.name}")
-        # Use the storage's path validation if available — UserScopedSkillStorage
-        # stores custom skills in a per-user directory that is not a sub-path of
-        # the global skills root, so the simple relative_to check would reject them.
-        # Fall back to the relative_to check when the storage is a mock (e.g. tests)
-        # that doesn't implement validate_skill_file_path.
-        if storage is not None and hasattr(storage, "validate_skill_file_path"):
-            resolved_file = storage.validate_skill_file_path(skill_file)
-        else:
-            resolved_file = skill_file.resolve()
-            resolved_root = skills_root.resolve()
-            try:
-                resolved_file.relative_to(resolved_root)
-            except ValueError as exc:
-                raise ValueError("Resolved skill file must stay within the configured skills root.") from exc
+        resolved_file = skill_file.resolve()
+        resolved_root = skills_root.resolve()
+        try:
+            resolved_file.relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError("Resolved skill file must stay within the run Skill root.") from exc
         if not resolved_file.is_file():
             raise FileNotFoundError(resolved_file)
         return resolved_file.read_text(encoding="utf-8")
@@ -130,13 +113,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         if reference is None:
             return None
 
-        storage = None if self._runtime_skills is not None else self._storage()
-        if self._runtime_skills is not None:
-            skills = list(self._runtime_skills)
-        else:
-            skills = get_catalog_skills_if_cutover(self._app_config)
-            if skills is None:
-                skills = storage.load_skills(enabled_only=False)
+        skills = list(self._runtime_skills)
         skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
         if skill is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not installed.")
@@ -149,17 +126,18 @@ class SkillActivationMiddleware(AgentMiddleware):
             text,
             skills,
             available_skills=self._available_skills,
-            container_base_path=(self._runtime_skills_container_path or (str(self._runtime_skills_root) if self._runtime_skills_root is not None else storage.get_container_root())),
+            container_base_path=(self._runtime_skills_container_path or str(self._runtime_skills_root or "/mnt/skills")),
         )
         if resolved is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be resolved.")
 
         try:
-            skills_root = self._runtime_skills_root or storage.get_skills_root_path()
+            if self._runtime_skills_root is None:
+                raise ValueError("run Skill root is unavailable")
+            skills_root = self._runtime_skills_root
             skill_content = self._read_skill_content(
                 resolved.skill.skill_file,
                 skills_root,
-                storage=storage,
             )
         except (OSError, ValueError):
             logger.exception("Failed to read slash-activated skill %s", resolved.skill.name)
@@ -408,16 +386,9 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         a transient registry read failure mid-run drops the injection for that
         call rather than trusting stale caller-supplied data.
         """
-        try:
-            storage = self._storage()
-            skills = get_catalog_skills_if_cutover(self._app_config)
-            if skills is None:
-                skills = storage.load_skills(enabled_only=False)
-            container_root = storage.get_container_root()
-        except Exception:
-            logger.exception("Failed to load skills while resolving secret bindings")
-            return None
-        return {posixpath.normpath(skill.get_container_file_path(container_root)): skill for skill in skills}
+        if not self._runtime_skills or not self._runtime_skills_container_path:
+            return {}
+        return {posixpath.normpath(skill.get_container_file_path(self._runtime_skills_container_path)): skill for skill in self._runtime_skills}
 
     def _resolve_registry_skill(self, registry: dict[str, Skill], path: object, *, require_autonomous: bool) -> Skill | None:
         """Resolve a container path to a live registry skill eligible for secret

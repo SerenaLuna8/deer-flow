@@ -35,24 +35,19 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import build_middlewares
-from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
+from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
 from deerflow.assets.catalog import (
     AssetCatalogUnavailable,
-    get_asset_catalog_provider,
-    reject_legacy_asset_mutation_after_cutover,
-    run_asset_catalog_lookup,
     trusted_asset_context,
 )
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
-from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
-from deerflow.skills.storage import get_or_new_user_skill_storage
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
@@ -279,9 +274,9 @@ class DeerFlowClient:
         mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(tools, deferred_names=deferred_setup.deferred_names)
 
         # Wire deferred skill discovery — mirrors agent.py so config flag works on both paths.
-        skills_list = get_enabled_skills_for_config(self._app_config)
-        if self._available_skills is not None:
-            skills_list = [s for s in skills_list if s.name in self._available_skills]
+        # Embedded runs have no project admission snapshot, so they receive no
+        # Skill bytes. Project Worker runs supply their exact immutable list.
+        skills_list = []
         skill_setup = build_skill_search_setup(
             skills_list,
             enabled=self._app_config.skills.deferred_discovery,
@@ -337,13 +332,11 @@ class DeerFlowClient:
         """Lazy import to avoid circular dependency at module level."""
         from deerflow.tools import get_available_tools
 
-        provider = get_asset_catalog_provider()
-        if provider is not None and self._asset_context is None and bool(run_asset_catalog_lookup(provider, "is_cutover_enabled")):
-            raise AssetCatalogUnavailable("trusted asset context is required when the asset catalog provider is enabled")
         return get_available_tools(
             model_name=model_name,
             subagent_enabled=subagent_enabled,
             asset_context=self._asset_context,
+            include_mcp=False,
         )
 
     @staticmethod
@@ -1029,28 +1022,8 @@ class DeerFlowClient:
         }
 
     def list_skills(self, enabled_only: bool = False) -> dict:
-        """List available skills.
-
-        Args:
-            enabled_only: If True, only return enabled skills.
-
-        Returns:
-            Dict with "skills" key containing list of skill info dicts,
-            matching the Gateway API ``SkillsListResponse`` schema.
-        """
-        storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
-        return {
-            "skills": [
-                {
-                    "name": s.name,
-                    "description": s.description,
-                    "license": s.license,
-                    "category": s.category,
-                    "enabled": s.enabled,
-                }
-                for s in storage.load_skills(enabled_only=enabled_only)
-            ]
-        }
+        """Reject the removed global Skill catalog surface."""
+        raise AssetCatalogUnavailable("global Skill listing was removed; use the authenticated project asset API")
 
     def get_memory(self) -> dict:
         """Get current memory data.
@@ -1101,185 +1074,28 @@ class DeerFlowClient:
     # ------------------------------------------------------------------
 
     def get_mcp_config(self) -> dict:
-        """Get MCP server configurations.
-
-        Returns:
-            Dict with "mcp_servers" key mapping server name to config,
-            matching the Gateway API ``McpConfigResponse`` schema.
-        """
-        config = get_extensions_config()
-        return {"mcp_servers": {name: server.model_dump() for name, server in config.mcp_servers.items()}}
+        """Reject the removed global MCP configuration surface."""
+        raise AssetCatalogUnavailable("global MCP configuration was removed; use the authenticated project asset API")
 
     def update_mcp_config(self, mcp_servers: dict[str, dict]) -> dict:
-        """Update MCP server configurations.
-
-        Writes to extensions_config.json and reloads the cache.
-
-        Args:
-            mcp_servers: Dict mapping server name to config dict.
-                Each value should contain keys like enabled, type, command, args, env, url, etc.
-
-        Returns:
-            Dict with "mcp_servers" key, matching the Gateway API
-            ``McpConfigResponse`` schema.
-
-        Raises:
-            OSError: If the config file cannot be written.
-        """
-        reject_legacy_asset_mutation_after_cutover()
-        config_path = ExtensionsConfig.resolve_config_path()
-        if config_path is None:
-            raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
-
-        current_config = get_extensions_config()
-
-        config_data = {
-            "mcpServers": mcp_servers,
-            "skills": {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()},
-        }
-
-        self._atomic_write_json(config_path, config_data)
-
-        self._agent = None
-        self._agent_config_key = None
-        reloaded = reload_extensions_config()
-        return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
+        """Reject the removed global MCP mutation surface."""
+        raise AssetCatalogUnavailable("global MCP mutation was removed; use the authenticated project asset API")
 
     # ------------------------------------------------------------------
     # Public API — skills management
     # ------------------------------------------------------------------
 
     def get_skill(self, name: str) -> dict | None:
-        """Get a specific skill by name.
-
-        Args:
-            name: Skill name.
-
-        Returns:
-            Skill info dict, or None if not found.
-        """
-        storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
-        skill = next((s for s in storage.load_skills(enabled_only=False) if s.name == name), None)
-        if skill is None:
-            return None
-        return {
-            "name": skill.name,
-            "description": skill.description,
-            "license": skill.license,
-            "category": skill.category,
-            "enabled": skill.enabled,
-        }
+        """Reject the removed global Skill lookup surface."""
+        raise AssetCatalogUnavailable("global Skill lookup was removed; use the authenticated project asset API")
 
     def update_skill(self, name: str, *, enabled: bool) -> dict:
-        """Update a skill's enabled status.
-
-        Args:
-            name: Skill name.
-            enabled: New enabled status.
-
-        Returns:
-            Updated skill info dict.
-
-        Raises:
-            ValueError: If the skill is not found.
-            OSError: If the config file cannot be written.
-        """
-        reject_legacy_asset_mutation_after_cutover()
-        storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
-        skills = storage.load_skills(enabled_only=False)
-        skill = next((s for s in skills if s.name == name), None)
-        if skill is None:
-            raise ValueError(f"Skill '{name}' not found")
-
-        # PUBLIC skills → global extensions_config.json (shared state).
-        # CUSTOM / LEGACY skills → per-user _skill_states.json (isolated state).
-        from deerflow.skills.types import SkillCategory
-
-        if skill.category == SkillCategory.PUBLIC:
-            config_path = ExtensionsConfig.resolve_config_path()
-            if config_path is None:
-                raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
-
-            extensions_config = get_extensions_config()
-            extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
-
-            config_data = {
-                "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-                "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-            }
-
-            self._atomic_write_json(config_path, config_data)
-            reload_extensions_config()
-        else:
-            # CUSTOM / LEGACY: write per-user state
-            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
-
-            if isinstance(storage, UserScopedSkillStorage):
-                storage.set_skill_enabled_state(name, enabled)
-            else:
-                # Fallback for non-user-scoped storage (unlikely in practice)
-                config_path = ExtensionsConfig.resolve_config_path()
-                if config_path is None:
-                    raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
-                extensions_config = get_extensions_config()
-                extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
-                config_data = {
-                    "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-                    "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-                }
-                self._atomic_write_json(config_path, config_data)
-                reload_extensions_config()
-
-        # Invalidate the prompt cache for this caller (and for all users if
-        # the changed skill is PUBLIC, since PUBLIC state is shared). Mirrors
-        # what ``routers/skills.py::update_skill`` does — without this the
-        # cached enabled-state would stay stale until process restart. See
-        # review feedback on PR #3889.
-        try:
-            from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, invalidate_user_skill_cache
-
-            skill_category_value = skill.category.value if hasattr(skill.category, "value") else skill.category
-            if skill_category_value == SkillCategory.PUBLIC.value:
-                clear_skills_system_prompt_cache()
-            else:
-                invalidate_user_skill_cache(get_effective_user_id())
-        except Exception as exc:
-            # Don't let cache-invalidation failures mask the actual write
-            # success — log and continue. The stale-cache window is bounded
-            # by the next config reload.
-            import logging
-
-            logging.getLogger(__name__).warning("Failed to invalidate skills prompt cache after update_skill: %s", exc)
-
-        self._agent = None
-        self._agent_config_key = None
-
-        updated = next((s for s in storage.load_skills(enabled_only=False) if s.name == name), None)
-        if updated is None:
-            raise RuntimeError(f"Skill '{name}' disappeared after update")
-        return {
-            "name": updated.name,
-            "description": updated.description,
-            "license": updated.license,
-            "category": updated.category,
-            "enabled": updated.enabled,
-        }
+        """Reject the removed global Skill mutation surface."""
+        raise AssetCatalogUnavailable("global Skill mutation was removed; use the authenticated project asset API")
 
     def install_skill(self, skill_path: str | Path) -> dict:
-        """Install a skill from a .skill archive (ZIP).
-
-        Args:
-            skill_path: Path to the .skill file.
-
-        Returns:
-            Dict with success, skill_name, message.
-
-        Raises:
-            FileNotFoundError: If the file does not exist.
-            ValueError: If the file is invalid.
-        """
-        reject_legacy_asset_mutation_after_cutover()
-        return get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config).install_skill_from_archive(skill_path)
+        """Reject the removed archive-install surface."""
+        raise AssetCatalogUnavailable("Skill archive installation was removed; use project asset version APIs")
 
     # ------------------------------------------------------------------
     # Public API — memory management

@@ -317,9 +317,9 @@ class AppConfig(BaseModel):
         if "circuit_breaker" in config_data:
             config_data["circuit_breaker"] = config_data["circuit_breaker"]
 
-        # Load extensions config separately (it's in a different file)
-        extensions_config = ExtensionsConfig.from_file()
-        config_data["extensions"] = extensions_config.model_dump()
+        # Asset authority is PostgreSQL-only. Keep the typed tombstone empty
+        # until the remaining non-asset extension fields are removed in M7.
+        config_data["extensions"] = ExtensionsConfig().model_dump()
 
         result = cls.model_validate(config_data)
         if not result.models:

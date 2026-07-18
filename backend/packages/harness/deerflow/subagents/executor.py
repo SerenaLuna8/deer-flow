@@ -352,6 +352,7 @@ class SubagentExecutor:
         run_id: str | None = None,
         channel_user_id: str | None = None,
         deerflow_trace_id: str | None = None,
+        runtime_skills: tuple[Skill, ...] = (),
     ):
         """Initialize the executor.
 
@@ -403,6 +404,7 @@ class SubagentExecutor:
         # must export the dispatching turn's id, not none at all.
         self.channel_user_id = channel_user_id
         self.deerflow_trace_id = deerflow_trace_id
+        self._runtime_skills = tuple(runtime_skills)
 
         self._base_tools = _filter_tools(
             tools,
@@ -494,22 +496,12 @@ class SubagentExecutor:
         return None
 
     async def _load_skills(self) -> list[Skill]:
-        """Load enabled skill metadata based on config.skills."""
+        """Filter the parent run's immutable Skill snapshot."""
         if self.config.skills is not None and len(self.config.skills) == 0:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} skills=[] — skipping skill loading")
             return []
 
-        try:
-            from deerflow.skills.storage import get_or_new_skill_storage
-
-            storage_kwargs = {"app_config": self.app_config} if self.app_config is not None else {}
-            storage = await asyncio.to_thread(get_or_new_skill_storage, **storage_kwargs)
-            # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
-            all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
-            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
-        except Exception:
-            logger.exception(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}")
-            raise
+        all_skills = [skill for skill in self._runtime_skills if skill.enabled]
 
         if not all_skills:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} no enabled skills found")

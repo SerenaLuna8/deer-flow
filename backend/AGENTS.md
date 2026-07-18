@@ -295,9 +295,11 @@ Configuration priority:
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
-**Extensions Configuration** (`extensions_config.json`):
+**Legacy extensions tombstone** (`extensions_config.json`):
 
-MCP servers and skills are configured together in `extensions_config.json` in project root:
+M7 Task 2 no longer loads Agent/Skill/MCP runtime authority from this file. The model remains
+temporarily for later configuration cleanup, but Gateway/Worker/Scheduler startup, prompt
+construction, MCP loading, and sandbox mounts must not read assets from it.
 
 Docker development mounts the project directory at `/app/project` and points
 `DEER_FLOW_CONFIG_PATH` / `DEER_FLOW_EXTENSIONS_CONFIG_PATH` into that directory.
@@ -321,11 +323,8 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | Router | Endpoints |
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
-| **Features** (`/api/features`) | `GET /` - report config-gated feature availability (currently `agents_api.enabled`) for frontend UI gating |
 | **Project governance** (`/api/projects`, `/api/project-invitations`) | Authenticated member, invitation, deletion, and restore APIs use immutable `ProjectContext` plus scoped repositories. Public invitation claim exchanges a fragment token for a ten-minute AES-GCM authenticated-encrypted opaque HttpOnly cookie derived from the Auth secret; claim/redeem use a PostgreSQL-shared 5-attempt/5-minute limiter whose single-statement admission admits only the first five concurrent attempts, clears on success, and stores SHA-256 keys only. 每次 admission 在同一事务内按 `expires_at` 索引使用 `FOR UPDATE SKIP LOCKED` 最多清理 100 条过期计数，避免公开接口产生无界表增长或无界清理。 |
 | **Console** (`/api/console`) | Read-only cross-thread observability for the current user (the data layer for an operations dashboard or external monitoring): `GET /stats` - headline counters (runs/threads/agents/tokens/cost); `GET /runs` - paginated run history joined with thread titles (per-run cost); `GET /usage` - zero-filled daily token series + per-model breakdown with spend. Queries `runs`/`threads_meta` directly as a reporting layer (no new `RunStore` methods) and uses the required PostgreSQL connection from `database.url`. A legacy internal memory-backend guard remains until task 3 provider cleanup, but memory is not selectable through public AppConfig. Real-cost estimation reads optional `models[*].pricing` (`currency`, `input_per_million`, `output_per_million`, `input_cache_hit_per_million`; `ModelConfig` is `extra="allow"`, so no schema change) and prices each run from its `token_usage_by_model` input/output split. Pricing is **cache-aware**: `RunJournal` accumulates prompt-cache hits from `usage_metadata.input_token_details.cache_read` into a sparse `cache_read_tokens` bucket key (also threaded through `SubagentTokenCollector` → `record_external_llm_usage_records`), and cache-hit input tokens are billed at `input_cache_hit_per_million` (omitted → billed at the miss price, a conservative upper bound). Legacy rows fall back to run-level totals at `model_name`; unpriced models yield `cost: null` and cost fields are null when no pricing is configured |
-| **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json) |
-| **Skills** (`/api/skills`) | `GET /` - list skills; admin-only `GET /content/{name}` - read-only raw `SKILL.md` for a skill visible in the current user's storage scope; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /install` - install from .skill archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`) |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; `POST /branches` - create a new main-thread branch from a completed assistant turn checkpoint. Workspace files are not checkpointed, so the branch only best-effort copies the current workspace when branching from the **latest** turn (`workspace_clone_mode="current_thread_best_effort"`); branching from an older/historical turn skips the copy (`workspace_clone_mode="skipped_historical_turn"`) so the branch never inherits files that only exist in a later timeline; `GET /goal`, `PUT /goal`, `DELETE /goal` - read, set, and clear the active thread goal; `POST /compact` - manually summarize older active context into `summary_text` and retain the recent message window, blocked while a run is in flight; unexpected failures are logged server-side and return a generic 500 detail |
@@ -1024,23 +1023,24 @@ PostgreSQL upsert 建立 singleton 并返回 `1`，后续并发 bump 单调递�
 全部 closure 验证结束后最后读取 generation；cache 消费者只能在数据库 generation 未变化的窗口
 复用 snapshot。
 
-**M3 system asset runtime cutover**：harness 只依赖
-`deerflow.assets.catalog.AssetCatalogProvider` 的安全 snapshot protocol，不得反向导入
-`app.*`；Gateway lifespan 在自己的 event loop 安装 `PostgresAssetCatalogProvider`，退出时必须
-清空 registry。`asset_catalog_state.cutover_at` 之前保留 legacy file loader；marker 之后 Agent、
-Skill、MCP runtime 与 legacy GET 只读取 PostgreSQL published system snapshot，空 catalog、项目
-snapshot、坏 checksum/归档或数据库不可用都 fail closed，绝不回退文件。每次 lookup 先读取
-generation，变化时整体清空 Agent/Skill/MCP cache；同步 Agent/Skill loader 与工作线程中的 MCP
-初始化都必须桥接回 provider owning loop，禁止 asyncpg pool 跨 event loop。
+**M7 permanent PostgreSQL system asset runtime**：harness 只依赖
+`deerflow.assets.catalog.AssetCatalogProvider` 的安全 snapshot protocol，不得反向导入 `app.*`；
+provider 缺失统一为 `AssetCatalogUnavailable`，不存在 cutover 状态或 file fallback。Gateway lifespan
+在自己的 event loop 安装 `PostgresAssetCatalogProvider`，退出时清空 registry；generation 变化时整体
+清空 Agent/Skill/MCP snapshot cache。
 
-Skill bytes 复用 Task 7 `_verified_archive_files` 校验后，原子物化到 gitignored 的
-`skills/custom/.asset-catalog/<generation>/`；slug、POSIX/Windows 路径与 symlink 均需拒绝越界，
-逻辑 category 仍为只读 `PUBLIC`。MCP 的无 secret definition 可进入短生命期安全配置；Task 7
-materializer 只接受可信 `ProjectContext`；env/header 按 transport 合并合法 connection key，OAuth
-只在局部 token manager 中换成 HTTP/SSE `Authorization` header，绝不能把未知 `oauth` key 传给
-adapter。明文不得进入 `ExtensionsConfig`、全局 MCP cache、日志、checkpoint 或文件。
-cutover 后 legacy Agent/Skill/MCP 文件写 API 在任何 IO 前统一返回
-`409 ASSET_CATALOG_CUTOVER` 并引导 `/admin/assets`；legacy custom Skill 读取不再暴露文件内容。
+`app.shared_assets.bootstrap` 从 package resources 加载 strict manifest，只接受列出的相对 regular
+files，拒绝 unknown keys、duplicate source key、路径逃逸、symlink、非 regular file 与 digest mismatch。
+`bootstrap_system_assets()` 使用一个 session/transaction，锁定 `asset_catalog_state`，以固定 non-login
+principal `00000000-0000-0000-0000-000000000007` 写 published system Agent/Skill/MCP rows 与完整 child
+rows；重复执行必须零创建，冲突必须整事务回滚，不得创建 credential、project binding 或 membership。
+
+运行期 Skill bytes 与 MCP tools 只能来自 `PrivateRunAdmissionService` 持久化的 exact snapshot，再由
+`PrivateAssetRuntime` 写入 run-owned temporary tree/one-shot proxy；prompt、slash activation、subagent、
+channel 与 sandbox 只消费这组 immutable objects/read-only mount。global/per-user/repo custom scan、
+extensions enablement、archive installer、`skill_manage` 和全局 MCP cache 均已移除。项目 Agent/Skill/MCP
+创建与 mutation 只保留 authenticated project shared-asset HTTP services；legacy `/api/agents`、
+`/api/skills`、`/api/mcp/config` 与 `/api/features` 返回普通 404。
 
 **M3 asset migration 与 credential rotation 运维**：两个脚本都必须显式选择 `--dry-run` 或
 `--execute`，禁止 startup 自动导入。`migrate_assets.py` 使用 runtime 相同的 `.deer-flow` /

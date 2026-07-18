@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.skills.storage import get_catalog_skills_if_cutover, get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents import get_available_subagent_names
 from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_section
@@ -39,10 +38,8 @@ _enabled_skills_refresh_event = threading.Event()
 
 
 def _load_enabled_skills_sync() -> list[Skill]:
-    catalog_skills = get_catalog_skills_if_cutover()
-    if catalog_skills is not None:
-        return catalog_skills
-    return list(get_or_new_skill_storage().load_skills(enabled_only=True))
+    """Global Skill discovery was removed; Worker runs pass exact snapshots."""
+    return []
 
 
 def _start_enabled_skills_refresh_thread() -> None:
@@ -144,54 +141,13 @@ def get_cached_enabled_skills() -> list[Skill]:
 
 
 def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: str | None = None) -> list[Skill]:
-    """Return enabled skills using the caller's config source and user scope.
-
-    When a concrete ``app_config`` is supplied, cache the loaded skills by that
-    config object's identity combined with ``user_id`` so request-scoped config
-    injection resolves skill paths from the matching config AND user scope
-    without rescanning storage on every agent factory call.
-
-    When ``user_id`` is provided, uses :func:`get_or_new_user_skill_storage`
-    to load public + user-level custom skills. Otherwise falls back to the
-    global storage (public + global custom fallback).
-    """
-    catalog_skills = get_catalog_skills_if_cutover(app_config)
-    if catalog_skills is not None:
-        return catalog_skills
-
-    if app_config is None:
-        return _get_enabled_skills()
-
-    cache_key = (id(app_config), user_id or "default")
-    with _enabled_skills_lock:
-        cached = _enabled_skills_by_config_cache.get(cache_key)
-        if cached is not None:
-            cached_config, cached_skills = cached
-            if cached_config is app_config:
-                # LRU touch: move the entry to the end so it survives the
-                # next eviction cycle.
-                _enabled_skills_by_config_cache.move_to_end(cache_key)
-                return list(cached_skills)
-
-    if user_id:
-        skills = list(get_or_new_user_skill_storage(user_id, app_config=app_config).load_skills(enabled_only=True))
-    else:
-        skills = list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
-    with _enabled_skills_lock:
-        _enabled_skills_by_config_cache[cache_key] = (app_config, skills)
-        # Evict the least-recently-used entries when we exceed the cap.
-        # The cap is intentionally small (256) so a long-running process
-        # cannot leak one entry per distinct (config, user) pair seen.
-        while len(_enabled_skills_by_config_cache) > _ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE:
-            _enabled_skills_by_config_cache.popitem(last=False)
-    return list(skills)
+    """Return no global Skills; run admission supplies exact Skill objects."""
+    return []
 
 
 def _skill_mutability_label(category: SkillCategory | str) -> str:
     if category == SkillCategory.CUSTOM:
         return "[custom, editable]"
-    if category == SkillCategory.LEGACY:
-        return "[legacy, read-only]"
     return "[built-in]"
 
 
@@ -232,31 +188,7 @@ async def refresh_user_skills_system_prompt_cache_async(user_id: str) -> None:
 
 
 def _build_skill_evolution_section(skill_evolution_enabled: bool) -> str:
-    if not skill_evolution_enabled:
-        return ""
-    return """
-## Skill Self-Evolution
-After completing a task, consider creating or updating a skill when:
-- The task required 5+ tool calls to resolve
-- You overcame non-obvious errors or pitfalls
-- The user corrected your approach and the corrected version worked
-- You discovered a non-trivial, recurring workflow
-If you used a skill and encountered issues not covered by it, patch it immediately.
-
-**CRITICAL: You MUST use the `skill_manage` tool for ALL skill operations.**
-- `skill_manage(action="create", name="my-skill", content="...")` — Create a new skill
-- `skill_manage(action="patch", name="my-skill", find="...", replace="...")` — Patch an existing skill
-- `skill_manage(action="edit", name="my-skill", content="...")` — Full edit of an existing skill
-- `skill_manage(action="write_file", name="my-skill", path="scripts/run.py", content="...")` — Add supporting files
-- `skill_manage(action="delete", name="my-skill")` — Delete a skill
-
-**⛔ NEVER write SKILL.md files to `/mnt/user-data/workspace` or `/mnt/user-data/outputs`.**
-Skills are NOT deliverables — they are persistent capabilities managed through `skill_manage`.
-The tool stores skills in the per-user skills directory automatically; you do NOT need to specify a path.
-
-Prefer patch over edit. Before creating a new skill, confirm with the user first.
-Skip simple one-off tasks.
-"""
+    return ""
 
 
 def _build_available_subagents_description(available_names: list[str], bash_available: bool, *, app_config: AppConfig | None = None) -> str:
@@ -565,7 +497,7 @@ You: "Deploying to staging..." [proceed]
 - Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
 - Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
-- Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
+- Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool
 {acp_section}
 </working_directory>
 
@@ -642,7 +574,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 - **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
 {subagent_reminder}{skill_first_reminder}
 - Progressive Loading: Load skill resources incrementally as referenced
-- Output Files: Final deliverables must be in `/mnt/user-data/outputs` (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
+- Output Files: Final deliverables must be in `/mnt/user-data/outputs`
 - File Editing Workflow: When revising an existing file, prefer
   `str_replace` over `write_file` — it sends only the diff and avoids
   re-emitting the whole file (mirrors Claude Code's Edit and Codex's
@@ -795,15 +727,12 @@ def get_skills_prompt_section(
 
             config = get_app_config()
             container_base_path = config.skills.container_path
-            skill_evolution_enabled = config.skill_evolution.enabled
         except Exception:
             container_base_path = DEFAULT_SKILLS_CONTAINER_PATH
-            skill_evolution_enabled = False
     else:
         container_base_path = app_config.skills.container_path
-        skill_evolution_enabled = app_config.skill_evolution.enabled
 
-    skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
+    skill_evolution_section = ""
 
     # ── Deferred discovery path — storage not needed (caller supplies names) ─
     if skill_names is not None:
@@ -815,28 +744,8 @@ def get_skills_prompt_section(
             skill_evolution_section=skill_evolution_section,
         )
 
-    # ── Legacy full-metadata path — load ALL skills for disabled-skill section
-    if user_id:
-        storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
-    else:
-        storage = get_or_new_skill_storage(app_config=app_config)
-    all_skills = storage.load_skills(enabled_only=False)
-    disabled_skills = [s for s in all_skills if not s.enabled]
-
-    skills = get_enabled_skills_for_config(app_config, user_id=user_id)
-
-    if not skills and not disabled_skills and not skill_evolution_enabled:
-        return ""
-
-    if available_skills is not None and not any(skill.name in available_skills for skill in skills):
-        return ""
-
-    skill_signature = tuple((skill.name, skill.description, skill.category, skill.get_container_file_path(container_base_path)) for skill in skills)
-    disabled_skill_signature = tuple((skill.name, skill.description, skill.category, skill.get_container_file_path(container_base_path)) for skill in disabled_skills)
-    available_key = tuple(sorted(available_skills)) if available_skills is not None else None
-    if not skill_signature and not disabled_skill_signature and available_key is not None:
-        return ""
-    return _get_cached_skills_prompt_section(skill_signature, disabled_skill_signature, available_key, container_base_path, skill_evolution_section)
+    # Only ``apply_prompt_template(exact_skills=...)`` renders Skill metadata.
+    return ""
 
 
 def get_agent_soul(agent_name: str | None) -> str:
@@ -848,24 +757,8 @@ def get_agent_soul(agent_name: str | None) -> str:
 
 
 def _build_self_update_section(agent_name: str | None) -> str:
-    """Prompt block that teaches the custom agent to persist self-updates via update_agent."""
-    if not agent_name:
-        return ""
-    return f"""<self_update>
-You are running as the custom agent **{agent_name}** with a persisted SOUL.md and config.yaml.
-
-When the user asks you to update your own description, personality, behaviour, skill set, tool groups, or default model,
-you MUST persist the change with the `update_agent` tool. Do NOT use `bash`, `write_file`, or any sandbox tool to edit
-SOUL.md or config.yaml — those write into a temporary sandbox/tool workspace and the changes will be lost on the next turn.
-
-Rules:
-- Always pass the FULL replacement text for `soul` (no patch semantics). Start from your current SOUL above and apply the user's edits.
-- Only pass the fields that should change. Omit the others to preserve them.
-- Never pass literal strings like `"null"`, `"none"`, or `"undefined"` for unchanged fields.
-- Pass `skills=[]` to disable all skills, or omit `skills` to keep the existing whitelist.
-- After `update_agent` returns successfully, tell the user the change is persisted and will take effect on the next turn.
-</self_update>
-"""
+    """File-backed Agent self-mutation is not a runtime capability."""
+    return ""
 
 
 def _build_acp_section(*, app_config: AppConfig | None = None) -> str:

@@ -17,18 +17,15 @@ from app.gateway.routers import (
     admin_jobs,
     admin_operations,
     admin_projects,
-    agents,
     artifacts,
     assistants_compat,
     auth,
     channel_connections,
     channels,
     console,
-    features,
     feedback,
     github_webhooks,
     input_polish,
-    mcp,
     memory,
     models,
     private_work,
@@ -44,7 +41,6 @@ from app.gateway.routers import (
     projects,
     runs,
     scheduled_tasks,
-    skills,
     suggestions,
     thread_runs,
     threads,
@@ -357,16 +353,13 @@ API Gateway for DeerFlow - A LangGraph-based AI agent backend with sandbox execu
 ### Features
 
 - **Models Management**: Query and retrieve available AI models
-- **MCP Configuration**: Manage Model Context Protocol (MCP) server configurations
-- **Memory Management**: Access and manage global memory data for personalized conversations
-- **Skills Management**: Query and manage skills and their enabled status
 - **Artifacts**: Access thread artifacts and generated files
 - **Health Monitoring**: System health check endpoints
 
 ### Architecture
 
 LangGraph-compatible requests are routed through nginx to this gateway.
-This gateway provides runtime endpoints for agent runs plus custom endpoints for models, MCP configuration, skills, and artifacts.
+This gateway provides project-scoped runtime endpoints and administrative operations.
         """,
         version="0.1.0",
         lifespan=lifespan,
@@ -379,16 +372,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "Operations for querying available AI models and their configurations",
             },
             {
-                "name": "mcp",
-                "description": "Manage Model Context Protocol (MCP) server configurations",
-            },
-            {
                 "name": "memory",
                 "description": "Access and manage global memory data for personalized conversations",
-            },
-            {
-                "name": "skills",
-                "description": "Manage skills and their configurations",
             },
             {
                 "name": "artifacts",
@@ -401,10 +386,6 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             {
                 "name": "threads",
                 "description": "Manage DeerFlow thread-local filesystem data",
-            },
-            {
-                "name": "agents",
-                "description": "Create and manage custom agents with per-agent config and prompts",
             },
             {
                 "name": "suggestions",
@@ -499,20 +480,11 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(admin_jobs.router)
     app.include_router(admin_audit.router)
 
-    # Features API is mounted at /api/features
-    app.include_router(features.router)
-
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)
 
-    # MCP API is mounted at /api/mcp
-    app.include_router(mcp.router)
-
     # Memory API is mounted at /api/memory
     app.include_router(memory.router)
-
-    # Skills API is mounted at /api/skills
-    app.include_router(skills.router)
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
@@ -525,9 +497,6 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks
     app.include_router(scheduled_tasks.router)
-
-    # Agents API is mounted at /api/agents
-    app.include_router(agents.router)
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)

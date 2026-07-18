@@ -268,34 +268,24 @@ def test_validate_local_tool_path_rejects_none_thread_data() -> None:
 # ---------- _resolve_skills_path ----------
 
 
-def test_resolve_skills_path_resolves_correctly() -> None:
-    """Skills virtual path should resolve to host path."""
-    with (
-        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
-        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
-    ):
-        resolved = _resolve_skills_path("/mnt/skills/public/bootstrap/SKILL.md")
-        assert resolved == "/home/user/deer-flow/skills/public/bootstrap/SKILL.md"
+def test_resolve_skills_path_rejects_global_skill() -> None:
+    """A global Skill path is never authorized outside an admitted-run mount."""
+    with pytest.raises(PermissionError, match="not authorized by this run"):
+        _resolve_skills_path("/mnt/skills/public/bootstrap/SKILL.md")
 
 
-def test_resolve_skills_path_resolves_root() -> None:
-    """Skills container root should resolve to host skills directory."""
-    with (
-        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
-        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
-    ):
-        resolved = _resolve_skills_path("/mnt/skills")
-        assert resolved == "/home/user/deer-flow/skills"
+def test_resolve_skills_path_rejects_global_root() -> None:
+    """The process-global Skill root cannot be resolved."""
+    with pytest.raises(PermissionError, match="not authorized by this run"):
+        _resolve_skills_path("/mnt/skills")
 
 
-def test_resolve_skills_path_raises_when_not_configured() -> None:
-    """Should raise FileNotFoundError when skills directory is not available."""
-    with (
-        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
-        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=None),
-    ):
-        with pytest.raises(FileNotFoundError, match="Skills directory not available"):
+def test_resolve_skills_path_does_not_probe_host_configuration() -> None:
+    """Fail closed without consulting a host Skill directory."""
+    with patch("deerflow.sandbox.tools._get_skills_host_path") as host_path:
+        with pytest.raises(PermissionError, match="not authorized by this run"):
             _resolve_skills_path("/mnt/skills/public/bootstrap/SKILL.md")
+    host_path.assert_not_called()
 
 
 # ---------- _resolve_and_validate_user_data_path ----------
@@ -972,8 +962,8 @@ def test_apply_cwd_prefix_quotes_path_with_spaces() -> None:
     assert result == "cd '/tmp/my workspace/t1' && echo hello"
 
 
-def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None:
-    """Bash commands referencing MCP filesystem server paths should be allowed."""
+def test_validate_local_bash_command_paths_rejects_ambient_mcp_filesystem_paths() -> None:
+    """An extensions file cannot grant the sandbox host filesystem access."""
     from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 
     mock_config = ExtensionsConfig(
@@ -986,27 +976,8 @@ def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None
         }
     )
     with patch("deerflow.config.extensions_config.get_extensions_config", return_value=mock_config):
-        # Should not raise - MCP filesystem paths are allowed
-        validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
-        validate_local_bash_command_paths("cat /mnt/d/workspace/subdir/file.txt", _THREAD_DATA)
-
-        # Path traversal should still be blocked
-        with pytest.raises(PermissionError, match="path traversal"):
-            validate_local_bash_command_paths("cat /mnt/d/workspace/../../etc/passwd", _THREAD_DATA)
-
-        # Disabled servers should not expose paths
-        disabled_config = ExtensionsConfig(
-            mcp_servers={
-                "filesystem": McpServerConfig(
-                    enabled=False,
-                    command="npx",
-                    args=["-y", "@modelcontextprotocol/server-filesystem", "/mnt/d/workspace"],
-                )
-            }
-        )
-        with patch("deerflow.config.extensions_config.get_extensions_config", return_value=disabled_config):
-            with pytest.raises(PermissionError, match="Unsafe absolute paths"):
-                validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
+        with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+            validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
 
 
 # ---------- Custom mount path tests ----------

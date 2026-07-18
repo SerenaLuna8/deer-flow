@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "source_key": "builtin:skill:deerflow-core",
+      "kind": "skill",
+      "slug": "deerflow-core",
+      "display_name": "DeerFlow Core",
+      "version": 1,
+      "payload_path": "content/deerflow-core-v1.skill.md",
+      "sha256": "7c4ad88ee087dd9c0f9aa386f2c067c08706befeae442f1e2b451524619e3f03"
+    },
+    {
+      "source_key": "builtin:agent:project-assistant",
+      "kind": "agent",
+      "slug": "project-assistant",
+      "display_name": "Project Assistant",
+      "version": 1,
+      "payload_path": "content/project-assistant-v1.agent.json",
+      "sha256": "c2747b90d4230994159419d53317820cffff341cdeaaa0d487cec2ff1bccaf41"
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 import uuid
 from dataclasses import fields
@@ -48,18 +49,21 @@ def test_catalog_provider_can_be_installed_and_cleared() -> None:
     assert get_asset_catalog_provider() is None
 
 
+def test_postgres_provider_is_permanent_and_has_no_filesystem_fallback() -> None:
+    from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
+
+    assert not hasattr(PostgresAssetCatalogProvider, "is_cutover_enabled")
+    source = inspect.getsource(PostgresAssetCatalogProvider).lower()
+    assert "cutover" not in source
+    assert "path(" not in source
+
+
 @pytest.mark.asyncio
-async def test_postgres_provider_fails_closed_after_cutover_when_catalog_is_empty() -> None:
-    from app.shared_assets.catalog_provider import (
-        AssetCatalogUnavailable,
-        PostgresAssetCatalogProvider,
-    )
+async def test_postgres_provider_returns_empty_kind_without_transition_state() -> None:
+    from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
 
     provider = PostgresAssetCatalogProvider.for_test()
-    await provider.mark_cutover_for_test()
-
-    with pytest.raises(AssetCatalogUnavailable):
-        await provider.list_system_skills()
+    assert await provider.list_system_skills() == ()
 
 
 def _snapshots(generation: int):
@@ -116,10 +120,10 @@ async def test_older_generation_writer_cannot_overwrite_newer_cache() -> None:
         PostgresAssetCatalogProvider,
     )
 
-    provider = PostgresAssetCatalogProvider.for_test(generation=1, cutover=True)
+    provider = PostgresAssetCatalogProvider.for_test(generation=1)
     old_mcp = _snapshots(1)[2]
     new_mcp = _snapshots(2)[2]
-    provider._prepare_cache(1, True)
+    provider._prepare_cache(1)
 
     release_old_writer = threading.Barrier(2)
     old_writer_errors: list[BaseException] = []
@@ -134,7 +138,7 @@ async def test_older_generation_writer_cannot_overwrite_newer_cache() -> None:
 
     old_writer = threading.Thread(target=write_old_generation)
     old_writer.start()
-    provider._prepare_cache(2, True)
+    provider._prepare_cache(2)
     try:
         provider._store("mcp", (new_mcp,), expected_generation=2)
     except BaseException as exc:  # pragma: no branch - asserted below
@@ -158,7 +162,6 @@ async def test_generation_change_invalidates_all_catalog_caches(mutation: str) -
     first = _snapshots(1)
     provider = PostgresAssetCatalogProvider.for_test(
         generation=1,
-        cutover=True,
         agents=(first[0],),
         skills=(first[1],),
         mcp=(first[2],),
@@ -191,7 +194,6 @@ async def test_provider_rejects_project_snapshot_on_runtime_path() -> None:
     _agent, skill, _mcp = _snapshots(1)
     provider = PostgresAssetCatalogProvider.for_test(
         generation=1,
-        cutover=True,
         skills=(skill.__class__(**{**skill.__dict__, "scope": AssetCatalogScope.PROJECT}),),
     )
 
@@ -206,7 +208,6 @@ async def test_sync_lookup_runs_on_provider_owning_loop() -> None:
     _agent, skill, _mcp = _snapshots(1)
     provider = PostgresAssetCatalogProvider.for_test(
         generation=1,
-        cutover=True,
         skills=(skill,),
     )
     owner_loop_id = id(asyncio.get_running_loop())

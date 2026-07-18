@@ -13,15 +13,14 @@ Tests that call the LLM are marked ``requires_llm`` and skipped in CI.
 File-management tests (upload/list/delete) don't need LLM and run everywhere.
 """
 
-import json
 import os
 import uuid
-import zipfile
 from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
 
+from deerflow.assets.catalog import AssetCatalogUnavailable
 from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.app_config import AppConfig
 
@@ -544,95 +543,12 @@ class TestArtifactAccess:
 
 
 class TestSkillInstallation:
-    """install_skill() with real ZIP handling and filesystem."""
+    """The embedded archive-install surface is permanently unavailable."""
 
-    @pytest.fixture(autouse=True)
-    def _allow_skill_security_scan(self, monkeypatch):
-        async def _scan(*args, **kwargs):
-            from deerflow.skills.security_scanner import ScanResult
-
-            return ScanResult(decision="allow", reason="ok")
-
-        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
-
-    @pytest.fixture(autouse=True)
-    def _isolate_skills_dir(self, tmp_path, monkeypatch):
-        """Redirect skill installation to a temp directory."""
-        skills_root = tmp_path / "skills"
-        (skills_root / "public").mkdir(parents=True)
-        (skills_root / "custom").mkdir(parents=True)
-        from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
-
-        local_storage = LocalSkillStorage(host_path=str(skills_root))
-        monkeypatch.setattr(
-            "deerflow.skills.storage._default_skill_storage",
-            local_storage,
-        )
-        monkeypatch.setattr(
-            "deerflow.client.get_or_new_user_skill_storage",
-            lambda user_id, **kwargs: local_storage,
-        )
-        self._skills_root = skills_root
-
-    @staticmethod
-    def _make_skill_zip(tmp_path, skill_name="test-e2e-skill"):
-        """Create a minimal valid .skill archive."""
-        skill_dir = tmp_path / "build" / skill_name
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\ndescription: E2E test skill\n---\n\nTest content.\n")
-        archive_path = tmp_path / f"{skill_name}.skill"
-        with zipfile.ZipFile(archive_path, "w") as zf:
-            for file in skill_dir.rglob("*"):
-                zf.write(file, file.relative_to(tmp_path / "build"))
-        return archive_path
-
-    def test_install_skill_success(self, e2e_env, tmp_path):
-        """A valid .skill archive installs to the custom skills directory."""
-        archive = self._make_skill_zip(tmp_path)
+    def test_install_skill_is_removed(self, e2e_env, tmp_path):
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-
-        result = c.install_skill(archive)
-        assert result["success"] is True
-        assert result["skill_name"] == "test-e2e-skill"
-        assert (self._skills_root / "custom" / "test-e2e-skill" / "SKILL.md").exists()
-
-    def test_install_skill_duplicate_rejected(self, e2e_env, tmp_path):
-        """Installing the same skill twice raises ValueError."""
-        archive = self._make_skill_zip(tmp_path)
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-
-        c.install_skill(archive)
-        with pytest.raises(ValueError, match="already exists"):
-            c.install_skill(archive)
-
-    def test_install_skill_invalid_extension(self, e2e_env, tmp_path):
-        """A file without .skill extension is rejected."""
-        bad_file = tmp_path / "not_a_skill.zip"
-        bad_file.write_bytes(b"PK\x03\x04")  # ZIP magic bytes
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(ValueError, match=".skill extension"):
-            c.install_skill(bad_file)
-
-    def test_install_skill_missing_frontmatter(self, e2e_env, tmp_path):
-        """A .skill archive without valid SKILL.md frontmatter is rejected."""
-        skill_dir = tmp_path / "build" / "bad-skill"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text("No frontmatter here.")
-
-        archive = tmp_path / "bad-skill.skill"
-        with zipfile.ZipFile(archive, "w") as zf:
-            for file in skill_dir.rglob("*"):
-                zf.write(file, file.relative_to(tmp_path / "build"))
-
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(ValueError, match="Invalid skill"):
-            c.install_skill(archive)
-
-    def test_install_skill_nonexistent_file(self, e2e_env):
-        """Installing from a nonexistent path raises FileNotFoundError."""
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(FileNotFoundError):
-            c.install_skill("/nonexistent/skill.skill")
+        with pytest.raises(AssetCatalogUnavailable, match="archive installation was removed"):
+            c.install_skill(tmp_path / "skill.skill")
 
 
 # ---------------------------------------------------------------------------
@@ -667,106 +583,30 @@ class TestConfigManagement:
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
         assert c.get_model("nonexistent-model") is None
 
-    def test_list_skills_returns_list(self, e2e_env):
-        """list_skills() returns a dict with 'skills' key from real directory scan."""
+    def test_list_skills_is_removed(self, e2e_env):
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        result = c.list_skills()
-        assert "skills" in result
-        assert isinstance(result["skills"], list)
-        # The real skills/ directory should have some public skills
-        assert len(result["skills"]) > 0
+        with pytest.raises(AssetCatalogUnavailable, match="global Skill listing was removed"):
+            c.list_skills()
 
-    def test_get_skill_found(self, e2e_env):
-        """get_skill() returns skill info for a known public skill."""
+    def test_get_skill_is_removed(self, e2e_env):
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        # 'deep-research' is a built-in public skill
-        skill = c.get_skill("deep-research")
-        if skill is not None:
-            assert skill["name"] == "deep-research"
-            assert "description" in skill
-            assert "enabled" in skill
+        with pytest.raises(AssetCatalogUnavailable, match="global Skill lookup was removed"):
+            c.get_skill("deep-research")
 
-    def test_get_skill_not_found(self, e2e_env):
-        """get_skill() returns None for nonexistent skill."""
+    def test_get_mcp_config_is_removed(self, e2e_env):
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        assert c.get_skill("nonexistent-skill-xyz") is None
+        with pytest.raises(AssetCatalogUnavailable, match="global MCP configuration was removed"):
+            c.get_mcp_config()
 
-    def test_get_mcp_config_returns_dict(self, e2e_env):
-        """get_mcp_config() returns a dict with 'mcp_servers' key."""
+    def test_update_mcp_config_is_removed(self, e2e_env):
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        result = c.get_mcp_config()
-        assert "mcp_servers" in result
-        assert isinstance(result["mcp_servers"], dict)
+        with pytest.raises(AssetCatalogUnavailable, match="global MCP mutation was removed"):
+            c.update_mcp_config({"test-server": {}})
 
-    def test_update_mcp_config_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
-        """update_mcp_config() writes extensions_config.json and invalidates the agent."""
-        # Set up a writable extensions_config.json
-        config_file = tmp_path / "extensions_config.json"
-        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
-        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
-
-        # Force reload so the singleton picks up our test file
-        from deerflow.config.extensions_config import reload_extensions_config
-
-        reload_extensions_config()
-
+    def test_update_skill_is_removed(self, e2e_env):
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        # Simulate a cached agent
-        c._agent = "fake-agent-placeholder"
-        c._agent_config_key = ("a", "b", "c", "d")
-
-        result = c.update_mcp_config({"test-server": {"enabled": True, "type": "stdio", "command": "echo"}})
-        assert "mcp_servers" in result
-
-        # Agent should be invalidated
-        assert c._agent is None
-        assert c._agent_config_key is None
-
-        # File should be written
-        written = json.loads(config_file.read_text())
-        assert "test-server" in written["mcpServers"]
-
-    def test_update_skill_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
-        """update_skill() writes extensions_config.json and invalidates the agent."""
-        config_file = tmp_path / "extensions_config.json"
-        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
-        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
-
-        from deerflow.config.extensions_config import reload_extensions_config
-
-        reload_extensions_config()
-
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        c._agent = "fake-agent-placeholder"
-        c._agent_config_key = ("a", "b", "c", "d")
-
-        # Use a real skill name from the public skills directory
-        skills = c.list_skills()
-        if not skills["skills"]:
-            pytest.skip("No skills available for testing")
-        skill_name = skills["skills"][0]["name"]
-
-        result = c.update_skill(skill_name, enabled=False)
-        assert result["name"] == skill_name
-        assert result["enabled"] is False
-
-        # Agent should be invalidated
-        assert c._agent is None
-        assert c._agent_config_key is None
-
-    def test_update_skill_nonexistent_raises(self, e2e_env, tmp_path, monkeypatch):
-        """update_skill() raises ValueError for nonexistent skill."""
-        config_file = tmp_path / "extensions_config.json"
-        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
-        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
-
-        from deerflow.config.extensions_config import reload_extensions_config
-
-        reload_extensions_config()
-
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(ValueError, match="not found"):
-            c.update_skill("nonexistent-skill-xyz", enabled=True)
+        with pytest.raises(AssetCatalogUnavailable, match="global Skill mutation was removed"):
+            c.update_skill("deep-research", enabled=False)
 
 
 # ---------------------------------------------------------------------------

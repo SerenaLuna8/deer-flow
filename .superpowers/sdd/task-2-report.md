@@ -1,76 +1,90 @@
-# M3 Task 2 Report: 共享资产授权与 domain contract
+# M7 Task 2 Report: PostgreSQL-only system assets
 
-## STATUS
+## Status
 
-PASS — 已按 brief 建立共享资产不可变 domain contract、平台治理 context、项目 capability、稳定错误与最小治理事件 sink；未修改 Task 1 schema，未实现 repository、service、router 或 crypto。
+PASS — implemented the deterministic packaged system-asset bootstrap and removed the pre-cutover/file-backed runtime authority described by Task 2. This report covers only Task 2 on base commit `528e43c7fa5ad537885db4e41522e0c729ba8494`; it does not claim M7 completion or release readiness.
 
-## RED
+## Delivered
 
-首次运行 brief 指定命令时，`uv` 默认 cache 位于 sandbox 不可写目录，命令未进入 pytest：
+- Added a strict, versioned `catalog.json` plus authenticated Agent/Skill payloads loaded through `importlib.resources`.
+- Added a single-transaction, idempotent PostgreSQL bootstrap with deterministic IDs, published versions, an `asset_catalog_state` lock, and the fixed non-login builtin principal `00000000-0000-0000-0000-000000000007`.
+- Added fail-closed conflict handling, digest/path/symlink validation, rollback coverage, and checks proving that bootstrap creates no credential or project binding.
+- Made `PostgresAssetCatalogProvider` permanent: removed `cutover_at`, `is_cutover_enabled()`, cutover constants, and filesystem fallback behavior.
+- Removed the legacy Agent/Skill/MCP/Features routers, Skill archive installer, per-user/global storage factories, legacy Skill category, and `skill_manage` mutation surface.
+- Refactored lead-agent prompt/activation, client, subagent, channel, sandbox, MCP, and ACP paths so ambient repo/user/custom/extensions state is not run authority. Project Worker runs consume exact admitted snapshots; embedded/global paths fail closed.
+- Updated root and backend `AGENTS.md` guidance without changing the milestone completion count.
 
-```text
-$ cd backend && uv run pytest tests/test_shared_asset_contexts.py tests/test_project_capabilities.py -q
-error: Failed to initialize cache at `/Users/jiangfeng/.cache/uv`
-Caused by: ... Operation not permitted
-```
+## TDD evidence
 
-该环境错误不计作 RED。将 cache 切换到可写目录后，聚焦测试因缺少目标 contract 按预期失败：
-
-```text
-$ cd backend && UV_CACHE_DIR=/tmp/deer-flow-uv-cache uv run pytest tests/test_shared_asset_contexts.py tests/test_project_capabilities.py -q
-E   ModuleNotFoundError: No module named 'app.shared_assets'
-1 error in 2.40s
-```
-
-失败原因是 Task 2 模块尚不存在，不是测试拼写或环境问题。
-
-## GREEN
-
-实现最小 contract 后运行相同聚焦测试：
+Initial focused RED:
 
 ```text
-$ cd backend && UV_CACHE_DIR=/tmp/deer-flow-uv-cache uv run pytest tests/test_shared_asset_contexts.py tests/test_project_capabilities.py -q
-.............                                                            [100%]
-13 passed in 0.25s
+13 failed, 35 passed in 7.52s
 ```
 
-## Ruff 与基础校验
+Failures were the intended missing bootstrap package, pre-cutover provider contract, legacy storage/import paths, and extensions-backed runtime behavior. A later invariant test for a preexisting builtin-principal project membership also failed before the membership conflict check:
 
 ```text
-$ cd backend && UV_CACHE_DIR=/tmp/deer-flow-uv-cache uv run ruff check app/shared_assets app/projects/capabilities.py tests/test_shared_asset_contexts.py tests/test_project_capabilities.py
-All checks passed!
-
-$ cd backend && UV_CACHE_DIR=/tmp/deer-flow-uv-cache uv run ruff format --check app/shared_assets app/projects/capabilities.py tests/test_shared_asset_contexts.py tests/test_project_capabilities.py
-8 files already formatted
-
-$ git diff --check
-(no output, exit 0)
+1 failed
+E   Failed: DID NOT RAISE <class 'app.shared_assets.bootstrap.service.BootstrapConflict'>
 ```
 
-## Changed files
+Both sets were made green by the production changes, not by weakening the assertions.
 
-- `backend/app/shared_assets/__init__.py`
-- `backend/app/shared_assets/models.py`
-- `backend/app/shared_assets/errors.py`
-- `backend/app/shared_assets/contexts.py`
-- `backend/app/shared_assets/governance_events.py`
-- `backend/app/projects/capabilities.py`
-- `backend/tests/test_shared_asset_contexts.py`
-- `backend/tests/test_project_capabilities.py`
-- `backend/AGENTS.md`
-- `.superpowers/sdd/task-2-report.md`
+## Final verification
+
+The worktree harness package was forced with `PYTHONPATH=packages/harness` because `backend/.venv` is shared with the main checkout and its editable install points there. All commands still used the required `backend/.venv/bin/pytest` binary.
+
+Required randomized-PostgreSQL affected gate:
+
+```text
+POSTGRES_TEST_URL=postgresql+asyncpg://jiangfeng@127.0.0.1:55437/postgres \
+PYTHONPATH=packages/harness .venv/bin/pytest \
+  tests/test_m7_asset_bootstrap_postgres.py \
+  tests/test_asset_catalog_provider.py \
+  tests/test_private_asset_runtime.py \
+  tests/integration/test_m3_asset_resolution_postgres.py \
+  tests/test_harness_boundary.py -q --tb=short -rs
+
+63 passed in 13.61s
+```
+
+PostgreSQL skips: **0**. The final run required unsandboxed localhost access because sandboxed TCP returned `Operation not permitted`; `pg_isready` confirmed the designated disposable listener before rerun.
+
+Adjacent unit gate:
+
+```text
+289 passed in 1.81s
+```
+
+This covered lead Skill prompt behavior, embedded client fail-closed behavior, ACP, sandbox security, and tool schema regressions.
+
+Updated embedded client E2E removal/configuration slice:
+
+```text
+9 passed in 0.33s
+```
+
+Additional checks:
+
+```text
+Ruff: All checks passed for every modified Python file and the new bootstrap package.
+OpenAPI: /api/agents, /api/skills, /api/mcp/config, and /api/features absent.
+compileall: app and packages/harness/deerflow passed.
+git diff --check: passed.
+```
 
 ## Self-review
 
-- `AssetScope`、`AssetKind`、`WorkflowStatus` 与 Task 1 schema 的字符串值一致；brief 指定的 dataclass 字段、顺序、默认值和冻结语义均已锁定。
-- `resolve_asset_actor()` 只允许认证域 UUID `system_admin` 创建独立 `SystemAssetGovernanceContext`；普通用户无法借此伪造 `ProjectContext`。
-- `shared_assets.manage_bindings` 和 `mcp.credentials.approve` 仅 Admin 持有；Editor 仍保留 `shared_assets.edit`，原 Runner/Viewer 能力未扩大。
-- 五类错误固定映射 404/403/409/422/503，实例只保存 `request_id`；code、status 与 public message 是不含内部细节的类级公共 contract。
-- 默认治理 sink 的 `write_override()` 只接收 actor/project/asset/version/action/request_id，structured event 精确包含这六个键；没有 payload、diff、credential metadata 或私有资源 ID 参数。
-- `app.shared_assets` 只依赖 application 层的轻量类型，不反向破坏 harness → app import boundary，也未触碰 M3 ORM/migration。
-- 文档已在 `backend/AGENTS.md` 的 M3 段用中文同步授权、错误和治理日志边界。
+- Manifest parsing forbids unknown keys, duplicate source keys/kind-slugs, unsafe relative paths, symlinks, non-regular files, and digest mismatch before payload parsing.
+- Bootstrap locks the singleton catalog state and uses one caller-owned session transaction; no shared-asset service commit is called. A conflict rolls back the principal and every asset written earlier in the transaction.
+- Existing canonical rows must match deterministic identity, published version, and payload checksum; source-key conflicts fail closed.
+- The builtin principal has no password, OAuth identity, project membership, credential, or binding and is rejected by `resolve_asset_actor()`.
+- Runtime source scans found no production references to the removed storage factories, legacy category, installer, `skill_manage` tool, cutover provider method/constants, or removed router mounts.
+- The two remaining `ExtensionsConfig.from_file()` calls are confined to the legacy configuration module's own cached loader/reloader definitions; Task 2 runtime consumers no longer call them. Final deletion of that configuration module belongs to the later M7 configuration cleanup task.
+- No claim is made that the full backend suite or later M7 task gates pass; tests whose only subject was the deleted archive/file-backed surface were removed or changed to assert stable fail-closed errors.
 
 ## Concerns
 
-- 按任务要求只运行 brief 指定 focused tests 与 changed-file Ruff，未运行全量 backend suite。
-- 当前 sink 是结构化日志默认实现；持久化 audit sink 明确留给 M6。
+- Task 2 intentionally leaves later M7 cleanup work (including final configuration/module deletion and baseline migration collapse) untouched.
+- The complete backend suite was not run; verification used the task's mandatory PostgreSQL gate plus directly affected adjacent unit/E2E slices.
