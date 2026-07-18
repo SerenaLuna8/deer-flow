@@ -10,23 +10,19 @@ from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
-from app.gateway.deps import langgraph_runtime
+from app.gateway.deps import gateway_platform_runtime
 from app.gateway.routers import (
     admin_assets,
     admin_audit,
     admin_jobs,
     admin_operations,
     admin_projects,
-    artifacts,
-    assistants_compat,
     auth,
     channel_connections,
     channels,
     console,
-    feedback,
     github_webhooks,
     input_polish,
-    memory,
     models,
     private_work,
     project_assets,
@@ -39,12 +35,6 @@ from app.gateway.routers import (
     project_memory,
     project_usage,
     projects,
-    runs,
-    scheduled_tasks,
-    suggestions,
-    thread_runs,
-    threads,
-    uploads,
 )
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from app.reliability.error_mapping import (
@@ -100,39 +90,16 @@ async def _asset_catalog_provider_lifespan(session_factory=None) -> AsyncGenerat
 
 @asynccontextmanager
 async def _gateway_runtime_lifespan(app: FastAPI, startup_config) -> AsyncGenerator[None, None]:
-    """Keep the catalog provider alive until LangGraph finishes draining runs."""
+    """Keep the catalog provider alive with the Gateway platform services."""
 
     async with _asset_catalog_provider_lifespan():
-        async with langgraph_runtime(app, startup_config):
+        async with gateway_platform_runtime(app, startup_config):
             yield
 
 
-async def _ensure_admin_user(app: FastAPI) -> None:
-    """Startup hook: handle first boot and migrate orphan threads otherwise.
-
-    After admin creation, migrate orphan threads from the LangGraph
-    store (metadata.user_id unset) to the admin account. This is the
-    "no-auth → with-auth" upgrade path: users who ran DeerFlow without
-    authentication have existing LangGraph thread data that needs an
-    owner assigned.
-        First boot (no admin exists):
-            - Does NOT create any user accounts automatically.
-            - The operator must visit ``/setup`` to create the first admin.
-
-    Subsequent boots (admin already exists):
-      - Runs the one-time "no-auth → with-auth" orphan thread migration for
-        existing LangGraph thread metadata that has no user_id.
-
-    No SQL persistence migration is needed: the four user_id columns
-    (threads_meta, runs, run_events, feedback) only come into existence
-    alongside the auth module via create_all, so freshly created tables
-    never contain NULL-owner rows.
-    """
-    from sqlalchemy import select
-
+async def _ensure_admin_user() -> None:
+    """Log first-boot setup status without mutating legacy private data."""
     from app.gateway.deps import get_local_provider
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.user.model import UserRow
 
     try:
         provider = get_local_provider()
@@ -140,10 +107,6 @@ async def _ensure_admin_user(app: FastAPI) -> None:
         # Auth persistence may not be initialized in some test/boot paths.
         # Skip admin migration work rather than failing gateway startup.
         logger.warning("Auth persistence not ready; skipping admin bootstrap check")
-        return
-
-    sf = get_session_factory()
-    if sf is None:
         return
 
     admin_count = await provider.count_admin_users()
@@ -155,83 +118,6 @@ async def _ensure_admin_user(app: FastAPI) -> None:
         logger.info("=" * 60)
         return
 
-    # Admin already exists — run orphan thread migration for any
-    # LangGraph thread metadata that pre-dates the auth module.
-    async with sf() as session:
-        stmt = select(UserRow).where(UserRow.system_role == "system_admin").limit(1)
-        row = (await session.execute(stmt)).scalar_one_or_none()
-
-    if row is None:
-        return  # Should not happen (admin_count > 0 above), but be safe.
-
-    admin_id = str(row.id)
-
-    # The legacy store rewrite is an upgrade-only compatibility path. Once
-    # the authoritative private-work marker is complete, project rows are the
-    # only writable authority and ordinary startup must not repair unscoped
-    # owner metadata behind the cutover boundary.
-    cutover_guard = getattr(app.state, "private_work_cutover_guard", None)
-    if cutover_guard is not None:
-        from app.private_work.errors import PrivateWorkCutover, PrivateWorkError
-
-        try:
-            await cutover_guard.require_legacy_open()
-        except PrivateWorkCutover:
-            logger.info("Private-work cutover complete; skipping orphan thread migration")
-            return
-        except PrivateWorkError:
-            logger.warning("Private-work cutover state unavailable; skipping orphan thread migration")
-            return
-
-    # LangGraph store orphan migration — non-fatal.
-    # This covers the "no-auth → with-auth" upgrade path for users
-    # whose existing LangGraph thread metadata has no user_id set.
-    store = getattr(app.state, "store", None)
-    if store is not None:
-        try:
-            migrated = await _migrate_orphaned_threads(store, admin_id)
-            if migrated:
-                logger.info("Migrated %d orphan LangGraph thread(s) to admin", migrated)
-        except Exception:
-            logger.exception("LangGraph thread migration failed (non-fatal)")
-
-
-async def _iter_store_items(store, namespace, *, page_size: int = 500):
-    """Paginated async iterator over a LangGraph store namespace.
-
-    Replaces the old hardcoded ``limit=1000`` call with a cursor-style
-    loop so that environments with more than one page of orphans do
-    not silently lose data. Terminates when a page is empty OR when a
-    short page arrives (indicating the last page).
-    """
-    offset = 0
-    while True:
-        batch = await store.asearch(namespace, limit=page_size, offset=offset)
-        if not batch:
-            return
-        for item in batch:
-            yield item
-        if len(batch) < page_size:
-            return
-        offset += page_size
-
-
-async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
-    """Migrate LangGraph store threads with no user_id to the given admin.
-
-    Uses cursor pagination so all orphans are migrated regardless of
-    count. Returns the number of rows migrated.
-    """
-    migrated = 0
-    async for item in _iter_store_items(store, ("threads",)):
-        metadata = item.value.get("metadata", {})
-        if not metadata.get("user_id"):
-            metadata["user_id"] = admin_user_id
-            item.value["metadata"] = metadata
-            await store.aput(("threads",), item.key, item.value)
-            migrated += 1
-    return migrated
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -239,7 +125,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Load config and check necessary environment variables at startup.
     # `startup_config` is a local snapshot used only for one-shot bootstrap
-    # work (logging level, langgraph_runtime engines, channels). Request-time
+    # work (logging level, platform engines, channels). Request-time
     # config resolution always routes through `get_app_config()` in
     # `app/gateway/deps.py::get_config()` so `config.yaml` edits become
     # visible without a process restart. We deliberately do NOT cache this
@@ -288,13 +174,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.warning("Upload staging file cleanup skipped", exc_info=True)
 
-    # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with _gateway_runtime_lifespan(app, startup_config):
-        logger.info("LangGraph runtime initialised")
+        logger.info("Gateway platform runtime initialised")
 
-        # Check admin bootstrap state and migrate orphan threads after admin exists.
-        # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
-        await _ensure_admin_user(app)
+        await _ensure_admin_user()
 
         # Start IM channel service if any channels are configured
         try:
@@ -353,12 +236,11 @@ API Gateway for DeerFlow - A LangGraph-based AI agent backend with sandbox execu
 ### Features
 
 - **Models Management**: Query and retrieve available AI models
-- **Artifacts**: Access thread artifacts and generated files
+- **Project Private Work**: Access project-scoped conversations and files
 - **Health Monitoring**: System health check endpoints
 
 ### Architecture
 
-LangGraph-compatible requests are routed through nginx to this gateway.
 This gateway provides project-scoped runtime endpoints and administrative operations.
         """,
         version="0.1.0",
@@ -372,40 +254,12 @@ This gateway provides project-scoped runtime endpoints and administrative operat
                 "description": "Operations for querying available AI models and their configurations",
             },
             {
-                "name": "memory",
-                "description": "Access and manage global memory data for personalized conversations",
-            },
-            {
-                "name": "artifacts",
-                "description": "Access and download thread artifacts and generated files",
-            },
-            {
-                "name": "uploads",
-                "description": "Upload and manage user files for threads",
-            },
-            {
-                "name": "threads",
-                "description": "Manage DeerFlow thread-local filesystem data",
-            },
-            {
-                "name": "suggestions",
-                "description": "Generate follow-up question suggestions for conversations",
-            },
-            {
                 "name": "input-polish",
                 "description": "Polish composer draft input before sending",
             },
             {
                 "name": "channels",
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
-            },
-            {
-                "name": "assistants-compat",
-                "description": "LangGraph Platform-compatible assistants API (stub)",
-            },
-            {
-                "name": "runs",
-                "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
             },
             {
                 "name": "health",
@@ -483,24 +337,6 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)
 
-    # Memory API is mounted at /api/memory
-    app.include_router(memory.router)
-
-    # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
-    app.include_router(artifacts.router)
-
-    # Uploads API is mounted at /api/threads/{thread_id}/uploads
-    app.include_router(uploads.router)
-
-    # Thread cleanup API is mounted at /api/threads/{thread_id}
-    app.include_router(threads.router)
-
-    # Scheduled tasks API is mounted at /api/scheduled-tasks
-    app.include_router(scheduled_tasks.router)
-
-    # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
-    app.include_router(suggestions.router)
-
     # Input polishing API is mounted at /api/input-polish
     app.include_router(input_polish.router)
 
@@ -510,20 +346,8 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
 
-    # Assistants compatibility API (LangGraph Platform stub)
-    app.include_router(assistants_compat.router)
-
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)
-
-    # Feedback API is mounted at /api/threads/{thread_id}/runs/{run_id}/feedback
-    app.include_router(feedback.router)
-
-    # Thread Runs API (LangGraph Platform-compatible runs lifecycle)
-    app.include_router(thread_runs.router)
-
-    # Stateless Runs API (stream/wait without a pre-existing thread)
-    app.include_router(runs.router)
 
     # GitHub webhooks API is mounted at /api/webhooks/github
     # Exempt from auth and CSRF middleware (see auth_middleware._PUBLIC_PATH_PREFIXES

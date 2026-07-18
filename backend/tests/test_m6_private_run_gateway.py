@@ -12,6 +12,7 @@ from app.private_work.context import PrivateWorkContext
 from app.private_work.run_admission import (
     AdmittedPrivateRun,
     PersistedRunSnapshot,
+    PrivateRunAdmissionServerContext,
     PrivateRunAdmissionService,
 )
 from app.private_work.run_repository import PrivateRunRecord
@@ -48,10 +49,8 @@ def _context() -> PrivateWorkContext:
 
 
 @pytest.mark.anyio
-async def test_gateway_private_run_is_admission_only_and_strips_client_authority(
-    monkeypatch,
-) -> None:
-    from app.gateway import services
+async def test_gateway_private_run_is_admission_only_and_strips_client_authority() -> None:
+    from app.private_work import http_runtime
 
     context = _context()
     now = datetime.now(UTC)
@@ -99,12 +98,6 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
             captured_server_context = server_context
             return admitted
 
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("Gateway must not launch or register private execution")
-
-    monkeypatch.setattr(services.asyncio, "create_task", forbidden)
-    monkeypatch.setattr(services, "get_run_manager", forbidden)
-    monkeypatch.setattr(services, "_launch_registered_run", forbidden)
     body = SimpleNamespace(
         assistant_id="forged-assistant",
         input={"messages": [{"role": "user", "content": "hello"}]},
@@ -122,7 +115,7 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
         interrupt_after=["after-agent"],
     )
 
-    record = await services.start_private_run(
+    record = await http_runtime.start_private_run(
         body,
         "private-thread",
         SimpleNamespace(),
@@ -143,10 +136,7 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
             "project_id": "forged-command-project",
         }
     }
-    assert captured.kwargs["interrupt_before"] == "*"
-    assert captured.kwargs["interrupt_after"] == ["after-agent"]
-    assert captured.kwargs["stream_mode"] == ["values"]
-    assert captured.kwargs["stream_subgraphs"] is False
+    assert set(captured.kwargs) == {"input", "config", "command"}
     assert captured_server_context is None
     assert record.run_id == run_id
     assert record.status is RunStatus.pending
@@ -154,7 +144,7 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
     assert record.store_only is True
     assert record.scope == context.resource_scope
 
-    await services.start_private_run(
+    await http_runtime.start_private_run(
         body,
         "private-thread",
         SimpleNamespace(),
@@ -167,7 +157,7 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
     assert "project_id" not in captured.kwargs["config"]["context"]
     assert isinstance(
         captured_server_context,
-        services.PrivateRunAdmissionServerContext,
+        PrivateRunAdmissionServerContext,
     )
     assert captured_server_context.non_interactive is True
 
@@ -177,7 +167,7 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
 async def test_gateway_db_worker_preserves_command_state_payload(
     migrated_postgres_database_url: str,
 ) -> None:
-    from app.gateway import services
+    from app.private_work.http_runtime import start_private_run
 
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     thread_id = f"m6-command-fidelity-{uuid.uuid4()}"
@@ -226,7 +216,7 @@ async def test_gateway_db_worker_preserves_command_state_payload(
             interrupt_before=[],
             interrupt_after=[],
         )
-        record = await services.start_private_run(
+        record = await start_private_run(
             body,
             thread_id,
             SimpleNamespace(),

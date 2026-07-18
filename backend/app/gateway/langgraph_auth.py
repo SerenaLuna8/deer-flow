@@ -1,9 +1,9 @@
-"""LangGraph compatibility auth handler — shares JWT logic with Gateway.
+"""Development-only LangGraph tooling auth — shares JWT logic with Gateway.
 
-The default DeerFlow runtime is embedded in the FastAPI Gateway; scripts and
-Docker deployments do not load this module.  It is retained for LangGraph
-tooling, Studio, or direct LangGraph Server compatibility through
-``langgraph.json``'s ``auth.path``.
+Gateway, local launchers, Docker, and production deployments do not load this
+module. It remains only for explicit LangGraph Studio/direct-server tooling
+through ``langgraph.json``'s ``auth.path``; it is not a project-private HTTP
+authority or a production runtime entry point.
 
 When that compatibility path is used, this module reuses the same JWT and CSRF
 rules as Gateway so both modes validate sessions consistently.

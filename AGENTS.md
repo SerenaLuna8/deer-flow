@@ -27,13 +27,13 @@ A single `make dev` / Docker stack runs four cooperating services:
 | Service         | Port   | Role                                                                 |
 | --------------- | ------ | ------------------------------------------------------------------- |
 | **Nginx**       | `2026` | Unified reverse-proxy entry point — open this in the browser        |
-| **Gateway API** | `8001` | FastAPI REST API + embedded LangGraph-compatible agent runtime      |
+| **Gateway API** | `8001` | FastAPI project/account/admin REST API                              |
 | **Frontend**    | `3000` | Next.js web interface                                               |
 | **Provisioner** | `8002` | Optional — only when sandbox is configured for provisioner/K8s mode |
 
-Nginx is the single public entry: it serves the frontend and proxies `/api/langgraph/*`
-to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all
-other `/api/*` go straight to the Gateway REST routers. See
+Nginx is the single public entry: it serves the frontend and proxies `/api/*`
+directly to Gateway REST routers. Project Run admission is Gateway-owned, while
+execution remains Worker-only. See
 [backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail.
 
 ## Repository Map
@@ -118,6 +118,12 @@ builtin principal 只写 PostgreSQL published system Agent/Skill/MCP rows，不�
 PostgreSQL provider。运行期 Skill/MCP 只来自 admission 持久化的 exact snapshot 与 run-local
 read-only materialization；repo/user/custom/extensions scan、archive install、`skill_manage` 文件 mutation
 以及 `/api/agents`、`/api/skills`、`/api/mcp/config`、`/api/features` 已删除。M7 仍未整体完成。
+
+M7 Task 3 已删除 Gateway global Thread/Run/Memory/upload/artifact/feedback HTTP surface、
+in-process agent runtime、orphan Thread startup migration 和 `/api/langgraph/*` rewrite。
+Gateway 只初始化 project-scoped checkpointer、PostgreSQL private Run/event stores 及
+quota/audit/asset/project services；`app.private_work.http_runtime` 只负责 project Run admission
+和 SSE frame formatting，执行仍由独立 Worker 完成。M7 仍未整体完成。
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks`; under final M6 cutover, `config.yaml -> scheduler.enabled` gates an independent Scheduler process rather than a Gateway lifespan task.

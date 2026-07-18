@@ -3,12 +3,12 @@
 **Getters** (used by routers): raise 503 when a required dependency is
 missing, except ``get_store`` which returns ``None``.
 
-``AppConfig`` is intentionally *not* cached on ``app.state``. Routers and the
-run path resolve it through :func:`deerflow.config.app_config.get_app_config`,
+``AppConfig`` is intentionally *not* cached on ``app.state``. Routers resolve
+it through :func:`deerflow.config.app_config.get_app_config`,
 which performs mtime-based hot reload, so edits to ``config.yaml`` take
 effect on the next request without a process restart. The engines created in
-:func:`langgraph_runtime` (stream bridge, persistence, checkpointer, store,
-run-event store) accept a ``startup_config`` snapshot — they are
+:func:`gateway_platform_runtime` (persistence, checkpointer, and store) accept
+a ``startup_config`` snapshot — they are
 restart-required by design and stay bound to that snapshot to keep the live
 process consistent with itself.
 
@@ -17,9 +17,7 @@ Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -47,134 +45,19 @@ from app.projects.context import resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
-from deerflow.runtime import RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 logger = logging.getLogger(__name__)
 
-# Upper bound (seconds) for draining in-flight runs during shutdown, before the
-# AsyncExitStack tears down the checkpointer (and its connection pool). Kept
-# local to avoid an app -> deps -> app import cycle. This is a *separate* budget
-# from ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS`` (currently also 5.0s,
-# which bounds channel-service stop): the two govern independent teardown steps
-# and may diverge, but both count toward the lifespan shutdown window — revisit
-# them together if their sum must stay within the server's graceful-shutdown
-# timeout.
-_RUN_DRAIN_TIMEOUT_SECONDS = 5.0
-
-
-def _should_reconcile_orphaned_runs() -> bool:
-    """Return whether startup recovery is safe for the configured worker count.
-
-    Every supported launcher passes ``GATEWAY_WORKERS`` to both uvicorn's
-    explicit ``--workers`` argument and the application environment. Invalid
-    or non-positive values are treated conservatively as multi-worker/unknown.
-    """
-    raw_workers = os.getenv("GATEWAY_WORKERS", "1")
-    try:
-        return int(raw_workers) == 1
-    except ValueError:
-        return False
-
-
-async def _drain_inflight_runs(run_manager: RunManager) -> None:
-    """Drain in-flight runs before the checkpointer is torn down (issue #3373).
-
-    Shields the (internally-bounded) drain so that even if the lifespan
-    coroutine is itself cancelled mid-shutdown — a second SIGINT or the server's
-    graceful-shutdown timeout, i.e. the same signal storm behind #3373 — the
-    checkpointer pool is not closed while run tasks are still writing
-    checkpoints. On such a cancellation we let the already-running drain finish
-    (it is bounded by ``RunManager.shutdown``'s own timeout) and then propagate
-    the cancellation.
-    """
-    drain = asyncio.create_task(run_manager.shutdown(timeout=_RUN_DRAIN_TIMEOUT_SECONDS))
-    try:
-        await asyncio.shield(drain)
-    except asyncio.CancelledError:
-        # Re-shield so this second wait does not abandon the in-flight drain;
-        # it is bounded, so this cannot hang. Then re-raise to honour shutdown.
-        try:
-            await asyncio.shield(drain)
-        except Exception:
-            logger.exception("In-flight run drain failed after shutdown cancellation")
-        raise
-    except Exception:
-        logger.exception("Failed to drain in-flight runs during shutdown")
-
-
-async def _publish_recovered_run_stream_end(
-    bridge: StreamBridge,
-    recovered_runs: list[RunRecord],
-    *,
-    cleanup_delay: float = 60.0,
-) -> None:
-    """Terminate retained streams for runs recovered as orphaned at startup."""
-    for record in recovered_runs:
-        stream_exists = getattr(bridge, "stream_exists", None)
-        if stream_exists is not None:
-            try:
-                if not await stream_exists(record.run_id):
-                    logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
-                    continue
-            except Exception:
-                logger.debug("Failed to check recovered stream existence for %s", record.run_id, exc_info=True)
-        try:
-            await bridge.publish_end(record.run_id)
-        except Exception:
-            logger.warning(
-                "Failed to publish recovered run stream end for %s",
-                record.run_id,
-                exc_info=True,
-            )
-            continue
-        task = asyncio.create_task(bridge.cleanup(record.run_id, delay=cleanup_delay))
-        task.add_done_callback(lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(task, run_id))
-
-
-def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) -> None:
-    if task.cancelled():
-        return
-    try:
-        task.result()
-    except Exception:
-        logger.warning("Failed to clean up recovered run stream for %s", run_id, exc_info=True)
-
-
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sql import SQLUserRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
-    from deerflow.runtime import RunRecord
 
 
 T = TypeVar("T")
-
-
-async def _mark_latest_recovered_threads_error(
-    run_manager: RunManager,
-    thread_store: ThreadMetaStore,
-    recovered_runs: list[RunRecord],
-) -> None:
-    """Mark thread status as error only when its newest run was recovered."""
-    recovered_by_thread: dict[str, set[str]] = {}
-    for record in recovered_runs:
-        recovered_by_thread.setdefault(record.thread_id, set()).add(record.run_id)
-
-    for thread_id, recovered_run_ids in recovered_by_thread.items():
-        try:
-            latest_runs = await run_manager.list_by_thread(thread_id, user_id=None, limit=1)
-        except Exception:
-            logger.warning("Failed to find latest run for thread %s during run reconciliation", thread_id, exc_info=True)
-            continue
-        if not latest_runs or latest_runs[0].run_id not in recovered_run_ids:
-            continue
-        try:
-            await thread_store.update_status(thread_id, "error", user_id=None)
-        except Exception:
-            logger.warning("Failed to mark thread %s as error during run reconciliation", thread_id, exc_info=True)
 
 
 def get_config() -> AppConfig:
@@ -185,7 +68,7 @@ def get_config() -> AppConfig:
     disk when its mtime changes. ``AppConfig`` is not cached on ``app.state``
     at all — the only startup-time snapshot lives as a local
     ``startup_config`` variable inside ``lifespan()`` and is passed
-    explicitly into :func:`langgraph_runtime` for the engines that are
+    explicitly into :func:`gateway_platform_runtime` for the engines that are
     restart-required by design. Routing every request through
     :func:`get_app_config` closes the bytedance/deer-flow issue #3107 BUG-001
     split-brain where the worker / lead-agent thread saw a stale startup
@@ -233,28 +116,24 @@ async def project_session() -> AsyncIterator[AsyncSession]:
 
 
 @asynccontextmanager
-async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGenerator[None, None]:
-    """Bootstrap and tear down all LangGraph runtime singletons.
+async def gateway_platform_runtime(
+    app: FastAPI,
+    startup_config: AppConfig,
+) -> AsyncGenerator[None, None]:
+    """Bootstrap the project-scoped Gateway platform services.
 
     ``startup_config`` is the ``AppConfig`` snapshot taken once during
     ``lifespan()`` for one-shot infrastructure bootstrap. The engines and
-    stores constructed here (stream bridge, persistence engine, checkpointer,
-    store, run-event store) are restart-required by design — they hold live
+    stores constructed here (persistence engine, checkpointer, and store) are
+    restart-required by design — they hold live
     connections, file handles, or singleton providers — so they bind to this
     snapshot and survive across `config.yaml` edits. Request-time consumers
     must still go through :func:`get_config` for any field that should be
     hot-reloadable. See ``backend/CLAUDE.md`` "Config Hot-Reload Boundary".
 
-    The matching ``run_events_config`` is frozen onto ``app.state`` so
-    :func:`get_run_context` pairs a freshly-loaded ``AppConfig`` with the
-    *startup-time* run-events configuration the underlying ``event_store``
-    was built from — otherwise the runtime could end up combining a live
-    new ``run_events_config`` with an event store still bound to the
-    previous backend.
-
     Usage in ``app.py``::
 
-        async with langgraph_runtime(app, startup_config):
+        async with gateway_platform_runtime(app, startup_config):
             yield
     """
     from deerflow.persistence.engine import (
@@ -262,14 +141,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         get_session_factory,
         init_engine_from_config,
     )
-    from deerflow.runtime import make_store, make_stream_bridge
+    from deerflow.runtime import make_store
     from deerflow.runtime.checkpointer.async_provider import make_checkpointer
-    from deerflow.runtime.events.store import make_run_event_store
 
     async with AsyncExitStack() as stack:
         config = startup_config
-
-        app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
 
         # Initialize and probe PostgreSQL before opening checkpointer/store pools.
         await init_engine_from_config(config.database)
@@ -359,26 +235,6 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_store = RunRepository(sf)
         app.state.feedback_repo = FeedbackRepository(sf)
 
-        from deerflow.persistence.thread_meta import make_thread_store
-
-        app.state.thread_store = make_thread_store(sf)
-        # The final M5 repositories remain project+owner scoped. Legacy HTTP
-        # receives a separate read-only projection so expand/cutover
-        # compatibility cannot regain mutation, lease, or dispatch authority.
-        from app.automations.legacy_reads import LegacyAutomationReadAdapter
-
-        legacy_automation_reads = LegacyAutomationReadAdapter(sf)
-        app.state.scheduled_task_repo = legacy_automation_reads
-        app.state.scheduled_task_run_repo = legacy_automation_reads
-
-        async def close_legacy_automation_reads() -> None:
-            await legacy_automation_reads.aclose()
-            if getattr(app.state, "scheduled_task_repo", None) is legacy_automation_reads:
-                app.state.scheduled_task_repo = None
-            if getattr(app.state, "scheduled_task_run_repo", None) is legacy_automation_reads:
-                app.state.scheduled_task_run_repo = None
-
-        stack.push_async_callback(close_legacy_automation_reads)
         from app.automations.cutover import AutomationCutoverGuard
         from app.automations.dispatcher import AutomationDispatcher
         from app.automations.occurrences import AutomationOccurrenceService
@@ -409,19 +265,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         )
         app.state.automation_scheduler_enabled = effective_scheduler_config.enabled
 
-        # Legacy run event store. The store and the matching
-        # ``run_events_config`` are both frozen at startup so
-        # ``get_run_context`` does not combine a freshly-reloaded
-        # ``AppConfig.run_events`` with a store still bound to the previous
-        # backend.
         run_events_config = getattr(config, "run_events", None)
-        app.state.run_events_config = run_events_config
-        app.state.run_event_store = make_run_event_store(run_events_config)
-
-        # Project-private chat history must survive gateway restarts even when
-        # the legacy/default run-event backend is configured as in-memory.
-        # Keep the legacy store configurable while binding the project API to
-        # the same PostgreSQL session factory as the rest of private work.
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         app.state.private_run_event_store = DbRunEventStore(
@@ -430,39 +274,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         )
         from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
 
-        # Project-private streams are durable and cross-process. Keep the
-        # configurable legacy bridge for legacy routes only.
         app.state.private_stream_bridge = PostgresStreamBridge(sf)
-
-        # RunManager with store backing for persistence
-        app.state.run_manager = RunManager(store=app.state.run_store)
-        if _should_reconcile_orphaned_runs():
-            from deerflow.utils.time import now_iso
-
-            # Without worker ownership/leases, startup recovery is safe only
-            # when this process is the sole worker.
-            recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
-                error="Gateway restarted before this run reached a durable final state.",
-                before=now_iso(),
-            )
-            sb_config = getattr(config, "stream_bridge", None)
-            cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
-            await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
-            await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
-        else:
-            logger.warning("Skipping startup orphan-run recovery because the effective worker count is not exactly 1 and runs have no cross-worker ownership lease")
-
-        try:
-            yield
-        finally:
-            # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
-            # checkpointer (and its connection pool). A run still mid-graph would
-            # otherwise leak into asyncio.run() shutdown, where langgraph's
-            # _checkpointer_put_after_previous aput races the closed pool and
-            # raises PoolClosed (issue #3373).
-            run_manager = getattr(app.state, "run_manager", None)
-            if run_manager is not None:
-                await _drain_inflight_runs(run_manager)
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -483,8 +296,8 @@ def _require(attr: str, label: str) -> Callable[[Request], T]:
     return dep
 
 
-get_stream_bridge: Callable[[Request], StreamBridge] = _require("stream_bridge", "Stream bridge")
-get_run_manager: Callable[[Request], RunManager] = _require("run_manager", "Run manager")
+get_stream_bridge: Callable[[Request], object] = _require("stream_bridge", "Stream bridge")
+get_run_manager: Callable[[Request], object] = _require("run_manager", "Run manager")
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_private_run_event_store: Callable[[Request], RunEventStore] = _require(
     "private_run_event_store",
@@ -647,27 +460,6 @@ def get_scheduled_task_service(request: Request):
     if val is None:
         raise HTTPException(status_code=503, detail="Scheduled task service not available")
     return val
-
-
-def get_run_context(request: Request) -> RunContext:
-    """Build a :class:`RunContext` from ``app.state`` singletons.
-
-    Returns a *base* context with infrastructure dependencies. The
-    ``app_config`` field is resolved live so per-run fields (e.g.
-    ``models[*].max_tokens``) follow ``config.yaml`` edits; the
-    ``event_store`` / ``run_events_config`` pair stays frozen to the snapshot
-    captured in :func:`langgraph_runtime` so callers never see a store bound
-    to one backend paired with a config pointing at another.
-    """
-    return RunContext(
-        checkpointer=get_checkpointer(request),
-        store=get_store(request),
-        event_store=get_run_event_store(request),
-        run_events_config=getattr(request.app.state, "run_events_config", None),
-        thread_store=get_thread_store(request),
-        app_config=get_config(),
-        on_run_completed=None,
-    )
 
 
 # ---------------------------------------------------------------------------

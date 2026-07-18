@@ -1,6 +1,4 @@
 from . import (
-    artifacts,
-    assistants_compat,
     input_polish,
     models,
     project_automations,
@@ -9,15 +7,9 @@ from . import (
     project_members,
     projects,
     scheduled_tasks,
-    suggestions,
-    thread_runs,
-    threads,
-    uploads,
 )
 
 __all__ = [
-    "artifacts",
-    "assistants_compat",
     "input_polish",
     "models",
     "project_invitations",
@@ -26,8 +18,4 @@ __all__ = [
     "project_automations",
     "projects",
     "scheduled_tasks",
-    "suggestions",
-    "threads",
-    "thread_runs",
-    "uploads",
 ]

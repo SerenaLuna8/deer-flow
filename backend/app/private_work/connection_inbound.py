@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -16,6 +17,11 @@ from app.private_work.errors import (
     PrivateWorkInvalid,
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
+)
+from app.private_work.http_runtime import start_private_run
+from app.private_work.run_service import (
+    TERMINAL_PRIVATE_RUN_STATUSES,
+    PrivateRunService,
 )
 from app.private_work.thread_repository import ThreadAgentRef
 from app.projects.context import resolve_project_context
@@ -139,22 +145,15 @@ def build_gateway_project_run_launcher(
     *,
     app: Any,
     start_private_run_fn: Callable[..., Awaitable[Any]] | None = None,
-    wait_for_completion_fn: Callable[..., Awaitable[bool]] | None = None,
 ) -> ProjectInboundRunLauncher:
     """Build the in-process Gateway launcher used by project-bound IM text."""
 
-    from app.gateway import services as gateway_services
     from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
-    from app.gateway.deps import (
-        get_project_checkpointer,
-        get_run_manager,
-        get_stream_bridge,
-    )
+    from app.gateway.deps import get_project_checkpointer
     from app.gateway.internal_auth import get_internal_user
     from deerflow.runtime import serialize_channel_values_for_api
 
-    private_start = start_private_run_fn or gateway_services.start_private_run
-    wait_for_completion = wait_for_completion_fn or gateway_services.wait_for_run_completion
+    private_start = start_private_run_fn or start_private_run
 
     async def launch(
         context: PrivateWorkContext,
@@ -191,30 +190,21 @@ def build_gateway_project_run_launcher(
                 "channel_name": message.channel_name,
                 "channel_user_id": message.user_id,
             },
-            webhook=None,
-            checkpoint_id=None,
-            checkpoint=None,
-            interrupt_before=None,
-            interrupt_after=None,
-            stream_mode=None,
-            stream_subgraphs=False,
-            stream_resumable=None,
-            on_disconnect="continue",
-            on_completion="keep",
             multitask_strategy="reject",
-            after_seconds=None,
-            if_not_exists="reject",
-            feedback_keys=None,
         )
         record = await private_start(body, thread_id, request, context)
-        completed = await wait_for_completion(
-            get_stream_bridge(request),
-            record,
-            request,
-            get_run_manager(request),
-        )
-        if not completed:
+        service = getattr(app.state, "private_run_service", None)
+        if not isinstance(service, PrivateRunService):
             raise PrivateWorkUnavailable(context.request_id)
+        while True:
+            durable = await service.get(
+                context,
+                thread_id,
+                record.run_id,
+            )
+            if durable.status in TERMINAL_PRIVATE_RUN_STATUSES:
+                break
+            await asyncio.sleep(0.1)
 
         checkpointer = get_project_checkpointer(request, context)
         checkpoint_tuple = await checkpointer.aget_tuple(

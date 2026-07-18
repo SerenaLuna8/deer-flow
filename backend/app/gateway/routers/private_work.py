@@ -16,20 +16,19 @@ from fastapi import (
     UploadFile,
     status,
 )
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import Field
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
 from app.gateway.deps import private_work_context, project_session, require_project_private_open
 from app.gateway.private_work_schemas import (
+    PrivateRunCreateRequest,
+    PrivateThreadTokenUsageResponse,
     PrivateWorkRoute,
     StrictPrivateWorkRequest,
     StrictPrivateWorkResponse,
-    strip_client_authority_fields,
 )
-from app.gateway.routers.thread_runs import RunCreateRequest, ThreadTokenUsageResponse
-from app.gateway.services import format_sse, start_private_run
 from app.private_work.checkpointer import (
     PRIVATE_SCOPE_MARKER,
     ProjectScopedCheckpointer,
@@ -48,6 +47,7 @@ from app.private_work.file_streaming import (
     PrivateFileStreamer,
     private_streaming_response,
 )
+from app.private_work.http_runtime import format_sse, start_private_run
 from app.private_work.readiness_service import (
     PrivateWorkReadinessService,
     ReadinessStatus,
@@ -134,18 +134,6 @@ class PrivateThreadStateResponse(StrictPrivateWorkResponse):
     parent_checkpoint_id: str | None = None
     created_at: str | None = None
     tasks: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class PrivateRunCreateRequest(RunCreateRequest):
-    model_config = ConfigDict(extra="forbid")
-
-    @model_validator(mode="after")
-    def strip_nested_client_authority(self) -> PrivateRunCreateRequest:
-        for field_name in ("metadata", "config", "context"):
-            value = getattr(self, field_name)
-            if isinstance(value, Mapping):
-                setattr(self, field_name, strip_client_authority_fields(value))
-        return self
 
 
 class PrivateRunResponse(StrictPrivateWorkResponse):
@@ -1082,14 +1070,14 @@ async def list_private_thread_events(
 
 @router.get(
     "/threads/{thread_id}/token-usage",
-    response_model=ThreadTokenUsageResponse,
+    response_model=PrivateThreadTokenUsageResponse,
 )
 async def private_thread_token_usage(
     thread_id: uuid.UUID,
     request: Request,
     include_active: bool = Query(default=False),
     context: PrivateWorkContext = Depends(private_work_context),
-) -> ThreadTokenUsageResponse:
+) -> PrivateThreadTokenUsageResponse:
     try:
         await _run_service(request, context.request_id).list(
             context,
@@ -1107,7 +1095,7 @@ async def private_thread_token_usage(
         )
     except PrivateWorkError as error:
         _raise_http(error)
-    return ThreadTokenUsageResponse(thread_id=str(thread_id), **aggregate)
+    return PrivateThreadTokenUsageResponse(thread_id=str(thread_id), **aggregate)
 
 
 @router.post(

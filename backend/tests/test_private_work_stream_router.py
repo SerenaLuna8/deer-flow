@@ -118,10 +118,6 @@ async def test_stream_run_uses_private_launcher_and_durable_sse_consumer_once(
                     "project_id": "payload-project",
                 }
             },
-            "checkpoint": {
-                "checkpoint_id": "payload-checkpoint",
-                "owner_user_id": "payload-owner",
-            },
             "metadata": {"safe": "value", "project_id": "forged"},
             "config": {
                 "context": {
@@ -151,10 +147,6 @@ async def test_stream_run_uses_private_launcher_and_durable_sse_consumer_once(
         "owner_user_id": "forged",
     }
     assert body.command == {"resume": {"role": "tool", "project_id": "payload-project"}}
-    assert body.checkpoint == {
-        "checkpoint_id": "payload-checkpoint",
-        "owner_user_id": "payload-owner",
-    }
     assert body.metadata == {"safe": "value"}
     assert body.config == {"context": {"thinking_enabled": True}}
     assert body.context == {"thinking_enabled": False}
@@ -261,7 +253,7 @@ async def test_durable_consumer_drains_next_page_before_terminal_fallback() -> N
     ]
 
     assert len(chunks) == 101
-    assert chunks[-1].endswith("id: 101\n\n")
+    assert chunks[-1].startswith("id: 101\n")
     bridge.read_after.assert_awaited_once_with(
         context.resource_scope,
         thread_id,
@@ -333,8 +325,8 @@ async def test_durable_consumer_waits_for_settlement_and_corrects_terminal(
     ]
 
     assert len(chunks) == 1
-    assert 'data: {"status": "interrupted"}' in chunks[0]
-    assert 'data: {"status": "success"}' not in chunks[0]
+    assert 'data: {"status":"interrupted"}' in chunks[0]
+    assert 'data: {"status":"success"}' not in chunks[0]
     bridge.read_after.assert_not_awaited()
     bridge.ensure_settled_terminal.assert_awaited_once_with(
         context.resource_scope,

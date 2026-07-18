@@ -222,10 +222,6 @@ async def test_start_run_strips_nested_authority_and_serializes_no_private_coord
                     "project_id": "payload-project",
                 }
             },
-            "checkpoint": {
-                "checkpoint_id": "payload-checkpoint",
-                "owner_user_id": "payload-owner",
-            },
             "metadata": {"safe": "value", "project_id": "forged"},
             "config": {"context": {"membership_id": "forged", "thinking_enabled": True}},
             "context": {"user_id": "forged", "thinking_enabled": False},
@@ -239,10 +235,6 @@ async def test_start_run_strips_nested_authority_and_serializes_no_private_coord
         "owner_user_id": "forged",
     }
     assert body.command == {"resume": {"role": "tool", "project_id": "payload-project"}}
-    assert body.checkpoint == {
-        "checkpoint_id": "payload-checkpoint",
-        "owner_user_id": "payload-owner",
-    }
     assert body.metadata == {"safe": "value"}
     assert body.config == {"context": {"thinking_enabled": True}}
     assert body.context == {"thinking_enabled": False}
