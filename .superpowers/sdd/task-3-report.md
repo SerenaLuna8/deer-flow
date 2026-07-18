@@ -201,7 +201,7 @@ Gateway embedded-runtime wording scan: zero hits
 
 ### Status
 
-Task 3 direct scope PASS in implementation commit `cf8b7651` (`fix: finish M7 task 3 review repair`). The required complete backend execution was actually run and is not globally green because 126 remaining failure candidates belong to later M7 tasks. No later-task production code was repaired, Task 4 was not started, and `.superpowers/sdd/progress.md` remains unchanged.
+Task 3 direct scope PASS in implementation commits `cf8b7651` and `523bf5ee`. The required complete backend execution was actually run and is not globally green because 124 remaining failure candidates belong to later M7 tasks. No later-task production code was repaired, Task 4 was not started, and `.superpowers/sdd/progress.md` remains unchanged.
 
 ### Findings closed
 
@@ -271,16 +271,16 @@ The two setup errors were:
 
 Both attempt to downgrade the forward-only `0015_project_reliability_finalize` migration to `0011_private_artifact_tombstone`. Per the frozen instruction, no open-ended repair was made.
 
-An initial `pytest --lf --collect-only -q` selected 139 nodes and identified 13 direct Task 3 stale contracts. After repairing only those, their focused files passed and the same command selected 126 remaining nodes:
+An initial `pytest --lf --collect-only -q` selected 139 nodes and identified 13 direct Task 3 stale contracts. After repairing those, the next 126-node snapshot was originally misclassified: two compact-SSE assertion failures belonged to Task 3 rather than Task 2. The corrected snapshot classification was Task 2: 60, Task 3: 2, Task 4: 2, Task 5: 3, Task 7: 3, and Task 8: 56. After closing the two Task 3 SSE nodes, the same command selected 124 remaining later-task nodes:
 
 ```text
-126/522 tests collected (396 deselected) in 1.25s
+124/520 tests collected (396 deselected) in 1.24s
 ```
 
 Remaining-node classification:
 
 - Task 3 deleted global runtime/direct stale imports: **0**
-- Task 2 deterministic system assets and removed filesystem authority: **62**
+- Task 2 deterministic system assets and removed filesystem authority: **60**
 - Task 4 legacy Automation API/read surface: **2**
 - Task 5 channel authority: **3**
 - Task 7 legacy config/fallback stores: **3**
@@ -352,8 +352,6 @@ tests/test_m5_automation_schema_postgres.py::test_m5_final_schema_has_private_sc
 tests/test_m5_automation_schema_postgres.py::test_fresh_and_staged_m5_catalogs_are_identical
 tests/test_m5_automation_schema_postgres.py::test_nonempty_automation_domain_fails_before_finalize_ddl
 tests/test_m5_automation_schema_postgres.py::test_cross_project_agent_fails_finalize_before_destructive_ddl
-tests/test_m6_private_sse_reconnect_postgres.py::test_replays_only_frames_after_last_event_id_across_gateway_restart
-tests/test_m6_private_sse_reconnect_postgres.py::test_replay_corrects_provisional_success_when_cancel_wins_settlement
 tests/test_mcp_custom_interceptors.py::test_custom_interceptor_loaded_and_appended
 tests/test_mcp_custom_interceptors.py::test_multiple_custom_interceptors
 tests/test_mcp_custom_interceptors.py::test_custom_interceptor_builder_returning_none_is_skipped
@@ -429,4 +427,34 @@ Deleted Gateway service import scan: only the intentional source-absence asserti
 Old services.py::start_run and Gateway-owned run wording scan: zero hits
 ```
 
-The complete suite was not rerun after deleting the 13 direct stale tests because the frozen instruction required recording and stopping on unrelated later-task failures. Focused Task 3 gates, complete collection, static checks, and the exact remaining-node audit were rerun after that cleanup.
+The complete suite was not rerun after deleting the 13 direct stale tests or closing the two SSE assertions because the frozen instructions explicitly excluded another complete execution. Focused Task 3 gates, static checks, and the exact remaining-node audit were rerun after the cleanup.
+
+## Third frozen review micro-repair (2026-07-18)
+
+Implementation commit: `523bf5ee` (`fix: finish M7 task 3 SSE review`).
+
+- Replaced two whitespace-sensitive SSE `data:` substring assertions with semantic JSON payload parsing. Production `format_sse` remains unchanged and compact.
+- Updated current architecture guidance to remove the deleted global Thread/409/`get_checkpointer` model and describe admission-only Gateway plus Worker-local `RunManager` execution.
+- Updated the Gateway runtime-cleanup module description to state that Gateway has no embedded agent runtime.
+
+TDD evidence:
+
+```text
+RED:   2 failed in 1.21s
+GREEN: 2 passed in 1.18s
+Final after format: 2 passed, 0 skipped in 1.21s
+```
+
+Final gates:
+
+```text
+Task 3 affected PostgreSQL + scheduled/OpenAPI: 66 passed, 0 skipped, 1 warning in 10.00s
+Blocking-I/O: 9 passed in 0.46s
+Lastfailed audit: 124/520 tests collected, 396 deselected in 1.24s
+Ruff check: All checks passed for 2 modified Python files
+Ruff format: 2 files already formatted
+git diff --check: passed
+Current-style Gateway/SSE residue scans: zero hits
+```
+
+`.superpowers/sdd/progress.md` remains unchanged, and Task 4 has not started.
