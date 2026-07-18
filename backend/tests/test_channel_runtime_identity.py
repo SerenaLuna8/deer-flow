@@ -39,6 +39,9 @@ def test_channel_launcher_imports_only_project_private_http_runtime() -> None:
     assert "app.gateway.services" not in source
     assert "get_run_manager" not in source
     assert "get_stream_bridge" not in source
+    assert "default_project" not in source
+    assert "recent_project" not in source
+    assert "unique_membership" not in source
 
 
 @pytest.mark.asyncio

@@ -283,7 +283,6 @@ class RunSnapshotRepository:
             raise PrivateWorkConflict(context.request_id)
         _reject_secret_bearing_keys(request.metadata, context.request_id)
         _reject_secret_bearing_keys(request.kwargs, context.request_id)
-        project_id = context.project_id
         safe_request = replace(
             request,
             assistant_id=str(resolved_agent.asset_id),
@@ -291,22 +290,11 @@ class RunSnapshotRepository:
             multitask_strategy="reject",
             model_name=resolved_agent.payload.model_ref,
         )
-        await self._agent(session, resolved_agent, project_id)
-        await self._validate_dependency_order(session, resolved_agent)
-        skills = await self._skills(
+        skills, mcps, closures = await self.validate_agent_closure_in_session(
             session,
-            resolved_agent.payload.skill_version_ids,
-            project_id,
+            context,
+            resolved_agent,
         )
-        mcps = await self._mcps(
-            session,
-            resolved_agent.payload.mcp_version_ids,
-            project_id,
-        )
-        closures = await self._credential_closures(session, mcps)
-        generation = await session.scalar(select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1).with_for_update())
-        if generation != resolved_agent.catalog_generation:
-            raise RunSnapshotAssetStale
         run = await PrivateRunRepository(session).create(
             scope=context.resource_scope,
             thread_id=thread_id,
@@ -379,6 +367,44 @@ class RunSnapshotRepository:
         )
         await session.flush()
         return run
+
+    async def validate_agent_closure_in_session(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        resolved_agent: ResolvedAgentSnapshot,
+    ) -> tuple[
+        list[tuple[SkillRow, SkillVersionRow]],
+        list[tuple[McpServerRow, McpServerVersionRow]],
+        dict[uuid.UUID, LockedMcpCredentialClosure],
+    ]:
+        """Lock and validate an Agent plus its exact credential-grant closure."""
+
+        context = require_issued_private_work_context(context)
+        if not isinstance(session, AsyncSession) or not session.in_transaction():
+            raise RunSnapshotAssetStale
+        if type(resolved_agent) is not ResolvedAgentSnapshot:
+            raise RunSnapshotAssetStale
+        if resolved_agent.kind is not AssetKind.AGENT or resolved_agent.catalog_generation < 0:
+            raise RunSnapshotAssetStale
+        project_id = context.project_id
+        await self._agent(session, resolved_agent, project_id)
+        await self._validate_dependency_order(session, resolved_agent)
+        skills = await self._skills(
+            session,
+            resolved_agent.payload.skill_version_ids,
+            project_id,
+        )
+        mcps = await self._mcps(
+            session,
+            resolved_agent.payload.mcp_version_ids,
+            project_id,
+        )
+        closures = await self._credential_closures(session, mcps)
+        generation = await session.scalar(select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1).with_for_update())
+        if generation != resolved_agent.catalog_generation:
+            raise RunSnapshotAssetStale
+        return skills, mcps, closures
 
     async def list_assets(
         self,

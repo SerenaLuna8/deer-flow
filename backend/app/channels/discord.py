@@ -478,7 +478,6 @@ class DiscordChannel(Channel):
             repo=self._connection_repo,
             provider="discord",
             workspace_id=guild_id,
-            fallback_without_workspace=True,
         )
 
     async def _bind_connection_from_connect_code(self, message, code: str) -> bool:

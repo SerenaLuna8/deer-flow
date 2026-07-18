@@ -119,6 +119,7 @@ const overview: OperationsOverviewData = {
     { dimension: "concurrent_runs", used: 0, reserved: 1 },
     { dimension: "mcp_calls_daily", used: 3, reserved: 0 },
   ],
+  channel_providers: [],
 };
 
 const projects: AdminProjectPage = {
@@ -328,6 +329,7 @@ describe("M6 system operations console", () => {
       data_status: "unavailable",
       counts: null,
       usage: null,
+      channel_providers: [],
     };
 
     expect(operationsOverviewSchema.parse(closedOverview)).toEqual(

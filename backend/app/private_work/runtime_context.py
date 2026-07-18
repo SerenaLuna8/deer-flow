@@ -13,6 +13,8 @@ _AUTHORITY_KEYS = frozenset(
     {
         "capability",
         "capabilities",
+        "account",
+        "account_id",
         "agent",
         "agent_asset_id",
         "agent_id",
@@ -24,6 +26,8 @@ _AUTHORITY_KEYS = frozenset(
         "available_skills",
         "channel_name",
         "channel_user_id",
+        "connection",
+        "connection_id",
         "is_bootstrap",
         "is_plan_mode",
         "file_authority",

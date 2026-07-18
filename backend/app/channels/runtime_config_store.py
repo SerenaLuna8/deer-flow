@@ -15,11 +15,11 @@ RUNTIME_CHANNEL_DISABLED_FLAG = "_runtime_disabled"
 
 
 class ChannelRuntimeConfigStore:
-    """JSON-backed store for channel credentials entered from the UI.
+    """Operator-managed JSON store for local channel process configuration.
 
-    This intentionally mirrors ``ChannelStore``: local/private deployments get
-    durable runtime configuration without needing a public callback URL or a
-    config.yaml edit.
+    Project APIs may read this bootstrap state to report provider availability,
+    but no HTTP route writes credentials into it. Task 7 owns removal of the
+    remaining local fallback store after configuration cutover.
     """
 
     def __init__(self, path: str | Path | None = None) -> None:

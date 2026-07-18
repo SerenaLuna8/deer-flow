@@ -44,6 +44,7 @@ class ProviderIdentity:
 class ResolvedInboundPrivateWork:
     """Authoritative private-work destination for one inbound conversation."""
 
+    account_id: uuid.UUID
     context: PrivateWorkContext
     connection_id: str
     thread_id: str
@@ -257,7 +258,7 @@ class ConnectionInboundResolver:
             external_account_id=provider_identity.external_account_id,
             workspace_id=provider_identity.workspace_id,
         )
-        connection_id, project_id, owner_user_id = self._connection_coordinates(
+        account_id, project_id, owner_user_id, connection_id = self._connection_coordinates(
             connection,
             request_id,
         )
@@ -277,6 +278,7 @@ class ConnectionInboundResolver:
             if not isinstance(thread_id, str) or not thread_id:
                 raise PrivateWorkInvalid(request_id)
             return ResolvedInboundPrivateWork(
+                account_id=account_id,
                 context=context,
                 connection_id=connection_id,
                 thread_id=thread_id,
@@ -305,6 +307,7 @@ class ConnectionInboundResolver:
             thread_id=thread_id,
         )
         return ResolvedInboundPrivateWork(
+            account_id=account_id,
             context=context,
             connection_id=connection_id,
             thread_id=thread_id,
@@ -325,18 +328,21 @@ class ConnectionInboundResolver:
     def _connection_coordinates(
         connection: Mapping[str, Any] | None,
         request_id: str,
-    ) -> tuple[str, uuid.UUID, uuid.UUID]:
+    ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, str]:
         if connection is None or connection.get("status") != "connected":
             raise PrivateWorkNotFound(request_id)
         connection_id = connection.get("id")
         if not isinstance(connection_id, str) or not connection_id:
             raise PrivateWorkNotFound(request_id)
         try:
+            account_id = uuid.UUID(str(connection["account_id"]))
             project_id = uuid.UUID(str(connection["project_id"]))
             owner_user_id = uuid.UUID(str(connection["owner_user_id"]))
         except (KeyError, TypeError, ValueError, AttributeError):
             raise PrivateWorkNotFound(request_id) from None
-        return connection_id, project_id, owner_user_id
+        if account_id != owner_user_id:
+            raise PrivateWorkNotFound(request_id)
+        return account_id, project_id, owner_user_id, connection_id
 
     async def _resolve_context(
         self,

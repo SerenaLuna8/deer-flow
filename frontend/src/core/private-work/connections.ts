@@ -33,6 +33,30 @@ const connectionsResponseSchema = z
   .object({ connections: z.array(connectionSchema) })
   .strict();
 
+const projectConnectionProviderSchema = z
+  .object({
+    provider: z.string().min(1),
+    display_name: z.string().min(1),
+    enabled: z.boolean(),
+    configured: z.boolean(),
+    connectable: z.boolean(),
+    unavailable_reason: z.string().nullable().optional(),
+    auth_mode: z.enum(["deep_link", "binding_code"]),
+    connection_status: z.string().min(1),
+  })
+  .strict();
+
+const projectConnectionProvidersResponseSchema = z
+  .object({
+    enabled: z.boolean(),
+    providers: z.array(projectConnectionProviderSchema),
+  })
+  .strict();
+
+export type ProjectConnectionProvider = z.infer<
+  typeof projectConnectionProviderSchema
+>;
+
 const connectResponseSchema = z
   .object({
     provider: z.string().min(1),
@@ -82,6 +106,27 @@ async function readResponse<T>(
 
 export function projectConnectionsQueryKey(scope: ProjectClientScope) {
   return privateWorkQueryKey(scope, "connections");
+}
+
+export function projectConnectionProvidersQueryKey(scope: ProjectClientScope) {
+  return privateWorkQueryKey(scope, "connection-providers");
+}
+
+export async function listProjectConnectionProviders(
+  access: ProjectConnectionAccess,
+  signal?: AbortSignal,
+): Promise<ProjectConnectionProvider[]> {
+  const response = await fetchWithAuth(
+    `${projectConnectionsBaseURL(access)}/providers`,
+    { signal },
+  );
+  return (
+    await readResponse(
+      response,
+      projectConnectionProvidersResponseSchema,
+      "Failed to load project connection providers",
+    )
+  ).providers;
 }
 
 export async function listProjectConnections(

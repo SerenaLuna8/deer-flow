@@ -2,7 +2,6 @@
 
 import {
   BellIcon,
-  CableIcon,
   InfoIcon,
   PaletteIcon,
   UserIcon,
@@ -19,7 +18,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { AboutSettingsPage } from "@/components/workspace/settings/about-settings-page";
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
-import { ChannelsSettingsPage } from "@/components/workspace/settings/channels-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import {
   SETTINGS_SECTION_IDS,
@@ -32,7 +30,6 @@ const settingsSectionIcons = {
   account: UserIcon,
   appearance: PaletteIcon,
   notification: BellIcon,
-  channels: CableIcon,
   about: InfoIcon,
 } as const;
 
@@ -104,7 +101,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "notification" && <NotificationSettingsPage />}
-              {activeSection === "channels" && <ChannelsSettingsPage />}
               {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>

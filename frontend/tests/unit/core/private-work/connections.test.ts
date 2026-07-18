@@ -5,6 +5,7 @@ import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import {
   connectProjectConnection,
   disconnectProjectConnection,
+  listProjectConnectionProviders,
   listProjectConnections,
   projectConnectionsQueryKey,
 } from "@/core/private-work/connections";
@@ -35,6 +36,34 @@ beforeEach(() => {
 });
 
 describe("project connection adapter", () => {
+  test("loads safe provider health from the exact project path", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        enabled: true,
+        providers: [
+          {
+            provider: "slack",
+            display_name: "Slack",
+            enabled: true,
+            configured: true,
+            connectable: true,
+            unavailable_reason: null,
+            auth_mode: "binding_code",
+            connection_status: "not_connected",
+          },
+        ],
+      }),
+    );
+
+    const providers = await listProjectConnectionProviders(access);
+
+    expect(providers.map((provider) => provider.provider)).toEqual(["slack"]);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/api/projects/${scope.projectId}/connections/providers`,
+      { signal: undefined },
+    );
+  });
+
   test("lists, connects, and disconnects only through exact project paths", async () => {
     mockedFetch
       .mockResolvedValueOnce(jsonResponse({ connections: [] }))

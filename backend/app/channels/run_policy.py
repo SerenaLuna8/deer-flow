@@ -61,8 +61,11 @@ class ChannelRunPolicy:
             per-sender ``/connect`` handshake — authenticity is enforced
             by HMAC at the webhook route, and the binding from "sender"
             to DeerFlow user is encoded in the agent's ``config.yaml``
-            ownership, not in the channel-connections table. Defaults to
-            True (the safe default for an interactive IM channel).
+            ownership, not in the channel-connections table. This exception is
+            only for an independently authenticated webhook path; interactive
+            IM inbound always resolves the exact PostgreSQL account, project,
+            owner, and connection tuple. Defaults to True (the safe default for
+            an interactive IM channel).
         fire_and_forget: When True, the manager schedules the run with
             ``runs.create`` (returns immediately once the run is
             ``pending``) instead of ``runs.wait`` (which keeps an HTTP

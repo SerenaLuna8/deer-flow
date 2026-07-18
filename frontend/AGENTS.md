@@ -135,9 +135,10 @@ Thread/file/artifact loaders 注入后启用，禁止回退到 legacy `/api/thre
 create/run/upload/branch 权限。Thread metadata 只有规范化 404/403 且 history/messages 为空时才显示
 公共 not-found，5xx 必须保留可用历史或显示可重试错误。项目 Memory 页面复用可注入的 workspace
 Memory view；query key 包含 account/project，Viewer 仅 list/export，不渲染 reload/import/update/delete。
-项目 Connections 复用 canonical channel provider metadata 和项目 Agent catalog；connect/disconnect 使用
-imperative API，连接临时状态在 `finally` 清除，不进入 TanStack mutation cache。当前 backend 未提供
-项目级 provider discovery、secret replace 或 rebind，前端不得借用 global channel endpoints 模拟这些能力。
+项目 Connections 从 `/api/projects/{project_id}/connections/providers` 读取服务端脱敏 provider
+availability，并复用项目 Agent catalog；connect/disconnect 使用 exact project imperative API，连接临时
+状态在 `finally` 清除，不进入 TanStack mutation cache。Frontend 不得借用已删除的 global channel
+endpoints，也不提供 secret replace 或 rebind。
 Chats、Memory 与 Connections 导航入口必须同时满足编译期 feature flag、服务端 readiness=ready 和
 `private_work.read_own`；新建或运行仍额外要求 `private_work.create` 和 `shared_assets.execute`。
 Viewer 仅 list/export/read/own-delete，不渲染 create/run/upload/connect 或 Memory mutation。项目或账号
@@ -203,7 +204,7 @@ SaaS 发布。
 
 ### Data Flow
 
-1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
+1. Project composer helpers such as `core/input-polish` can rewrite the local draft only through the active project's `/api/projects/{project_id}/private-work/input-polish`; missing project scope fails before fetch. Confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → the project-private streaming client
 2. Stream events update thread state (messages, artifacts, todos, goal)
 3. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
 4. TanStack Query manages server state; project private-work keys and reconnect metadata include

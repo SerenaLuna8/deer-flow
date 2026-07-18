@@ -89,6 +89,7 @@ def _connection(context, *, connection_id: str, agent_id: uuid.UUID | None) -> d
         }
     return {
         "id": connection_id,
+        "account_id": str(context.user_id),
         "project_id": str(context.project_id),
         "owner_user_id": str(context.user_id),
         "status": "connected",
@@ -276,6 +277,65 @@ async def test_resolver_rejects_non_connected_connection_before_private_work(
 
 @pytest.mark.asyncio
 @pytest.mark.postgres
+async def test_resolver_rejects_connection_account_owner_mismatch(
+    seed: M4ThreadSeed,
+) -> None:
+    repository = FakeConnectionRepository()
+    connection = _connection(
+        seed.owner_a,
+        connection_id="connection-a",
+        agent_id=seed.project_agent_id,
+    )
+    connection["account_id"] = str(seed.owner_b.user_id)
+    repository.connections[("slack", "external-a", "workspace-a")] = connection
+
+    with pytest.raises(PrivateWorkNotFound):
+        await _resolver(seed, repository, FakePrivateThreadService()).resolve(_identity())
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+@pytest.mark.parametrize("invalid_scope", ["removed-member", "deleted-project"])
+async def test_resolver_rejects_inactive_project_authority(
+    seed: M4ThreadSeed,
+    invalid_scope: str,
+) -> None:
+    repository = FakeConnectionRepository()
+    repository.connections[("slack", "external-a", "workspace-a")] = _connection(
+        seed.owner_a,
+        connection_id="connection-a",
+        agent_id=seed.project_agent_id,
+    )
+    async with seed.engine.begin() as connection:
+        if invalid_scope == "removed-member":
+            await connection.execute(
+                text(
+                    """UPDATE project_memberships
+                    SET status='removed', ended_at=now(), end_reason='removed'
+                    WHERE project_id=:project_id AND user_id=:user_id"""
+                ),
+                {
+                    "project_id": seed.owner_a.project_id,
+                    "user_id": str(seed.owner_a.user_id),
+                },
+            )
+        else:
+            await connection.execute(
+                text(
+                    """UPDATE projects
+                    SET status='pending_deletion', deletion_requested_at=now(),
+                        deletion_effective_at=now()
+                    WHERE id=:project_id"""
+                ),
+                {"project_id": seed.owner_a.project_id},
+            )
+
+    with pytest.raises(PrivateWorkNotFound):
+        await _resolver(seed, repository, FakePrivateThreadService()).resolve(_identity())
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
 async def test_resolver_rejects_missing_server_agent_before_thread_creation(
     seed: M4ThreadSeed,
 ) -> None:
@@ -325,8 +385,9 @@ async def test_attach_connection_identity_only_copies_server_lookup_fields() -> 
     )
 
     assert attached.connection_id == "connection-a"
-    assert attached.owner_user_id == str(owner_user_id)
-    assert attached.project_id == str(project_id)
+    assert attached.workspace_id == "workspace-a"
+    assert attached.owner_user_id != str(owner_user_id)
+    assert attached.project_id != str(project_id)
 
 
 @pytest.mark.asyncio
@@ -340,6 +401,7 @@ async def test_project_inbound_dispatcher_uses_only_resolved_context_and_thread(
     )
 
     resolved = ResolvedInboundPrivateWork(
+        account_id=seed.owner_a.user_id,
         context=seed.owner_a,
         connection_id="connection-a",
         thread_id="private-thread",

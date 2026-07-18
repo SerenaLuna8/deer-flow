@@ -71,6 +71,7 @@ import { polishInputDraft } from "@/core/input-polish/api";
 import { hasOpenHumanInputRequest } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -315,6 +316,7 @@ export function InputBox({
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
   const { thread, isMock } = useThread();
+  const privateWork = usePrivateWorkAccess(undefined, isMock);
   const { attachments, textInput } = usePromptInputController();
   const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
@@ -1020,6 +1022,7 @@ export function InputBox({
   const inputPolishDisabled =
     isComposerDisabled ||
     isMockThread ||
+    privateWork.scope === null ||
     hasOpenHumanInputCard ||
     polishingInput ||
     (!inputPolishUndoAvailable &&
@@ -1139,6 +1142,7 @@ export function InputBox({
 
     try {
       const result = await polishInputDraft(
+        privateWork,
         {
           text: originalText,
           locale,
@@ -1193,6 +1197,7 @@ export function InputBox({
   }, [
     inputPolishDisabled,
     locale,
+    privateWork,
     setPromptHistoryValue,
     t.inputBox.inputPolishFailed,
     t.inputBox.inputPolishNoChanges,

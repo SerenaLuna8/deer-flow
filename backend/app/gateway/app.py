@@ -18,17 +18,14 @@ from app.gateway.routers import (
     admin_operations,
     admin_projects,
     auth,
-    channel_connections,
-    channels,
-    console,
     github_webhooks,
-    input_polish,
     models,
     private_work,
     project_assets,
     project_audit,
     project_automations,
     project_connections,
+    project_input_polish,
     project_invitations,
     project_lifecycle,
     project_members,
@@ -254,12 +251,8 @@ This gateway provides project-scoped runtime endpoints and administrative operat
                 "description": "Operations for querying available AI models and their configurations",
             },
             {
-                "name": "input-polish",
-                "description": "Polish composer draft input before sending",
-            },
-            {
-                "name": "channels",
-                "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
+                "name": "project-input-polish",
+                "description": "Polish a composer draft under current project authority",
             },
             {
                 "name": "health",
@@ -327,24 +320,13 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(private_work.router)
     app.include_router(project_memory.router)
     app.include_router(project_connections.router)
+    app.include_router(project_input_polish.router)
     app.include_router(admin_assets.admin_router)
     app.include_router(admin_assets.admin_project_router)
     app.include_router(admin_operations.router)
     app.include_router(admin_projects.router)
     app.include_router(admin_jobs.router)
     app.include_router(admin_audit.router)
-
-    # Console API (cross-thread observability) is mounted at /api/console
-    app.include_router(console.router)
-
-    # Input polishing API is mounted at /api/input-polish
-    app.include_router(input_polish.router)
-
-    # User-facing IM channel connection API is mounted at /api/channels
-    app.include_router(channel_connections.router)
-
-    # Channels API is mounted at /api/channels
-    app.include_router(channels.router)
 
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)

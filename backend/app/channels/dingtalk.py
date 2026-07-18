@@ -480,7 +480,6 @@ class DingTalkChannel(Channel):
             repo=self._connection_repo,
             provider="dingtalk",
             workspace_id=self._connection_workspace_id(conversation_type, conversation_id),
-            fallback_without_workspace=True,
         )
 
     async def _bind_connection_from_connect_code(

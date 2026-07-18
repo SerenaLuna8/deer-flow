@@ -40,6 +40,7 @@ from app.reliability.error_mapping import (
     reliability_http_exception_handler,
 )
 from app.reliability.models import ReliabilityReadiness
+from app.reliability.operations import safe_channel_provider_health
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.jobs.model import DeadJobRow, JobRow
@@ -174,6 +175,42 @@ def test_system_operations_routes_are_mounted() -> None:
     assert "/api/admin/audit" in paths
 
 
+def test_channel_provider_health_is_aggregate_and_redacts_connection_payload() -> None:
+    health = safe_channel_provider_health(
+        {
+            "service_running": True,
+            "channels": {
+                "slack": {
+                    "enabled": True,
+                    "running": True,
+                    "bot_token": "xoxb-secret",
+                    "webhook_secret": "webhook-secret",
+                    "external_account_id": "account-secret",
+                    "connection": {"payload": "secret"},
+                }
+            },
+        },
+        checked_at=NOW,
+    )
+
+    assert [
+        {
+            "provider": item.provider,
+            "status": item.status,
+            "checked_at": item.checked_at,
+            "code": item.code,
+        }
+        for item in health
+    ] == [
+        {
+            "provider": "slack",
+            "status": "ready",
+            "checked_at": NOW,
+            "code": "CHANNEL_READY",
+        }
+    ]
+
+
 @pytest.mark.postgres
 @pytest.mark.anyio
 async def test_operations_requires_current_system_admin_and_returns_only_aggregate_public_health(
@@ -216,7 +253,14 @@ async def test_operations_requires_current_system_admin_and_returns_only_aggrega
 
         assert response.status_code == 200, response.text
         body = response.json()
-        assert set(body) == {"readiness", "data_status", "counts", "usage"}
+        assert set(body) == {
+            "readiness",
+            "data_status",
+            "counts",
+            "usage",
+            "channel_providers",
+        }
+        assert body["channel_providers"] == []
         assert body["data_status"] == "available"
         assert body["readiness"] == {
             "status": "degraded",
@@ -657,6 +701,7 @@ async def test_operations_overview_returns_closed_readiness_without_querying_agg
             "data_status": "unavailable",
             "counts": None,
             "usage": None,
+            "channel_providers": [],
         }
     finally:
         await seed.engine.dispose()

@@ -81,6 +81,19 @@ const aggregateUsageSchema = z
     }
   });
 
+const channelProviderHealthSchema = z
+  .object({
+    provider: z.string().min(1),
+    status: z.enum(["ready", "degraded", "unavailable"]),
+    checked_at: z.string().datetime({ offset: true }),
+    code: z.enum([
+      "CHANNEL_READY",
+      "CHANNEL_STOPPED",
+      "CHANNEL_DISABLED",
+    ]),
+  })
+  .strict();
+
 export const operationsOverviewSchema = z.discriminatedUnion("data_status", [
   z
     .object({
@@ -91,6 +104,7 @@ export const operationsOverviewSchema = z.discriminatedUnion("data_status", [
       data_status: z.literal("available"),
       counts: operationsCountsSchema,
       usage: aggregateUsageSchema,
+      channel_providers: z.array(channelProviderHealthSchema),
     })
     .strict(),
   z
@@ -102,6 +116,7 @@ export const operationsOverviewSchema = z.discriminatedUnion("data_status", [
       data_status: z.literal("unavailable"),
       counts: z.null(),
       usage: z.null(),
+      channel_providers: z.array(channelProviderHealthSchema),
     })
     .strict(),
 ]);

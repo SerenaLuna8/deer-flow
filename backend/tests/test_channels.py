@@ -908,21 +908,12 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_channel_storage_user_id_falls_back_to_platform_user(self, monkeypatch):
-        """Unbound auth-enabled channels stage files under the same bucket the run uses.
-
-        ``_resolve_run_params`` runs an unbound msg under ``safe(msg.user_id)``, so
-        ``_channel_storage_user_id`` must resolve to the same value instead of
-        ``None`` (which would fall back to ``"default"`` in the dispatcher task and
-        cross buckets — the agent would read uploads the channel never wrote there).
-        """
+    def test_channel_storage_user_id_requires_server_resolved_owner(self):
+        """External platform users never become project filesystem authority."""
         from app.channels.manager import _channel_storage_user_id, _safe_user_id_for_run
 
-        # Auth enabled (no auth-disabled owner), unbound (no owner_user_id).
-        monkeypatch.setattr("app.channels.manager._auth_disabled_owner_user_id", lambda: None)
-
         unbound = InboundMessage(channel_name="slack", chat_id="C1", user_id="U-platform", text="hi")
-        assert _channel_storage_user_id(unbound) == _safe_user_id_for_run("U-platform")
+        assert _channel_storage_user_id(unbound) is None
 
         bound = InboundMessage(channel_name="slack", chat_id="C1", user_id="U-platform", text="hi", owner_user_id="owner-1")
         assert _channel_storage_user_id(bound) == _safe_user_id_for_run("owner-1")
@@ -2252,11 +2243,51 @@ class TestChannelManager:
 
     def test_handle_command_slash_skill_reports_disabled_skill(self, tmp_path):
         from app.channels.manager import ChannelManager
+        from app.private_work.connection_inbound import (
+            ProjectInboundDispatcher,
+            ResolvedInboundPrivateWork,
+        )
+        from app.private_work.context import PrivateWorkContext
+        from app.projects.capabilities import capabilities_for
+        from app.projects.context import ProjectContext
+        from app.projects.models import ProjectRole
 
         async def go():
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            manager = ChannelManager(bus=bus, store=store)
+            owner_id = uuid.uuid4()
+            context = PrivateWorkContext.from_project(
+                ProjectContext(
+                    user_id=owner_id,
+                    project_id=uuid.uuid4(),
+                    membership_id=uuid.uuid4(),
+                    role=ProjectRole.RUNNER,
+                    capabilities=capabilities_for(ProjectRole.RUNNER),
+                    membership_version=1,
+                    request_id="slash-project-authority",
+                )
+            )
+            resolver = SimpleNamespace(
+                resolve=AsyncMock(
+                    return_value=ResolvedInboundPrivateWork(
+                        account_id=owner_id,
+                        context=context,
+                        connection_id="connection-a",
+                        thread_id="thread-a",
+                        created=False,
+                    )
+                )
+            )
+            launcher = AsyncMock(return_value={"messages": [{"type": "ai", "content": "project answer"}]})
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                require_bound_identity=True,
+                private_inbound_dispatcher=ProjectInboundDispatcher(
+                    resolver,
+                    launcher,
+                ),
+            )
             manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis", enabled=False)])
 
             mock_client = _make_mock_langgraph_client()
@@ -2282,17 +2313,59 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.wait.assert_not_called()
-            assert outbound_received[0].text == "Skill `/data-analysis` is installed but disabled. Enable it before using slash activation."
+            launcher.assert_awaited_once()
+            assert launcher.await_args.args[2].text.startswith("/data-analysis")
+            assert outbound_received[0].text == "project answer"
 
         _run(go())
 
     def test_handle_command_uninstalled_slash_skill_stays_unknown_command(self, tmp_path):
         from app.channels.manager import ChannelManager
+        from app.private_work.connection_inbound import (
+            ProjectInboundDispatcher,
+            ResolvedInboundPrivateWork,
+        )
+        from app.private_work.context import PrivateWorkContext
+        from app.projects.capabilities import capabilities_for
+        from app.projects.context import ProjectContext
+        from app.projects.models import ProjectRole
 
         async def go():
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            manager = ChannelManager(bus=bus, store=store)
+            owner_id = uuid.uuid4()
+            context = PrivateWorkContext.from_project(
+                ProjectContext(
+                    user_id=owner_id,
+                    project_id=uuid.uuid4(),
+                    membership_id=uuid.uuid4(),
+                    role=ProjectRole.RUNNER,
+                    capabilities=capabilities_for(ProjectRole.RUNNER),
+                    membership_version=1,
+                    request_id="slash-project-authority",
+                )
+            )
+            resolver = SimpleNamespace(
+                resolve=AsyncMock(
+                    return_value=ResolvedInboundPrivateWork(
+                        account_id=owner_id,
+                        context=context,
+                        connection_id="connection-a",
+                        thread_id="thread-a",
+                        created=False,
+                    )
+                )
+            )
+            launcher = AsyncMock(return_value={"messages": [{"type": "ai", "content": "project answer"}]})
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                require_bound_identity=True,
+                private_inbound_dispatcher=ProjectInboundDispatcher(
+                    resolver,
+                    launcher,
+                ),
+            )
             manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "frontend-design")])
 
             mock_client = _make_mock_langgraph_client()
@@ -2318,7 +2391,9 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.wait.assert_not_called()
-            assert outbound_received[0].text.startswith("Unknown command: /data-analysis.")
+            launcher.assert_awaited_once()
+            assert launcher.await_args.args[2].text.startswith("/data-analysis")
+            assert outbound_received[0].text == "project answer"
 
         _run(go())
 
@@ -3429,6 +3504,7 @@ class TestChannelManagerBoundIdentityPolicy:
                 )
             )
             resolved = ResolvedInboundPrivateWork(
+                account_id=owner_id,
                 context=context,
                 connection_id="server-connection",
                 thread_id="project-thread",

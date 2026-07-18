@@ -8,7 +8,6 @@ describe("SETTINGS_SECTION_IDS", () => {
       "account",
       "appearance",
       "notification",
-      "channels",
       "about",
     ]);
     expect(SETTINGS_SECTION_IDS).not.toContain("memory");

@@ -78,6 +78,7 @@ class TestChannelConnectionRepository:
         results = await repo.list_connections(seed.owner_a_scope)
 
         assert [item["id"] for item in results] == [alice["id"]]
+        assert results[0]["account_id"] == seed.owner_a_scope.owner_user_id
         assert results[0]["owner_user_id"] == seed.owner_a_scope.owner_user_id
         assert results[0]["provider"] == "slack"
         assert results[0]["scopes"] == ["chat:write"]

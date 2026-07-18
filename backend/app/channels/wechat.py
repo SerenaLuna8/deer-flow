@@ -1078,7 +1078,9 @@ class WechatChannel(Channel):
         if stored_path is None:
             return None
 
-        mime_type = detected_image[1] if detected_image else mimetypes.guess_type(filename)[0] or "image/jpeg"
+        # The fallback filename is always .jpg, so avoid the lazy stdlib
+        # mime-types database initialization (filesystem IO) on the event loop.
+        mime_type = detected_image[1] if detected_image else "image/jpeg"
         return {
             "type": "image",
             "filename": stored_path.name,

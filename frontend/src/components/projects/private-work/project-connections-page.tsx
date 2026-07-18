@@ -14,14 +14,15 @@ import {
   prepareConnectWindow,
 } from "@/core/channels/open-connect-url";
 import {
-  CHANNEL_PROVIDER_IDS,
   labelOfChannelProvider,
   type ChannelProviderId,
 } from "@/core/channels/types";
 import {
   connectProjectConnection,
   disconnectProjectConnection,
+  listProjectConnectionProviders,
   listProjectConnections,
+  projectConnectionProvidersQueryKey,
   projectConnectionsQueryKey,
 } from "@/core/private-work/connections";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
@@ -48,6 +49,11 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
   const connections = useQuery({
     queryKey,
     queryFn: ({ signal }) => listProjectConnections(privateWork, signal),
+  });
+  const providers = useQuery({
+    queryKey: projectConnectionProvidersQueryKey(scope),
+    queryFn: ({ signal }) =>
+      listProjectConnectionProviders(privateWork, signal),
   });
   const agentsQuery = useProjectAssets(
     user?.id ?? "",
@@ -115,11 +121,11 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
         </p>
       </header>
 
-      {connections.isLoading ? (
+      {connections.isLoading || providers.isLoading ? (
         <p role="status" className="text-muted-foreground text-sm">
           正在加载 Connections…
         </p>
-      ) : connections.error ? (
+      ) : connections.error || providers.error ? (
         <div className="rounded-xl border p-5">
           <p role="alert" className="text-destructive text-sm">
             无法加载 Connections，请稍后重试。
@@ -128,14 +134,18 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
             type="button"
             variant="outline"
             className="mt-4"
-            onClick={() => void connections.refetch()}
+            onClick={() => {
+              void connections.refetch();
+              void providers.refetch();
+            }}
           >
             重试
           </Button>
         </div>
       ) : (
         <ul className="grid gap-3 md:grid-cols-2">
-          {CHANNEL_PROVIDER_IDS.map((provider) => {
+          {(providers.data ?? []).map((providerState) => {
+            const provider = providerState.provider as ChannelProviderId;
             const connection = connections.data?.find(
               (item) =>
                 item.provider === provider && item.status === "connected",
@@ -158,8 +168,13 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
                         "已连接")
                       : "未连接"}
                   </p>
+                  {!providerState.connectable ? (
+                    <p className="text-muted-foreground truncate text-xs">
+                      {providerState.unavailable_reason ?? "渠道当前不可用"}
+                    </p>
+                  ) : null}
                 </div>
-                {canManage ? (
+                {canManage && providerState.connectable ? (
                   connection ? (
                     <Button
                       type="button"

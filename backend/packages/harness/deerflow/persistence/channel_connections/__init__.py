@@ -1,8 +1,5 @@
 """User-owned IM channel connection persistence."""
 
-from deerflow.persistence.channel_connections.legacy_sql import (
-    LegacyChannelConnectionRepository,
-)
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
@@ -16,7 +13,6 @@ from deerflow.persistence.channel_connections.sql import (
 
 __all__ = [
     "ChannelConnectionRepository",
-    "LegacyChannelConnectionRepository",
     "ChannelConnectionRow",
     "ChannelConversationRow",
     "ChannelCredentialCipher",

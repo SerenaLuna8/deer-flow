@@ -543,7 +543,7 @@ See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
-DeerFlow supports user-owned IM channel connections and reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. The existing project-scoped backend API is `/api/projects/{project_id}/connections`; bound text runs in that exact project and owner scope. Frontend integration remains pending. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and operational notes.
+DeerFlow supports user-owned IM channel connections and reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Connections and provider availability use only `/api/projects/{project_id}/connections*`; bound text runs in that exact PostgreSQL account, project, owner, and connection scope. The project Connections page uses this project-only API, and the global channel binding API has been removed. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and operational notes.
 
 | Channel | Transport | Difficulty |
 |---------|-----------|------------|
@@ -634,7 +634,7 @@ channels:
 Notes:
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
-- IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
+- Project-bound IM channel workers resolve the persisted connection row and admit the exact project-private Run directly through Gateway's internal admission service; they do not call a global LangGraph-compatible API or derive project authority from message fields.
 
 Set the corresponding API keys in your `.env` file:
 
@@ -707,7 +707,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
 
 
-When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://gateway:8001/api` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
+When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. Auxiliary channel commands that use `channels.gateway_url` must target the Gateway service name (for example `http://gateway:8001`), not `localhost`. Project-bound Run admission is process-local and does not use `channels.langgraph_url`.
 
 **Commands**
 

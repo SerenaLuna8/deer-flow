@@ -339,7 +339,6 @@ class WeComChannel(Channel):
             repo=self._connection_repo,
             provider="wecom",
             workspace_id=str(inbound.metadata.get("aibotid") or "") or None,
-            fallback_without_workspace=True,
         )
 
     async def _bind_connection_from_connect_code(self, *, frame: dict[str, Any], user_id: str, code: str) -> bool:

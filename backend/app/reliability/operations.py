@@ -38,6 +38,7 @@ JobStatus = Literal[
     "dead",
 ]
 JobType = Literal["private_run", "automation_run", "retention_purge"]
+ProviderHealthStatus = Literal["ready", "degraded", "unavailable"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,9 +58,60 @@ class AggregateUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class ChannelProviderHealth:
+    provider: str
+    status: ProviderHealthStatus
+    checked_at: datetime
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
 class OperationsOverview:
     counts: OperationsCounts
     usage: tuple[AggregateUsage, ...]
+
+
+def safe_channel_provider_health(
+    raw_status: object,
+    *,
+    checked_at: datetime | None = None,
+) -> tuple[ChannelProviderHealth, ...]:
+    """Reduce channel process state to a closed, public aggregate contract."""
+
+    selected_time = checked_at or datetime.now(UTC)
+    if selected_time.tzinfo is None or selected_time.utcoffset() is None:
+        raise ValueError("provider health time must be timezone-aware")
+    if not isinstance(raw_status, dict):
+        return ()
+    service_running = raw_status.get("service_running") is True
+    channels = raw_status.get("channels")
+    if not isinstance(channels, dict):
+        return ()
+    result: list[ChannelProviderHealth] = []
+    for provider in sorted(channels):
+        value = channels[provider]
+        if not isinstance(provider, str) or not isinstance(value, dict):
+            continue
+        enabled = value.get("enabled") is True
+        running = value.get("running") is True
+        if service_running and enabled and running:
+            status: ProviderHealthStatus = "ready"
+            code = "CHANNEL_READY"
+        elif enabled:
+            status = "degraded"
+            code = "CHANNEL_STOPPED"
+        else:
+            status = "unavailable"
+            code = "CHANNEL_DISABLED"
+        result.append(
+            ChannelProviderHealth(
+                provider=provider,
+                status=status,
+                checked_at=selected_time,
+                code=code,
+            )
+        )
+    return tuple(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,10 +453,12 @@ __all__ = [
     "AdminJobRecord",
     "AdminProjectPage",
     "AdminProjectRecord",
+    "ChannelProviderHealth",
     "JobStatus",
     "JobType",
     "OperationsOverview",
     "ProjectStatus",
     "SystemOperationsRepository",
+    "safe_channel_provider_health",
     "resolve_current_system_audit_context",
 ]

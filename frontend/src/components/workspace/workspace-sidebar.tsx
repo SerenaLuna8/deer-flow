@@ -11,7 +11,6 @@ import {
 import { PROJECT_FIRST_MODE } from "@/core/projects/features";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
-import { WorkspaceChannelsList } from "./channels/workspace-channels-list";
 import { RecentChatList } from "./recent-chat-list";
 import { WorkspaceHeader } from "./workspace-header";
 import { WorkspaceNavChatList } from "./workspace-nav-chat-list";
@@ -30,7 +29,6 @@ export function WorkspaceSidebar({
         </SidebarHeader>
         <SidebarContent>
           <WorkspaceNavChatList />
-          {showLegacyChats && <WorkspaceChannelsList />}
           {showLegacyChats && isSidebarOpen && <RecentChatList />}
         </SidebarContent>
         <SidebarFooter>

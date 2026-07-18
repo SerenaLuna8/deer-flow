@@ -34,6 +34,7 @@ from app.private_work.cutover import PrivateWorkCutoverGuard
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import (
     PrivateWorkError,
+    PrivateWorkForbidden,
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
@@ -534,6 +535,22 @@ async def private_work_context(
         raise private_work_http_exception(PrivateWorkUnavailable(request_id)) from None
     except PrivateWorkError as exc:
         raise private_work_http_exception(exc) from None
+
+
+async def project_input_polish_context(
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateWorkContext:
+    """Issue only current project authority allowed to call input polish."""
+
+    from app.projects.capabilities import Capability
+
+    for capability in (
+        Capability.PRIVATE_WORK_CREATE,
+        Capability.SHARED_ASSETS_EXECUTE,
+    ):
+        if capability not in context.capabilities:
+            raise private_work_http_exception(PrivateWorkForbidden(context.request_id))
+    return context
 
 
 async def automation_context(

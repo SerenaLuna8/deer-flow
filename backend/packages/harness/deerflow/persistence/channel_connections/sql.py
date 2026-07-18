@@ -110,6 +110,7 @@ class ChannelConnectionRepository:
     def _connection_to_dict(row: ChannelConnectionRow) -> dict[str, Any]:
         data = row.to_dict()
         data["project_id"] = str(data["project_id"])
+        data["account_id"] = data["owner_user_id"]
         data["external_account_id"] = data["external_account_id"] or None
         data["workspace_id"] = data["workspace_id"] or None
         data["scopes"] = data.pop("scopes_json") or []

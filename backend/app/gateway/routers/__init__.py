@@ -1,7 +1,7 @@
 from . import (
-    input_polish,
     models,
     project_automations,
+    project_input_polish,
     project_invitations,
     project_lifecycle,
     project_members,
@@ -9,11 +9,11 @@ from . import (
 )
 
 __all__ = [
-    "input_polish",
     "models",
     "project_invitations",
     "project_lifecycle",
     "project_members",
     "project_automations",
+    "project_input_polish",
     "projects",
 ]

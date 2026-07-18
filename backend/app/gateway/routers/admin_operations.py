@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime
 from functools import wraps
 from inspect import isawaitable
 from typing import Literal
@@ -33,9 +34,11 @@ from app.reliability.errors import (
 )
 from app.reliability.models import ReliabilityReadiness
 from app.reliability.operations import (
+    ChannelProviderHealth,
     OperationsOverview,
     SystemOperationsRepository,
     resolve_current_system_audit_context,
+    safe_channel_provider_health,
 )
 from app.reliability.process_readiness import read_process_readiness
 from app.reliability.readiness import ReliabilityReadinessService
@@ -110,12 +113,21 @@ class AggregateUsageResponse(BaseModel):
     reserved: int
 
 
+class ChannelProviderHealthResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    provider: str
+    status: Literal["ready", "degraded", "unavailable"]
+    checked_at: datetime
+    code: Literal["CHANNEL_READY", "CHANNEL_STOPPED", "CHANNEL_DISABLED"]
+
+
 class OperationsOverviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     readiness: OperationsReadinessResponse
     data_status: Literal["available", "unavailable"]
     counts: OperationsCountsResponse | None
     usage: list[AggregateUsageResponse] | None
+    channel_providers: list[ChannelProviderHealthResponse]
 
     @model_validator(mode="after")
     def validate_aggregate_availability(self) -> OperationsOverviewResponse:
@@ -125,6 +137,17 @@ class OperationsOverviewResponse(BaseModel):
         if not closed and (self.data_status != "available" or self.counts is None or self.usage is None):
             raise ValueError("open readiness requires available aggregate data")
         return self
+
+
+def _channel_provider_response(
+    item: ChannelProviderHealth,
+) -> ChannelProviderHealthResponse:
+    return ChannelProviderHealthResponse(
+        provider=item.provider,
+        status=item.status,
+        checked_at=item.checked_at,
+        code=item.code,
+    )
 
 
 async def authenticated_system_identity(
@@ -243,6 +266,7 @@ def map_admin_operations_errors(function):
 def overview_response(
     value: OperationsOverview | None,
     readiness: ReliabilityReadiness,
+    channel_providers: tuple[ChannelProviderHealth, ...] = (),
 ) -> OperationsOverviewResponse:
     if readiness.status == "closed":
         return OperationsOverviewResponse(
@@ -266,6 +290,7 @@ def overview_response(
             data_status="unavailable",
             counts=None,
             usage=None,
+            channel_providers=[_channel_provider_response(item) for item in channel_providers],
         )
     if value is None:
         raise ValueError("open readiness requires operations overview")
@@ -303,7 +328,26 @@ def overview_response(
             )
             for item in value.usage
         ],
+        channel_providers=[_channel_provider_response(item) for item in channel_providers],
     )
+
+
+async def current_channel_provider_health() -> tuple[ChannelProviderHealth, ...]:
+    """Read channel status once under a short bound and expose safe enums only."""
+
+    try:
+        from app.channels.service import get_channel_service
+
+        service = get_channel_service()
+        if service is None:
+            return ()
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(service.get_status),
+            timeout=1.0,
+        )
+    except Exception:
+        return ()
+    return safe_channel_provider_health(raw)
 
 
 @router.get("", response_model=OperationsOverviewResponse)
@@ -316,11 +360,13 @@ async def get_operations_overview(
     async with session.begin():
         await resolve_current_system_audit_context(session, identity[0], identity[1])
         readiness = await current_reliability_readiness(request, session, identity)
+        channel_providers = await current_channel_provider_health()
         if readiness.status == "closed":
-            return overview_response(None, readiness)
+            return overview_response(None, readiness, channel_providers)
         return overview_response(
             await SystemOperationsRepository(session).overview(),
             readiness,
+            channel_providers,
         )
 
 

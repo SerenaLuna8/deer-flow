@@ -1,32 +1,39 @@
 from __future__ import annotations
 
-import uuid
+import asyncio
+import logging
 from datetime import UTC, datetime
-from typing import Literal
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from app.gateway.deps import private_work_context, require_project_private_open
-from app.gateway.private_work_schemas import PrivateWorkRoute, StrictPrivateWorkRequest
-from app.gateway.routers.channel_connections import (
-    _PROVIDER_META,
-    ChannelConnectionResponse,
-    ChannelConnectionsResponse,
-    ChannelConnectResponse,
-    _connect_instruction,
-    _connect_url,
-    _ensure_runtime_channel_ready_if_available,
-    _get_channel_connections_config,
-    _get_channels_config,
-    _provider_config,
-    _provider_status,
+from app.channels.runtime_config_store import (
+    ChannelRuntimeConfigStore,
+    apply_runtime_connection_config,
+    merge_runtime_channel_configs,
 )
+from app.gateway.channel_schemas import (
+    PROJECT_CONNECTION_PROVIDER_META,
+    PROJECT_CONNECTION_RUNTIME_REQUIREMENTS,
+    ProjectConnectionProviderResponse,
+    ProjectConnectionProvidersResponse,
+    ProjectConnectionResponse,
+    ProjectConnectionsResponse,
+    ProjectConnectRequest,
+    ProjectConnectResponse,
+    project_connect_instruction,
+)
+from app.gateway.deps import private_work_context, require_project_private_open
+from app.gateway.private_work_schemas import PrivateWorkRoute
 from app.private_work.connection_service import ProjectConnectionService
 from app.private_work.context import PrivateWorkContext
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import PrivateWorkError, PrivateWorkNotFound, PrivateWorkUnavailable
+from deerflow.config.app_config import get_app_config
+from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
 from deerflow.persistence.engine import get_session_factory
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/connections",
@@ -34,12 +41,6 @@ router = APIRouter(
     route_class=PrivateWorkRoute,
     dependencies=[Depends(require_project_private_open)],
 )
-
-
-class ProjectConnectRequest(StrictPrivateWorkRequest):
-    agent_asset_id: uuid.UUID
-    agent_scope: Literal["project", "system"]
-    redirect_after: str | None = None
 
 
 def _service(request: Request) -> ProjectConnectionService:
@@ -56,42 +57,188 @@ def _service(request: Request) -> ProjectConnectionService:
     return service
 
 
-async def _ready_provider(request: Request, provider: str, request_id: str):
-    config = await _get_channel_connections_config(request)
-    channels_config = await _get_channels_config(request)
-    if not config.enabled:
-        raise private_work_http_exception(PrivateWorkUnavailable(request_id))
+async def _runtime_store(request: Request) -> ChannelRuntimeConfigStore:
+    store = getattr(request.app.state, "channel_runtime_config_store", None)
+    if isinstance(store, ChannelRuntimeConfigStore):
+        return store
+    store = await asyncio.to_thread(ChannelRuntimeConfigStore)
+    request.app.state.channel_runtime_config_store = store
+    return store
+
+
+async def _provider_config(request: Request) -> tuple[ChannelConnectionsConfig, dict[str, object]]:
+    configured = getattr(request.app.state, "channel_connections_config", None)
+    app_config = None
+    if not isinstance(configured, ChannelConnectionsConfig):
+        app_config = await asyncio.to_thread(get_app_config)
+        configured = app_config.channel_connections
+    configured = apply_runtime_connection_config(
+        configured,
+        store=await _runtime_store(request),
+    )
+    request.app.state.channel_connections_config = configured
+
+    channels = getattr(request.app.state, "channels_config", None)
+    if not isinstance(channels, dict):
+        app_config = app_config or await asyncio.to_thread(get_app_config)
+        extra = app_config.model_extra or {}
+        raw_channels = extra.get("channels")
+        channels = dict(raw_channels) if isinstance(raw_channels, dict) else {}
+        merge_runtime_channel_configs(
+            channels,
+            configured,
+            store=await _runtime_store(request),
+        )
+        request.app.state.channels_config = channels
+    return configured, channels
+
+
+def _runtime_configured(provider: str, channels: dict[str, object]) -> bool:
+    runtime = channels.get(provider)
+    if not isinstance(runtime, dict) or runtime.get("enabled") is not True:
+        return False
+    return all(isinstance(runtime.get(key), str) and bool(runtime[key].strip()) for key in PROJECT_CONNECTION_RUNTIME_REQUIREMENTS[provider])
+
+
+def _runtime_running(provider: str) -> bool | None:
     try:
-        provider_config = _provider_config(config, provider)
+        from app.channels.service import get_channel_service
+
+        service = get_channel_service()
+        if service is None:
+            return None
+        status = service.get_status()
     except Exception:
-        raise private_work_http_exception(PrivateWorkNotFound(request_id)) from None
-    if provider_config.enabled:
-        await _ensure_runtime_channel_ready_if_available(provider, channels_config)
-    status, unavailable_reason = _provider_status(config, channels_config, provider)
-    if not status["enabled"] or not status["configured"] or unavailable_reason:
+        logger.debug("Unable to read project channel provider health", exc_info=True)
+        return None
+    if status.get("service_running") is not True:
+        return False
+    provider_status = status.get("channels", {}).get(provider)
+    return bool(provider_status.get("running")) if isinstance(provider_status, dict) else None
+
+
+async def _ensure_runtime_ready(provider: str, channels: dict[str, object]) -> bool | None:
+    runtime = channels.get(provider)
+    if not isinstance(runtime, dict) or runtime.get("enabled") is not True:
+        return None
+    try:
+        from app.channels.service import get_channel_service
+
+        service = get_channel_service()
+        if service is None:
+            return None
+        ensure_ready = getattr(service, "ensure_channel_ready", None)
+        if ensure_ready is None:
+            return None
+        return await ensure_ready(provider, runtime)
+    except Exception:
+        logger.exception("Failed to reconcile project channel provider health")
+        return False
+
+
+def _provider_state(
+    config: ChannelConnectionsConfig,
+    channels: dict[str, object],
+    provider: str,
+) -> tuple[bool, bool, str | None]:
+    declared = config.provider_status(provider)
+    enabled = bool(declared["enabled"])
+    configured = bool(declared["configured"]) and _runtime_configured(provider, channels)
+    reason = None
+    if enabled and not configured:
+        reason = f"{PROJECT_CONNECTION_PROVIDER_META[provider]['display_name']} provider is not configured."
+    elif enabled and _runtime_running(provider) is False:
+        reason = f"{PROJECT_CONNECTION_PROVIDER_META[provider]['display_name']} provider is unavailable."
+    return enabled, configured, reason
+
+
+async def _ready_provider(request: Request, provider: str, request_id: str) -> ChannelConnectionsConfig:
+    config, channels = await _provider_config(request)
+    if provider not in PROJECT_CONNECTION_PROVIDER_META or not config.enabled:
+        raise private_work_http_exception(PrivateWorkNotFound(request_id))
+    enabled, configured, reason = _provider_state(config, channels, provider)
+    if enabled:
+        await _ensure_runtime_ready(provider, channels)
+        enabled, configured, reason = _provider_state(config, channels, provider)
+    if not enabled or not configured or reason is not None:
         raise private_work_http_exception(PrivateWorkUnavailable(request_id))
     return config
 
 
-@router.get("", response_model=ChannelConnectionsResponse)
+def _connect_url(config: ChannelConnectionsConfig, provider: str, code: str) -> str | None:
+    if provider != "telegram":
+        return None
+    bot_username = str(getattr(config.telegram, "bot_username", "") or "").strip()
+    if not bot_username:
+        return None
+    return f"https://t.me/{bot_username}?start={code}"
+
+
+@router.get("/providers", response_model=ProjectConnectionProvidersResponse)
+async def list_project_connection_providers(
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectConnectionProvidersResponse:
+    config, channels = await _provider_config(request)
+    try:
+        connections = await _service(request).list(context)
+    except PrivateWorkError as exc:
+        raise private_work_http_exception(exc) from None
+    connected = {row["provider"]: row["status"] for row in connections if row.get("status") == "connected"}
+    providers: list[ProjectConnectionProviderResponse] = []
+    for provider, metadata in PROJECT_CONNECTION_PROVIDER_META.items():
+        enabled, configured, reason = _provider_state(config, channels, provider)
+        if not enabled:
+            continue
+        providers.append(
+            ProjectConnectionProviderResponse(
+                provider=provider,
+                display_name=metadata["display_name"],
+                enabled=enabled,
+                configured=configured,
+                connectable=configured and reason is None,
+                unavailable_reason=reason,
+                auth_mode=metadata["auth_mode"],
+                connection_status=connected.get(provider, "not_connected"),
+            )
+        )
+    return ProjectConnectionProvidersResponse(enabled=config.enabled, providers=providers)
+
+
+@router.get("", response_model=ProjectConnectionsResponse)
 async def list_project_connections(
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
-) -> ChannelConnectionsResponse:
+) -> ProjectConnectionsResponse:
     try:
         rows = await _service(request).list(context)
     except PrivateWorkError as exc:
         raise private_work_http_exception(exc) from None
-    return ChannelConnectionsResponse(connections=[ChannelConnectionResponse(**row) for row in rows])
+    return ProjectConnectionsResponse(
+        connections=[
+            ProjectConnectionResponse(
+                id=str(row.get("id", "")),
+                provider=str(row.get("provider", "")),
+                status=str(row.get("status", "")),
+                external_account_id=row.get("external_account_id"),
+                external_account_name=row.get("external_account_name"),
+                workspace_id=row.get("workspace_id"),
+                workspace_name=row.get("workspace_name"),
+                scopes=list(row.get("scopes") or []),
+                metadata=dict(row.get("metadata") or {}),
+            )
+            for row in rows
+        ]
+    )
 
 
-@router.post("/{provider}/connect", response_model=ChannelConnectResponse)
+@router.post("/{provider}/connect", response_model=ProjectConnectResponse)
 async def begin_project_connection(
     request: Request,
     provider: str,
     body: ProjectConnectRequest,
     context: PrivateWorkContext = Depends(private_work_context),
-) -> ChannelConnectResponse:
+) -> ProjectConnectResponse:
     config = await _ready_provider(request, provider, context.request_id)
     try:
         challenge = await _service(request).begin_connect(
@@ -105,12 +252,12 @@ async def begin_project_connection(
         raise private_work_http_exception(exc) from None
     now = datetime.now(UTC)
     expires_in = max(0, int((challenge.expires_at - now).total_seconds() + 0.999))
-    return ChannelConnectResponse(
+    return ProjectConnectResponse(
         provider=provider,
-        mode=_PROVIDER_META[provider]["auth_mode"],
+        mode=PROJECT_CONNECTION_PROVIDER_META[provider]["auth_mode"],
         url=_connect_url(config, provider, challenge.code),
         code=challenge.code,
-        instruction=_connect_instruction(provider, challenge.code),
+        instruction=project_connect_instruction(provider, challenge.code),
         expires_in=expires_in,
     )
 

@@ -95,6 +95,8 @@ async def test_channel_admission_uses_resolved_project_scope_not_message_authori
             "channel_user_id": "external-user",
             "owner_user_id": "forged-owner",
             "project_id": "forged-project",
+            "account_id": "forged-account",
+            "connection_id": "forged-connection",
         },
     )
     record = await start_private_run(

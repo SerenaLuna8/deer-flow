@@ -132,6 +132,15 @@ Automation HTTP surface；底层 `scheduled_tasks` / `scheduled_task_runs` 表�
 `AutomationSchedulerService` 的 caller-owned transaction 操作完成 terminal reconciliation 与
 due occurrence/Run/job 原子 admission。M7 仍未整体完成。
 
+M7 Task 5 已删除 global channel/channel-connections/console/input-polish HTTP surface 和
+legacy channel connection repository。项目连接只使用
+`/api/projects/{project_id}/connections*`，input polish 只使用
+`/api/projects/{project_id}/private-work/input-polish` 并在模型调用前重新验证
+`private_work.create`、`shared_assets.execute`、Thread Agent snapshot 与 Credential grant
+closure。IM inbound 只从 PostgreSQL connected row 恢复 exact account/project/owner/connection
+authority，不允许 default/recent/unique-membership/auth-disabled fallback；system operations
+只返回脱敏 provider health 聚合。M7 仍未整体完成。
+
 Scheduled-task note:
 - Project Automation is available only under `/projects/{project_slug}/automations` and `/api/projects/{project_id}/automations*`; the global scheduled-task HTTP API has been removed. `config.yaml -> scheduler.enabled` gates an independent Scheduler process rather than a Gateway lifespan task.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal Worker run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. `AutomationDispatcher` writes that flag as server-owned admission data in the atomic occurrence/Run/job transaction; client-supplied `context.non_interactive` is dropped.

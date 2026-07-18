@@ -30,7 +30,10 @@ from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 from app.gateway.internal_auth import create_internal_auth_headers
-from app.private_work.connection_inbound import ProjectInboundDispatcher
+from app.private_work.connection_inbound import (
+    ConnectionInboundResolver,
+    ProjectInboundDispatcher,
+)
 from app.private_work.errors import PrivateWorkNotFound
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
@@ -493,17 +496,8 @@ def _human_input_message(content: str, *, original_content: str | None = None) -
     return message
 
 
-def _auth_disabled_owner_user_id() -> str | None:
-    try:
-        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, is_auth_disabled
-    except Exception:
-        logger.debug("Unable to inspect auth-disabled mode for channel owner fallback", exc_info=True)
-        return None
-    return AUTH_DISABLED_USER_ID if is_auth_disabled() else None
-
-
 def _effective_owner_user_id(msg: InboundMessage) -> str | None:
-    return _auth_disabled_owner_user_id() or msg.owner_user_id
+    return msg.owner_user_id
 
 
 def _apply_effective_owner(msg: InboundMessage) -> InboundMessage:
@@ -545,14 +539,10 @@ def _channel_storage_user_id(msg: InboundMessage) -> str | None:
     (``_resolve_run_params`` → ``run_context["user_id"]``) and the **file/artifact
     storage bucket** (``receive_file`` / ``_ingest_inbound_files`` /
     ``_prepare_artifact_delivery``), so the bucket the agent reads/writes always
-    matches where channel files are staged. Prefer the bound DeerFlow owner,
-    otherwise fall back to the sanitized raw platform user id. Without that
-    fallback, an unbound auth-enabled channel would run under ``safe(msg.user_id)``
-    but stage files under ``get_effective_user_id()`` (the dispatcher task's unset
-    contextvar → ``"default"``), so uploads would land in ``users/default/...``
-    while the agent reads ``users/{safe_platform_user_id}/...``. Returns ``None``
-    only when neither identity is available, leaving the caller to fall back to the
-    contextvar/default user.
+    matches where channel files are staged. Only a server-resolved DeerFlow owner
+    is accepted. An unbound provider sender returns ``None`` and must be rejected
+    before project-private file ingestion rather than creating a filesystem
+    identity from the external platform user.
 
     Distinct from :func:`_owner_headers`, which deliberately sends the *raw* owner
     id (no sanitize, no platform fallback) over HTTP for gateway to re-resolve;
@@ -561,8 +551,6 @@ def _channel_storage_user_id(msg: InboundMessage) -> str | None:
     owner_user_id = _effective_owner_user_id(msg)
     if owner_user_id:
         return _safe_user_id_for_run(owner_user_id)
-    if msg.user_id:
-        return _safe_user_id_for_run(msg.user_id)
     return None
 
 
@@ -1195,10 +1183,14 @@ class ChannelManager:
     # -- chat handling -----------------------------------------------------
 
     def _should_dispatch_project_inbound(self, msg: InboundMessage) -> bool:
-        if self._private_inbound_dispatcher is None or not self._require_bound_identity or msg.msg_type != InboundMessageType.CHAT:
+        if self._private_inbound_dispatcher is None or not self._require_bound_identity:
             return False
         policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
-        return policy is None or policy.requires_bound_identity
+        if policy is not None and not policy.requires_bound_identity:
+            return False
+        if msg.msg_type == InboundMessageType.CHAT:
+            return True
+        return msg.msg_type == InboundMessageType.COMMAND and parse_slash_skill_reference(msg.text) is not None
 
     async def _handle_project_inbound_chat(self, msg: InboundMessage) -> None:
         dispatcher = self._private_inbound_dispatcher
@@ -1262,12 +1254,8 @@ class ChannelManager:
         policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
         if policy is not None and not policy.requires_bound_identity:
             return None
-        if _auth_disabled_owner_user_id():
-            return None
-
         has_connection = bool(msg.connection_id)
-        has_owner = bool(msg.owner_user_id)
-        if not (has_connection and has_owner):
+        if not has_connection:
             return _BoundIdentityRejection()
         if self._connection_repo is None:
             return _BoundIdentityRejection(message=BOUND_IDENTITY_UNAVAILABLE_MESSAGE)
@@ -1285,11 +1273,19 @@ class ChannelManager:
         if connection is None:
             return _BoundIdentityRejection()
 
-        connection_id = connection.get("id")
-        owner_user_id = connection.get("owner_user_id")
-        if connection_id == msg.connection_id and owner_user_id == msg.owner_user_id:
+        try:
+            account_id, _project_id, owner_user_id, connection_id = ConnectionInboundResolver._connection_coordinates(
+                connection,
+                "channel-bound-identity",
+            )
+        except PrivateWorkNotFound:
+            return _BoundIdentityRejection()
+        if account_id == owner_user_id and connection_id == msg.connection_id:
             return None
-        return _BoundIdentityRejection(outbound_connection_id=connection_id, outbound_owner_user_id=owner_user_id)
+        return _BoundIdentityRejection(
+            outbound_connection_id=connection_id,
+            outbound_owner_user_id=str(owner_user_id),
+        )
 
     async def _reject_unbound_channel_message(
         self,
@@ -1315,6 +1311,8 @@ class ChannelManager:
         await self.bus.publish_outbound(outbound)
 
     async def _lookup_thread_id(self, msg: InboundMessage) -> str | None:
+        if self._require_bound_identity:
+            return None
         if msg.connection_id and self._connection_repo is not None:
             return await self._connection_repo.get_thread_id(
                 msg.connection_id,
@@ -1324,6 +1322,8 @@ class ChannelManager:
         return self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
 
     async def _store_thread_id(self, msg: InboundMessage, thread_id: str) -> None:
+        if self._require_bound_identity:
+            raise RuntimeError("project channel conversations require the project inbound resolver")
         if msg.connection_id and msg.owner_user_id and self._connection_repo is not None:
             await self._connection_repo.set_thread_id(
                 connection_id=msg.connection_id,

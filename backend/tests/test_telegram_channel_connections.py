@@ -121,8 +121,8 @@ async def test_bound_telegram_message_publishes_connection_identity(runtime):
 
     runtime.assert_owner_a_scope(connection)
     assert inbound.connection_id == connection["id"]
-    assert inbound.owner_user_id == runtime.seed.owner_a_scope.owner_user_id
-    assert inbound.project_id == runtime.seed.owner_a_scope.project_id
+    assert inbound.owner_user_id is None
+    assert inbound.project_id is None
     assert inbound.workspace_id == "100"
     assert inbound.user_id == "42"
     assert inbound.chat_id == "100"
