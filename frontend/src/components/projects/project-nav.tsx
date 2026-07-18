@@ -80,6 +80,7 @@ export function projectNavigationItems(
     { href: `${base}/members`, icon: UsersIcon, label: "成员与邀请" },
   ];
   if (
+    !staticWebsiteOnly &&
     projectPrivateWorkEntryEnabled(
       privateWorkFeatureEnabled,
       project.capabilities.includes("private_work.read_own"),

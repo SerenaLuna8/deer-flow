@@ -20,6 +20,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+from app.audit.service import AuditService, _bind_gateway_audit_process
+from app.audit.sinks import OperationalAuditSink
 from app.automations.cutover import AutomationCutoverGuard
 from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.readiness import AutomationReadinessService
@@ -32,6 +34,7 @@ from app.gateway.routers import project_automations
 from app.private_work.context import PrivateWorkContext
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.projects.context import ProjectContext, resolve_project_context
+from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.automations.migration_digest import canonical_digest
 from deerflow.persistence.bootstrap import _get_alembic_config, bootstrap_schema
 from deerflow.persistence.scheduled_task_runs import (
@@ -921,6 +924,11 @@ async def build_m5_app(seed: M5Seed) -> M5App:
 
     app.dependency_overrides[project_session] = request_session
     app.dependency_overrides[get_current_user_from_request] = request_user
+    audit_service = AuditService(seed.factory, AuditHmacKeyring.from_environment())
+    app.state.operational_audit_sink = OperationalAuditSink(
+        audit_service,
+        process_context=_bind_gateway_audit_process(audit_service),
+    )
     app.state.automation_cutover_guard = AutomationCutoverGuard(seed.factory)
     app.state.automation_service = ProjectAutomationService(seed.factory, clock=lambda: M5_NOW)
     app.state.automation_occurrence_service = AutomationOccurrenceService(

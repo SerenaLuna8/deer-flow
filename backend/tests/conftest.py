@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from postgres_utils import RedactedURL, replace_database, temporary_postgres_database  # noqa: E402
+from support.release_gate_plugin import pytest_sessionfinish  # noqa: E402, F401
 
 # Break the circular import chain that exists in production code:
 #   deerflow.subagents.__init__

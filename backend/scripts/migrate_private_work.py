@@ -1210,12 +1210,13 @@ async def run_private_work_migration(
                     empty_install=not any(counts.values()),
                 )
 
-        # M5 finalize requires the M4 marker to be complete. Cross that newer
-        # boundary only after the private-work transaction above commits.
+        # M5 finalize requires the M4 marker to be complete. Cross only the M5
+        # boundary here: M6 has its own backup-attested explicit cutover and a
+        # legacy private-work migration must never bypass it via ``head``.
         await asyncio.to_thread(
             command.upgrade,
             _get_alembic_config(engine),
-            "head",
+            _PROJECT_AUTOMATION_FINAL_REVISION,
         )
         await engine.dispose()
         engine = create_async_engine(database_url)

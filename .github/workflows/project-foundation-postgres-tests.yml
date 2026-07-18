@@ -1,4 +1,4 @@
-name: M1, M2, M3, M4 and M5 PostgreSQL Gates
+name: M1-M6 PostgreSQL Gates
 
 on:
   push:
@@ -7,6 +7,7 @@ on:
       - "backend/**"
       - "scripts/check.py"
       - "scripts/doctor.py"
+      - "Makefile"
       - ".github/workflows/project-foundation-postgres-tests.yml"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -14,6 +15,7 @@ on:
       - "backend/**"
       - "scripts/check.py"
       - "scripts/doctor.py"
+      - "Makefile"
       - ".github/workflows/project-foundation-postgres-tests.yml"
 
 concurrency:
@@ -25,7 +27,7 @@ permissions:
 
 jobs:
   postgres-release-gates:
-    name: M1, M2, M3, M4 and M5 PostgreSQL gates
+    name: M1-M6 PostgreSQL gates
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -89,24 +91,13 @@ jobs:
       - name: Require PostgreSQL test administrator URL
         working-directory: backend
         run: |
-          if [ -z "${POSTGRES_TEST_URL:-}" ]; then
+          if ! test -n "${POSTGRES_TEST_URL:-}"; then
             echo "POSTGRES_TEST_URL is required for the PostgreSQL release gate" >&2
             exit 1
           fi
 
-      - name: Run M1, M2, M3, M4 and M5 PostgreSQL isolation gates
-        working-directory: backend
-        run: >-
-          uv run pytest
-          tests/integration/test_m1_postgres_cutover.py
-          tests/integration/test_project_isolation_postgres.py
-          tests/integration/test_m2_project_governance_postgres.py
-          tests/integration/test_m3_shared_assets_postgres.py
-          tests/integration/test_m4_private_work_postgres.py
-          tests/integration/test_m4_private_work_migration_postgres.py
-          tests/integration/test_m5_project_automation_postgres.py
-          tests/integration/test_m5_automation_migration_postgres.py
-          -q
+      - name: Run the fixed M1-M6 PostgreSQL release gate with zero skips
+        run: make test-project-foundation-postgres
 
       - name: Run PostgreSQL scripts and project lint gates
         working-directory: backend

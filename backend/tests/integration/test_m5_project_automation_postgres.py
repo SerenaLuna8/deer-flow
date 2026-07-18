@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import shlex
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -82,7 +81,7 @@ async def m5_app(m5_seed: M5Seed):
         await app.aclose()
 
 
-def test_release_workflow_has_exact_m1_to_m5_gate_after_hard_fail() -> None:
+def test_release_workflow_delegates_exact_m1_to_m6_gate_after_hard_fail() -> None:
     workflow_path = Path(__file__).resolve().parents[3] / ".github/workflows/project-foundation-postgres-tests.yml"
     workflow = yaml.load(
         workflow_path.read_text(encoding="utf-8"),
@@ -92,30 +91,19 @@ def test_release_workflow_has_exact_m1_to_m5_gate_after_hard_fail() -> None:
     # BaseLoader intentionally keeps YAML 1.1 words such as `on` as strings.
     # SafeLoader would silently turn this workflow key into boolean True.
     assert "on" in workflow
-    assert workflow["name"] == "M1, M2, M3, M4 and M5 PostgreSQL Gates"
+    assert workflow["name"] == "M1-M6 PostgreSQL Gates"
     job = workflow["jobs"]["postgres-release-gates"]
-    assert job["name"] == "M1, M2, M3, M4 and M5 PostgreSQL gates"
+    assert job["name"] == "M1-M6 PostgreSQL gates"
     steps = job["steps"]
     step_names = [step.get("name") for step in steps]
     assert step_names.count("Require PostgreSQL test administrator URL") == 1
-    assert step_names.count("Run M1, M2, M3, M4 and M5 PostgreSQL isolation gates") == 1
+    gate_name = "Run the fixed M1-M6 PostgreSQL release gate with zero skips"
+    assert step_names.count(gate_name) == 1
     hard_fail_index = next(index for index, step in enumerate(steps) if step.get("name") == "Require PostgreSQL test administrator URL")
-    pytest_index = next(index for index, step in enumerate(steps) if step.get("name") == "Run M1, M2, M3, M4 and M5 PostgreSQL isolation gates")
-    assert hard_fail_index < pytest_index
-    assert 'if [ -z "${POSTGRES_TEST_URL:-}" ]; then' in steps[hard_fail_index]["run"]
-
-    expected_files = [
-        "tests/integration/test_m1_postgres_cutover.py",
-        "tests/integration/test_project_isolation_postgres.py",
-        "tests/integration/test_m2_project_governance_postgres.py",
-        "tests/integration/test_m3_shared_assets_postgres.py",
-        "tests/integration/test_m4_private_work_postgres.py",
-        "tests/integration/test_m4_private_work_migration_postgres.py",
-        "tests/integration/test_m5_project_automation_postgres.py",
-        "tests/integration/test_m5_automation_migration_postgres.py",
-    ]
-    pytest_tokens = shlex.split(steps[pytest_index]["run"])
-    assert pytest_tokens == ["uv", "run", "pytest", *expected_files, "-q"]
+    gate_index = next(index for index, step in enumerate(steps) if step.get("name") == gate_name)
+    assert hard_fail_index < gate_index
+    assert 'test -n "${POSTGRES_TEST_URL:-}"' in steps[hard_fail_index]["run"]
+    assert steps[gate_index]["run"] == "make test-project-foundation-postgres"
 
 
 @pytest.mark.asyncio

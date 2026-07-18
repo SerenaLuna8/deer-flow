@@ -1,9 +1,30 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup setup-db setup-m4-migration-db migrate-db migrate-sqlite migrate-assets migrate-private-work migrate-automations migrate-reliability reconcile-usage backup-db restore-db drill-restore rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon gateway worker scheduler nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.PHONY: help config config-upgrade check install test test-project-foundation-postgres setup setup-db setup-m4-migration-db migrate-db migrate-sqlite migrate-assets migrate-private-work migrate-automations migrate-reliability reconcile-usage backup-db restore-db drill-restore rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon gateway worker scheduler nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
+PROJECT_FOUNDATION_POSTGRES_TESTS = \
+	tests/integration/test_m1_postgres_cutover.py \
+	tests/integration/test_project_isolation_postgres.py \
+	tests/integration/test_m2_project_governance_postgres.py \
+	tests/integration/test_m3_shared_assets_postgres.py \
+	tests/integration/test_m4_private_work_postgres.py \
+	tests/integration/test_m4_private_work_migration_postgres.py \
+	tests/integration/test_m5_project_automation_postgres.py \
+	tests/integration/test_m5_automation_migration_postgres.py \
+	tests/test_m6_reliability_migration_postgres.py \
+	tests/test_m6_reliability_schema_postgres.py \
+	tests/test_m6_process_readiness.py \
+	tests/test_m6_job_repository_postgres.py \
+	tests/test_m6_durable_stream_postgres.py \
+	tests/test_m6_quota_service_postgres.py \
+	tests/test_m6_audit_redaction.py \
+	tests/test_m6_audit_integration_postgres.py \
+	tests/test_m6_restore_postgres.py \
+	tests/test_m6_release_gate_postgres.py \
+	tests/test_m6_worker_crash_recovery_postgres.py \
+	tests/test_m6_gateway_reconnect_process.py
 
 # Detect OS for Windows compatibility
 ifeq ($(OS),Windows_NT)
@@ -24,6 +45,8 @@ help:
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
+	@echo "  make test            - Run the fixed M1-M6 PostgreSQL release gate (0 skip)"
+	@echo "  make test-project-foundation-postgres - Run the fixed M1-M6 PostgreSQL release gate"
 	@echo "  make setup-db        - 创建并初始化 PostgreSQL 数据库"
 	@echo "  make setup-m4-migration-db - 创建/验证固定在0007的legacy SQLite迁移库"
 	@echo "  make migrate-db      - 仅升级已存在 PostgreSQL 数据库"
@@ -64,6 +87,12 @@ help:
 	@echo "  make docker-logs-redis - View Docker Redis logs"
 
 ## Setup & Diagnosis
+test: test-project-foundation-postgres
+
+test-project-foundation-postgres:
+	@test -n "$${POSTGRES_TEST_URL:-}" || (echo "POSTGRES_TEST_URL is required for the PostgreSQL release gate" >&2; exit 1)
+	@cd backend && DEER_FLOW_REQUIRE_ZERO_SKIPS=1 uv run pytest $(PROJECT_FOUNDATION_POSTGRES_TESTS) -ra
+
 setup:
 	@$(BACKEND_UV_RUN) python ../scripts/setup_wizard.py
 

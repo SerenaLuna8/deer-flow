@@ -11,11 +11,17 @@ from fastapi import FastAPI, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.audit.service import AuditService, _bind_gateway_audit_process
+from app.audit.sinks import OperationalAuditSink
 from app.gateway.deps import project_session
 from app.gateway.routers import projects
 from app.projects.context import resolve_project_context
 from app.projects.errors import ProjectNotFound
 from app.projects.repository import ProjectRepository
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.service import QuotaService
+from app.reliability.owner_refs import AuditHmacKeyring
+from deerflow.config.quota_config import QuotaConfig
 
 
 @pytest.mark.integration
@@ -40,6 +46,13 @@ async def test_project_api_and_repository_enforce_account_isolation(
 
     app.dependency_overrides[project_session] = request_session
     app.dependency_overrides[projects.authenticated_project_identity] = request_identity
+    audit_keyring = AuditHmacKeyring.from_environment()
+    audit_service = AuditService(factory, audit_keyring)
+    app.state.operational_audit_sink = OperationalAuditSink(
+        audit_service,
+        process_context=_bind_gateway_audit_process(audit_service),
+    )
+    app.state.project_quota_enforcer = ProjectQuotaEnforcer(QuotaService(factory, QuotaConfig(), source_ref_hasher=audit_keyring))
 
     def headers(name: str) -> dict[str, str]:
         return {"x-test-user": str(users[name])}
