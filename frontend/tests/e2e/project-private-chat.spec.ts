@@ -10,8 +10,12 @@ const THREAD_ID = "20000000-0000-4000-8000-000000000001";
 const MISSING_THREAD_ID = "20000000-0000-4000-8000-000000000099";
 const AGENT_ID = "30000000-0000-4000-8000-000000000001";
 const PROJECT_FILE_ID = "40000000-0000-4000-8000-000000000001";
+const PROJECT_SKILL_FILE_ID = "40000000-0000-4000-8000-000000000003";
+const PROJECT_SKILL_ID = "50000000-0000-4000-8000-000000000001";
+const SIDECAR_THREAD_ID = "60000000-0000-4000-8000-000000000001";
 const WRITE_ARTIFACT_PATH = "/mnt/user-data/outputs/project-report.md";
 const PRESENTED_ARTIFACT_PATH = "/mnt/user-data/outputs/presented-report.md";
+const PRESENTED_SKILL_PATH = "/mnt/user-data/outputs/reviewer.skill";
 
 const project: Project = {
   id: PROJECT_ID,
@@ -108,6 +112,7 @@ type MockPrivateWorkOptions = {
   searchThreads?: (typeof privateThread)[];
   streamValues?: Record<string, unknown>;
   workspaceChanges?: unknown;
+  uploadedFiles?: Array<Record<string, unknown>>;
 };
 
 async function json(route: Route, body: unknown, status = 200) {
@@ -241,20 +246,23 @@ async function mockPrivateWork(
         request.method() === "GET" &&
         path.endsWith(`/threads/${THREAD_ID}/uploads`)
       ) {
-        return json(route, [
-          {
-            id: PROJECT_FILE_ID,
-            logical_path: "outputs/presented-report.md",
-            display_name: "presented-report.md",
-            kind: "artifact",
-            media_type: "text/markdown",
-            size: 26,
-            sha256: "project-file-sha",
-            status: "ready",
-            created_at: "2026-07-15T00:00:00Z",
-            updated_at: "2026-07-15T00:00:00Z",
-          },
-        ]);
+        return json(
+          route,
+          options.uploadedFiles ?? [
+            {
+              id: PROJECT_FILE_ID,
+              logical_path: "outputs/presented-report.md",
+              display_name: "presented-report.md",
+              kind: "artifact",
+              media_type: "text/markdown",
+              size: 26,
+              sha256: "project-file-sha",
+              status: "ready",
+              created_at: "2026-07-15T00:00:00Z",
+              updated_at: "2026-07-15T00:00:00Z",
+            },
+          ],
+        );
       }
       if (path.endsWith(`/threads/${THREAD_ID}/files/${PROJECT_FILE_ID}`)) {
         if (options.artifactFileStatus) {
@@ -312,6 +320,219 @@ async function mockPrivateWork(
     },
   );
   return requests;
+}
+
+type ProjectSidecarMockOptions = {
+  existing?: boolean;
+  messages?: unknown[];
+  deleteGate?: Promise<void>;
+};
+
+async function mockProjectSidecar(
+  page: Page,
+  options: ProjectSidecarMockOptions = {},
+) {
+  let sidecarThreadId = options.existing ? SIDECAR_THREAD_ID : null;
+  let searchVisible = options.existing ?? false;
+  let messages = [...(options.messages ?? [])];
+  const requests: string[] = [];
+  const createBodies: Array<Record<string, unknown>> = [];
+  const runBodies: unknown[] = [];
+  const globalRequests: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (
+      path === "/api/threads" ||
+      path.startsWith("/api/threads/") ||
+      path.startsWith("/api/langgraph/threads") ||
+      path.startsWith("/api/langgraph/runs")
+    ) {
+      globalRequests.push(`${request.method()} ${path}`);
+    }
+  });
+
+  const sidecarMetadata = () => ({
+    created_at: "2026-07-15T00:00:00Z",
+    updated_at: "2026-07-15T02:00:00Z",
+    deerflow_sidecar: true,
+    parent_thread_id: THREAD_ID,
+    sidecar_context_type: "referenced_message",
+    sidecar_context_label: "Selected assistant text #1",
+    sidecar_context_count: 1,
+    referenced_message_id: "msg-project-sidecar-source",
+    referenced_message_ids: ["msg-project-sidecar-source"],
+    referenced_message_role: "assistant",
+    referenced_message_roles: ["assistant"],
+  });
+  const sidecarThread = () => ({
+    thread_id: sidecarThreadId,
+    agent_asset_id: AGENT_ID,
+    agent_scope: "project",
+    display_name: "Project side chat",
+    status: "idle",
+    metadata: sidecarMetadata(),
+    version: 1,
+  });
+
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/private-work/**`,
+    async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const path = url.pathname;
+
+      if (request.method() === "POST" && path.endsWith("/threads/search")) {
+        requests.push(`${request.method()} ${path}`);
+        return json(route, {
+          items:
+            searchVisible && sidecarThreadId
+              ? [sidecarThread(), privateThread]
+              : [privateThread],
+        });
+      }
+
+      if (request.method() === "POST" && path.endsWith("/threads")) {
+        const body = request.postDataJSON() as Record<string, unknown>;
+        createBodies.push(body);
+        sidecarThreadId = String(body.thread_id);
+        searchVisible = true;
+        requests.push(`${request.method()} ${path}`);
+        return json(route, {
+          ...sidecarThread(),
+          display_name:
+            typeof body.display_name === "string" ? body.display_name : null,
+          metadata: {
+            ...sidecarMetadata(),
+            ...(typeof body.metadata === "object" && body.metadata !== null
+              ? body.metadata
+              : {}),
+          },
+        });
+      }
+
+      if (!sidecarThreadId || !path.includes(`/threads/${sidecarThreadId}`)) {
+        return route.fallback();
+      }
+      requests.push(`${request.method()} ${path}`);
+
+      if (path.endsWith(`/threads/${sidecarThreadId}/state`)) {
+        return json(route, {
+          values: {
+            title: "Project side chat",
+            messages,
+            artifacts: [],
+            todos: [],
+          },
+          next: [],
+          metadata: {},
+          checkpoint: {},
+          checkpoint_id: null,
+          parent_checkpoint_id: null,
+          created_at: "2026-07-15T02:00:00Z",
+          tasks: [],
+        });
+      }
+      if (path.endsWith(`/threads/${sidecarThreadId}/token-usage`)) {
+        return json(route, {
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          total_tokens: 0,
+        });
+      }
+      if (path.endsWith(`/threads/${sidecarThreadId}/uploads/limits`)) {
+        return json(route, {
+          max_files: 10,
+          max_file_size: 50 * 1024 * 1024,
+          max_total_size: 100 * 1024 * 1024,
+        });
+      }
+      if (
+        request.method() === "GET" &&
+        path.endsWith(`/threads/${sidecarThreadId}/uploads`)
+      ) {
+        return json(route, []);
+      }
+      if (path.endsWith(`/threads/${sidecarThreadId}/runs/stream`)) {
+        const body = request.postDataJSON() as {
+          input?: { messages?: unknown[] };
+        };
+        runBodies.push(body);
+        const submitted = body.input?.messages ?? [];
+        messages = [
+          ...messages,
+          ...submitted,
+          {
+            type: "ai",
+            id: `msg-sidecar-ai-${runBodies.length}`,
+            content: "Scoped side answer.",
+          },
+        ];
+        return handleRunStream(route, {}, submitted);
+      }
+      if (/\/threads\/[^/]+\/runs(?:\?|$)/u.test(request.url())) {
+        return json(route, []);
+      }
+      if (path.endsWith(`/threads/${sidecarThreadId}`)) {
+        if (request.method() === "DELETE") {
+          await options.deleteGate;
+          searchVisible = false;
+          return route.fulfill({ status: 204 });
+        }
+        if (!searchVisible) return json(route, { detail: "not found" }, 404);
+        return json(route, sidecarThread());
+      }
+      return json(route, { detail: "not found" }, 404);
+    },
+  );
+
+  return {
+    requests,
+    createBodies,
+    runBodies,
+    globalRequests,
+    hideFromSearch: () => {
+      searchVisible = false;
+    },
+  };
+}
+
+async function selectProjectMessageText(page: Page, text: string) {
+  await page.evaluate((targetText) => {
+    const root = document.querySelector('[data-testid="main-message-list"]');
+    const walker = document.createTreeWalker(
+      root ?? document.body,
+      NodeFilter.SHOW_TEXT,
+    );
+    let node = walker.nextNode();
+    while (node) {
+      const value = node.textContent ?? "";
+      const start = value.indexOf(targetText);
+      if (start >= 0) {
+        const range = document.createRange();
+        range.setStart(node, start);
+        range.setEnd(node, start + targetText.length);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        node.parentElement?.dispatchEvent(
+          new MouseEvent("mouseup", { bubbles: true }),
+        );
+        return;
+      }
+      node = walker.nextNode();
+    }
+    throw new Error(`Unable to find project message text: ${targetText}`);
+  }, text);
+  await expect(page.locator("[data-sidecar-selection-toolbar]")).toBeVisible();
+}
+
+async function openProjectSidecarDraft(page: Page, text: string) {
+  await selectProjectMessageText(page, text);
+  await page
+    .locator("[data-sidecar-selection-toolbar]")
+    .getByRole("button", { name: /ask in side chat/i })
+    .click();
+  await expect(page.getByTestId("sidecar-panel")).toBeVisible();
 }
 
 test.beforeEach(async ({ page }) => {
@@ -449,6 +670,7 @@ test("project chat opens and closes a scoped side-chat draft", async ({
       },
     ],
   });
+  const sidecar = await mockProjectSidecar(page);
   await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
   await page.getByText("Investigate this project-scoped detail.").waitFor();
   await page.evaluate(() => {
@@ -474,6 +696,188 @@ test("project chat opens and closes a scoped side-chat draft", async ({
   ).toBeVisible();
   await page.getByTestId("sidecar-close-button").click();
   await expect(page.getByTestId("sidecar-panel")).toHaveCount(0);
+  expect(sidecar.requests.some((request) => request.startsWith("DELETE"))).toBe(
+    false,
+  );
+  expect(sidecar.globalRequests).toEqual([]);
+});
+
+test("project side chat creates, sends, and renders references only through private-work", async ({
+  page,
+}) => {
+  const sourceText = "Investigate this scoped side conversation.";
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "ai",
+        id: "msg-project-sidecar-source",
+        content: sourceText,
+      },
+    ],
+  });
+  const sidecar = await mockProjectSidecar(page);
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await page.getByText(sourceText).waitFor();
+  await openProjectSidecarDraft(page, sourceText);
+  const sidecarInput = page.getByPlaceholder(/deeper follow-up/i);
+  await sidecarInput.fill("What should the project do next?");
+  await sidecarInput.press("Enter");
+
+  await expect.poll(() => sidecar.createBodies).toHaveLength(1);
+  await expect.poll(() => sidecar.runBodies).toHaveLength(1);
+  await expect(
+    page.getByTestId("sidecar-message-list").getByText("Scoped side answer."),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByTestId("sidecar-message-list")
+      .getByTestId("message-reference-attachment"),
+  ).toContainText("1 selected text fragment");
+
+  expect(sidecar.createBodies[0]?.metadata).toMatchObject({
+    deerflow_sidecar: true,
+    parent_thread_id: THREAD_ID,
+    referenced_message_id: "msg-project-sidecar-source",
+  });
+  expect(sidecar.requests).toContain(
+    `POST /api/projects/${PROJECT_ID}/private-work/threads`,
+  );
+  expect(sidecar.requests).toContain(
+    `POST /api/projects/${PROJECT_ID}/private-work/threads/${String(sidecar.createBodies[0]?.thread_id)}/runs/stream`,
+  );
+  expect(sidecar.globalRequests).toEqual([]);
+});
+
+test("project side chat restores scoped history", async ({ page }) => {
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "ai",
+        id: "msg-project-sidecar-source",
+        content: "The parent project history remains here.",
+      },
+    ],
+  });
+  const sidecar = await mockProjectSidecar(page, {
+    existing: true,
+    messages: [
+      {
+        type: "human",
+        id: "msg-sidecar-restored-human",
+        content: [{ type: "text", text: "Restored project follow-up" }],
+      },
+      {
+        type: "ai",
+        id: "msg-sidecar-restored-ai",
+        content: "Restored project side answer.",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible();
+  await page.getByTestId("sidecar-header-trigger").click();
+  await expect(
+    page
+      .getByTestId("sidecar-message-list")
+      .getByText("Restored project side answer."),
+  ).toBeVisible();
+
+  expect(sidecar.requests).toContain(
+    `POST /api/projects/${PROJECT_ID}/private-work/threads/search`,
+  );
+  expect(sidecar.requests).toContain(
+    `GET /api/projects/${PROJECT_ID}/private-work/threads/${SIDECAR_THREAD_ID}/state`,
+  );
+  expect(sidecar.globalRequests).toEqual([]);
+});
+
+test("project side chat self-heals a stale scoped trigger", async ({
+  page,
+}) => {
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "ai",
+        id: "msg-project-sidecar-source",
+        content: "The scoped sidecar may be deleted elsewhere.",
+      },
+    ],
+  });
+  const sidecar = await mockProjectSidecar(page, {
+    existing: true,
+    messages: [
+      {
+        type: "ai",
+        id: "msg-sidecar-stale",
+        content: "Soon to be deleted.",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible();
+  sidecar.hideFromSearch();
+  await page.getByTestId("sidecar-header-trigger").click();
+  await expect(page.getByTestId("sidecar-panel")).toBeHidden();
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeHidden();
+  expect(sidecar.globalRequests).toEqual([]);
+});
+
+test("project side chat deletes only its scoped persisted thread", async ({
+  page,
+}) => {
+  await mockPrivateWork(page);
+  const sidecar = await mockProjectSidecar(page, { existing: true });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible();
+  await page.getByTestId("sidecar-header-trigger").click();
+  await page.getByTestId("sidecar-delete-button").click();
+  await page.getByTestId("sidecar-delete-confirm-button").click();
+
+  await expect(page.getByTestId("sidecar-panel")).toBeHidden();
+  expect(sidecar.requests).toContain(
+    `DELETE /api/projects/${PROJECT_ID}/private-work/threads/${SIDECAR_THREAD_ID}`,
+  );
+  expect(sidecar.globalRequests).toEqual([]);
+});
+
+test("project side chat keeps its delete dialog locked while scoped delete is in flight", async ({
+  page,
+}) => {
+  let releaseDelete!: () => void;
+  const deleteGate = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  await mockPrivateWork(page);
+  const sidecar = await mockProjectSidecar(page, {
+    existing: true,
+    deleteGate,
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible();
+  await page.getByTestId("sidecar-header-trigger").click();
+  await page.getByTestId("sidecar-delete-button").click();
+  const dialogTitle = page.getByRole("heading", { name: "Delete side chat" });
+  await page.getByTestId("sidecar-delete-confirm-button").click();
+
+  await expect(
+    page.getByTestId("sidecar-delete-confirm-button"),
+  ).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Cancel" })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(dialogTitle).toBeVisible();
+  expect(sidecar.requests).toContain(
+    `DELETE /api/projects/${PROJECT_ID}/private-work/threads/${SIDECAR_THREAD_ID}`,
+  );
+  expect(sidecar.globalRequests).toEqual([]);
+
+  releaseDelete();
+  await expect(dialogTitle).toBeHidden();
+  await expect(page.getByTestId("sidecar-panel")).toBeHidden();
 });
 
 test("project history renders Mermaid and stopped subtask state", async ({
@@ -857,6 +1261,131 @@ test("project artifact failures show a public error instead of the response body
   await expect(page.getByText("private artifact storage failure")).toHaveCount(
     0,
   );
+});
+
+test("project .skill artifacts are download-only on the UUID file route", async ({
+  page,
+}) => {
+  const fileRequests: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.includes(`/threads/${THREAD_ID}/files/`)) {
+      fileRequests.push(`${request.method()} ${path}`);
+    }
+  });
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "ai",
+        id: "msg-project-skill-present",
+        content: "The project Skill archive is ready.",
+        tool_calls: [
+          {
+            id: "present-project-skill",
+            name: "present_files",
+            args: { filepaths: [PRESENTED_SKILL_PATH] },
+          },
+        ],
+      },
+    ],
+    stateArtifacts: [PRESENTED_SKILL_PATH],
+    uploadedFiles: [
+      {
+        id: PROJECT_SKILL_FILE_ID,
+        logical_path: "outputs/reviewer.skill",
+        display_name: "reviewer.skill",
+        kind: "artifact",
+        media_type: "application/octet-stream",
+        size: 512,
+        sha256: "project-skill-sha",
+        status: "ready",
+        created_at: "2026-07-15T00:00:00Z",
+        updated_at: "2026-07-15T00:00:00Z",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await page.getByText("reviewer.skill", { exact: true }).click();
+
+  await expect(
+    page.getByText("This file type cannot be previewed in the browser."),
+  ).toBeVisible();
+  const downloadURL = `/api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/files/${PROJECT_SKILL_FILE_ID}`;
+  await expect(
+    page.locator("#artifacts").getByRole("link", { name: "Download" }),
+  ).toHaveAttribute("href", new RegExp(`${downloadURL}$`, "u"));
+  await page.waitForTimeout(200);
+  expect(fileRequests).toEqual([]);
+});
+
+test("project Skill catalog suggestions submit through the scoped run", async ({
+  page,
+}) => {
+  const runBodies: unknown[] = [];
+  const projectRequests = await mockPrivateWork(page, true, { runBodies });
+  const globalPrivateRequests: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (
+      path === "/api/skills" ||
+      path.startsWith("/api/langgraph/threads") ||
+      path.startsWith("/api/threads/")
+    ) {
+      globalPrivateRequests.push(`${request.method()} ${path}`);
+    }
+  });
+  await page.route(`**/api/projects/${PROJECT_ID}/skills`, (route) =>
+    json(route, {
+      system_items: [],
+      project_items: [
+        {
+          id: PROJECT_SKILL_ID,
+          scope: "project",
+          project_id: PROJECT_ID,
+          slug: "review-skill",
+          display_name: "Review Skill",
+          status: "active",
+          current_published_version_id: null,
+          version: 1,
+          created_by_user_id: ACCOUNT_ID,
+          created_at: "2026-07-15T00:00:00Z",
+          updated_at: "2026-07-15T00:00:00Z",
+          capabilities: [
+            "shared_assets.read",
+            "shared_assets.execute",
+            "shared_assets.edit",
+          ],
+          binding: null,
+        },
+      ],
+      request_id: "req-project-skills-suggestion",
+    }),
+  );
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await textarea.fill("/");
+  const suggestion = page.getByRole("option", { name: /review-skill/i });
+  await expect(suggestion).toBeVisible();
+  await textarea.press("ArrowDown");
+  await textarea.press("ArrowUp");
+  await textarea.press("Enter");
+  await expect(page.getByText("/review-skill")).toBeVisible();
+  const inlineInput = page.getByRole("textbox", {
+    name: /how can i assist you/i,
+  });
+  await inlineInput.fill("inspect this project");
+  await inlineInput.press("Enter");
+
+  await expect.poll(() => runBodies).toHaveLength(1);
+  expect(JSON.stringify(runBodies[0])).toContain(
+    "/review-skill inspect this project",
+  );
+  expect(projectRequests).toContain(
+    `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/stream`,
+  );
+  expect(globalPrivateRequests).toEqual([]);
 });
 
 test("viewer can delete an owned thread but cannot create or run project work", async ({

@@ -1678,6 +1678,7 @@ export function useThreadStream({
 
   return {
     thread: mergedThread,
+    boundThreadId: onStreamThreadId ?? null,
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,

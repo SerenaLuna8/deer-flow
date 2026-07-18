@@ -7,7 +7,6 @@ import type { AgentThreadState } from "../threads";
 
 import { buildWriteFileDraftContent } from "./preview";
 export async function loadArtifactContent({
-  filepath,
   url,
   signal,
 }: {
@@ -15,18 +14,16 @@ export async function loadArtifactContent({
   url: string;
   signal?: AbortSignal;
 }) {
-  let artifactURL = url;
-  if (filepath.endsWith(".skill")) {
-    artifactURL = `${url.replace(/\/$/u, "")}/SKILL.md`;
-  }
+  // Project file URLs are authority-bearing UUID endpoints. Fetch the exact
+  // URL; packaged `.skill` archives are download-only and have no member route.
   const response = signal
-    ? await fetchWithAuth(artifactURL, { signal })
-    : await fetchWithAuth(artifactURL);
+    ? await fetchWithAuth(url, { signal })
+    : await fetchWithAuth(url);
   if (!response.ok) {
     await throwGatewayApiError(response, "Failed to load artifact content");
   }
   const text = await response.text();
-  return { content: text, url: artifactURL };
+  return { content: text, url };
 }
 
 export function loadArtifactContentFromToolCall({

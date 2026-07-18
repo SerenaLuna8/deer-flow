@@ -164,3 +164,52 @@ production legacy route/global thread residue: zero matches
 
 Task 7 was not started, and the M7 progress ledger was not changed by this
 repair.
+
+## Second independent-review repair
+
+The second review of `bb18f3ad` found two remaining Important gaps: project
+`.skill` artifacts tried to preview a nonexistent `SKILL.md` member URL, and
+the deleted legacy Sidecar/Skill suggestion coverage had not yet been fully
+reconciled on project private-work routes.
+
+### RED evidence and fixes
+
+- The new artifact unit test failed because the UUID file URL was rewritten to
+  `.../files/<uuid>/SKILL.md`. The matching project E2E failed because the UI
+  forced the archive into Markdown preview instead of rendering its download
+  fallback.
+- `.skill` is now an explicit opaque, download-only artifact contract. The
+  loader never derives archive-member routes, the detail view does not fetch or
+  render it as Markdown, and both the header and fallback retain the project
+  UUID file URL. Error bodies remain hidden by the existing safe loader path.
+- Project Sidecar coverage now owns draft close, create/send, visible reference
+  metadata, scoped stream, persisted history restore, stale-thread self-heal,
+  delete, and in-flight delete locking. Every case observes project
+  `/api/projects/{project_id}/private-work/...` requests and rejects global or
+  legacy thread routes.
+- The create/send E2E exposed a real transition bug: the queued first Sidecar
+  message was consumed before `useThreadStream` had bound the newly created
+  thread. `useThreadStream` now exposes its bound thread ID, and Sidecar waits
+  for that ID before dispatching the queued message.
+- Project Skill catalog integration now proves a leading slash shows the
+  project Skill, keyboard navigation selects it, and submission enters the
+  project-scoped run stream without a global Skill or thread request.
+
+### Fresh second-repair gates
+
+```text
+focused artifact unit: 1 file, 4 passed
+focused project artifact/Skill/Sidecar E2E: 8 passed
+full unit: 121 files, 883 passed, 0 skipped
+full default Playwright: 74 passed
+static artifact/browser Playwright: 2 passed
+pnpm check: ESLint and TypeScript passed
+pnpm format: passed
+BUILD_MODE=production pnpm build: 80/80 pages
+BUILD_MODE=static SKIP_ENV_VALIDATION=1 pnpm build: 80/80 pages
+git diff --check: passed
+production legacy route/global client residue: zero matches
+```
+
+Task 7 was not started, and `.superpowers/sdd/progress.md` remains unchanged by
+this second repair.

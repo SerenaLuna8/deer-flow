@@ -183,6 +183,7 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const {
     thread,
+    boundThreadId,
     sendMessage,
     isUploading,
     isHistoryLoading,
@@ -444,7 +445,12 @@ export function SidecarPanel({ className }: { className?: string }) {
   );
 
   useEffect(() => {
-    if (!queuedSubmit || !sidecar.sidecarThreadId || thread.isLoading) {
+    if (
+      !queuedSubmit ||
+      !sidecar.sidecarThreadId ||
+      boundThreadId !== sidecar.sidecarThreadId ||
+      thread.isLoading
+    ) {
       return;
     }
 
@@ -468,6 +474,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     });
   }, [
     queuedSubmit,
+    boundThreadId,
     sidecar,
     sidecar.sidecarThreadId,
     submitToSidecarThread,

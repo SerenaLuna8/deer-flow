@@ -145,21 +145,16 @@ export function ArtifactFileDetail({
       ...artifacts.filter((artifact) => !presentedSet.has(artifact)),
     ];
   }, [artifacts, filepath, isWriteFile, openedPresentedFilepaths]);
-  const isSkillFile = useMemo(() => {
-    return filepath.endsWith(".skill");
-  }, [filepath]);
   const { isCodeFile, language } = useMemo(() => {
     if (isWriteFile) {
       let language = checkCodeFile(filepath).language;
       language ??= "text";
       return { isCodeFile: true, language };
     }
-    // Treat .skill files as markdown (they contain SKILL.md)
-    if (isSkillFile) {
-      return { isCodeFile: true, language: "markdown" };
-    }
+    // Packaged `.skill` artifacts intentionally fall through as opaque,
+    // download-only files rather than pretending the archive is Markdown.
     return checkCodeFile(filepath);
-  }, [filepath, isWriteFile, isSkillFile]);
+  }, [filepath, isWriteFile]);
   const canPreviewInBrowser = useMemo(() => {
     return canBrowserPreviewFile(filepath);
   }, [filepath]);

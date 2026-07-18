@@ -92,4 +92,20 @@ describe("artifact content scope and transport", () => {
       );
     },
   );
+
+  test("keeps project .skill downloads on the exact UUID file URL", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      new Response("skill archive", {
+        status: 200,
+        headers: { "Content-Type": "application/octet-stream" },
+      }),
+    );
+    const url =
+      "/api/projects/project/private-work/threads/thread-1/files/file-1";
+
+    await expect(
+      loadArtifactContent({ filepath: "outputs/reviewer.skill", url }),
+    ).resolves.toEqual({ content: "skill archive", url });
+    expect(mockedFetch).toHaveBeenCalledWith(url);
+  });
 });

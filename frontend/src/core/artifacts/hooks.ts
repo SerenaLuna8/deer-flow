@@ -46,7 +46,7 @@ export function useArtifactContent({
     },
     enabled,
     retry: false,
-    // Cache artifact content for 5 minutes to avoid repeated fetches (especially for .skill ZIP extraction)
+    // Cache previewable artifact content for 5 minutes to avoid repeated fetches.
     staleTime: 5 * 60 * 1000,
   });
   return {
