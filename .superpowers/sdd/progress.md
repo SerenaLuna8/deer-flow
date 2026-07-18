@@ -8,7 +8,7 @@
 
 ## M7 reviewed tasks
 
-- No task completed yet. Task 1 is next.
+- Task 1: complete at `08ed19be` (implementation `55d2e656`, review repair `08ed19be`; final independent review 0 Critical/Important/Minor). Marker-free final-schema readiness now uses only Alembic revision plus allowlisted relation presence, public contracts expose `schema_ready`/`schema_state` with safe `ready | unavailable`, and Gateway domains plus Worker/Scheduler fail closed. Fresh evidence: backend 75 passed plus repair gate 46 passed, frontend 39 passed plus repair gate 17 passed, all with 0 skips; Ruff, format, ESLint/TypeScript, Prettier, and diff checks clean. Temporary `PRE_RESET_SCHEMA_REVISION` remains intentionally until Task 8.
 
 ---
 
