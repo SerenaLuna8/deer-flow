@@ -85,6 +85,7 @@ Pre-repair independent review history:
 - Critical: 0; Important: 1; Minor: 0.
 - The sole remaining Important item was the unavailable fresh PostgreSQL/process evidence. The fresh gates above now close that evidence gap; a fixed-SHA post-commit review is still required before Task 19 acceptance.
 - The first fixed-SHA review at `0b3a4073` reported 0 Critical, 3 Important, and 1 Minor. All four findings have repair code and fresh evidence above; a post-repair fixed-SHA review is still required before Task 19 acceptance.
+- The post-repair review at `6dc749df` reported 0 Critical, 0 Important, and one Minor: mapping quota ledger rows by `source_kind` could hide duplicate rows. The final assertion now requires exactly two rows and the exact unordered reserve/release key-ID set; its focused PostgreSQL gate passed `1/1`, `0 skipped`.
 
 ## Residual-state policy
 
