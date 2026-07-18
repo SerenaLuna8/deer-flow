@@ -1,25 +1,4 @@
-"""Real HTTP end-to-end verification for issue #2862's setup_agent path.
-
-This test drives the **entire** FastAPI gateway through ``starlette.testclient.TestClient``:
-
-  starlette.testclient.TestClient (real ASGI stack)
-    -> AuthMiddleware (real cookie parsing, real JWT decode)
-    -> /api/v1/auth/register endpoint (real password hash + PostgreSQL write)
-    -> /api/threads/{id}/runs/stream endpoint (real start_run config-assembly)
-    -> background asyncio.create_task(run_agent) (real worker, real Runtime)
-    -> langchain.agents.create_agent graph (real, with fake LLM)
-    -> ToolNode dispatch (real)
-    -> setup_agent tool (real file I/O)
-
-The only mock is the LLM (no API key needed). Every layer that participates
-in ``user_id`` propagation — auth, ContextVar, ``inject_authenticated_user_context``,
-``worker._build_runtime_context``, ``Runtime.merge`` — is the real production
-code path. If the chain is broken at any layer, this test fails.
-
-This is what "真实验证" looks like for a server that lives behind authentication:
-register a user, log in (cookie), POST to /runs/stream, wait for the run to
-finish, then read the filesystem.
-"""
+"""Real HTTP regression for removal of the global setup-agent run entry."""
 
 from __future__ import annotations
 
@@ -27,29 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from _agent_e2e_helpers import FakeToolCallingModel, build_single_tool_call_model
-
-
-def _build_fake_create_chat_model(agent_name: str):
-    """Return a callable matching the real ``create_chat_model`` signature.
-
-    Whenever the lead agent constructs a chat model during the bootstrap flow,
-    we hand it a fake that emits a single setup_agent tool_call on its first
-    turn, then a benign final answer on its second turn.
-    """
-
-    def fake_create_chat_model(*args: Any, **kwargs: Any) -> FakeToolCallingModel:
-        return build_single_tool_call_model(
-            tool_name="setup_agent",
-            tool_args={
-                "soul": f"# Real HTTP E2E SOUL for {agent_name}",
-                "description": "real-http-e2e agent",
-            },
-            tool_call_id="call_real_http_1",
-            final_text=f"Agent {agent_name} created via real HTTP e2e.",
-        )
-
-    return fake_create_chat_model
 
 
 @pytest.fixture
@@ -167,54 +123,12 @@ def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch)
     return create_app()
 
 
-def _drain_stream(response, *, timeout: float = 30.0, max_bytes: int = 4 * 1024 * 1024) -> str:
-    """Consume an SSE response body until the run terminates and return the text.
-
-    Bounded to keep the test fail-fast:
-      - Stops as soon as an ``event: end`` SSE frame is observed (the gateway
-        sends this when the background run finishes — see ``services.format_sse``
-        and ``StreamBridge.publish_end``).
-      - Stops at ``timeout`` seconds wall-clock so a stuck run / runaway heartbeat
-        loop surfaces a real failure instead of hanging pytest.
-      - Stops at ``max_bytes`` so a runaway producer can't OOM the test process.
-    """
-    import time as _time
-
-    deadline = _time.monotonic() + timeout
-    body = b""
-    for chunk in response.iter_bytes():
-        body += chunk
-        if b"event: end" in body:
-            break
-        if len(body) >= max_bytes:
-            break
-        if _time.monotonic() >= deadline:
-            break
-    return body.decode("utf-8", errors="replace")
-
-
-def _wait_for_file(path: Path, *, timeout: float = 10.0) -> bool:
-    """Block until *path* exists or *timeout* elapses.
-
-    The run completes inside ``asyncio.create_task`` after start_run returns,
-    so the test must wait for the background task to flush its writes.
-    """
-    import time as _time
-
-    deadline = _time.monotonic() + timeout
-    while _time.monotonic() < deadline:
-        if path.exists():
-            return True
-        _time.sleep(0.05)
-    return False
-
-
 @pytest.mark.no_auto_user
-def test_real_http_legacy_setup_agent_entry_is_closed_after_private_cutover(
+def test_real_http_global_setup_agent_entry_is_absent(
     isolated_app: Any,
     isolated_deer_flow_home: Path,
 ):
-    """M4 asset authoring must not be reachable through the legacy run API."""
+    """Deleted global Thread routes are ordinary missing routes after M7."""
     from starlette.testclient import TestClient
 
     with TestClient(isolated_app) as client:
@@ -235,6 +149,5 @@ def test_real_http_legacy_setup_agent_entry_is_closed_after_private_cutover(
             json={"thread_id": thread_id, "metadata": {}},
             headers={"X-CSRF-Token": csrf_token},
         )
-        assert created.status_code == 409, created.text
-        assert created.json()["detail"]["code"] == "PRIVATE_WORK_CUTOVER"
+        assert created.status_code == 404, created.text
         assert not list(isolated_deer_flow_home.rglob("SOUL.md"))

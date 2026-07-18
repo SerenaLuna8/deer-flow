@@ -375,10 +375,9 @@ async def test_project_inbound_dispatcher_uses_only_resolved_context_and_thread(
 @pytest.mark.postgres
 async def test_gateway_project_run_launcher_calls_private_start_wait_and_scoped_state(
     seed: M4ThreadSeed,
-    monkeypatch,
 ) -> None:
-    from app.gateway import services
     from app.private_work.connection_inbound import build_gateway_project_run_launcher
+    from app.private_work.run_service import PrivateRunService
 
     channel_values = {
         "messages": [
@@ -402,23 +401,28 @@ async def test_gateway_project_run_launcher_calls_private_start_wait_and_scoped_
             assert context is seed.owner_a
             return FakeCheckpointer()
 
-    bridge = object()
-    run_manager = object()
+    durable_reads: list[tuple[object, str, str]] = []
+
+    class FakePrivateRunService(PrivateRunService):
+        def __init__(self) -> None:
+            self.statuses = iter(("pending", "success"))
+
+        async def get(self, context, thread_id, run_id):
+            durable_reads.append((context, thread_id, run_id))
+            return SimpleNamespace(status=next(self.statuses))
+
     app = SimpleNamespace(
         state=SimpleNamespace(
-            stream_bridge=bridge,
-            run_manager=run_manager,
+            private_run_service=FakePrivateRunService(),
             project_scoped_checkpointer=FakeProjectScopedCheckpointer(),
         )
     )
     record = SimpleNamespace(run_id="run-a", thread_id="private-thread")
     private_start = AsyncMock(return_value=record)
-    legacy_start = AsyncMock(side_effect=AssertionError("legacy start_run used"))
-    wait = AsyncMock(return_value=True)
-    monkeypatch.setattr(services, "start_private_run", private_start)
-    monkeypatch.setattr(services, "start_run", legacy_start)
-    monkeypatch.setattr(services, "wait_for_run_completion", wait)
-    launcher = build_gateway_project_run_launcher(app=app)
+    launcher = build_gateway_project_run_launcher(
+        app=app,
+        start_private_run_fn=private_start,
+    )
     message = InboundMessage(
         channel_name="slack",
         chat_id="chat-a",
@@ -434,8 +438,10 @@ async def test_gateway_project_run_launcher_calls_private_start_wait_and_scoped_
     assert thread_id == "private-thread"
     assert context is seed.owner_a
     assert body.input == {"messages": [{"role": "user", "content": "hello"}]}
-    wait.assert_awaited_once_with(bridge, record, request, run_manager)
-    legacy_start.assert_not_awaited()
+    assert durable_reads == [
+        (seed.owner_a, "private-thread", "run-a"),
+        (seed.owner_a, "private-thread", "run-a"),
+    ]
     assert result == channel_values
 
 

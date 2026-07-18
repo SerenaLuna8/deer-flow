@@ -58,22 +58,3 @@ def test_openapi_operation_ids_are_unique(openapi_spec: dict) -> None:
 
     duplicates = {op_id: locations for op_id, locations in op_id_to_locations.items() if len(locations) > 1}
     assert not duplicates, f"Duplicate operationIds in OpenAPI spec: {duplicates}"
-
-
-def test_stream_existing_run_exposes_distinct_get_and_post(openapi_spec: dict) -> None:
-    """The ``/runs/{run_id}/stream`` endpoint must expose GET and POST as distinct operations.
-
-    LangGraph SDK ``joinStream`` uses GET while ``useStream``'s stop button uses POST, so
-    both methods must remain registered with their own ``operationId``.
-    """
-    path = "/api/threads/{thread_id}/runs/{run_id}/stream"
-    path_item = openapi_spec["paths"].get(path)
-    assert path_item is not None, f"Expected {path} to be present in the OpenAPI spec"
-
-    assert "get" in path_item, f"Expected GET handler on {path}"
-    assert "post" in path_item, f"Expected POST handler on {path}"
-
-    get_op_id = path_item["get"].get("operationId")
-    post_op_id = path_item["post"].get("operationId")
-    assert get_op_id and post_op_id, "Both GET and POST must have operationIds"
-    assert get_op_id != post_op_id, f"GET and POST share operationId {get_op_id!r}, which breaks OpenAPI codegen"

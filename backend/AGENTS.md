@@ -485,7 +485,7 @@ Lets a caller pass per-request, short-lived end-user credentials (e.g. an ERP to
 - **Inject**: `bash_tool` reads the injection set and passes it as `execute_command(env=...)`. Scope is the activation turn/run only — a run without `/skill` activation injects nothing.
 - **AIO image requirement**: on `AioSandbox` the env path uses the `bash.exec` API (`POST /v1/bash/exec`), which upstream all-in-one-sandbox only ships since `1.9.3` — older images (including a `latest` tag frozen on the `1.0.0.x` line) 404 the whole `/v1/bash/*` namespace. `AioSandbox` detects the 404, remembers the capability gap on the instance, and fails fast with an actionable upgrade error instead of letting the model retry raw 404s; there is deliberately **no** fallback through the legacy shell path because none keeps the secret values out of the command string (#3921). Regression tests: `tests/test_aio_sandbox.py::TestBashExecUnsupportedFailFast`.
 - **Inherited-env scrub**: `execute_command` no longer leaks the Gateway's `os.environ` to skill subprocesses — `env_policy.build_sandbox_env` drops secret-looking names (`*KEY*`/`*SECRET*`/`*TOKEN*`/`*PASSWORD*`/`*CREDENTIAL*`/`*DSN*` + a connection-string denylist like `DATABASE_URL`/`REDIS_URL`/`GH_PAT`) so platform credentials never reach a skill; a skill that needs one must declare it.
-- **Leak surfaces sealed** (verified by a real-gateway e2e run — secret reaches the sandbox but none of these): prompt (value never in a message), trace (`tracing/metadata.py` never copies `context`), checkpoint (secrets live on `runtime.context`, not graph state), audit (journal records names only), stdout (`tools.py::mask_secret_values` redacts injected values from bash output), and **run-record persistence + run API** (`services.py::start_run` stores `redact_config_secrets(body.config)` so `runs.kwargs_json` and `RunResponse.kwargs` never carry the secret).
+- **Leak surfaces sealed**: prompt (value never enters a message), trace (`tracing/metadata.py` never copies `context`), checkpoint (secrets live on `runtime.context`, not graph state), audit (journal records names only), and stdout (`tools.py::mask_secret_values` redacts injected values from bash output). Project-private admission through `app.private_work.http_runtime.start_private_run` recursively strips request-scoped secret values before persisting Run kwargs; the independent Worker reconstructs execution through `RunAgentPrivateExecutor` without exposing them through a global Run API.
 - **Scope / non-goals**: no persistence/vaulting — values are request-scoped and never stored server-side, so long-lived use means the caller re-supplies `context.secrets` on each request while the skill stays in `skill_context`; subagents do not inherit the injection set; the MCP per-user-credential gap (#3322) is a sibling, not covered here. Tests: `tests/test_skill_request_scoped_secrets.py`.
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
@@ -1080,9 +1080,9 @@ stateless 与 thread-scoped 的 stream/wait handler 必须在 thread ID 解析�
 pure preflight wrapper 居中、`require_permission` 在内，使 malformed body 在 thread owner store 与
 其他 runtime dependency 前固定失败，同时合法 body 仍完整进入认证授权。direct apply defense 即使 canonical checkpoint ID 为空，也必须先把 normalized config
 和 reserved-field removals 安装到调用方 config 后再返回。
-`start_run()` 在创建 run/thread record 前生成 authority-sanitized
-metadata/config/body-context 副本，并一致用于持久化、API response 与 live config；secret redaction
-发生在 authority sanitize 之后。graph input/messages 不经过该递归清洗，消息 `role` 是合法数据。
+`app.private_work.http_runtime.start_private_run()` 在原子创建 project-private Run 与 durable job 前生成
+authority-sanitized metadata/config/body-context 副本，并一致用于持久化和 Worker execution config；secret
+redaction 发生在 authority sanitize 之后。graph input/messages 不经过该递归清洗，消息 `role` 是合法数据。
 身份仅由后续服务端认证、trusted internal owner 或独立的 trusted internal runtime/storage header 注入；后者只设置 live execution bucket，不能成为 owner、repository scope、`ProjectContext` 或 `PrivateWorkContext`。普通 HTTP/API 请求即使伪造该 header 也会被忽略，`body.context.user_id` 仍会被清洗。harness 只接收不含 role/capability 的
 `deerflow.runtime.PrivateResourceScope`，继续禁止 import `app.*`。每个 mutation 或副作用边界
 通过 `PrivateWorkRevalidator.require()` 在调用方已有 transaction 内重验 active project、未暂停

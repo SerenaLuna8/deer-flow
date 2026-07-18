@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
 import uuid
@@ -18,10 +17,8 @@ from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from deerflow.runtime import (
-    DisconnectMode,
     RunContext,
     RunManager,
-    RunRecord,
     RunStatus,
     run_agent,
 )
@@ -855,10 +852,13 @@ def _private_body(*, checkpoint_id=None, assistant_id=None):
 
 
 @pytest.mark.anyio
-async def test_launch_registered_private_run_derives_task_identities_from_admitted_owner(
-    monkeypatch,
-) -> None:
-    from app.gateway import services
+async def test_worker_executor_derives_runtime_identities_from_admitted_owner() -> None:
+    from datetime import UTC, datetime
+
+    from app.private_work.run_admission import PersistedRunSnapshot
+    from app.private_work.run_repository import PrivateRunRecord
+    from app.reliability.execution import PrivateRunExecution, RunAgentPrivateExecutor
+    from app.reliability.jobs import JobClaim, JobScope
     from deerflow.runtime.user_context import (
         get_current_user,
         get_runtime_storage_user_id,
@@ -868,46 +868,123 @@ async def test_launch_registered_private_run_derives_task_identities_from_admitt
         set_runtime_storage_user_id,
     )
 
-    captured: list[tuple[str | None, str | None]] = []
+    context = _private_context()
+    owner_user_id = str(context.user_id)
+    now = datetime.now(UTC)
+    job_id = uuid.uuid4()
+    run = PrivateRunRecord(
+        run_id=str(uuid.uuid4()),
+        thread_id="private-thread",
+        project_id=context.project_id,
+        owner_user_id=owner_user_id,
+        assistant_id=None,
+        status="pending",
+        multitask_strategy="reject",
+        metadata={},
+        kwargs={},
+        error=None,
+        model_name="test-model",
+        created_at=now,
+        updated_at=now,
+        job_id=job_id,
+    )
+    execution = PrivateRunExecution(
+        context=context,
+        run=run,
+        snapshot=PersistedRunSnapshot(
+            assets=(),
+            mcp_grants=(),
+            catalog_generation=1,
+        ),
+        checkpoint_namespace=run.run_id,
+        graph_input={},
+        command=None,
+        config={},
+        interrupt_before=None,
+        interrupt_after=None,
+        stream_mode=[],
+        stream_subgraphs=False,
+    )
+    claim = JobClaim(
+        job_id=job_id,
+        attempt_id=uuid.uuid4(),
+        lease_token="worker-lease",
+        job_type="private_run",
+        scope=JobScope(
+            project_id=context.project_id,
+            owner_user_id=owner_user_id,
+        ),
+        run_id=run.run_id,
+        occurrence_id=None,
+        retry_safety="safe",
+        cancel_requested=False,
+    )
+    captured: list[tuple[str | None, str | None, object]] = []
 
-    async def run_agent(*_args, **_kwargs):
+    async def runner(_bridge, run_manager, record, *, ctx, **_kwargs):
         current = get_current_user()
         captured.append(
             (
                 str(current.id) if current is not None else None,
                 get_runtime_storage_user_id(),
+                ctx.private_scope,
             )
         )
+        await run_manager.set_status(record.run_id, RunStatus.success)
 
-    monkeypatch.setattr(services, "run_agent", run_agent)
-    record = RunRecord(
-        run_id=str(uuid.uuid4()),
-        thread_id="private-thread",
-        assistant_id=None,
-        status=RunStatus.pending,
-        on_disconnect=DisconnectMode.cancel,
+    class AssetRuntime:
+        async def materialize(self, passed_context, admitted, *, authorization_boundary):
+            assert passed_context is context
+            assert admitted.opaque_runtime_scope == context.resource_scope
+            assert authorization_boundary.execution_job_id == job_id
+
+            async def aclose() -> None:
+                return None
+
+            return SimpleNamespace(
+                model_ref="test-model",
+                skill_root=None,
+                aclose=aclose,
+            )
+
+    class ProjectCheckpointer:
+        def for_context(self, passed_context):
+            assert passed_context is context
+            return SimpleNamespace(set_authorization_boundary=lambda _boundary: None)
+
+    class Authority:
+        cancel_requested = False
+
+        def __init__(self) -> None:
+            self.claim = claim
+
+        def bind_cancel_callback(self, callback) -> None:
+            self.cancel_callback = callback
+
+    executor = RunAgentPrivateExecutor(
+        object(),
+        app_config=SimpleNamespace(
+            get_model_config=lambda name: object() if name == "test-model" else None,
+            skills=SimpleNamespace(container_path=None),
+            run_events=SimpleNamespace(),
+        ),
+        bridge=object(),
+        project_checkpointer=ProjectCheckpointer(),
+        store=object(),
+        event_store=object(),
+        asset_runtime=AssetRuntime(),
+        agent_factory=object(),
+        runner=runner,
     )
+
     owner_token = set_current_user(SimpleNamespace(id="forged-ambient-owner"))
     storage_token = set_runtime_storage_user_id("forged-ambient-storage")
     try:
-        services._launch_registered_run(
-            bridge=object(),
-            run_manager=object(),
-            record=record,
-            run_context=object(),
-            agent_factory=object(),
-            graph_input={},
-            config={},
-            stream_modes=[],
-            stream_subgraphs=False,
-            interrupt_before=None,
-            interrupt_after=None,
-            owner_user_id="exact-admitted-owner",
-            runtime_user_id="exact-admitted-owner",
-        )
-        assert record.task is not None
-        await asyncio.wait_for(record.task, timeout=2)
-        assert captured == [("exact-admitted-owner", "exact-admitted-owner")]
+        result = await executor.execute(execution, Authority())
+        assert result.status == "succeeded"
+        assert captured == [
+            (owner_user_id, owner_user_id, context.resource_scope),
+        ]
         assert get_current_user().id == "forged-ambient-owner"
         assert get_runtime_storage_user_id() == "forged-ambient-storage"
     finally:
