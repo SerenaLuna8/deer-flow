@@ -17,10 +17,3 @@ export function privateWorkQueryKey(
 ) {
   return [...privateWorkRoot(scope), ...segments] as const;
 }
-
-export function scopedPrivateWorkQueryKey(
-  scope: ProjectClientScope | null,
-  ...segments: readonly unknown[]
-) {
-  return scope ? privateWorkQueryKey(scope, ...segments) : segments;
-}

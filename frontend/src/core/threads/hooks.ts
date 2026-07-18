@@ -19,10 +19,10 @@ import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import { usePrivateWorkAccess } from "../private-work/provider";
-import { scopedPrivateWorkQueryKey } from "../private-work/query-keys";
+import { privateWorkQueryKey } from "../private-work/query-keys";
 import type {
-  PrivateWorkAccess,
   ProjectClientScope,
+  ProjectPrivateWorkScope,
 } from "../private-work/types";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
@@ -56,7 +56,7 @@ export type ThreadStreamOptions = {
   displayThreadId?: string | null | undefined;
   context: LocalSettings["context"];
   isMock?: boolean;
-  privateWork?: PrivateWorkAccess;
+  privateWork?: ProjectPrivateWorkScope;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
@@ -64,10 +64,10 @@ export type ThreadStreamOptions = {
 };
 
 function scopedThreadQueryKey(
-  scope: ProjectClientScope | null,
+  scope: ProjectClientScope,
   ...segments: readonly unknown[]
 ) {
-  return scopedPrivateWorkQueryKey(scope, ...segments);
+  return privateWorkQueryKey(scope, ...segments);
 }
 
 type SendMessageOptions = {
@@ -593,7 +593,7 @@ export function getSummarizationMiddlewareMessages(
 export function upsertThreadInSearchCache(
   queryClient: QueryClient,
   thread: AgentThread,
-  scope: ProjectClientScope | null = null,
+  scope: ProjectClientScope,
 ) {
   queryClient.setQueriesData(
     {
@@ -636,7 +636,7 @@ export function upsertThreadInSearchCache(
 export function upsertThreadInInfiniteCache(
   queryClient: QueryClient,
   thread: AgentThread,
-  scope: ProjectClientScope | null = null,
+  scope: ProjectClientScope,
 ) {
   queryClient.setQueriesData(
     {
@@ -691,7 +691,7 @@ export function invalidateStoppedThreadCaches(
   queryClient: QueryClient,
   threadId: string | null | undefined,
   isMock = false,
-  scope: ProjectClientScope | null = null,
+  scope: ProjectClientScope,
 ) {
   void queryClient.invalidateQueries({
     queryKey: scopedThreadQueryKey(scope, "threads", "search"),
@@ -730,7 +730,7 @@ function scheduleStoppedThreadFinalizationRefetch(
   queryClient: QueryClient,
   threadId: string | null | undefined,
   isMock = false,
-  scope: ProjectClientScope | null = null,
+  scope: ProjectClientScope,
 ) {
   if (isMock) {
     return;
@@ -745,7 +745,7 @@ export async function stopThreadAndInvalidateCaches(
   stop: () => Promise<void> | void,
   threadId: string | null | undefined,
   isMock = false,
-  scope: ProjectClientScope | null = null,
+  scope: ProjectClientScope,
 ) {
   try {
     await stop();
@@ -1691,7 +1691,7 @@ export function useThreadStream({
 type ThreadHistoryOptions = {
   enabled?: boolean;
   pendingSupersededRunIds?: ReadonlySet<string>;
-  privateWork?: PrivateWorkAccess;
+  privateWork?: ProjectPrivateWorkScope;
 };
 
 export function useThreadHistory(
@@ -1900,7 +1900,7 @@ export function useThreadHistory(
 
 export function useThreads(
   params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
-  explicitPrivateWork?: PrivateWorkAccess,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
   queryOptions: { enabled?: boolean } = {},
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
@@ -2033,7 +2033,7 @@ export function useInfiniteThreads(
     sortOrder: "desc",
     select: ["thread_id", "updated_at", "values", "metadata"],
   },
-  explicitPrivateWork?: PrivateWorkAccess,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useInfiniteQuery<
@@ -2066,7 +2066,7 @@ export function useInfiniteThreads(
 export function useThreadRuns(
   threadId?: string,
   { enabled = true }: { enabled?: boolean } = {},
-  explicitPrivateWork?: PrivateWorkAccess,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<Run[]>({
@@ -2092,7 +2092,7 @@ export function useThreadMetadata(
   }: {
     enabled?: boolean;
     isMock?: boolean;
-    privateWork?: PrivateWorkAccess;
+    privateWork?: ProjectPrivateWorkScope;
   } = {},
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
@@ -2129,7 +2129,7 @@ export function useThreadTokenUsage(
   {
     enabled = true,
     privateWork: explicitPrivateWork,
-  }: { enabled?: boolean; privateWork?: PrivateWorkAccess } = {},
+  }: { enabled?: boolean; privateWork?: ProjectPrivateWorkScope } = {},
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<ThreadTokenUsageResponse | null>({
@@ -2149,7 +2149,7 @@ export function useThreadTokenUsage(
   });
 }
 
-export function useBranchThread(explicitPrivateWork?: PrivateWorkAccess) {
+export function useBranchThread(explicitPrivateWork?: ProjectPrivateWorkScope) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
   return useMutation({
@@ -2202,7 +2202,7 @@ export function useBranchThread(explicitPrivateWork?: PrivateWorkAccess) {
 export function useRunDetail(
   threadId: string,
   runId: string,
-  explicitPrivateWork?: PrivateWorkAccess,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<Run>({
@@ -2221,39 +2221,12 @@ export function useRunDetail(
   });
 }
 
-async function deleteLocalThreadData(
-  threadId: string,
-  privateWork: PrivateWorkAccess,
-) {
-  const response = await fetch(
-    `${privateWork.apiBaseURL}/threads/${encodeURIComponent(threadId)}`,
-    {
-      method: "DELETE",
-    },
-  );
-
-  // A 404 means the thread is already gone — the desired end state. The prior
-  // `apiClient.threads.delete` call hits the same gateway handler (nginx
-  // rewrites /api/langgraph/threads/* to /api/threads/*) and removes the
-  // thread_meta row, so this second delete's ownership guard 404s. Treat it as
-  // success to keep the delete idempotent.
-  if (!response.ok && response.status !== 404) {
-    const error = await response
-      .json()
-      .catch(() => ({ detail: "Failed to delete local thread data." }));
-    throw new Error(error.detail ?? "Failed to delete local thread data.");
-  }
-}
-
 export async function deleteThreadEverywhere(
   apiClient: ThreadDeleteClient,
   threadId: string,
-  privateWork: PrivateWorkAccess,
+  _privateWork: ProjectPrivateWorkScope,
 ) {
   await apiClient.threads.delete(threadId);
-  if (privateWork.scope === null) {
-    await deleteLocalThreadData(threadId, privateWork);
-  }
 }
 
 export async function findSidecarThreadIdsForParent(
@@ -2298,7 +2271,7 @@ export async function findSidecarThreadIdsForParent(
 async function deleteSidecarThreadsForParent(
   apiClient: ThreadDeleteClient,
   parentThreadId: string,
-  privateWork: PrivateWorkAccess,
+  privateWork: ProjectPrivateWorkScope,
 ) {
   let sidecarThreadIds: string[];
   try {
@@ -2342,7 +2315,7 @@ async function deleteSidecarThreadsForParent(
   });
 }
 
-export function useDeleteThread(explicitPrivateWork?: PrivateWorkAccess) {
+export function useDeleteThread(explicitPrivateWork?: ProjectPrivateWorkScope) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
   const apiClient = privateWork.client as ThreadDeleteClient;
@@ -2411,7 +2384,7 @@ export function useDeleteThread(explicitPrivateWork?: PrivateWorkAccess) {
   });
 }
 
-export function useRenameThread(explicitPrivateWork?: PrivateWorkAccess) {
+export function useRenameThread(explicitPrivateWork?: ProjectPrivateWorkScope) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
   const apiClient = privateWork.client;

@@ -67,6 +67,7 @@ import {
   buildSidecarContextPrompt,
   buildSidecarThreadMetadata,
 } from "@/core/sidecar";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import {
   useDeleteThread,
   useThreadStream,
@@ -80,7 +81,6 @@ import {
   type UploadLimitViolation,
 } from "@/core/uploads";
 import { uuid } from "@/core/utils/uuid";
-import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import {
@@ -231,7 +231,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     isUploading ||
     hasOpenHumanInputCard ||
     (hasSidecarThread && isHistoryLoading) ||
-    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
+    isStaticWebsiteOnly();
 
   useEffect(() => {
     if (models.length === 0) {
@@ -620,9 +620,7 @@ export function SidecarPanel({ className }: { className?: string }) {
             initialScroll="instant"
             resizeScroll="instant"
             onSubmitHumanInput={
-              env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
-                ? undefined
-                : handleSubmitHumanInput
+              isStaticWebsiteOnly() ? undefined : handleSubmitHumanInput
             }
           />
         ) : (

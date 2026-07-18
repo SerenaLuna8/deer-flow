@@ -386,14 +386,7 @@ export function MemoryFactList(props: {
   onDelete?: (fact: MemoryFact) => void;
   sourceThreadHref: MemorySourceThreadHref;
 }): React.ReactNode {
-  const {
-    facts,
-    t,
-    isDeleting,
-    onEdit,
-    onDelete,
-    sourceThreadHref,
-  } = props;
+  const { facts, t, isDeleting, onEdit, onDelete, sourceThreadHref } = props;
 
   return (
     <section

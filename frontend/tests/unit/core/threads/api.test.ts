@@ -1,6 +1,8 @@
 import { beforeEach, expect, test, rs } from "@rstest/core";
 
 const fetchWithAuth = rs.fn();
+const apiBaseURL =
+  "http://localhost:2026/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work";
 
 rs.mock("@/core/api/fetcher", () => ({
   fetch: fetchWithAuth,
@@ -30,13 +32,15 @@ test("fetchThreadTokenUsage uses shared auth fetch without JSON GET headers", as
 
   const { fetchThreadTokenUsage } = await import("@/core/threads/api");
 
-  await expect(fetchThreadTokenUsage("thread-1")).resolves.toMatchObject({
+  await expect(
+    fetchThreadTokenUsage("thread-1", { apiBaseURL }),
+  ).resolves.toMatchObject({
     thread_id: "thread-1",
     total_tokens: 7,
   });
 
   expect(fetchWithAuth).toHaveBeenCalledWith(
-    expect.stringContaining("/api/threads/thread-1/token-usage"),
+    `${apiBaseURL}/threads/thread-1/token-usage`,
     {
       method: "GET",
     },
@@ -51,7 +55,9 @@ test("fetchThreadTokenUsage returns null for unavailable token usage", async () 
 
   const { fetchThreadTokenUsage } = await import("@/core/threads/api");
 
-  await expect(fetchThreadTokenUsage("thread-1")).resolves.toBeNull();
+  await expect(
+    fetchThreadTokenUsage("thread-1", { apiBaseURL }),
+  ).resolves.toBeNull();
 });
 
 test("fetchThreadTokenUsage accepts the project private-work REST base", async () => {
@@ -67,8 +73,6 @@ test("fetchThreadTokenUsage accepts the project private-work REST base", async (
       by_caller: { lead_agent: 0, subagent: 0, middleware: 0 },
     }),
   });
-  const apiBaseURL =
-    "http://localhost:2026/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work";
   const { fetchThreadTokenUsage } = await import("@/core/threads/api");
 
   await fetchThreadTokenUsage("thread/1", { apiBaseURL });
@@ -94,18 +98,22 @@ test("branchThreadFromTurn posts the selected turn ids to the gateway", async ()
   const { branchThreadFromTurn } = await import("@/core/threads/api");
 
   await expect(
-    branchThreadFromTurn("thread/1", {
-      messageId: "ai-2",
-      messageIds: ["ai-1", "ai-2"],
-      title: "Branch: original",
-    }),
+    branchThreadFromTurn(
+      "thread/1",
+      {
+        messageId: "ai-2",
+        messageIds: ["ai-1", "ai-2"],
+        title: "Branch: original",
+      },
+      { apiBaseURL },
+    ),
   ).resolves.toMatchObject({
     thread_id: "branch-thread",
     parent_checkpoint_id: "checkpoint-2",
   });
 
   expect(fetchWithAuth).toHaveBeenCalledWith(
-    expect.stringContaining("/api/threads/thread%2F1/branches"),
+    `${apiBaseURL}/threads/thread%2F1/branches`,
     {
       method: "POST",
       headers: {
@@ -131,10 +139,14 @@ test("branchThreadFromTurn surfaces gateway detail on failure", async () => {
   const { branchThreadFromTurn } = await import("@/core/threads/api");
 
   await expect(
-    branchThreadFromTurn("thread-1", {
-      messageId: "ai-2",
-      messageIds: ["ai-2"],
-    }),
+    branchThreadFromTurn(
+      "thread-1",
+      {
+        messageId: "ai-2",
+        messageIds: ["ai-2"],
+      },
+      { apiBaseURL },
+    ),
   ).rejects.toThrow("This turn can no longer be branched from.");
 });
 
@@ -157,6 +169,7 @@ test("compactThreadContext posts agent attribution and abort signal", async () =
 
   await expect(
     compactThreadContext("thread-1", {
+      apiBaseURL,
       agentName: "research-agent",
       signal: controller.signal,
     }),
@@ -166,7 +179,7 @@ test("compactThreadContext posts agent attribution and abort signal", async () =
   });
 
   expect(fetchWithAuth).toHaveBeenCalledWith(
-    expect.stringContaining("/api/threads/thread-1/compact"),
+    `${apiBaseURL}/threads/thread-1/compact`,
     {
       method: "POST",
       headers: {

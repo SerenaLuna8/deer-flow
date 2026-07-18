@@ -19,6 +19,18 @@ import {
 } from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
 
+const PROJECT_SCOPE = {
+  accountId: "11111111-1111-4111-8111-111111111111",
+  projectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+};
+const PRIVATE_WORK_ROOT = [
+  "account",
+  PROJECT_SCOPE.accountId,
+  "project",
+  PROJECT_SCOPE.projectId,
+  "private-work",
+] as const;
+
 // Issue #3482: the sidebar and /workspace/chats list used to be capped at
 // 50 threads because `useThreads()` exits as soon as `threads.length >=
 // params.limit`.  These pure helpers back the `useInfiniteThreads()`
@@ -269,7 +281,10 @@ describe("upsertThreadInInfiniteCache", () => {
   function seedClient(initial?: InfiniteData<AgentThread[]>): QueryClient {
     const client = new QueryClient();
     if (initial) {
-      client.setQueryData([...INFINITE_THREADS_QUERY_KEY_PREFIX, {}], initial);
+      client.setQueryData(
+        [...PRIVATE_WORK_ROOT, ...INFINITE_THREADS_QUERY_KEY_PREFIX, {}],
+        initial,
+      );
     }
     return client;
   }
@@ -277,12 +292,16 @@ describe("upsertThreadInInfiniteCache", () => {
   function readCache(
     client: QueryClient,
   ): InfiniteData<AgentThread[]> | undefined {
-    return client.getQueryData([...INFINITE_THREADS_QUERY_KEY_PREFIX, {}]);
+    return client.getQueryData([
+      ...PRIVATE_WORK_ROOT,
+      ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+      {},
+    ]);
   }
 
   test("no-op when the infinite cache has not been initialised yet", () => {
     const client = seedClient();
-    upsertThreadInInfiniteCache(client, makeThread("new"));
+    upsertThreadInInfiniteCache(client, makeThread("new"), PROJECT_SCOPE);
     expect(readCache(client)).toBeUndefined();
   });
 
@@ -291,7 +310,7 @@ describe("upsertThreadInInfiniteCache", () => {
       pages: [[makeThread("a"), makeThread("b")]],
       pageParams: [0],
     });
-    upsertThreadInInfiniteCache(client, makeThread("new"));
+    upsertThreadInInfiniteCache(client, makeThread("new"), PROJECT_SCOPE);
     const cache = readCache(client);
     expect(cache?.pages[0]?.map((t) => t.thread_id)).toEqual(["new", "a", "b"]);
   });
@@ -305,10 +324,14 @@ describe("upsertThreadInInfiniteCache", () => {
     // Simulate an onCreated upsert that races with a thread already in cache:
     // the cache copy should win for title/metadata (it represents later state),
     // but no duplicate row should appear.
-    upsertThreadInInfiniteCache(client, {
-      ...makeThread("a", "New title"),
-      status: "busy",
-    });
+    upsertThreadInInfiniteCache(
+      client,
+      {
+        ...makeThread("a", "New title"),
+        status: "busy",
+      },
+      PROJECT_SCOPE,
+    );
     const cache = readCache(client);
     const ids = cache?.pages[0]?.map((t) => t.thread_id);
     expect(ids).toEqual(["a", "b"]);
@@ -330,36 +353,68 @@ describe("invalidateStoppedThreadCaches", () => {
     const client = new QueryClient();
     const { queryKeys } = invalidatedQueryKeys(client);
 
-    invalidateStoppedThreadCaches(client, "thread-1", false);
+    invalidateStoppedThreadCaches(client, "thread-1", false, PROJECT_SCOPE);
 
-    expect(queryKeys()).toContainEqual(["threads", "search"]);
-    expect(queryKeys()).toContainEqual(INFINITE_THREADS_QUERY_KEY_PREFIX);
-    expect(queryKeys()).toContainEqual(["thread", "thread-1"]);
     expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      "threads",
+      "search",
+    ]);
+    expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+    ]);
+    expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      "thread",
+      "thread-1",
+    ]);
+    expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
       "thread",
       "metadata",
       "thread-1",
       false,
     ]);
-    expect(queryKeys()).toContainEqual(["thread-token-usage", "thread-1"]);
+    expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      "thread-token-usage",
+      "thread-1",
+    ]);
   });
 
   test("does not refresh per-thread API caches for mock threads", () => {
     const client = new QueryClient();
     const { queryKeys } = invalidatedQueryKeys(client);
 
-    invalidateStoppedThreadCaches(client, "thread-1", true);
+    invalidateStoppedThreadCaches(client, "thread-1", true, PROJECT_SCOPE);
 
-    expect(queryKeys()).toContainEqual(["threads", "search"]);
-    expect(queryKeys()).toContainEqual(INFINITE_THREADS_QUERY_KEY_PREFIX);
-    expect(queryKeys()).not.toContainEqual(["thread", "thread-1"]);
+    expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      "threads",
+      "search",
+    ]);
+    expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+    ]);
     expect(queryKeys()).not.toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      "thread",
+      "thread-1",
+    ]);
+    expect(queryKeys()).not.toContainEqual([
+      ...PRIVATE_WORK_ROOT,
       "thread",
       "metadata",
       "thread-1",
       true,
     ]);
-    expect(queryKeys()).not.toContainEqual(["thread-token-usage", "thread-1"]);
+    expect(queryKeys()).not.toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      "thread-token-usage",
+      "thread-1",
+    ]);
   });
 
   test("wraps SDK stop and refreshes caches after it resolves", async () => {
@@ -367,10 +422,17 @@ describe("invalidateStoppedThreadCaches", () => {
     const stop = rs.fn(() => Promise.resolve());
     const { queryKeys } = invalidatedQueryKeys(client);
 
-    await stopThreadAndInvalidateCaches(client, stop, "thread-1", false);
+    await stopThreadAndInvalidateCaches(
+      client,
+      stop,
+      "thread-1",
+      false,
+      PROJECT_SCOPE,
+    );
 
     expect(stop).toHaveBeenCalledTimes(1);
     expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
       "thread",
       "metadata",
       "thread-1",
@@ -386,11 +448,22 @@ describe("invalidateStoppedThreadCaches", () => {
     const { queryKeys } = invalidatedQueryKeys(client);
 
     await expect(
-      stopThreadAndInvalidateCaches(client, stop, "thread-1", false),
+      stopThreadAndInvalidateCaches(
+        client,
+        stop,
+        "thread-1",
+        false,
+        PROJECT_SCOPE,
+      ),
     ).rejects.toThrow("cancel failed");
 
-    expect(queryKeys()).toContainEqual(["threads", "search"]);
     expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      "threads",
+      "search",
+    ]);
+    expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
       "thread",
       "metadata",
       "thread-1",
@@ -410,14 +483,15 @@ describe("invalidateStoppedThreadCaches", () => {
         () => Promise.resolve(),
         null,
         false,
+        PROJECT_SCOPE,
       );
 
       const countSearchInvalidations = () =>
         queryKeys().filter(
           (queryKey) =>
-            queryKey?.length === 2 &&
-            queryKey[0] === "threads" &&
-            queryKey[1] === "search",
+            queryKey?.length === PRIVATE_WORK_ROOT.length + 2 &&
+            queryKey[PRIVATE_WORK_ROOT.length] === "threads" &&
+            queryKey[PRIVATE_WORK_ROOT.length + 1] === "search",
         ).length;
 
       expect(countSearchInvalidations()).toBe(1);
@@ -427,7 +501,11 @@ describe("invalidateStoppedThreadCaches", () => {
       );
 
       expect(countSearchInvalidations()).toBe(2);
-      expect(queryKeys()).not.toContainEqual(["thread", null]);
+      expect(queryKeys()).not.toContainEqual([
+        ...PRIVATE_WORK_ROOT,
+        "thread",
+        null,
+      ]);
     } finally {
       client.clear();
       rs.useRealTimers();
@@ -443,7 +521,7 @@ describe("invalidateStoppedThreadCaches", () => {
     let finalized = false;
     let fetchCount = 0;
     const observer = new QueryObserver<AgentThread[]>(client, {
-      queryKey: ["threads", "search"],
+      queryKey: [...PRIVATE_WORK_ROOT, "threads", "search"],
       queryFn: async () => {
         fetchCount += 1;
         return [
@@ -461,8 +539,11 @@ describe("invalidateStoppedThreadCaches", () => {
     try {
       await observer.refetch();
       expect(
-        client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.values
-          ?.title,
+        client.getQueryData<AgentThread[]>([
+          ...PRIVATE_WORK_ROOT,
+          "threads",
+          "search",
+        ])?.[0]?.values?.title,
       ).toBe("New Conversation");
 
       await stopThreadAndInvalidateCaches(
@@ -470,12 +551,16 @@ describe("invalidateStoppedThreadCaches", () => {
         () => Promise.resolve(),
         "thread-1",
         false,
+        PROJECT_SCOPE,
       );
       await Promise.resolve();
 
       expect(
-        client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.values
-          ?.title,
+        client.getQueryData<AgentThread[]>([
+          ...PRIVATE_WORK_ROOT,
+          "threads",
+          "search",
+        ])?.[0]?.values?.title,
       ).toBe("New Conversation");
 
       finalized = true;
@@ -484,8 +569,11 @@ describe("invalidateStoppedThreadCaches", () => {
       );
 
       expect(
-        client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.values
-          ?.title,
+        client.getQueryData<AgentThread[]>([
+          ...PRIVATE_WORK_ROOT,
+          "threads",
+          "search",
+        ])?.[0]?.values?.title,
       ).toBe("Generated Title");
       expect(fetchCount).toBeGreaterThanOrEqual(3);
     } finally {

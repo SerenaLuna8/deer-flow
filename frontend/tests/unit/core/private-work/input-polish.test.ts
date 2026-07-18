@@ -38,17 +38,4 @@ describe("project input polish adapter", () => {
       expect.objectContaining({ method: "POST" }),
     );
   });
-
-  test("rejects missing project scope before any request", async () => {
-    await expect(
-      polishInputDraft(
-        { scope: null, apiBaseURL: "/api" },
-        {
-          text: "request",
-          thread_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        },
-      ),
-    ).rejects.toThrow("project-scoped private-work URL");
-    expect(mockedFetch).not.toHaveBeenCalled();
-  });
 });

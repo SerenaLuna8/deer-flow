@@ -1,21 +1,26 @@
 import { useQuery } from "@tanstack/react-query";
 
+import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
+import { privateWorkQueryKey } from "@/core/private-work/query-keys";
+
 import { fetchWorkspaceChanges } from "./api";
 import type { WorkspaceChangesResponse } from "./types";
 
 export function workspaceChangesQueryKey(
+  scope: Parameters<typeof privateWorkQueryKey>[0],
   threadId: string | undefined,
   runId: string | undefined,
   includeFiles: boolean,
   includeDiff: boolean,
 ) {
-  return [
+  return privateWorkQueryKey(
+    scope,
     "workspace-changes",
     threadId,
     runId,
     includeFiles,
     includeDiff,
-  ] as const;
+  );
 }
 
 export function useWorkspaceChanges({
@@ -31,8 +36,10 @@ export function useWorkspaceChanges({
   includeDiff?: boolean;
   enabled?: boolean;
 }) {
+  const privateWork = useProjectPrivateWorkScope();
   return useQuery<WorkspaceChangesResponse>({
     queryKey: workspaceChangesQueryKey(
+      privateWork.scope,
       threadId,
       runId,
       includeFiles,
@@ -43,6 +50,7 @@ export function useWorkspaceChanges({
         throw new Error("threadId and runId are required");
       }
       return fetchWorkspaceChanges({
+        privateWork,
         threadId,
         runId,
         includeFiles,

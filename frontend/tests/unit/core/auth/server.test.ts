@@ -20,7 +20,7 @@ const ENV_KEYS = [
   "DEER_FLOW_AUTH_DISABLED",
   "DEER_FLOW_ENV",
   "ENVIRONMENT",
-  "NEXT_PUBLIC_STATIC_WEBSITE_ONLY",
+  "NEXT_PUBLIC_BUILD_MODE",
 ] as const;
 
 type EnvSnapshot = Partial<
@@ -63,7 +63,7 @@ describe("getServerSideUser", () => {
     setEnv("DEER_FLOW_AUTH_DISABLED", undefined);
     setEnv("DEER_FLOW_ENV", undefined);
     setEnv("ENVIRONMENT", undefined);
-    setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", undefined);
+    setEnv("NEXT_PUBLIC_BUILD_MODE", undefined);
   });
 
   afterEach(() => {
@@ -72,7 +72,7 @@ describe("getServerSideUser", () => {
   });
 
   test("bypasses gateway auth in static website mode", async () => {
-    setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", "true");
+    setEnv("NEXT_PUBLIC_BUILD_MODE", "static");
     const fetchSpy = rs.fn(() => {
       throw new Error("fetch should not be called in static website mode");
     });
@@ -120,7 +120,7 @@ describe("getServerSideUser — gateway_unavailable contract (issue #3493)", () 
   beforeEach(() => {
     saved = snapshotEnv();
     setEnv("DEER_FLOW_AUTH_DISABLED", undefined);
-    setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", undefined);
+    setEnv("NEXT_PUBLIC_BUILD_MODE", undefined);
   });
 
   afterEach(() => {

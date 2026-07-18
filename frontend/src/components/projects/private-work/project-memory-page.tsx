@@ -42,9 +42,7 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
   const permissions = projectMemoryPermissions(project.capabilities);
   const generation = useMemo(
     () =>
-      Symbol(
-        `project-memory-generation:${scope?.accountId ?? "none"}:${scope?.projectId ?? "none"}`,
-      ),
+      Symbol(`project-memory-generation:${scope.accountId}:${scope.projectId}`),
     [scope],
   );
   const currentGeneration = useRef(generation);
@@ -55,10 +53,7 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
     return () => {
       mounted.current = false;
     };
-  }, [scope?.accountId, scope?.projectId]);
-  if (!scope) {
-    throw new Error("Project Memory requires an entered project scope");
-  }
+  }, [scope.accountId, scope.projectId]);
   const queryKey = projectMemoryQueryKey(scope);
   const query = useQuery({
     queryKey,

@@ -13,11 +13,7 @@ export type ProjectSlashSkill = {
 
 export function useProjectSlashSkills() {
   const { scope } = useProjectPrivateWorkScope();
-  const query = useProjectAssets(
-    scope.accountId,
-    scope.projectId,
-    "skills",
-  );
+  const query = useProjectAssets(scope.accountId, scope.projectId, "skills");
   const skills = useMemo(() => {
     const catalog = query.data as ProjectAssetList | undefined;
     if (!catalog) return [];

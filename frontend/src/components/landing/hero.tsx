@@ -9,7 +9,7 @@ import { AuroraText } from "@/components/ui/aurora-text";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import Galaxy from "@/components/ui/galaxy";
-import { env } from "@/env";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { cn } from "@/lib/utils";
 
 const HERO_WORDS = [
@@ -62,7 +62,7 @@ export function Hero({ className }: { className?: string }) {
           <HeroWordRotate words={HERO_WORDS} />
           <span className="whitespace-nowrap">SuperAgent</span>
         </div>
-        {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY && (
+        {isStaticWebsiteOnly() && (
           <a
             href="https://byteplus.com"
             target="_blank"

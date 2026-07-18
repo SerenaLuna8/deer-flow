@@ -1,11 +1,6 @@
 "use client";
 
-import {
-  BellIcon,
-  InfoIcon,
-  PaletteIcon,
-  UserIcon,
-} from "lucide-react";
+import { BellIcon, InfoIcon, PaletteIcon, UserIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {

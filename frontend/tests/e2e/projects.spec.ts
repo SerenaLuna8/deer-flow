@@ -253,18 +253,6 @@ test("workspace shows project cards without project navigation", async ({
   await expect(page.getByRole("button", { name: "账户" })).toBeVisible();
 });
 
-test("legacy project workspace address redirects to workspace", async ({
-  page,
-}) => {
-  mockLangGraphAPI(page);
-  await mockProjectsAPI(page);
-
-  await page.goto("/workspace/projects");
-
-  await expect(page).toHaveURL(/\/workspace$/);
-  await expect(page.getByTestId("project-workbench")).toBeVisible();
-});
-
 test("project workbench supports create, search, pin, edit, enter, and return", async ({
   page,
 }) => {

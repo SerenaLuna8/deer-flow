@@ -111,7 +111,7 @@ export function ProjectUsagePage() {
   const staticMode = isStaticWebsiteOnly();
   const access = usePrivateWorkAccess();
 
-  if (!canRead || staticMode || access.scope === null) notFound();
+  if (!canRead || staticMode) notFound();
   return <AuthorizedProjectUsagePage access={access} scope={access.scope} />;
 }
 

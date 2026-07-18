@@ -1,9 +1,6 @@
 import type { AgentThread } from "@/core/threads";
 
-import {
-  SIDECAR_METADATA_KEY,
-  isSidecarThread,
-} from "./thread";
+import { SIDECAR_METADATA_KEY, isSidecarThread } from "./thread";
 
 type SidecarThreadSearchClient = {
   threads: {

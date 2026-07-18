@@ -29,12 +29,10 @@ const KEY_TWO = "66666666-6666-4666-8666-666666666666";
 
 type TriggerTransport = typeof triggerAutomation;
 
-function access(scope: typeof SCOPE | null, active = true): PrivateWorkAccess {
+function access(scope: typeof SCOPE, active = true): PrivateWorkAccess {
   return {
     scope,
-    apiBaseURL: scope
-      ? `/api/projects/${scope.projectId}/private-work`
-      : "/api",
+    apiBaseURL: `/api/projects/${scope.projectId}/private-work`,
     client: {} as PrivateWorkAccess["client"],
     queryKeyPrefix: [],
     reconnectOnMount: true,
@@ -47,10 +45,6 @@ describe("project automation hooks", () => {
     const active = projectAutomationsQueryOptions(access(SCOPE));
     expect(active.queryKey).toEqual([...automationRoot(SCOPE), "list", 50, 0]);
     expect(active.enabled).toBe(true);
-
-    const inactive = projectAutomationsQueryOptions(access(null));
-    expect(inactive.queryKey).toEqual(["automations", "inactive", "list"]);
-    expect(inactive.enabled).toBe(false);
   });
 
   test("uses a scoped mutation key and forwards the provider abort signal", async () => {
@@ -78,21 +72,10 @@ describe("project automation hooks", () => {
     expect(operation).toHaveBeenCalledWith(SCOPE, "input", controller.signal);
   });
 
-  test("does not run without scope or invalidate after the scope becomes stale", async () => {
+  test("does not invalidate after the scope becomes stale", async () => {
     const queryClient = new QueryClient();
     const invalidate = rs.spyOn(queryClient, "invalidateQueries");
     const operation = rs.fn(async () => "result");
-    const noScope = automationMutationOptions(
-      queryClient,
-      access(null),
-      "create",
-      operation,
-    );
-    await expect(noScope.mutationFn("input")).rejects.toThrow(
-      "Project automation scope is unavailable",
-    );
-    expect(operation).not.toHaveBeenCalled();
-
     const stale = automationMutationOptions(
       queryClient,
       access(SCOPE, false),

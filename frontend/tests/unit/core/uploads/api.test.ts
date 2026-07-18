@@ -103,16 +103,3 @@ describe("project upload adapter", () => {
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });
 });
-
-test("default workspace uploads keep the legacy multipart contract", async () => {
-  fetchWithAuth.mockResolvedValue({
-    ok: true,
-    json: async () => ({ success: true, files: [], skipped_files: [] }),
-  });
-  const { uploadFiles } = await import("@/core/uploads/api");
-  await uploadFiles("thread/1", []);
-  expect(fetchWithAuth).toHaveBeenCalledWith(
-    "/api/threads/thread%2F1/uploads",
-    expect.objectContaining({ method: "POST" }),
-  );
-});

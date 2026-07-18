@@ -98,3 +98,69 @@ The final production residue command returned zero matches for all removed
 workspace URLs, global Memory/Agent/Skill/MCP API literals, and
 `LEGACY_WORKSPACE_CHAT_SCOPE`. The production and static build route tables
 contain `/workspace` but no legacy workspace child route.
+
+## Independent review repair
+
+The first independent review of `8428e136` rejected Task 6 on three Important
+findings: the static workspace build still reached the authenticated module
+graph, the default test suites retained legacy-only coverage instead of the
+project successor contract, and shared chat/artifact clients still admitted
+global or nullable private-work scope.
+
+The repair was driven from reproduced failures. The strict-scope focused unit
+gate initially ran 8 tests with 4 failures, and the static artifact gate found
+`AuthProvider` in the `/workspace` client graph. The first migrated project-chat
+browser run also exposed five fixture/assertion gaps before reaching 20/20.
+
+### Repair implementation
+
+- Added one canonical `BUILD_MODE=production|static` contract. Static builds
+  resolve `#workspace-build-entry` through the `deerflow-static` package
+  condition into an isolated local adapter and use `.next-static`; production
+  builds resolve the authenticated project workbench. The artifact test walks
+  the workspace client manifest, trace, and referenced chunks and rejects
+  `AuthProvider`, project providers, private-work clients, or API literals.
+- Made `ProjectPrivateWorkScope` the canonical non-null access type for live
+  thread, upload, artifact, feedback, subtask-event, and workspace-change
+  public APIs. Thread token usage, compact, branch, goal, feedback, follow-up,
+  subtask history, files, artifacts, and changes now derive their URLs and
+  cache keys from the account/project private-work scope. Production `src`
+  contains no `/api/threads`, `/api/langgraph/threads`, nullable-scope fallback,
+  or equivalent `getBackendBaseURL()` thread construction.
+- Removed default-suite specs whose only subject was a deleted workspace URL or
+  compatibility shell. Reusable behavior was moved to project-scoped tests
+  instead of being discarded with the old route.
+
+### Deleted-test capability reconciliation
+
+| Deleted legacy area                                                                                | Final project-scoped coverage or disposition                                                                                                                                                   |
+| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chat load, history, streaming, stop, human input, upload, ownership errors                         | `project-private-chat.spec.ts` exercises the entered project and rejects global thread/artifact/upload requests.                                                                               |
+| Thread list and infinite scroll                                                                    | Project Chats verifies owner-scoped search and explicit pagination through the selected project private-work client.                                                                           |
+| Mermaid, stopped subtasks, persisted subtask steps                                                 | Project history renders Mermaid and stopped state; expanding the task asserts the project run-events URL.                                                                                      |
+| Artifact preview and artifact-less stream state                                                    | Project write-file/presented-file coverage preserves preview, header trigger, scoped file transport, safe errors, and state across an artifact-less stream value.                              |
+| Workspace changes                                                                                  | The project message badge opens data loaded only from the project private-work run endpoint.                                                                                                   |
+| Quoted references and side-chat draft                                                              | Project chat preserves conversation references and opens/closes the project-scoped draft sidecar.                                                                                              |
+| Plain-text and nested Markdown edge cases                                                          | Project history retains source text and renders deeply nested AI markers without a crash.                                                                                                      |
+| Agent and Skill catalog compatibility pages                                                        | `project-assets.spec.ts` covers the project/system asset catalog and binding workflow; the global compatibility pages are intentionally removed.                                               |
+| Scheduled-task workspace page                                                                      | `project-automations.spec.ts` remains the authority for project Automation lifecycle, history, permissions, retry, and scope transitions.                                                      |
+| Legacy branch/regenerate, recent-thread sidebar, global settings/pages, legacy new-thread ordering | These controls and routes have no project contract (branch/regenerate are explicitly disabled in project chat); their tests were intentionally retired rather than pointed at a different URL. |
+
+### Fresh repair gates
+
+```text
+focused strict-scope unit: 5 files, 16 passed
+focused project private chat: 20 passed
+full unit: 121 files, 882 passed, 0 skipped
+full default Playwright: 67 passed
+static artifact/browser Playwright: 2 passed
+pnpm check: ESLint and TypeScript passed
+pnpm format: passed
+BUILD_MODE=production pnpm build: 80/80 pages
+BUILD_MODE=static SKIP_ENV_VALIDATION=1 pnpm build: 80/80 pages
+git diff --check: passed
+production legacy route/global thread residue: zero matches
+```
+
+Task 7 was not started, and the M7 progress ledger was not changed by this
+repair.

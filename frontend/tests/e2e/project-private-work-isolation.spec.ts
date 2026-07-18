@@ -181,9 +181,7 @@ test("Link project switch drops a late previous-project Thread response", async 
   await expect(page.getByText("Alpha Project conversation")).toHaveCount(0);
 });
 
-test("static demo landing path contract preserves legacy chats", () => {
-  expect(workspaceLandingPath(true, null)).toBe("/workspace/chats/new");
-  expect(workspaceLandingPath(true, "demo-thread")).toBe(
-    "/workspace/chats/demo-thread",
-  );
+test("static demo landing path ignores stale thread hints", () => {
+  expect(workspaceLandingPath(true, null)).toBe("/workspace");
+  expect(workspaceLandingPath(true, "demo-thread")).toBe("/workspace");
 });

@@ -39,6 +39,7 @@ import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import {
   useBranchThread,
   useThreadMetadata,
@@ -47,14 +48,9 @@ import {
 } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
-import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import {
-  ChatBox,
-  useSpecificChatMode,
-  useThreadChat,
-} from ".";
+import { ChatBox, useSpecificChatMode, useThreadChat } from ".";
 
 export interface ChatRouteScope {
   privateWork: ProjectPrivateWorkScope;
@@ -267,7 +263,7 @@ export function ScopedChatPage({
         !scope.branchVisible ||
         isNewThread ||
         isMock ||
-        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+        isStaticWebsiteOnly()
       ) {
         return;
       }
@@ -389,7 +385,7 @@ export function ScopedChatPage({
                     scope.canRun &&
                     !isNewThread &&
                     !isMock &&
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                    !isStaticWebsiteOnly() &&
                     !isUploading &&
                     !thread.isLoading
                   }
@@ -399,9 +395,7 @@ export function ScopedChatPage({
                       : handleRegenerate
                   }
                   onSubmitHumanInput={
-                    !scope.canRun ||
-                    isMock ||
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+                    !scope.canRun || isMock || isStaticWebsiteOnly()
                       ? undefined
                       : handleSubmitHumanInput
                   }
@@ -410,7 +404,7 @@ export function ScopedChatPage({
                     scope.canCreate &&
                     !isNewThread &&
                     !isMock &&
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                    !isStaticWebsiteOnly() &&
                     !isUploading &&
                     !thread.isLoading &&
                     !branchThread.isPending
@@ -487,7 +481,7 @@ export function ScopedChatPage({
                       disabled={
                         !scope.canRun ||
                         isMock ||
-                        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                        isStaticWebsiteOnly() ||
                         isUploading ||
                         hasOpenHumanInputCard ||
                         (!isNewThread && isHistoryLoading)
@@ -516,7 +510,7 @@ export function ScopedChatPage({
                       )}
                     />
                   )}
-                  {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
+                  {isStaticWebsiteOnly() && (
                     <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">
                       {t.common.notAvailableInDemoMode}
                     </div>

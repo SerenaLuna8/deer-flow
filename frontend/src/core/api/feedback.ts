@@ -1,4 +1,4 @@
-import { getBackendBaseURL } from "../config";
+import type { ProjectPrivateWorkScope } from "../private-work/types";
 
 import { fetch } from "./fetcher";
 
@@ -9,13 +9,14 @@ export interface FeedbackData {
 }
 
 export async function upsertFeedback(
+  privateWork: Pick<ProjectPrivateWorkScope, "apiBaseURL">,
   threadId: string,
   runId: string,
   rating: number,
   comment?: string,
 ): Promise<FeedbackData> {
   const res = await fetch(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
+    `${privateWork.apiBaseURL}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -29,11 +30,12 @@ export async function upsertFeedback(
 }
 
 export async function deleteFeedback(
+  privateWork: Pick<ProjectPrivateWorkScope, "apiBaseURL">,
   threadId: string,
   runId: string,
 ): Promise<void> {
   const res = await fetch(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
+    `${privateWork.apiBaseURL}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
     { method: "DELETE" },
   );
   if (!res.ok && res.status !== 404) {

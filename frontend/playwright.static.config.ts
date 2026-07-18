@@ -30,8 +30,7 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       SKIP_ENV_VALIDATION: "1",
-      NEXT_PUBLIC_STATIC_WEBSITE_ONLY: "true",
-      NEXT_DIST_DIR: ".next-static",
+      BUILD_MODE: "static",
       DEER_FLOW_AUTH_DISABLED: "1",
     },
   },

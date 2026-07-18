@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -9,13 +9,11 @@ import {
 } from "@/core/projects/features";
 
 describe("project-first routing", () => {
-  test("routes normal sessions to the workspace and preserves static demo", () => {
+  test("routes every session to the project workbench", () => {
     expect(PROJECT_FIRST_MODE).toBe(true);
     expect(workspaceLandingPath(false, null)).toBe("/workspace");
-    expect(workspaceLandingPath(true, "demo-thread")).toBe(
-      "/workspace/chats/demo-thread",
-    );
-    expect(workspaceLandingPath(true, null)).toBe("/workspace/chats/new");
+    expect(workspaceLandingPath(true, "demo-thread")).toBe("/workspace");
+    expect(workspaceLandingPath(true, null)).toBe("/workspace");
   });
 
   test("project home uses an independent authenticated shell", () => {
@@ -30,18 +28,14 @@ describe("project-first routing", () => {
     expect(source).not.toContain("WorkspaceContent");
   });
 
-  test("the old workbench alias redirects before mounting clients", () => {
-    const workbenchPage = readFileSync(
-      resolve(process.cwd(), "src/app/workspace/projects/page.tsx"),
-      "utf8",
-    );
+  test("the old workbench alias is absent and static rejection precedes auth", () => {
     const projectLayout = readFileSync(
       resolve(process.cwd(), "src/app/projects/layout.tsx"),
       "utf8",
     );
-    expect(workbenchPage).toContain('redirect("/workspace")');
-    expect(workbenchPage).not.toContain("ProjectWorkbenchPage");
-    expect(workbenchPage).not.toContain('"use client"');
+    expect(
+      existsSync(resolve(process.cwd(), "src/app/workspace/projects/page.tsx")),
+    ).toBe(false);
     expect(projectLayout.indexOf("isStaticWebsiteOnly")).toBeLessThan(
       projectLayout.indexOf("getServerSideUser()"),
     );
@@ -69,17 +63,14 @@ describe("project-first routing", () => {
     expect(source).toContain("<GatewayOfflineBanner gatewayUnavailable />");
   });
 
-  test("project-first navigation uses the canonical workspace name and path", () => {
-    for (const file of [
-      "src/components/workspace/command-palette.tsx",
-      "src/components/workspace/workspace-header.tsx",
-      "src/components/workspace/workspace-nav-chat-list.tsx",
-    ]) {
-      const source = readFileSync(resolve(process.cwd(), file), "utf8");
-      expect(source).toContain('"/workspace"');
-      expect(source).toContain("工作空间");
-      expect(source).not.toContain('"/workspace/projects"');
-      expect(source).not.toContain("项目工作台");
-    }
+  test("project navigation returns only to the canonical workbench", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/components/projects/project-nav.tsx"),
+      "utf8",
+    );
+    expect(source).toContain('href="/workspace"');
+    expect(source).toContain("返回工作空间");
+    expect(source).not.toContain('"/workspace/projects"');
+    expect(source).not.toContain("项目工作台");
   });
 });

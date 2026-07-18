@@ -11,9 +11,8 @@ export default async function ProjectLayout({
 }>) {
   if (isStaticWebsiteOnly()) notFound();
   const { project_slug: slug } = await params;
-  const { ProjectContextProvider } = await import(
-    "@/components/projects/project-context"
-  );
+  const { ProjectContextProvider } =
+    await import("@/components/projects/project-context");
   return (
     <ProjectContextProvider slug={slug}>{children}</ProjectContextProvider>
   );

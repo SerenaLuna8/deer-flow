@@ -65,7 +65,9 @@ describe("M6 static, capability, readiness and cache-isolation release gates", (
   });
 
   test("private-work navigation requires both capability and live readiness", () => {
-    const ready = projectNavigationItems(project, true).map((item) => item.href);
+    const ready = projectNavigationItems(project, true).map(
+      (item) => item.href,
+    );
     const unavailable = projectNavigationItems(project, false).map(
       (item) => item.href,
     );
@@ -90,9 +92,10 @@ describe("M6 static, capability, readiness and cache-isolation release gates", (
     const queryClient = new QueryClient();
     const registry = createPrivateWorkScopeRegistry();
     registry.acquire(scopeA);
-    queryClient.setQueryData([...privateWorkRoot(scopeA), "threads"], [
-      "secret-a",
-    ]);
+    queryClient.setQueryData(
+      [...privateWorkRoot(scopeA), "threads"],
+      ["secret-a"],
+    );
     const mutationRoot = [...privateWorkRoot(scopeA), "mutation"];
     queryClient.getMutationCache().build(queryClient, {
       mutationKey: mutationRoot,

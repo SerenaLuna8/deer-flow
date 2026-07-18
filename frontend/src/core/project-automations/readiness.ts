@@ -16,16 +16,7 @@ import {
 import { automationQueryKey } from "./query-keys";
 import { automationReadinessSchema, type AutomationReadiness } from "./types";
 
-const INACTIVE_READINESS_KEY = [
-  "automations",
-  "inactive",
-  "readiness",
-] as const;
-
 function requiredScope(access: PrivateWorkAccess): ProjectClientScope {
-  if (!access.scope) {
-    throw new Error("Project automation scope is unavailable");
-  }
   return access.scope;
 }
 
@@ -46,12 +37,10 @@ export function projectAutomationReadinessOptions(
 ) {
   const scope = access.scope;
   return {
-    queryKey: scope
-      ? automationQueryKey(scope, "readiness")
-      : INACTIVE_READINESS_KEY,
+    queryKey: automationQueryKey(scope, "readiness"),
     queryFn: ({ signal }: { signal: AbortSignal }) =>
       fetchAutomationReadiness(requiredScope(access), signal),
-    enabled: enabled && scope !== null,
+    enabled,
     retry: false,
     refetchOnWindowFocus: false,
   };

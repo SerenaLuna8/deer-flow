@@ -6,36 +6,27 @@ import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import type { AgentThreadState } from "../threads";
 
 import { buildWriteFileDraftContent } from "./preview";
-import { urlOfArtifact } from "./utils";
-
 export async function loadArtifactContent({
   filepath,
-  threadId,
-  isMock,
-  url: explicitURL,
+  url,
   signal,
 }: {
   filepath: string;
-  threadId: string;
-  isMock?: boolean;
-  url?: string;
+  url: string;
   signal?: AbortSignal;
 }) {
-  let enhancedFilepath = filepath;
+  let artifactURL = url;
   if (filepath.endsWith(".skill")) {
-    enhancedFilepath = filepath + "/SKILL.md";
+    artifactURL = `${url.replace(/\/$/u, "")}/SKILL.md`;
   }
-  const url =
-    explicitURL ??
-    urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
   const response = signal
-    ? await fetchWithAuth(url, { signal })
-    : await fetchWithAuth(url);
+    ? await fetchWithAuth(artifactURL, { signal })
+    : await fetchWithAuth(artifactURL);
   if (!response.ok) {
     await throwGatewayApiError(response, "Failed to load artifact content");
   }
   const text = await response.text();
-  return { content: text, url };
+  return { content: text, url: artifactURL };
 }
 
 export function loadArtifactContentFromToolCall({

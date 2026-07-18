@@ -31,7 +31,6 @@ import {
   upsertFeedback,
   type FeedbackData,
 } from "@/core/api/feedback";
-import { resolveArtifactURL } from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -42,6 +41,8 @@ import {
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
+import { useProjectArtifactReferenceURL } from "@/core/private-work/file-hooks";
+import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { useProjectSlashSkills } from "@/core/shared-assets";
 import { readReferenceMessageContexts } from "@/core/sidecar";
@@ -74,6 +75,7 @@ function FeedbackButtons({
     initialFeedback,
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const privateWork = useProjectPrivateWorkScope();
 
   const handleClick = useCallback(
     async (rating: number) => {
@@ -81,10 +83,15 @@ function FeedbackButtons({
       setIsSubmitting(true);
       try {
         if (feedback?.rating === rating) {
-          await deleteFeedback(threadId, runId);
+          await deleteFeedback(privateWork, threadId, runId);
           setFeedback(null);
         } else {
-          const result = await upsertFeedback(threadId, runId, rating);
+          const result = await upsertFeedback(
+            privateWork,
+            threadId,
+            runId,
+            rating,
+          );
           setFeedback(result);
         }
       } catch {
@@ -93,7 +100,7 @@ function FeedbackButtons({
         setIsSubmitting(false);
       }
     },
-    [threadId, runId, feedback, isSubmitting],
+    [threadId, runId, feedback, isSubmitting, privateWork],
   );
 
   return (
@@ -199,6 +206,10 @@ function MessageImage({
   threadId: string;
   maxWidth?: string;
 }) {
+  const projectURL = useProjectArtifactReferenceURL(
+    threadId,
+    typeof src === "string" ? src : "",
+  );
   if (!src) return null;
 
   const imgClassName = cn("overflow-hidden rounded-lg", `max-w-[${maxWidth}]`);
@@ -207,7 +218,8 @@ function MessageImage({
     return <img className={imgClassName} src={src} alt={alt} {...props} />;
   }
 
-  const url = src.startsWith("/mnt/") ? resolveArtifactURL(src, threadId) : src;
+  const url = src.startsWith("/mnt/") ? projectURL : src;
+  if (!url) return null;
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
@@ -553,6 +565,7 @@ function RichFileCard({
   const { t } = useI18n();
   const isUploading = file.status === "uploading";
   const isImage = isImageFile(file.filename);
+  const fileUrl = useProjectArtifactReferenceURL(threadId, file.path ?? "");
 
   if (isUploading) {
     return (
@@ -583,7 +596,7 @@ function RichFileCard({
 
   if (!file.path) return null;
 
-  const fileUrl = resolveArtifactURL(file.path, threadId);
+  if (!fileUrl) return null;
 
   if (isImage) {
     return (

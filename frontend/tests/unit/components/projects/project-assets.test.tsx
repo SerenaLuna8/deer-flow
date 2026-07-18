@@ -471,5 +471,4 @@ describe("project shared asset pages", () => {
     expect(source).not.toContain("useReplaceProjectCredential");
     expect(source).not.toContain("useMutation(");
   });
-
 });

@@ -26,12 +26,10 @@ const SCOPE = {
   projectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 };
 
-function access(scope: typeof SCOPE | null): PrivateWorkAccess {
+function access(scope: typeof SCOPE): PrivateWorkAccess {
   return {
     scope,
-    apiBaseURL: scope
-      ? `/api/projects/${scope.projectId}/private-work`
-      : "/api",
+    apiBaseURL: `/api/projects/${scope.projectId}/private-work`,
     client: {} as PrivateWorkAccess["client"],
     queryKeyPrefix: [],
     reconnectOnMount: true,
@@ -73,14 +71,10 @@ describe("project automation readiness", () => {
     });
   });
 
-  test("disables readiness without current provider identity", () => {
+  test("derives readiness from the current provider identity", () => {
     const active = projectAutomationReadinessOptions(access(SCOPE));
     expect(active.queryKey).toEqual([...automationRoot(SCOPE), "readiness"]);
     expect(active.enabled).toBe(true);
-
-    const inactive = projectAutomationReadinessOptions(access(null));
-    expect(inactive.queryKey).toEqual(["automations", "inactive", "readiness"]);
-    expect(inactive.enabled).toBe(false);
   });
 
   test("requires both server readiness and automation capability", () => {

@@ -34,7 +34,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; both `pnpm build` and its production WebServer build use Webpack explicitly so production compilation remains deterministic across local and CI environments. Static-demo release coverage lives under `tests/e2e-static/` and uses `playwright.static.config.ts`; it builds with `NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true` into the independent `.next-static` dist directory, so normal and static production builds cannot reuse each other's output.
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; both `pnpm build` and its production WebServer build use Webpack explicitly so production compilation remains deterministic across local and CI environments. Static-demo release coverage lives under `tests/e2e-static/` and uses `playwright.static.config.ts`; it builds with the canonical `BUILD_MODE=static` contract into the independent `.next-static` dist directory, so normal and static production builds cannot reuse each other's output or module graph.
 
 ## Architecture
 

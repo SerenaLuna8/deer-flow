@@ -110,7 +110,7 @@ export function ProjectAuditPage() {
   const staticMode = isStaticWebsiteOnly();
   const access = usePrivateWorkAccess();
 
-  if (!canRead || staticMode || access.scope === null) notFound();
+  if (!canRead || staticMode) notFound();
   return (
     <AuthorizedProjectAuditPage
       key={access.scope.projectId}

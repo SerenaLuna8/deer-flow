@@ -3,6 +3,12 @@
   "version": "2.1.0",
   "private": true,
   "type": "module",
+  "imports": {
+    "#workspace-build-entry": {
+      "deerflow-static": "./src/build/workspace-static.tsx",
+      "default": "./src/build/workspace-production.tsx"
+    }
+  },
   "scripts": {
     "demo:save": "node scripts/save-demo.js",
     "build": "next build --webpack",

@@ -1,7 +1,4 @@
-import type {
-  ChannelConnection,
-  ChannelProviderId,
-} from "./connection-types";
+import type { ChannelConnection, ChannelProviderId } from "./connection-types";
 
 export const CONNECT_POLL_INTERVAL_MS = 2000;
 // Fallback bind window used when the backend response omits or garbles

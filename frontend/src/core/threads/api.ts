@@ -1,6 +1,5 @@
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
-import { getBackendBaseURL } from "@/core/config";
-import type { PrivateWorkAccess } from "@/core/private-work/types";
+import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
 
 import type { ThreadTokenUsageResponse } from "./types";
 
@@ -15,18 +14,18 @@ export type ThreadCompactResponse = {
   total_tokens: number;
 };
 
-export type CompactThreadContextOptions = {
-  signal?: AbortSignal;
-  agentName?: string | null;
-  apiBaseURL?: string;
-};
-
-export type PrivateWorkRequestOptions = Partial<
-  Pick<PrivateWorkAccess, "apiBaseURL">
+export type PrivateWorkRequestOptions = Pick<
+  ProjectPrivateWorkScope,
+  "apiBaseURL"
 >;
 
-function threadAPIBaseURL(options?: PrivateWorkRequestOptions): string {
-  return options?.apiBaseURL ?? `${getBackendBaseURL()}/api`;
+export type CompactThreadContextOptions = PrivateWorkRequestOptions & {
+  signal?: AbortSignal;
+  agentName?: string | null;
+};
+
+function threadAPIBaseURL(options: PrivateWorkRequestOptions): string {
+  return options.apiBaseURL;
 }
 
 export type ThreadBranchResponse = {
@@ -60,7 +59,7 @@ async function readThreadAPIError(
 
 export async function fetchThreadTokenUsage(
   threadId: string,
-  options?: PrivateWorkRequestOptions,
+  options: PrivateWorkRequestOptions,
 ): Promise<ThreadTokenUsageResponse | null> {
   const response = await fetchWithAuth(
     `${threadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/token-usage`,
@@ -82,7 +81,7 @@ export async function fetchThreadTokenUsage(
 export async function branchThreadFromTurn(
   threadId: string,
   input: BranchThreadFromTurnInput,
-  options?: PrivateWorkRequestOptions,
+  options: PrivateWorkRequestOptions,
 ): Promise<ThreadBranchResponse> {
   const response = await fetchWithAuth(
     `${threadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/branches`,
@@ -110,7 +109,7 @@ export async function branchThreadFromTurn(
 
 export async function compactThreadContext(
   threadId: string,
-  options: CompactThreadContextOptions = {},
+  options: CompactThreadContextOptions,
 ): Promise<ThreadCompactResponse> {
   const response = await fetchWithAuth(
     `${threadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/compact`,

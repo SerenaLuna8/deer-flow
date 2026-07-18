@@ -41,9 +41,6 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
   const privateWork = usePrivateWorkAccess();
   const queryClient = useQueryClient();
   const scope = privateWork.scope;
-  if (!scope) {
-    throw new Error("Project connections require an entered project scope");
-  }
   const canManage = project.capabilities.includes("private_work.create");
   const queryKey = projectConnectionsQueryKey(scope);
   const connections = useQuery({

@@ -2,7 +2,7 @@ import { throwGatewayApiError } from "@/core/api/errors";
 import { fetch } from "@/core/api/fetcher";
 import {
   projectClientScopeSchema,
-  type PrivateWorkAccess,
+  type ProjectPrivateWorkScope,
 } from "@/core/private-work/types";
 
 export type InputPolishRequest = {
@@ -17,13 +17,10 @@ export type InputPolishResponse = {
 };
 
 export async function polishInputDraft(
-  access: Pick<PrivateWorkAccess, "apiBaseURL" | "scope">,
+  access: Pick<ProjectPrivateWorkScope, "apiBaseURL" | "scope">,
   request: InputPolishRequest,
   options?: { signal?: AbortSignal },
 ): Promise<InputPolishResponse> {
-  if (access.scope === null) {
-    throw new Error("Input polish requires a project-scoped private-work URL");
-  }
   const scope = projectClientScopeSchema.parse(access.scope);
   const suffix = `/projects/${scope.projectId}/private-work`;
   if (!access.apiBaseURL.endsWith(suffix)) {

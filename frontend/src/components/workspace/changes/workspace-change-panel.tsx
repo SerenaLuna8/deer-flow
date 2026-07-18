@@ -19,8 +19,8 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { resolveArtifactURL } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
+import { useProjectArtifactReferenceURL } from "@/core/private-work/file-hooks";
 import { useWorkspaceChanges } from "@/core/workspace-changes/hooks";
 import {
   getChangedFileCount,
@@ -116,7 +116,7 @@ function WorkspaceChangeFile({
 }) {
   const { t } = useI18n();
   const hasDiff = file.diff.length > 0;
-  const openUrl = resolveArtifactURL(file.path, threadId);
+  const openUrl = useProjectArtifactReferenceURL(threadId, file.path);
   const canOpenFile = file.status !== "deleted" && !file.sensitive;
 
   return (
@@ -140,7 +140,7 @@ function WorkspaceChangeFile({
               </div>
             </div>
           </div>
-          {canOpenFile && (
+          {canOpenFile && openUrl && (
             <a
               href={openUrl}
               target="_blank"

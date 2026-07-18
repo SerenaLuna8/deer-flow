@@ -58,8 +58,8 @@ export function ProjectPrivateWorkProvider({
 }
 
 export function usePrivateWorkAccess(
-  explicit?: PrivateWorkAccess,
-): PrivateWorkAccess {
+  explicit?: ProjectPrivateWorkScope,
+): ProjectPrivateWorkScope {
   const contextual = useContext(PrivateWorkContext);
   const access = explicit ?? contextual;
   if (!access) {
@@ -69,11 +69,7 @@ export function usePrivateWorkAccess(
 }
 
 export function useProjectPrivateWorkScope(
-  explicit?: PrivateWorkAccess,
+  explicit?: ProjectPrivateWorkScope,
 ): ProjectPrivateWorkScope {
-  const access = usePrivateWorkAccess(explicit);
-  if (!access.scope) {
-    throw new Error("An entered project private-work scope is required");
-  }
-  return access as ProjectPrivateWorkScope;
+  return usePrivateWorkAccess(explicit);
 }

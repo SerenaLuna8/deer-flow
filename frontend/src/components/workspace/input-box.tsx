@@ -65,13 +65,13 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { fetch } from "@/core/api/fetcher";
-import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
 import { hasOpenHumanInputRequest } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import { privateWorkQueryKey } from "@/core/private-work/query-keys";
 import { useProjectSlashSkills } from "@/core/shared-assets";
 import {
   buildReferenceMessageMetadata,
@@ -615,7 +615,7 @@ export function InputBox({
         let goal: GoalState | null = null;
         if (command.kind === "status") {
           const response = await fetch(
-            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+            `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
             { method: "GET", signal },
@@ -646,7 +646,7 @@ export function InputBox({
           onGoalChange?.(goal);
         } else if (command.kind === "clear") {
           const response = await fetch(
-            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+            `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
             { method: "DELETE", signal },
@@ -667,7 +667,7 @@ export function InputBox({
           onGoalChange?.(null);
         } else {
           const response = await fetch(
-            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+            `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
             {
@@ -719,6 +719,7 @@ export function InputBox({
       t.inputBox.goalFailed,
       t.inputBox.goalNone,
       t.inputBox.goalSet,
+      privateWork.apiBaseURL,
       textInput,
       threadId,
     ],
@@ -734,6 +735,7 @@ export function InputBox({
     const signal = request.controller.signal;
     try {
       const result = await compactThreadContext(threadId, {
+        apiBaseURL: privateWork.apiBaseURL,
         signal,
         agentName:
           typeof context.agent_name === "string" ? context.agent_name : null,
@@ -750,9 +752,14 @@ export function InputBox({
       setFollowupsHidden(false);
       setFollowupsLoading(false);
 
-      void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
       void queryClient.invalidateQueries({
-        queryKey: threadTokenUsageQueryKey(threadId),
+        queryKey: privateWorkQueryKey(privateWork.scope, "thread", threadId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: privateWorkQueryKey(
+          privateWork.scope,
+          ...threadTokenUsageQueryKey(threadId),
+        ),
       });
 
       if (result.compacted) {
@@ -780,6 +787,7 @@ export function InputBox({
     t.inputBox.compactSkipped,
     t.inputBox.compactSuccess,
     isWelcomeMode,
+    privateWork,
     textInput,
     threadId,
   ]);
@@ -1022,7 +1030,6 @@ export function InputBox({
   const inputPolishDisabled =
     isComposerDisabled ||
     isMockThread ||
-    privateWork.scope === null ||
     hasOpenHumanInputCard ||
     polishingInput ||
     (!inputPolishUndoAvailable &&
@@ -1488,16 +1495,19 @@ export function InputBox({
     setFollowupsLoading(true);
     setFollowups([]);
 
-    fetch(`${getBackendBaseURL()}/api/threads/${threadId}/suggestions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: recent,
-        n: 3,
-        model_name: context.model_name ?? undefined,
-      }),
-      signal: controller.signal,
-    })
+    fetch(
+      `${privateWork.apiBaseURL}/threads/${encodeURIComponent(threadId)}/suggestions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: recent,
+          n: 3,
+          model_name: context.model_name ?? undefined,
+        }),
+        signal: controller.signal,
+      },
+    )
       .then(async (res) => {
         if (!res.ok) {
           return { suggestions: [] as string[] };
@@ -1524,6 +1534,7 @@ export function InputBox({
     disabled,
     followupSuggestionsEnabled,
     isMock,
+    privateWork.apiBaseURL,
     status,
     suggestionsConfigLoaded,
     suggestionsEnabled,

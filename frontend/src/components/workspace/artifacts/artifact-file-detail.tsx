@@ -87,11 +87,7 @@ export function ArtifactFileDetail({
     }
     return filepathFromProps;
   }, [filepathFromProps, isWriteFile]);
-  const projectFiles = useUploadedFiles(
-    threadId,
-    privateWork,
-    !isWriteFile,
-  );
+  const projectFiles = useUploadedFiles(threadId, privateWork, !isWriteFile);
   const projectURL = useMemo(() => {
     if (isWriteFile) return null;
     const normalizedPath = filepath
@@ -189,11 +185,8 @@ export function ArtifactFileDetail({
   const { content, url, isLoading, error } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
-    enabled:
-      isCodeFile &&
-      !isWriteFile &&
-      projectURL !== null,
-    url: openURL ?? undefined,
+    enabled: isCodeFile && !isWriteFile && projectURL !== null,
+    url: openURL ?? filepathFromProps,
     privateWork,
   });
 

@@ -18,8 +18,8 @@ export type RunMetadataStorage = {
   removeItem(key: `lg:stream:${string}`): void;
 };
 
-export type PrivateWorkAccess = {
-  scope: ProjectClientScope | null;
+export type ProjectPrivateWorkScope = {
+  scope: ProjectClientScope;
   client: LangGraphClient;
   apiBaseURL: string;
   queryKeyPrefix: readonly unknown[];
@@ -28,9 +28,8 @@ export type PrivateWorkAccess = {
   isActive?(): boolean;
 };
 
-export type ProjectPrivateWorkScope = Omit<PrivateWorkAccess, "scope"> & {
-  scope: ProjectClientScope;
-};
+/** @deprecated Use the project-authoritative scope name in public APIs. */
+export type PrivateWorkAccess = ProjectPrivateWorkScope;
 
 export function runPrivateWorkAbortable<T>(
   access: PrivateWorkAccess,

@@ -3,8 +3,7 @@
  */
 
 import { fetch } from "../api/fetcher";
-import { getBackendBaseURL } from "../config";
-import type { PrivateWorkAccess } from "../private-work/types";
+import type { ProjectPrivateWorkScope } from "../private-work/types";
 
 export interface UploadedFileInfo {
   id?: string;
@@ -40,8 +39,10 @@ export interface UploadLimits {
   max_total_size: number;
 }
 
-export type UploadRequestOptions = Pick<PrivateWorkAccess, "apiBaseURL"> &
-  Partial<Pick<PrivateWorkAccess, "scope">>;
+export type UploadRequestOptions = Pick<
+  ProjectPrivateWorkScope,
+  "apiBaseURL" | "scope"
+>;
 
 type PrivateUploadedFile = {
   id: string;
@@ -56,16 +57,12 @@ type PrivateUploadedFile = {
   updated_at: string;
 };
 
-function uploadAPIBaseURL(options?: UploadRequestOptions): string {
-  return options?.apiBaseURL ?? `${getBackendBaseURL()}/api`;
+function uploadAPIBaseURL(options: UploadRequestOptions): string {
+  return options.apiBaseURL;
 }
 
-function isProjectUpload(options?: UploadRequestOptions): boolean {
-  return options?.scope != null;
-}
-
-export function supportsUploadLimits(options?: UploadRequestOptions): boolean {
-  return !isProjectUpload(options);
+export function supportsUploadLimits(_options: UploadRequestOptions): boolean {
+  return false;
 }
 
 function mapPrivateUploadedFile(
@@ -104,53 +101,29 @@ async function readErrorDetail(
 export async function uploadFiles(
   threadId: string,
   files: File[],
-  options?: UploadRequestOptions,
+  options: UploadRequestOptions,
 ): Promise<UploadResponse> {
-  if (isProjectUpload(options)) {
-    const uploadedFiles: UploadedFileInfo[] = [];
-    const apiBaseURL = uploadAPIBaseURL(options);
-    for (const file of files) {
-      const formData = new FormData();
-      formData.append("file", file);
-      const response = await fetch(
-        `${apiBaseURL}/threads/${encodeURIComponent(threadId)}/uploads`,
-        { method: "POST", body: formData },
-      );
-      if (!response.ok) {
-        throw new Error(await readErrorDetail(response, "Upload failed"));
-      }
-      const uploaded = (await response.json()) as PrivateUploadedFile;
-      uploadedFiles.push(
-        mapPrivateUploadedFile(uploaded, apiBaseURL, threadId),
-      );
+  const uploadedFiles: UploadedFileInfo[] = [];
+  const apiBaseURL = uploadAPIBaseURL(options);
+  for (const file of files) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(
+      `${apiBaseURL}/threads/${encodeURIComponent(threadId)}/uploads`,
+      { method: "POST", body: formData },
+    );
+    if (!response.ok) {
+      throw new Error(await readErrorDetail(response, "Upload failed"));
     }
-    return {
-      success: true,
-      files: uploadedFiles,
-      message: `${uploadedFiles.length} file(s) uploaded`,
-      skipped_files: [],
-    };
+    const uploaded = (await response.json()) as PrivateUploadedFile;
+    uploadedFiles.push(mapPrivateUploadedFile(uploaded, apiBaseURL, threadId));
   }
-
-  const formData = new FormData();
-
-  files.forEach((file) => {
-    formData.append("files", file);
-  });
-
-  const response = await fetch(
-    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads`,
-    {
-      method: "POST",
-      body: formData,
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error(await readErrorDetail(response, "Upload failed"));
-  }
-
-  return response.json();
+  return {
+    success: true,
+    files: uploadedFiles,
+    message: `${uploadedFiles.length} file(s) uploaded`,
+    skipped_files: [],
+  };
 }
 
 /**
@@ -158,7 +131,7 @@ export async function uploadFiles(
  */
 export async function getUploadLimits(
   threadId: string,
-  options?: UploadRequestOptions,
+  options: UploadRequestOptions,
 ): Promise<UploadLimits> {
   const response = await fetch(
     `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads/limits`,
@@ -178,29 +151,11 @@ export async function getUploadLimits(
  */
 export async function listUploadedFiles(
   threadId: string,
-  options?: UploadRequestOptions,
+  options: UploadRequestOptions,
 ): Promise<ListFilesResponse> {
-  if (isProjectUpload(options)) {
-    const apiBaseURL = uploadAPIBaseURL(options);
-    const response = await fetch(
-      `${apiBaseURL}/threads/${encodeURIComponent(threadId)}/uploads`,
-    );
-    if (!response.ok) {
-      throw new Error(
-        await readErrorDetail(response, "Failed to list uploaded files"),
-      );
-    }
-    const files = (await response.json()) as PrivateUploadedFile[];
-    return {
-      files: files.map((file) =>
-        mapPrivateUploadedFile(file, apiBaseURL, threadId),
-      ),
-      count: files.length,
-    };
-  }
-
+  const apiBaseURL = uploadAPIBaseURL(options);
   const response = await fetch(
-    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads/list`,
+    `${apiBaseURL}/threads/${encodeURIComponent(threadId)}/uploads`,
   );
 
   if (!response.ok) {
@@ -209,7 +164,13 @@ export async function listUploadedFiles(
     );
   }
 
-  return response.json();
+  const files = (await response.json()) as PrivateUploadedFile[];
+  return {
+    files: files.map((file) =>
+      mapPrivateUploadedFile(file, apiBaseURL, threadId),
+    ),
+    count: files.length,
+  };
 }
 
 /**
@@ -218,30 +179,17 @@ export async function listUploadedFiles(
 export async function deleteUploadedFile(
   threadId: string,
   filename: string,
-  options?: UploadRequestOptions,
+  options: UploadRequestOptions,
 ): Promise<{ success: boolean; message: string }> {
-  if (isProjectUpload(options)) {
-    const response = await fetch(
-      `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads?file_id=${encodeURIComponent(filename)}`,
-      { method: "DELETE" },
-    );
-    if (!response.ok) {
-      throw new Error(await readErrorDetail(response, "Failed to delete file"));
-    }
-    const result = (await response.json()) as { success: boolean };
-    return { ...result, message: "File deleted" };
-  }
-
   const response = await fetch(
-    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads/${encodeURIComponent(filename)}`,
-    {
-      method: "DELETE",
-    },
+    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads?file_id=${encodeURIComponent(filename)}`,
+    { method: "DELETE" },
   );
 
   if (!response.ok) {
     throw new Error(await readErrorDetail(response, "Failed to delete file"));
   }
 
-  return response.json();
+  const result = (await response.json()) as { success: boolean };
+  return { ...result, message: "File deleted" };
 }

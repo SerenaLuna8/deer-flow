@@ -86,11 +86,7 @@ const channelProviderHealthSchema = z
     provider: z.string().min(1),
     status: z.enum(["ready", "degraded", "unavailable"]),
     checked_at: z.string().datetime({ offset: true }),
-    code: z.enum([
-      "CHANNEL_READY",
-      "CHANNEL_STOPPED",
-      "CHANNEL_DISABLED",
-    ]),
+    code: z.enum(["CHANNEL_READY", "CHANNEL_STOPPED", "CHANNEL_DISABLED"]),
   })
   .strict();
 

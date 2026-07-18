@@ -6,8 +6,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 
 import { usePrivateWorkAccess } from "../private-work/provider";
-import { scopedPrivateWorkQueryKey } from "../private-work/query-keys";
-import type { PrivateWorkAccess } from "../private-work/types";
+import { privateWorkQueryKey } from "../private-work/query-keys";
+import type { ProjectPrivateWorkScope } from "../private-work/types";
 
 import {
   deleteUploadedFile,
@@ -25,11 +25,11 @@ import {
  */
 export function useUploadLimits(
   threadId: string,
-  explicitPrivateWork?: PrivateWorkAccess,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery({
-    queryKey: scopedPrivateWorkQueryKey(
+    queryKey: privateWorkQueryKey(
       privateWork.scope,
       "uploads",
       "limits",
@@ -47,13 +47,13 @@ export function useUploadLimits(
  */
 export function useUploadFiles(
   threadId: string,
-  explicitPrivateWork?: PrivateWorkAccess,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
 
   return useMutation<UploadResponse, Error, File[]>({
-    mutationKey: scopedPrivateWorkQueryKey(
+    mutationKey: privateWorkQueryKey(
       privateWork.scope,
       "uploads",
       "create",
@@ -63,7 +63,7 @@ export function useUploadFiles(
     onSuccess: () => {
       // Invalidate the uploaded files list
       void queryClient.invalidateQueries({
-        queryKey: scopedPrivateWorkQueryKey(
+        queryKey: privateWorkQueryKey(
           privateWork.scope,
           "uploads",
           "list",
@@ -79,12 +79,12 @@ export function useUploadFiles(
  */
 export function useUploadedFiles(
   threadId: string,
-  explicitPrivateWork?: PrivateWorkAccess,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
   enabled = true,
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery({
-    queryKey: scopedPrivateWorkQueryKey(
+    queryKey: privateWorkQueryKey(
       privateWork.scope,
       "uploads",
       "list",
@@ -100,13 +100,13 @@ export function useUploadedFiles(
  */
 export function useDeleteUploadedFile(
   threadId: string,
-  explicitPrivateWork?: PrivateWorkAccess,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
 ) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationKey: scopedPrivateWorkQueryKey(
+    mutationKey: privateWorkQueryKey(
       privateWork.scope,
       "uploads",
       "delete",
@@ -117,7 +117,7 @@ export function useDeleteUploadedFile(
     onSuccess: () => {
       // Invalidate the uploaded files list
       void queryClient.invalidateQueries({
-        queryKey: scopedPrivateWorkQueryKey(
+        queryKey: privateWorkQueryKey(
           privateWork.scope,
           "uploads",
           "list",
@@ -134,7 +134,7 @@ export function useDeleteUploadedFile(
  */
 export function useUploadFilesOnSubmit(
   threadId: string,
-  explicitPrivateWork?: PrivateWorkAccess,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
 ) {
   const uploadMutation = useUploadFiles(threadId, explicitPrivateWork);
 

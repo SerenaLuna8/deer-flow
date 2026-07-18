@@ -4,14 +4,13 @@ rs.mock("@/core/api/fetcher", () => ({
   fetch: rs.fn(),
 }));
 
-rs.mock("@/core/config", () => ({
-  getBackendBaseURL: () => "/backend",
-}));
-
 import { fetch as fetcher } from "@/core/api/fetcher";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 
 const mockedFetch = rs.mocked(fetcher);
+const privateWork = {
+  apiBaseURL: "/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work",
+};
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -44,11 +43,11 @@ describe("fetchSubtaskSteps", () => {
   test("scopes the request to the task and only fetches subagent.step", async () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(200, []));
 
-    await fetchSubtaskSteps("thread 1", "run/1", "task-A");
+    await fetchSubtaskSteps(privateWork, "thread 1", "run/1", "task-A");
 
     const url = mockedFetch.mock.calls[0]![0] as string;
     expect(url).toContain(
-      "/backend/api/threads/thread%201/runs/run%2F1/events",
+      `${privateWork.apiBaseURL}/threads/thread%201/runs/run%2F1/events`,
     );
     expect(url).toContain("task_id=task-A");
     expect(url).toContain("event_types=subagent.step");
@@ -66,7 +65,7 @@ describe("fetchSubtaskSteps", () => {
       )
       .mockResolvedValueOnce(jsonResponse(200, [stepEvent(12, 2, "bash")]));
 
-    const steps = await fetchSubtaskSteps("t", "r", "A", 2);
+    const steps = await fetchSubtaskSteps(privateWork, "t", "r", "A", 2);
 
     expect(steps.map((s) => s.message_index)).toEqual([0, 1, 2]);
     expect(steps.map((s) => s.tool_name)).toEqual([
@@ -84,7 +83,7 @@ describe("fetchSubtaskSteps", () => {
       jsonResponse(200, [stepEvent(10, 0, "web_search")]),
     );
 
-    const steps = await fetchSubtaskSteps("t", "r", "A", 500);
+    const steps = await fetchSubtaskSteps(privateWork, "t", "r", "A", 500);
 
     expect(steps).toHaveLength(1);
     expect(mockedFetch).toHaveBeenCalledTimes(1);
@@ -93,6 +92,8 @@ describe("fetchSubtaskSteps", () => {
   test("throws when a page request fails", async () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(500, { detail: "boom" }));
 
-    await expect(fetchSubtaskSteps("t", "r", "A")).rejects.toThrow();
+    await expect(
+      fetchSubtaskSteps(privateWork, "t", "r", "A"),
+    ).rejects.toThrow();
   });
 });

@@ -1,8 +1,4 @@
-import {
-  DownloadIcon,
-  LoaderIcon,
-  Trash2Icon,
-} from "lucide-react";
+import { DownloadIcon, LoaderIcon, Trash2Icon } from "lucide-react";
 import { useCallback } from "react";
 import { toast } from "sonner";
 
@@ -115,26 +111,26 @@ export function ArtifactFileList({
             </CardDescription>
             <CardAction className="row-span-1 self-center">
               {projectFiles.data?.files.some(
-                  (candidate) =>
-                    candidate.id &&
-                    candidate.logical_path ===
-                      file
-                        .replace(/^\/mnt\/(?:data|user-data)\//u, "")
-                        .replace(/^\/+/, ""),
-                ) && (
-                  <Button
-                    variant="ghost"
-                    disabled={deleteProjectFile.isPending}
-                    onClick={(event) => handleDeleteProjectFile(event, file)}
-                  >
-                    {deleteProjectFile.isPending ? (
-                      <LoaderIcon className="size-4 animate-spin" />
-                    ) : (
-                      <Trash2Icon className="size-4" />
-                    )}
-                    {t.common.delete}
-                  </Button>
-                )}
+                (candidate) =>
+                  candidate.id &&
+                  candidate.logical_path ===
+                    file
+                      .replace(/^\/mnt\/(?:data|user-data)\//u, "")
+                      .replace(/^\/+/, ""),
+              ) && (
+                <Button
+                  variant="ghost"
+                  disabled={deleteProjectFile.isPending}
+                  onClick={(event) => handleDeleteProjectFile(event, file)}
+                >
+                  {deleteProjectFile.isPending ? (
+                    <LoaderIcon className="size-4 animate-spin" />
+                  ) : (
+                    <Trash2Icon className="size-4" />
+                  )}
+                  {t.common.delete}
+                </Button>
+              )}
               {downloadURL(file) ? (
                 <Button variant="ghost" asChild>
                   <a

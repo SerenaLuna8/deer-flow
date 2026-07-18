@@ -18,10 +18,7 @@ import {
 import type { Project } from "@/core/projects/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
-export type ProjectChatRouteScope = Omit<
-  ScopedChatRouteScope,
-  "privateWork"
->;
+export type ProjectChatRouteScope = Omit<ScopedChatRouteScope, "privateWork">;
 
 export function projectChatRouteScope(
   project: Project,

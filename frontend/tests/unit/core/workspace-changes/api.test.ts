@@ -1,5 +1,7 @@
 import { afterEach, expect, test, rs } from "@rstest/core";
 
+import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
+
 afterEach(() => {
   rs.unstubAllGlobals();
 });
@@ -38,6 +40,10 @@ test("fetchWorkspaceChanges can request file metadata without diffs", async () =
     await import("@/core/workspace-changes/api");
 
   await fetchWorkspaceChanges({
+    privateWork: {
+      apiBaseURL:
+        "/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work",
+    } as ProjectPrivateWorkScope,
     threadId: "thread-1",
     runId: "run-1",
     includeFiles: true,
@@ -45,6 +51,9 @@ test("fetchWorkspaceChanges can request file metadata without diffs", async () =
   });
 
   const url = new URL(requestedUrl, "http://localhost");
+  expect(url.pathname).toBe(
+    "/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work/threads/thread-1/runs/run-1/workspace-changes",
+  );
   expect(url.searchParams.get("include_files")).toBe("true");
   expect(url.searchParams.get("include_diff")).toBe("false");
 });

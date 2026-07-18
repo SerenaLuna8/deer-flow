@@ -43,8 +43,6 @@ import {
   type UpdateAutomationInput,
 } from "./types";
 
-const INACTIVE_ROOT = ["automations", "inactive"] as const;
-
 const DEFINITIVE_TRIGGER_ERROR_CODES = new Set<AutomationErrorCode>([
   "AUTOMATION_FORBIDDEN",
   "AUTOMATION_NOT_FOUND",
@@ -121,21 +119,15 @@ function isDefinitiveTriggerError(error: unknown): boolean {
 }
 
 function sameScope(
-  left: ProjectClientScope | null,
-  right: ProjectClientScope | null,
+  left: ProjectClientScope,
+  right: ProjectClientScope,
 ): boolean {
   return (
-    left !== null &&
-    right !== null &&
-    left.accountId === right.accountId &&
-    left.projectId === right.projectId
+    left.accountId === right.accountId && left.projectId === right.projectId
   );
 }
 
 function requiredScope(access: PrivateWorkAccess): ProjectClientScope {
-  if (!access.scope) {
-    throw new Error("Project automation scope is unavailable");
-  }
   return access.scope;
 }
 
@@ -151,12 +143,10 @@ export function projectAutomationsQueryOptions(
   const scope = access.scope;
   const parsed = normalizedFilters(filters);
   return {
-    queryKey: scope
-      ? automationQueryKey(scope, "list", parsed.limit, parsed.offset)
-      : [...INACTIVE_ROOT, "list"],
+    queryKey: automationQueryKey(scope, "list", parsed.limit, parsed.offset),
     queryFn: ({ signal }: { signal: AbortSignal }) =>
       listAutomations(requiredScope(access), parsed, signal),
-    enabled: enabled && scope !== null,
+    enabled,
     retry: false,
   };
 }
@@ -173,9 +163,7 @@ export function automationMutationOptions<TData, TVariables>(
 ) {
   const originScope = access.scope;
   return {
-    mutationKey: originScope
-      ? automationMutationKey(originScope, action)
-      : [...INACTIVE_ROOT, "mutation", action],
+    mutationKey: automationMutationKey(originScope, action),
     mutationFn: async (variables: TVariables) => {
       const scope = requiredScope(access);
       return await runPrivateWorkAbortable(access, (signal) =>
@@ -184,7 +172,6 @@ export function automationMutationOptions<TData, TVariables>(
     },
     onSuccess: async () => {
       if (
-        !originScope ||
         !sameScope(originScope, access.scope) ||
         !isPrivateWorkAccessActive(access)
       ) {
@@ -241,15 +228,13 @@ export function useThreadProjectAutomations(
   const scope = access.scope;
   const parsed = normalizedFilters(filters);
   return useQuery({
-    queryKey: scope
-      ? automationQueryKey(
-          scope,
-          "thread",
-          threadId ?? "",
-          parsed.limit,
-          parsed.offset,
-        )
-      : [...INACTIVE_ROOT, "thread", threadId ?? ""],
+    queryKey: automationQueryKey(
+      scope,
+      "thread",
+      threadId ?? "",
+      parsed.limit,
+      parsed.offset,
+    ),
     queryFn: ({ signal }) =>
       listThreadAutomations(
         requiredScope(access),
@@ -257,7 +242,7 @@ export function useThreadProjectAutomations(
         parsed,
         signal,
       ),
-    enabled: enabled && scope !== null && Boolean(threadId),
+    enabled: enabled && Boolean(threadId),
     retry: false,
   });
 }
@@ -269,12 +254,10 @@ export function useProjectAutomation(
   const access = usePrivateWorkAccess();
   const scope = access.scope;
   return useQuery({
-    queryKey: scope
-      ? automationQueryKey(scope, "task", taskId ?? "")
-      : [...INACTIVE_ROOT, "task", taskId ?? ""],
+    queryKey: automationQueryKey(scope, "task", taskId ?? ""),
     queryFn: ({ signal }) =>
       getAutomation(requiredScope(access), taskId ?? "", signal),
-    enabled: enabled && scope !== null && Boolean(taskId),
+    enabled: enabled && Boolean(taskId),
     retry: false,
   });
 }
@@ -288,19 +271,17 @@ export function useProjectAutomationRuns(
   const scope = access.scope;
   const parsed = normalizedFilters(filters);
   return useQuery({
-    queryKey: scope
-      ? automationQueryKey(
-          scope,
-          "task",
-          taskId ?? "",
-          "runs",
-          parsed.limit,
-          parsed.offset,
-        )
-      : [...INACTIVE_ROOT, "task", taskId ?? "", "runs"],
+    queryKey: automationQueryKey(
+      scope,
+      "task",
+      taskId ?? "",
+      "runs",
+      parsed.limit,
+      parsed.offset,
+    ),
     queryFn: ({ signal }) =>
       listAutomationRuns(requiredScope(access), taskId ?? "", parsed, signal),
-    enabled: enabled && scope !== null && Boolean(taskId),
+    enabled: enabled && Boolean(taskId),
     retry: false,
   });
 }

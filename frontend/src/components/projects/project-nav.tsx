@@ -249,13 +249,13 @@ function ProjectNavigationLinksWithGovernance({
   const canReadUsage = project.capabilities.includes("project.usage.read");
   const canReadAudit = project.capabilities.includes("project.audit.read");
   const props = { project, mobile, privateWorkReady, automationReady };
-  if (scope !== null && canReadUsage && canReadAudit) {
+  if (canReadUsage && canReadAudit) {
     return <ProjectNavigationLinksWithUsageAndAudit {...props} scope={scope} />;
   }
-  if (scope !== null && canReadUsage) {
+  if (canReadUsage) {
     return <ProjectNavigationLinksWithUsage {...props} scope={scope} />;
   }
-  if (scope !== null && canReadAudit) {
+  if (canReadAudit) {
     return <ProjectNavigationLinksWithAudit {...props} scope={scope} />;
   }
   return (

@@ -36,9 +36,41 @@ describe("M7 project-only frontend surface", () => {
       "/api/agents",
       "/api/skills",
       "/api/mcp/config",
+      "/api/threads",
       "LEGACY_WORKSPACE_CHAT_SCOPE",
     ]) {
       expect(productionFiles).not.toContain(forbidden);
     }
+  });
+
+  test("private-work and artifact contracts require a project scope", () => {
+    const privateWorkTypes = readFileSync(
+      resolve(process.cwd(), "src/core/private-work/types.ts"),
+      "utf8",
+    );
+    const privateWorkQueryKeys = readFileSync(
+      resolve(process.cwd(), "src/core/private-work/query-keys.ts"),
+      "utf8",
+    );
+    const artifactHooks = readFileSync(
+      resolve(process.cwd(), "src/core/artifacts/hooks.ts"),
+      "utf8",
+    );
+    const artifactLoader = readFileSync(
+      resolve(process.cwd(), "src/core/artifacts/loader.ts"),
+      "utf8",
+    );
+    const artifactUtils = readFileSync(
+      resolve(process.cwd(), "src/core/artifacts/utils.ts"),
+      "utf8",
+    );
+
+    expect(privateWorkTypes).toContain("scope: ProjectClientScope;");
+    expect(privateWorkTypes).not.toContain("scope: ProjectClientScope | null;");
+    expect(privateWorkQueryKeys).not.toContain("scopedPrivateWorkQueryKey");
+    expect(artifactHooks).not.toContain("url?: string;");
+    expect(artifactLoader).not.toContain("url?: string;");
+    expect(artifactUtils).not.toContain("urlOfArtifact");
+    expect(artifactUtils).not.toContain("/api/threads/${threadId}/artifacts");
   });
 });

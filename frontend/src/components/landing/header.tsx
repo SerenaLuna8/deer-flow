@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { NumberTicker } from "@/components/ui/number-ticker";
 import type { Locale } from "@/core/i18n/locale";
 import { getI18n } from "@/core/i18n/server";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -72,8 +73,7 @@ export async function Header({ className, homeURL, locale }: HeaderProps) {
           >
             <GitHubLogoIcon className="size-4" />
             <span className="hidden sm:inline">Star on GitHub</span>
-            {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
-              env.GITHUB_OAUTH_TOKEN && <StarCounter />}
+            {isStaticWebsiteOnly() && env.GITHUB_OAUTH_TOKEN && <StarCounter />}
           </a>
         </Button>
       </div>

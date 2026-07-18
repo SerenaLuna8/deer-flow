@@ -1,5 +1,5 @@
 import { fetch } from "../api/fetcher";
-import { getBackendBaseURL } from "../config";
+import type { ProjectPrivateWorkScope } from "../private-work/types";
 
 import { eventsToSteps, type SubtaskStep } from "./steps";
 
@@ -22,12 +22,13 @@ type FetchedEvent = Parameters<typeof eventsToSteps>[0][number] & {
  * expand when the live SSE steps are gone (e.g. after a page reload).
  */
 export async function fetchSubtaskSteps(
+  privateWork: Pick<ProjectPrivateWorkScope, "apiBaseURL">,
   threadId: string,
   runId: string,
   taskId: string,
   pageSize: number = SUBTASK_STEPS_PAGE_SIZE,
 ): Promise<SubtaskStep[]> {
-  const base = `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+  const base = `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
     threadId,
   )}/runs/${encodeURIComponent(runId)}/events`;
 

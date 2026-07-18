@@ -9,7 +9,6 @@ import {
   createPrivateWorkScopeRegistry,
   transitionPrivateWorkScope,
 } from "@/core/private-work/scope-registry";
-import type { PrivateWorkAccess } from "@/core/private-work/types";
 
 rs.mock("@/components/workspace/messages/context", () => ({
   useThread: () => ({ thread: { messages: [] }, isMock: false }),
@@ -61,7 +60,6 @@ describe("artifact content scope and transport", () => {
       "artifact",
       "outputs/report.md",
       "thread-1",
-      false,
       `${access.apiBaseURL}/threads/thread-1/files/file-1`,
     ]);
     expect(projectQuery?.options.retry).toBe(false);
@@ -71,38 +69,6 @@ describe("artifact content scope and transport", () => {
       projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     });
     expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
-  });
-
-  test("preserves the legacy workspace artifact query key", () => {
-    const queryClient = new QueryClient();
-    const workspaceAccess = { scope: null } as PrivateWorkAccess;
-
-    function Consumer() {
-      useArtifactContent({
-        filepath: "outputs/report.md",
-        threadId: "thread-1",
-        enabled: false,
-        url: "/api/threads/thread-1/artifacts/report.md",
-        privateWork: workspaceAccess,
-      });
-      return null;
-    }
-
-    renderToStaticMarkup(
-      <QueryClientProvider client={queryClient}>
-        <Consumer />
-      </QueryClientProvider>,
-    );
-
-    const workspaceQuery = queryClient.getQueryCache().getAll()[0];
-    expect(workspaceQuery?.queryKey).toEqual([
-      "artifact",
-      "outputs/report.md",
-      "thread-1",
-      false,
-      "/api/threads/thread-1/artifacts/report.md",
-    ]);
-    expect(workspaceQuery?.options.retry).toBeUndefined();
   });
 
   test.each([404, 503])(
@@ -118,7 +84,6 @@ describe("artifact content scope and transport", () => {
       await expect(
         loadArtifactContent({
           filepath: "outputs/report.md",
-          threadId: "thread-1",
           url: "/api/projects/project/private-work/files/file-1",
         }),
       ).rejects.toThrow();

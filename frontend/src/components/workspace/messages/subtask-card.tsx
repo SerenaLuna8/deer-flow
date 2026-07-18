@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { ShineBorder } from "@/components/ui/shine-border";
 import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
+import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
 import { SafeStreamdown } from "@/core/streamdown/components";
@@ -51,6 +52,7 @@ export function SubtaskCard({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const task = useSubtask(taskId)!;
   const updateSubtask = useUpdateSubtask();
+  const privateWork = useProjectPrivateWorkScope();
 
   // The card shows the subagent's step timeline (#3779): its reasoning turns
   // (AI text) interleaved with the tools it ran (by name). See stepsForDisplay
@@ -69,7 +71,7 @@ export function SubtaskCard({
       return;
     }
     backfilledRef.current = true;
-    fetchSubtaskSteps(threadId, runId, taskId)
+    fetchSubtaskSteps(privateWork, threadId, runId, taskId)
       .then((steps) => {
         if (steps.length > 0) {
           updateSubtask({ id: taskId, steps });
@@ -79,7 +81,15 @@ export function SubtaskCard({
         // Allow a retry on the next expand if the fetch failed.
         backfilledRef.current = false;
       });
-  }, [collapsed, stepsCount, threadId, runId, taskId, updateSubtask]);
+  }, [
+    collapsed,
+    stepsCount,
+    threadId,
+    runId,
+    taskId,
+    updateSubtask,
+    privateWork,
+  ]);
   const icon = useMemo(() => {
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;

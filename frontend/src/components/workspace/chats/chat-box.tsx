@@ -12,8 +12,8 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { useUploadedFiles } from "@/core/uploads";
-import { env } from "@/env";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
@@ -52,7 +52,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   const projectFiles = useUploadedFiles(
     threadId,
     privateWork,
-    artifactsEnabled && privateWork.scope !== null,
+    artifactsEnabled,
   );
   const sidecar = useMaybeSidecar();
   const sidecarOpen = sidecar?.open ?? false;
@@ -62,9 +62,6 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     const stateArtifacts = Array.isArray(thread.values.artifacts)
       ? thread.values.artifacts
       : [];
-    if (!privateWork.scope) {
-      return stateArtifacts;
-    }
     return Array.from(
       new Set([
         ...stateArtifacts,
@@ -73,7 +70,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
         ) ?? []),
       ]),
     );
-  }, [privateWork.scope, projectFiles.data?.files, thread.values.artifacts]);
+  }, [projectFiles.data?.files, thread.values.artifacts]);
 
   useEffect(() => {
     if (threadIdRef.current !== threadId) {
@@ -93,10 +90,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     //   deselect();
     // }
 
-    if (
-      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
-      autoSelectFirstArtifact
-    ) {
+    if (isStaticWebsiteOnly() && autoSelectFirstArtifact) {
       if (threadArtifacts.length > 0) {
         setAutoSelectFirstArtifact(false);
         selectArtifact(threadArtifacts[0]!);
@@ -119,7 +113,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     if (sidecarOpen) {
       return false;
     }
-    if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true") {
+    if (isStaticWebsiteOnly()) {
       return artifactsOpen && artifacts?.length > 0;
     }
     return artifactsOpen;

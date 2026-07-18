@@ -99,11 +99,15 @@ const projectArtifactMessages = [
 type MockPrivateWorkOptions = {
   metadataStatus?: number;
   stateMessages?: unknown[];
+  stateMessagesAfterStream?: unknown[];
   stateArtifacts?: string[];
   artifactFileStatus?: number;
   runBodies?: unknown[];
   streamGate?: Promise<void>;
   uploadRequests?: string[];
+  searchThreads?: (typeof privateThread)[];
+  streamValues?: Record<string, unknown>;
+  workspaceChanges?: unknown;
 };
 
 async function json(route: Route, body: unknown, status = 200) {
@@ -154,21 +158,35 @@ async function mockPrivateWork(
         });
       }
       if (path.endsWith("/threads/search")) {
-        return json(route, { items: threadExists ? [privateThread] : [] });
+        const body = request.postDataJSON() as {
+          offset?: number;
+          limit?: number;
+        };
+        const allThreads =
+          options.searchThreads ?? (threadExists ? [privateThread] : []);
+        const offset = body.offset ?? 0;
+        const limit = body.limit ?? 50;
+        return json(route, {
+          items: allThreads.slice(offset, offset + limit),
+        });
       }
       if (path.endsWith(`/threads/${THREAD_ID}/state`)) {
         if (!threadExists) return json(route, { detail: "not found" }, 404);
         return json(route, {
           values: {
             title: "Owner research",
-            messages: options.stateMessages ?? [
-              {
-                type: "human",
-                id: "msg-project-history",
-                content: [{ type: "text", text: "Previous project question" }],
-              },
+            messages: [
+              ...(options.stateMessages ?? [
+                {
+                  type: "human",
+                  id: "msg-project-history",
+                  content: [
+                    { type: "text", text: "Previous project question" },
+                  ],
+                },
+              ]),
               ...(hasStreamed
-                ? [
+                ? (options.stateMessagesAfterStream ?? [
                     {
                       type: "human",
                       id: "msg-project-submitted",
@@ -179,7 +197,7 @@ async function mockPrivateWork(
                       id: "msg-ai-1",
                       content: "Hello from DeerFlow!",
                     },
-                  ]
+                  ])
                 : []),
             ],
             artifacts: options.stateArtifacts ?? [],
@@ -271,7 +289,21 @@ async function mockPrivateWork(
         options.runBodies?.push(request.postDataJSON());
         await options.streamGate;
         hasStreamed = true;
-        return handleRunStream(route);
+        return handleRunStream(route, options.streamValues);
+      }
+      if (path.endsWith(`/threads/${THREAD_ID}/runs/run-retained/events`)) {
+        return json(route, []);
+      }
+      if (
+        path.endsWith(
+          `/threads/${THREAD_ID}/runs/run-retained/workspace-changes`,
+        )
+      ) {
+        return json(
+          route,
+          options.workspaceChanges ?? { detail: "not found" },
+          options.workspaceChanges ? 200 : 404,
+        );
       }
       if (/\/threads\/[^/]+\/runs(?:\?|$)/u.test(request.url())) {
         return json(route, []);
@@ -297,6 +329,13 @@ test.beforeEach(async ({ page }) => {
         schema_ready: true,
         request_id: "req-automation-ready",
       }),
+  );
+  await page.route(`**/api/projects/${PROJECT_ID}/skills`, (route) =>
+    json(route, {
+      system_items: [],
+      project_items: [],
+      request_id: "req-project-skills",
+    }),
   );
 });
 
@@ -328,7 +367,9 @@ test("project detail loads history and streams without legacy private-work calls
   await expect(page.getByText("Previous project question")).toBeVisible();
   await expect(page.getByRole("button", { name: "Submit" })).toBeVisible();
   await expect(page.getByTestId("add-attachments-button")).toBeVisible();
-  const automationLink = page.getByLabel("Automations");
+  const automationLink = page.locator(
+    `a[href="/projects/research-lab/automations?thread_id=${THREAD_ID}"]`,
+  );
   await expect(automationLink).toHaveAttribute(
     "href",
     `/projects/research-lab/automations?thread_id=${THREAD_ID}`,
@@ -352,6 +393,245 @@ test("project detail loads history and streams without legacy private-work calls
   expect(legacySuggestionRequests).toEqual([]);
   expect(legacyArtifactRequests).toEqual([]);
   expect(legacyPrivateRequests).toEqual([]);
+});
+
+test("project chat keeps quoted references inside the scoped conversation", async ({
+  page,
+}) => {
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "ai",
+        id: "msg-project-reference",
+        content: "Keep this project-only reference attached.",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect(
+    page.getByText("Keep this project-only reference attached."),
+  ).toBeVisible();
+  await page.evaluate(() => {
+    const target = Array.from(document.querySelectorAll("p")).find((element) =>
+      element.textContent?.includes(
+        "Keep this project-only reference attached.",
+      ),
+    );
+    const text = target?.firstChild;
+    if (!text) throw new Error("project reference text was not found");
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await expect(page.locator("[data-sidecar-selection-toolbar]")).toBeVisible();
+  await page
+    .locator("[data-sidecar-selection-toolbar]")
+    .getByRole("button", { name: /add to conversation/i })
+    .click();
+  await expect(page.getByTestId("conversation-quote-attachment")).toContainText(
+    "1 selected text fragment",
+  );
+});
+
+test("project chat opens and closes a scoped side-chat draft", async ({
+  page,
+}) => {
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "ai",
+        id: "msg-project-sidecar",
+        content: "Investigate this project-scoped detail.",
+      },
+    ],
+  });
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await page.getByText("Investigate this project-scoped detail.").waitFor();
+  await page.evaluate(() => {
+    const target = Array.from(document.querySelectorAll("p")).find((element) =>
+      element.textContent?.includes("Investigate this project-scoped detail."),
+    );
+    if (!target) throw new Error("side-chat source was not found");
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  const toolbar = page.locator("[data-sidecar-selection-toolbar]");
+  await toolbar.getByRole("button", { name: /ask in side chat/i }).click();
+  await expect(page.getByTestId("sidecar-panel")).toBeVisible();
+  await expect(
+    page
+      .getByTestId("sidecar-panel")
+      .getByText("1 selected text fragment")
+      .first(),
+  ).toBeVisible();
+  await page.getByTestId("sidecar-close-button").click();
+  await expect(page.getByTestId("sidecar-panel")).toHaveCount(0);
+});
+
+test("project history renders Mermaid and stopped subtask state", async ({
+  page,
+}) => {
+  const projectRequests = await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "ai",
+        id: "msg-project-mermaid",
+        content:
+          '```mermaid\nflowchart TD\n A[Project] -- "scoped" -.-> B[Thread]\n```',
+      },
+      {
+        type: "ai",
+        id: "msg-project-subtask",
+        run_id: "run-retained",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-project-subtask",
+            name: "task",
+            args: {
+              subagent_type: "general-purpose",
+              description: "Scoped stopped subtask",
+              prompt: "Investigate scoped state",
+            },
+          },
+        ],
+      },
+    ],
+  });
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect(page.getByLabel("Mermaid chart")).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(page.getByText("Mermaid Error:")).toHaveCount(0);
+  await expect(page.getByText("Scoped stopped subtask")).toBeVisible();
+  await expect(page.getByText("Subtask failed")).toBeVisible();
+  await page.getByText("Scoped stopped subtask").click();
+  await expect
+    .poll(() =>
+      projectRequests.includes(
+        `GET /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/run-retained/events`,
+      ),
+    )
+    .toBe(true);
+});
+
+test("project history preserves plain-text edge cases", async ({ page }) => {
+  const source = "const price = '$5';\n> > > nested marker";
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      { type: "human", id: "msg-project-plain", content: source },
+      {
+        type: "ai",
+        id: "msg-project-nested",
+        content: "- > > > deeply nested response",
+      },
+    ],
+  });
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect(page.getByText(source, { exact: true })).toBeVisible();
+  await expect(page.getByText(/deeply nested response/u)).toBeVisible();
+});
+
+test("project write-file artifacts retain preview and survive artifact-less stream values", async ({
+  page,
+}) => {
+  await mockPrivateWork(page, true, {
+    stateMessages: projectArtifactMessages,
+    stateMessagesAfterStream: [
+      {
+        type: "human",
+        id: "msg-project-artifact-submitted",
+        content: "Continue scoped artifact work",
+      },
+      {
+        type: "ai",
+        id: "msg-project-artifact-stream",
+        content: "Artifact-less project stream completed.",
+      },
+    ],
+    stateArtifacts: [WRITE_ARTIFACT_PATH, PRESENTED_ARTIFACT_PATH],
+    streamValues: { todos: [] },
+  });
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await page.getByText(WRITE_ARTIFACT_PATH, { exact: true }).click();
+  await expect(
+    page.locator("#artifacts").getByText("Project report"),
+  ).toBeVisible();
+  const artifactTrigger = page.getByRole("button", { name: /artifacts/i });
+  await expect(artifactTrigger).toBeVisible();
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await textarea.fill("Continue scoped artifact work");
+  await textarea.press("Enter");
+  await expect(
+    page.getByText("Artifact-less project stream completed."),
+  ).toBeVisible();
+  await expect(artifactTrigger).toBeVisible();
+});
+
+test("project workspace changes use only the private-work route", async ({
+  page,
+}) => {
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "ai",
+        id: "msg-project-changes",
+        run_id: "run-retained",
+        content: "Updated scoped files.",
+      },
+    ],
+    workspaceChanges: {
+      available: true,
+      version: 1,
+      summary: {
+        created: 0,
+        modified: 1,
+        deleted: 0,
+        additions: 1,
+        deletions: 1,
+        truncated: false,
+      },
+      files: [
+        {
+          path: "/mnt/user-data/outputs/report.md",
+          root: "outputs",
+          status: "modified",
+          binary: false,
+          sensitive: false,
+          size_before: 5,
+          size_after: 5,
+          sha256_before: "before",
+          sha256_after: "after",
+          diff: "-Draft\n+Ready",
+          diff_truncated: false,
+          diff_unavailable_reason: null,
+          additions: 1,
+          deletions: 1,
+        },
+      ],
+      limits: {},
+    },
+  });
+  const globalRequests: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith(`/api/threads/${THREAD_ID}/runs/`)) {
+      globalRequests.push(path);
+    }
+  });
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect(page.getByText("Edited 1 file")).toBeVisible();
+  await page.getByRole("button", { name: "View changes" }).click();
+  await expect(page.getByText("+Ready")).toBeVisible();
+  expect(globalRequests).toEqual([]);
 });
 
 test("project chat polishes draft through only the scoped endpoint", async ({
@@ -510,6 +790,24 @@ test("project list is owner-scoped and direct metadata misses show one public no
     page.getByRole("heading", { name: "找不到这个对话" }),
   ).toBeVisible();
   await expect(page.getByText(/owner|跨项目|其他用户/iu)).toHaveCount(0);
+});
+
+test("project thread list paginates inside the selected project scope", async ({
+  page,
+}) => {
+  const searchThreads = Array.from({ length: 51 }, (_, index) => ({
+    ...privateThread,
+    thread_id: `20000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    display_name: `Scoped thread ${index + 1}`,
+  }));
+  await mockPrivateWork(page, true, { searchThreads });
+  await page.goto("/projects/research-lab/chats");
+  await expect(
+    page.getByText("Scoped thread 1", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Scoped thread 51")).toHaveCount(0);
+  await page.getByRole("button", { name: "加载更多" }).click();
+  await expect(page.getByText("Scoped thread 51")).toBeVisible();
 });
 
 test("project artifacts load only through the scoped project file surface", async ({

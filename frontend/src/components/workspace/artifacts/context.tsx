@@ -7,7 +7,7 @@ import {
 } from "react";
 
 import { useSidebar } from "@/components/ui/sidebar";
-import { env } from "@/env";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 export interface ArtifactsContextType {
   enabled: boolean;
@@ -43,9 +43,7 @@ function ArtifactsStateProvider({
   const [artifacts, setArtifacts] = useState<string[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
   const [autoSelect, setAutoSelect] = useState(true);
-  const [open, setOpen] = useState(
-    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
-  );
+  const [open, setOpen] = useState(isStaticWebsiteOnly());
   const [autoOpen, setAutoOpen] = useState(true);
 
   const updateArtifacts = useCallback(
@@ -59,7 +57,7 @@ function ArtifactsStateProvider({
     (artifact: string, autoSelect = false) => {
       if (!enabled) return;
       setSelectedArtifact(artifact);
-      if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true") {
+      if (!isStaticWebsiteOnly()) {
         setSidebarOpen(false);
       }
       if (!autoSelect) {

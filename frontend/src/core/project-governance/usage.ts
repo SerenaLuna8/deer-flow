@@ -232,7 +232,6 @@ export function projectUsageQueryKey(scope: ProjectClientScope) {
 }
 
 function requiredScope(access: PrivateWorkAccess): ProjectClientScope {
-  if (!access.scope) throw new Error("Project governance scope is unavailable");
   return access.scope;
 }
 
