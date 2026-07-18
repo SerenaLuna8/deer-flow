@@ -82,13 +82,13 @@ def test_root_makefile_clean_does_not_reference_langgraph_server_cache():
     assert ".langgraph_api" not in makefile
 
 
-def test_nginx_routes_official_langgraph_prefix_to_gateway_api():
+def test_nginx_has_no_langgraph_compatibility_rewrite():
     for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
         content = _read(path)
 
         assert "/api/langgraph-compat" not in content
+        assert "/api/langgraph/" not in content
         assert "proxy_pass http://langgraph" not in content
-        assert "rewrite ^/api/langgraph/(.*) /api/$1 break;" in content
         assert "proxy_pass http://gateway" in content or "proxy_pass http://$gateway_upstream" in content
 
 
@@ -159,8 +159,7 @@ def test_gateway_runtime_docs_do_not_reference_transition_modes():
 
 
 def test_agent_instruction_docs_do_not_reference_standalone_langgraph_server():
-    """Agent/Copilot instruction docs must describe only the Gateway-embedded
-    runtime — no standalone LangGraph service, port 2024, or langgraph.log."""
+    """Agent docs must not revive the removed standalone LangGraph service."""
     content = _read(".github/copilot-instructions.md")
 
     assert "langgraph.log" not in content

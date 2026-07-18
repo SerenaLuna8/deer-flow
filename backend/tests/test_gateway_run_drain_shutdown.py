@@ -1,30 +1,15 @@
-"""Regression tests for graceful run-task drain on Gateway shutdown.
+"""Regression tests for the process-local ``RunManager`` drain primitive.
 
-Guards bytedance/deer-flow issue #3373:
-
-    psycopg_pool.PoolClosed: the pool 'pool-1' is already closed
-
-Root cause: chat runs are fire-and-forget background ``asyncio`` tasks
-(``app/gateway/services.py`` -> ``asyncio.create_task(run_agent(...))``) owned
-by nobody. On shutdown, ``langgraph_runtime``'s ``AsyncExitStack`` tore down the
-checkpointer's postgres pool while those tasks were still mid-graph. langgraph's
-``AsyncPregelLoop._checkpointer_put_after_previous`` then ran its
-``finally: await checkpointer.aput(...)`` against the already-closed pool.
-
-Fix: ``RunManager.shutdown()`` cancels and *bounded*-awaits every in-flight run,
-and ``langgraph_runtime`` calls it BEFORE the ``AsyncExitStack`` closes the
-checkpointer — so the final checkpoint write lands while the pool is still open.
-The drain must stay bounded (a stuck run must not hang the worker, the
-precondition for the signal-reentrancy deadlock guarded by
-``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS``).
+Gateway no longer creates a ``RunManager`` or owns agent tasks. The independent
+Worker still uses a process-local manager while executing a durable job, so its
+bounded shutdown and final checkpoint behavior remain valid harness contracts.
 """
 
 from __future__ import annotations
 
 import asyncio
 import operator
-from contextlib import asynccontextmanager, suppress
-from types import SimpleNamespace
+from contextlib import suppress
 from typing import Annotated, TypedDict
 
 import pytest
@@ -147,69 +132,6 @@ async def test_shutdown_is_noop_without_inflight_runs():
 
 
 @pytest.mark.asyncio
-async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeypatch):
-    """The wiring order lock for #3373: drain in-flight runs, THEN close the pool.
-
-    Patches every ``langgraph_runtime`` collaborator down to trivial stand-ins so
-    only the bootstrap/teardown ordering runs. The checkpointer probe records when
-    its context manager exits (pool close); a ``RunManager.shutdown`` spy records
-    when the drain happens. The drain MUST come first.
-    """
-    from fastapi import FastAPI
-
-    from app.gateway.deps import langgraph_runtime
-
-    events: list[str] = []
-
-    @asynccontextmanager
-    async def probe_checkpointer(_config):
-        try:
-            yield object()
-        finally:
-            events.append("checkpointer_closed")
-
-    @asynccontextmanager
-    async def fake_stream_bridge(_config):
-        yield object()
-
-    @asynccontextmanager
-    async def fake_store(_config):
-        yield object()
-
-    async def fake_init_engine(_db):
-        return None
-
-    async def fake_close_engine():
-        return None
-
-    async def spy_shutdown(self, *, timeout):  # noqa: ANN001
-        events.append("runs_drained")
-
-    monkeypatch.setattr("deerflow.runtime.checkpointer.async_provider.make_checkpointer", probe_checkpointer)
-    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", fake_stream_bridge)
-    monkeypatch.setattr("deerflow.runtime.make_store", fake_store)
-    monkeypatch.setattr("deerflow.persistence.engine.init_engine_from_config", fake_init_engine)
-    monkeypatch.setattr("deerflow.persistence.engine.close_engine", fake_close_engine)
-    monkeypatch.setattr(
-        "deerflow.persistence.engine.get_session_factory",
-        lambda: lambda: None,
-    )
-    monkeypatch.setattr("deerflow.runtime.events.store.make_run_event_store", lambda _cfg: object())
-    monkeypatch.setattr("deerflow.persistence.thread_meta.make_thread_store", lambda _sf: object())
-    monkeypatch.setattr(RunManager, "shutdown", spy_shutdown, raising=False)
-
-    app = FastAPI()
-    startup_config = SimpleNamespace(database=SimpleNamespace(), run_events=None)
-
-    async with langgraph_runtime(app, startup_config):
-        pass
-
-    assert "runs_drained" in events, "langgraph_runtime never drained in-flight runs on shutdown"
-    assert "checkpointer_closed" in events
-    assert events.index("runs_drained") < events.index("checkpointer_closed"), f"runs must be drained before the checkpointer pool is closed; got order {events}"
-
-
-@pytest.mark.asyncio
 async def test_drain_flushes_real_graph_checkpoint_before_close():
     """End-to-end #3373 guard with a REAL langgraph graph + checkpointer.
 
@@ -268,7 +190,7 @@ async def test_drain_flushes_real_graph_checkpoint_before_close():
 
         # The fix: drain while the checkpointer is still open ...
         await rm.shutdown(timeout=5.0)
-        # ... and only then close it (mirrors langgraph_runtime's ExitStack).
+        # ... and only then close the Worker-owned checkpointer resource.
         saver.close()
 
         assert saver.writes_after_close == [], f"a checkpoint write raced a closed checkpointer: {saver.writes_after_close}"

@@ -2,82 +2,26 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import inspect
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
 
-from app.gateway.deps import langgraph_runtime
 from deerflow.config.database_config import DatabaseConfig
 
 
-@asynccontextmanager
-async def _context(value):
-    yield value
+def test_gateway_has_no_embedded_run_manager_and_worker_owns_agent_execution() -> None:
+    from app.gateway.deps import gateway_platform_runtime
+    from app.reliability.execution import RunAgentPrivateExecutor
 
+    gateway_source = inspect.getsource(gateway_platform_runtime)
+    worker_source = inspect.getsource(RunAgentPrivateExecutor.execute)
 
-@pytest.mark.asyncio
-async def test_multi_worker_postgres_runtime_does_not_recover_another_workers_active_run(monkeypatch):
-    monkeypatch.setenv("GATEWAY_WORKERS", "8")
-    config = SimpleNamespace(
-        database=SimpleNamespace(),
-        run_events=None,
-        stream_bridge=None,
-    )
-    sf = MagicMock()
-    run_manager = MagicMock()
-    run_manager.reconcile_orphaned_inflight_runs = AsyncMock(return_value=[])
-    run_manager.shutdown = AsyncMock()
-
-    with (
-        patch("deerflow.persistence.engine.init_engine_from_config", new=AsyncMock()) as init_engine,
-        patch("deerflow.persistence.engine.get_session_factory", return_value=sf),
-        patch("deerflow.persistence.engine.close_engine", new=AsyncMock()),
-        patch("deerflow.runtime.make_stream_bridge", return_value=_context(MagicMock())),
-        patch("deerflow.runtime.checkpointer.async_provider.make_checkpointer", return_value=_context(MagicMock())),
-        patch("deerflow.runtime.make_store", return_value=_context(MagicMock())),
-        patch("deerflow.persistence.thread_meta.make_thread_store", return_value=MagicMock()),
-        patch("deerflow.runtime.events.store.make_run_event_store", return_value=MagicMock()),
-        patch("app.gateway.deps.RunManager", return_value=run_manager),
-    ):
-        async with langgraph_runtime(FastAPI(), config):
-            pass
-
-    init_engine.assert_awaited_once_with(config.database)
-    run_manager.reconcile_orphaned_inflight_runs.assert_not_awaited()
-
-
-@pytest.mark.parametrize("workers", ["2", "8", "invalid", "0"])
-def test_only_explicit_single_worker_allows_startup_recovery(workers: str, monkeypatch) -> None:
-    from app.gateway.deps import _should_reconcile_orphaned_runs
-
-    monkeypatch.setenv("GATEWAY_WORKERS", workers)
-    assert _should_reconcile_orphaned_runs() is False
-
-
-def test_single_worker_allows_startup_recovery(monkeypatch) -> None:
-    from app.gateway.deps import _should_reconcile_orphaned_runs
-
-    monkeypatch.setenv("GATEWAY_WORKERS", "1")
-    assert _should_reconcile_orphaned_runs() is True
-
-
-def test_uvicorn_web_concurrency_is_not_used_as_application_worker_state(monkeypatch) -> None:
-    from app.gateway.deps import _should_reconcile_orphaned_runs
-
-    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
-    monkeypatch.setenv("WEB_CONCURRENCY", "2")
-    assert _should_reconcile_orphaned_runs() is True
-
-
-def test_authoritative_gateway_worker_count_wins_over_web_concurrency(monkeypatch) -> None:
-    from app.gateway.deps import _should_reconcile_orphaned_runs
-
-    monkeypatch.setenv("GATEWAY_WORKERS", "1")
-    monkeypatch.setenv("WEB_CONCURRENCY", "4")
-    assert _should_reconcile_orphaned_runs() is True
+    assert "RunManager" not in gateway_source
+    assert "make_stream_bridge" not in gateway_source
+    assert "run_agent" not in gateway_source
+    assert "RunManager()" in worker_source
+    assert "await self._runner(" in worker_source
 
 
 def test_postgres_only_runtime_exposes_no_worker_backend_gate() -> None:

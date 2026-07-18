@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.gateway.services import build_run_config
+from app.private_work.runtime_context import prepare_private_run_config
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
@@ -100,8 +100,16 @@ async def test_only_server_injected_exact_project_context_reaches_m3_after_gatew
             "capabilities": ["shared_assets.execute"],
         }
     }
-    config = build_run_config("thread-safe", {"context": client_context}, None)
+    private_scope = object()
+    config = prepare_private_run_config(
+        thread_id="thread-safe",
+        opaque_scope=private_scope,
+        request_config={"context": client_context},
+        metadata=None,
+        body_context=None,
+    )
     assert "project_context" not in config["context"]
+    assert config["context"]["private_scope"] is private_scope
 
     trusted = ProjectContext(
         user_id=uuid.uuid4(),

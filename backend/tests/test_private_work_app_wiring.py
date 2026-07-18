@@ -13,12 +13,13 @@ from app.automations.dispatcher import AutomationDispatcher
 from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.readiness import AutomationReadinessService
 from app.gateway.app import create_app
-from app.gateway.deps import langgraph_runtime
+from app.gateway.deps import gateway_platform_runtime
 from app.private_work.connection_service import ProjectConnectionService
 from app.private_work.cutover import PrivateWorkCutoverGuard
 from app.private_work.file_service import PrivateFileService
 from app.private_work.file_streaming import PrivateFileStreamer
 from app.private_work.memory_service import PrivateMemoryService
+from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
@@ -43,10 +44,7 @@ def test_create_app_mounts_project_private_work_routes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_langgraph_runtime_installs_project_private_work_services_from_one_factory(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+async def test_gateway_platform_runtime_installs_project_private_work_services_from_one_factory() -> None:
     app = FastAPI()
     config = SimpleNamespace(
         database=SimpleNamespace(),
@@ -54,7 +52,6 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
             backend="memory",
             max_trace_content=321,
         ),
-        stream_bridge=None,
         scheduler=SchedulerConfig(min_once_delay_seconds=73),
         quotas=QuotaConfig(),
     )
@@ -71,10 +68,6 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
         ),
         patch("deerflow.persistence.engine.close_engine", new=AsyncMock()),
         patch(
-            "deerflow.runtime.make_stream_bridge",
-            return_value=_context(MagicMock()),
-        ),
-        patch(
             "deerflow.runtime.checkpointer.async_provider.make_checkpointer",
             return_value=_context(MagicMock()),
         ),
@@ -82,17 +75,8 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
             "deerflow.runtime.make_store",
             return_value=_context(MagicMock()),
         ),
-        patch(
-            "deerflow.persistence.thread_meta.make_thread_store",
-            return_value=MagicMock(),
-        ),
-        patch(
-            "deerflow.runtime.events.store.make_run_event_store",
-            return_value=MagicMock(),
-        ),
     ):
-        legacy_read_adapter = None
-        async with langgraph_runtime(app, config):
+        async with gateway_platform_runtime(app, config):
             assert isinstance(
                 app.state.private_work_cutover_guard,
                 PrivateWorkCutoverGuard,
@@ -103,6 +87,11 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
 
             assert isinstance(app.state.private_run_service, PrivateRunService)
             assert app.state.private_run_service._session_factory is session_factory
+            assert isinstance(
+                app.state.private_run_admission_service,
+                PrivateRunAdmissionService,
+            )
+            assert app.state.private_run_admission_service._session_factory is session_factory
 
             assert isinstance(app.state.private_file_service, PrivateFileService)
             assert app.state.private_file_service._session_factory is session_factory
@@ -139,26 +128,17 @@ async def test_langgraph_runtime_installs_project_private_work_services_from_one
             assert app.state.automation_dispatcher._session_factory is session_factory
             assert not hasattr(app.state, "automation_reconciler")
             assert not hasattr(app.state, "scheduled_task_service")
+            assert not hasattr(app.state, "scheduled_task_repo")
+            assert not hasattr(app.state, "scheduled_task_run_repo")
             assert not hasattr(app.state, "automation_scheduler")
             assert not hasattr(app.state, "automation_scheduler_ownership")
-            assert app.state.scheduled_task_repo is not None
-            assert app.state.scheduled_task_repo is app.state.scheduled_task_run_repo
-            legacy_read_adapter = app.state.scheduled_task_repo
-            assert legacy_read_adapter.closed is False
-
-        assert legacy_read_adapter is not None
-        assert legacy_read_adapter.closed is True
-        assert app.state.scheduled_task_repo is None
-        assert app.state.scheduled_task_run_repo is None
 
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_project_private_events_survive_langgraph_runtime_rebuild(
-    monkeypatch,
+async def test_project_private_events_survive_gateway_platform_runtime_rebuild(
     migrated_postgres_database_url: str,
 ) -> None:
-    monkeypatch.setenv("GATEWAY_WORKERS", "2")
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     config = SimpleNamespace(
         database=SimpleNamespace(),
@@ -166,7 +146,6 @@ async def test_project_private_events_survive_langgraph_runtime_rebuild(
             backend="memory",
             max_trace_content=654,
         ),
-        stream_bridge=None,
         quotas=QuotaConfig(),
     )
     thread_id = "private-runtime-rebuild-thread"
@@ -195,10 +174,6 @@ async def test_project_private_events_survive_langgraph_runtime_rebuild(
             ),
             patch("deerflow.persistence.engine.close_engine", new=AsyncMock()),
             patch(
-                "deerflow.runtime.make_stream_bridge",
-                side_effect=lambda _config: _context(MagicMock()),
-            ),
-            patch(
                 "deerflow.runtime.checkpointer.async_provider.make_checkpointer",
                 side_effect=lambda _config: _context(MagicMock()),
             ),
@@ -206,17 +181,9 @@ async def test_project_private_events_survive_langgraph_runtime_rebuild(
                 "deerflow.runtime.make_store",
                 side_effect=lambda _config: _context(MagicMock()),
             ),
-            patch(
-                "deerflow.persistence.thread_meta.make_thread_store",
-                return_value=MagicMock(),
-            ),
-            patch(
-                "deerflow.runtime.events.store.make_run_event_store",
-                return_value=MagicMock(),
-            ),
         ):
             first_app = FastAPI()
-            async with langgraph_runtime(first_app, config):
+            async with gateway_platform_runtime(first_app, config):
                 first_store = first_app.state.private_run_event_store
                 assert isinstance(first_store, DbRunEventStore)
                 await first_store.put(
@@ -229,7 +196,7 @@ async def test_project_private_events_survive_langgraph_runtime_rebuild(
                 )
 
             second_app = FastAPI()
-            async with langgraph_runtime(second_app, config):
+            async with gateway_platform_runtime(second_app, config):
                 second_store = second_app.state.private_run_event_store
                 assert isinstance(second_store, DbRunEventStore)
                 assert second_store is not first_store

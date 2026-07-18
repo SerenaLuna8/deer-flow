@@ -327,14 +327,18 @@ class TestRequiredSecretsParsing:
 class TestSecretCarrier:
     """Request-scoped secret carrier: context.secrets → runtime.context (Slice 3)."""
 
-    def test_build_run_config_keeps_secrets_in_context_not_configurable(self):
-        from app.gateway.services import build_run_config
+    def test_private_run_config_rejects_client_secret_carriers(self):
+        from app.private_work.runtime_context import prepare_private_run_config
 
-        config = build_run_config("thread-1", {"context": {"secrets": {"ERP_TOKEN": "v"}}}, None)
-        assert config["context"]["secrets"] == {"ERP_TOKEN": "v"}
-        # Secrets must never be mirrored into configurable (which legacy readers
-        # and some trace backends surface).
-        assert "secrets" not in config.get("configurable", {})
+        config = prepare_private_run_config(
+            thread_id="thread-1",
+            opaque_scope=object(),
+            request_config={"context": {"secrets": {"ERP_TOKEN": "v"}}},
+            metadata=None,
+            body_context=None,
+        )
+        assert "secrets" not in config["context"]
+        assert "secrets" not in config["configurable"]
 
     def test_runtime_context_carries_secrets(self):
         from deerflow.runtime.runs.worker import _build_runtime_context
@@ -342,19 +346,27 @@ class TestSecretCarrier:
         ctx = _build_runtime_context("t", "r", {"secrets": {"ERP_TOKEN": "v"}})
         assert ctx["secrets"] == {"ERP_TOKEN": "v"}
 
-    def test_build_run_config_strips_caller_dunder_context_keys(self):
+    def test_private_run_config_strips_caller_dunder_context_keys(self):
         """Security (#3938): the harness writes private ``__``-prefixed keys into
         ``runtime.context`` (binding sources, active-secret set, run journal). A
         caller must not be able to seed them via ``config.context`` and forge
         internal state — they are stripped at the gateway boundary."""
-        from app.gateway.services import build_run_config
+        from app.private_work.runtime_context import prepare_private_run_config
 
-        config = build_run_config(
-            "thread-1",
-            {"context": {"secrets": {"ERP_TOKEN": "v"}, "__slash_skill_secret_source": {"path": "x"}, "__active_skill_secrets": {"ADMIN": "stolen"}}},
-            None,
+        config = prepare_private_run_config(
+            thread_id="thread-1",
+            opaque_scope=object(),
+            request_config={
+                "context": {
+                    "secrets": {"ERP_TOKEN": "v"},
+                    "__slash_skill_secret_source": {"path": "x"},
+                    "__active_skill_secrets": {"ADMIN": "stolen"},
+                }
+            },
+            metadata=None,
+            body_context=None,
         )
-        assert config["context"]["secrets"] == {"ERP_TOKEN": "v"}
+        assert "secrets" not in config["context"]
         assert "__slash_skill_secret_source" not in config["context"]
         assert "__active_skill_secrets" not in config["context"]
 

@@ -336,7 +336,7 @@ echo ""
 sandbox_mode="$(detect_sandbox_mode)"
 echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 
-echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
+echo -e "${BLUE}Runtime: Gateway admission API + independent Worker execution${NC}"
 
 services="redis frontend gateway worker nginx"
 

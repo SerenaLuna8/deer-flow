@@ -1,10 +1,6 @@
 """Tests for exposing the IM-channel platform user id to sandbox commands (#3914).
 
-Two halves:
-- Gateway: ``merge_run_context_overrides`` forwards ``channel_user_id`` from
-  ``body.context`` into ``config['context']`` (runtime context) only — never
-  into ``configurable`` (which is checkpointed).
-- Sandbox: ``bash_tool`` exposes the id as the fixed env var
+The sandbox ``bash_tool`` exposes the runtime id as the fixed env var
   ``DEERFLOW_CHANNEL_USER_ID`` via an ``export`` prefix on the command string.
   It must NOT ride the ``env=`` parameter: on ``AioSandbox`` a non-empty env
   switches execution to the ``bash.exec`` API, which requires image >= 1.9.3
@@ -50,37 +46,6 @@ def _run_bash(monkeypatch, runtime, command: str = "echo hi") -> _CapturingSandb
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
     bash_tool.func(runtime=runtime, description="test", command=command)
     return sandbox
-
-
-class TestMergeRunContextOverridesChannelUserId:
-    def test_channel_user_id_propagates_to_runtime_context_only(self):
-        from app.gateway.services import build_run_config, merge_run_context_overrides
-
-        config = build_run_config("thread-1", None, None)
-        merge_run_context_overrides(config, {"channel_user_id": "ou_feishu_123"})
-
-        assert config["context"]["channel_user_id"] == "ou_feishu_123"
-        # Never into configurable: that mapping is checkpointed with the thread.
-        assert "channel_user_id" not in config["configurable"]
-
-    def test_existing_runtime_context_value_wins(self):
-        """setdefault semantics: a server-side value stamped earlier must not be
-        overridden by the client-supplied body.context."""
-        from app.gateway.services import build_run_config, merge_run_context_overrides
-
-        config = build_run_config("thread-1", None, None)
-        config.setdefault("context", {})["channel_user_id"] = "server-stamped"
-        merge_run_context_overrides(config, {"channel_user_id": "client-supplied"})
-
-        assert config["context"]["channel_user_id"] == "server-stamped"
-
-    def test_absent_channel_user_id_adds_nothing(self):
-        from app.gateway.services import build_run_config, merge_run_context_overrides
-
-        config = build_run_config("thread-1", None, None)
-        merge_run_context_overrides(config, {"model_name": "gpt"})
-
-        assert "channel_user_id" not in config.get("context", {})
 
 
 class TestBashToolChannelIdentityPrefix:

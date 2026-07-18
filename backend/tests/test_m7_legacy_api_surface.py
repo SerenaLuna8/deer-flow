@@ -35,6 +35,12 @@ def test_gateway_openapi_has_no_global_private_routes() -> None:
     assert all(not path.startswith(prefix) for path in paths for prefix in LEGACY_PREFIXES)
 
 
+def test_gateway_openapi_keeps_legacy_scheduled_tasks_until_task_4() -> None:
+    paths = create_app().openapi()["paths"]
+
+    assert "/api/scheduled-tasks" in paths
+
+
 def test_gateway_openapi_keeps_project_private_routes() -> None:
     paths = create_app().openapi()["paths"]
     prefix = "/api/projects/{project_id}/private-work"
@@ -55,6 +61,12 @@ def test_gateway_runtime_has_no_legacy_execution_singletons() -> None:
         "make_stream_bridge",
         "make_run_event_store",
         "_migrate_orphaned_threads",
+        "ScheduledTaskRepository",
+        "ScheduledTaskRunRepository",
+        "ScheduledTaskService",
+        "scheduled_task_repo",
+        "scheduled_task_run_repo",
+        "scheduled_task_service",
     ):
         assert forbidden not in source
 

@@ -51,13 +51,3 @@ def test_upload_limit_resolver_uses_supplied_defaults_for_invalid_values() -> No
         "max_file_size": 100 * MIB,
         "max_total_size": 100 * MIB,
     }
-
-
-def test_legacy_upload_router_reexports_schema_contracts() -> None:
-    from app import upload_contracts
-    from app.gateway.routers import uploads
-
-    assert uploads.UploadedFileInfo is upload_contracts.UploadedFileInfo
-    assert uploads.UploadResponse is upload_contracts.UploadResponse
-    assert uploads.UploadListResponse is upload_contracts.UploadListResponse
-    assert uploads.UploadLimits is upload_contracts.UploadLimits

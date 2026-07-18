@@ -18,7 +18,7 @@ from fastapi import FastAPI
 
 
 @asynccontextmanager
-async def _noop_langgraph_runtime(_app, _startup_config):
+async def _noop_gateway_runtime(_app, _startup_config):
     yield
 
 
@@ -49,7 +49,7 @@ async def _run_lifespan_with_hanging_stop() -> float:
     with (
         patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
-        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app._gateway_runtime_lifespan", _noop_gateway_runtime),
         patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
         patch("app.channels.service.stop_channel_service", side_effect=hang_forever),
@@ -96,7 +96,7 @@ async def _run_lifespan_with_upload_staging_cleanup():
     with (
         patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
-        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app._gateway_runtime_lifespan", _noop_gateway_runtime),
         patch("app.gateway.app.cleanup_stale_upload_staging_files", cleanup_upload_staging_files),
         patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),

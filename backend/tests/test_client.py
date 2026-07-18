@@ -11,10 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
 
-from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
 from app.gateway.routers.models import ModelResponse, ModelsListResponse
-from app.gateway.routers.threads import ThreadGoalResponse
-from app.gateway.routers.uploads import UploadResponse
 from deerflow.assets.catalog import AssetCatalogUnavailable
 from deerflow.client import DeerFlowClient
 from deerflow.config.paths import Paths
@@ -2173,10 +2170,9 @@ class TestGatewayConformance:
         with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
             result = client.upload_files("t-conform", [src_file])
 
-        parsed = UploadResponse(**result)
-        assert parsed.success is True
-        assert len(parsed.files) == 1
-        assert parsed.files[0].size == len("hello")
+        assert result["success"] is True
+        assert len(result["files"]) == 1
+        assert result["files"][0]["size"] == len("hello")
 
     def test_goal_methods(self, client):
         from langgraph.checkpoint.memory import InMemorySaver
@@ -2185,10 +2181,9 @@ class TestGatewayConformance:
 
         result = client.set_goal("t-goal", "ship it")
 
-        parsed = ThreadGoalResponse(**result)
-        assert parsed.goal is not None
-        assert parsed.goal["objective"] == "ship it"
-        assert ThreadGoalResponse(**client.clear_goal("t-goal")).goal is None
+        assert result["goal"] is not None
+        assert result["goal"]["objective"] == "ship it"
+        assert client.clear_goal("t-goal")["goal"] is None
 
     def test_get_memory_config(self, client):
         mem_cfg = MagicMock()
@@ -2209,10 +2204,9 @@ class TestGatewayConformance:
         with patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg):
             result = client.get_memory_config()
 
-        parsed = MemoryConfigResponse(**result)
-        assert parsed.enabled is True
-        assert parsed.max_facts == 100
-        assert parsed.token_counting == "tiktoken"
+        assert result["enabled"] is True
+        assert result["max_facts"] == 100
+        assert result["token_counting"] == "tiktoken"
 
     def test_get_memory_status(self, client):
         mem_cfg = MagicMock()
@@ -2252,10 +2246,9 @@ class TestGatewayConformance:
         ):
             result = client.get_memory_status()
 
-        parsed = MemoryStatusResponse(**result)
-        assert parsed.config.enabled is True
-        assert parsed.config.token_counting == "tiktoken"
-        assert parsed.data.version == "1.0"
+        assert result["config"]["enabled"] is True
+        assert result["config"]["token_counting"] == "tiktoken"
+        assert result["data"]["version"] == "1.0"
 
 
 # ===========================================================================

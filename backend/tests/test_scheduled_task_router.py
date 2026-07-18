@@ -130,7 +130,6 @@ def test_cutover_closes_every_legacy_route_before_repository_or_dispatch() -> No
         client.get("/api/scheduled-tasks"),
         client.get("/api/scheduled-tasks/task-1"),
         client.get("/api/scheduled-tasks/task-1/runs"),
-        client.get("/api/threads/thread-1/scheduled-tasks"),
         client.post("/api/scheduled-tasks", json={}),
         client.patch("/api/scheduled-tasks/task-1", json={}),
         client.post("/api/scheduled-tasks/task-1/pause"),

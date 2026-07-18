@@ -327,13 +327,3 @@ async def list_scheduled_task_runs(
         limit=limit,
         offset=offset,
     )
-
-
-@router.get("/threads/{thread_id}/scheduled-tasks")
-@require_permission("threads", "read", owner_check=True)
-async def list_thread_scheduled_tasks(thread_id: str, request: Request):
-    repo = get_scheduled_task_repo(request)
-    user = await get_optional_user_from_request(request)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    return await repo.list_by_user_and_thread(str(user.id), thread_id)

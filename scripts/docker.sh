@@ -231,7 +231,7 @@ start() {
         COMPOSE_CMD="$COMPOSE_CMD -f $DOCKER_DIR/docker-compose.dood.yaml"
     fi
 
-    echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
+    echo -e "${BLUE}Runtime: Gateway admission API + independent Worker execution${NC}"
     echo -e "${BLUE}Detected sandbox mode: $sandbox_mode${NC}"
     if [ "$sandbox_mode" = "provisioner" ]; then
         echo -e "${BLUE}Provisioner enabled (Kubernetes mode).${NC}"

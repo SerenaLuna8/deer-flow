@@ -132,12 +132,12 @@ async def _chunks(payload: bytes, size: int = MIB) -> AsyncIterator[bytes]:
         yield payload[offset : offset + size]
 
 
-def test_private_defaults_allow_one_hundred_mib_while_legacy_upload_stays_fifty_mib() -> None:
-    from app.gateway.routers.uploads import DEFAULT_MAX_FILE_SIZE as LEGACY_MAX_FILE_SIZE
+def test_private_defaults_allow_one_hundred_mib_while_legacy_contract_stays_fifty_mib() -> None:
     from app.private_work.file_service import PrivateFileLimits
+    from app.upload_contracts import LEGACY_UPLOAD_DEFAULTS
 
     assert PrivateFileLimits().max_file_size == 100 * MIB
-    assert LEGACY_MAX_FILE_SIZE == 50 * MIB
+    assert LEGACY_UPLOAD_DEFAULTS.max_file_size == 50 * MIB
 
 
 def test_secure_conversion_open_closes_file_descriptor_when_fstat_fails(

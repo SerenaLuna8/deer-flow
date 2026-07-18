@@ -4,7 +4,7 @@ import json
 
 
 def _format_sse(event: str, data, *, event_id: str | None = None) -> str:
-    from app.gateway.services import format_sse
+    from app.private_work.http_runtime import format_sse
 
     return format_sse(event, data, event_id=event_id)
 
