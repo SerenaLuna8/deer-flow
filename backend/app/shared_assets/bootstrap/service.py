@@ -243,8 +243,22 @@ def _validate_asset_row(row, entry: BootstrapEntry) -> None:
         raise BootstrapConflict("existing system asset conflicts with canonical manifest")
 
 
+def _strict_value_equal(actual: object, expected: object) -> bool:
+    if isinstance(actual, Mapping) or isinstance(expected, Mapping):
+        if not isinstance(actual, Mapping) or not isinstance(expected, Mapping):
+            return False
+        return actual.keys() == expected.keys() and all(_strict_value_equal(actual[key], expected[key]) for key in actual)
+    if isinstance(actual, list) or isinstance(expected, list):
+        if not isinstance(actual, list) or not isinstance(expected, list):
+            return False
+        return len(actual) == len(expected) and all(_strict_value_equal(actual_item, expected_item) for actual_item, expected_item in zip(actual, expected, strict=True))
+    if isinstance(actual, (bool, int, float)) or isinstance(expected, (bool, int, float)):
+        return type(actual) is type(expected) and actual == expected
+    return actual == expected
+
+
 def _matches(row: object, **expected: object) -> bool:
-    return all(getattr(row, name) == value for name, value in expected.items())
+    return all(_strict_value_equal(getattr(row, name), value) for name, value in expected.items())
 
 
 async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: BootstrapEntry) -> bool:

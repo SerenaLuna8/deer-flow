@@ -13,10 +13,7 @@
       "name": "api-key",
       "purpose": "Authenticate documentation requests when configured.",
       "payload_schema": {
-        "type": "object",
-        "properties": {"api_key": {"type": "string"}},
-        "required": ["api_key"],
-        "additionalProperties": false
+        "headers": ["X-DEERFLOW-DOCS-KEY"]
       },
       "required": false
     }

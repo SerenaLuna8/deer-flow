@@ -182,3 +182,66 @@ The 11 adjacent skips are all external-LLM E2E cases whose API key is not config
 - Deleted tests only exercised APIs removed by Task 2; mixed suites were ported to exact runtime snapshots and remain collected.
 - The branch still preserves later M7 Tasks 3-11 and the 6/8 milestone boundary unchanged.
 - The complete backend test suite was not executed; full collection was executed to prove zero collection errors, alongside the complete Task 2 PostgreSQL gate and affected adjacency gates above.
+
+## Final MCP slot-schema repair (2026-07-18)
+
+### Status
+
+PASS — the packaged MCP credential slot now uses DeerFlow's authoritative domain schema, and bootstrap canonical graph comparison preserves JSON scalar types. This repair changes only the final Task 2 MCP/bootstrap finding.
+
+### TDD evidence
+
+Focused real-PostgreSQL RED before the production repair:
+
+```text
+3 failed, 2 passed, 34 deselected in 0.82s
+
+Provider/McpService reconstruction:
+TypeError: 'bool' object is not iterable
+  at McpService._definition_from_record()
+  while reconstructing tuple(values) from the packaged slot schema
+
+Strict JSON equality:
+False versus 0: incorrectly matched
+1 versus 1.0: incorrectly matched
+List order and mapping-key-order control cases behaved as expected.
+```
+
+Focused GREEN after replacing the general JSON Schema with the domain slot schema and adding recursive JSON comparison:
+
+```text
+5 passed, 34 deselected in 0.75s
+```
+
+The packaged slot schema is now exactly:
+
+```json
+{"headers":["X-DEERFLOW-DOCS-KEY"]}
+```
+
+It contains only a header name, no secret value. The real PostgreSQL regression test proves bootstrap initially creates zero credentials, grants, or project bindings; the test then creates a normal project binding solely to exercise the actual `BindingService` and `ProjectAssetResolver` path, whose uncredentialed optional slot materializes to an empty mapping.
+
+An intermediate complete gate exposed that applying Python concrete-type identity to non-JSON database values also rejected the driver's UUID representation (`1 failed, 86 passed`). The comparator was narrowed to JSON Mapping, list, and numeric/bool scalar semantics. Its final contract proves `false != 0`, `1 != 1.0`, list order is exact, and mapping key order is irrelevant without changing non-JSON row identity comparison.
+
+### Final verification
+
+```text
+Focused bootstrap idempotency, Provider/Resolver, and JSON comparison:
+6 passed, 33 deselected in 1.07s
+
+Focused Provider/Resolver regression:
+1 passed in 0.71s
+
+Full Task 2 PostgreSQL gate after final formatting:
+87 passed in 19.23s
+PostgreSQL skips: 0
+
+Ruff: All checks passed
+Ruff format: 2 files already formatted
+compileall: app and packages/harness/deerflow passed
+Removed-symbol static scan: zero hits
+GitHub filesystem-authority static scan: zero hits
+git diff --check: passed
+```
+
+The MCP payload digest recorded in `catalog.json` is `8b5d24e0e23150cf43ad66d40d46751b3492acc95d6e112c1fa7564e3fa37deb`.

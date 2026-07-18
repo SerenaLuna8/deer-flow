@@ -17,7 +17,7 @@
       "display_name": "DeerFlow Docs",
       "version": 1,
       "payload_path": "content/deerflow-docs-v1.mcp.json",
-      "sha256": "0a99b4936001a23c4db380bd7363f262e43d3abe6b3cb3a1dff5dea5c302ac3a"
+      "sha256": "8b5d24e0e23150cf43ad66d40d46751b3492acc95d6e112c1fa7564e3fa37deb"
     },
     {
       "source_key": "builtin:agent:project-assistant",

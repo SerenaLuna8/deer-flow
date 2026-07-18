@@ -98,6 +98,108 @@ async def test_bootstrap_catalog_is_atomic_and_idempotent(m7_database: M7Databas
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_packaged_mcp_reconstructs_through_provider_and_resolver(
+    m7_database: M7Database,
+) -> None:
+    from app.projects.capabilities import capabilities_for
+    from app.projects.context import ProjectContext
+    from app.projects.models import ProjectRole
+    from app.shared_assets.binding_service import BindingService
+    from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
+    from app.shared_assets.keyring import CredentialKeyring
+    from app.shared_assets.models import AssetKind, AssetSelection
+    from app.shared_assets.resolver import ProjectAssetResolver
+
+    await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
+
+    provider = PostgresAssetCatalogProvider(m7_database.session_factory)
+    snapshots = await provider.list_system_mcp()
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    slots = snapshot.definition["credential_slots"]
+    assert len(slots) == 1
+    assert slots[0]["payload_schema"] == {
+        "headers": ("X-DEERFLOW-DOCS-KEY",),
+    }
+    assert snapshot.credential_grant_ids == ()
+
+    async with m7_database.session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(CredentialRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(ProjectSystemMcpBindingRow)) == 0
+
+    async with m7_database.session_factory() as session, session.begin():
+        user_id = await _add_normal_user(session)
+        project_id = uuid.uuid4()
+        membership_id = uuid.uuid4()
+        session.add(
+            ProjectRow(
+                id=project_id,
+                slug=f"packaged-mcp-{uuid.uuid4().hex[:8]}",
+                display_name="Packaged MCP",
+                created_by_user_id=user_id,
+            )
+        )
+        await session.flush()
+        session.add(
+            ProjectMembershipRow(
+                id=membership_id,
+                project_id=project_id,
+                user_id=user_id,
+                role="admin",
+            )
+        )
+
+    role = ProjectRole.ADMIN
+    context = ProjectContext(
+        user_id=uuid.UUID(user_id),
+        project_id=project_id,
+        membership_id=membership_id,
+        role=role,
+        capabilities=capabilities_for(role),
+        membership_version=1,
+        request_id="packaged-mcp",
+    )
+    await BindingService(m7_database.session_factory).enable(
+        context,
+        AssetSelection(AssetKind.MCP, snapshot.asset_id, snapshot.version_id),
+    )
+    keyring = CredentialKeyring(
+        active_key_id="packaged-mcp-test",
+        _keys={"packaged-mcp-test": b"m" * 32},
+    )
+    resolver = ProjectAssetResolver(m7_database.session_factory, keyring=keyring)
+    resolved = await resolver.resolve_project_asset_snapshot(
+        context,
+        AssetSelection(AssetKind.MCP, snapshot.asset_id),
+    )
+
+    assert resolved.definition["credential_slots"][0]["payload_schema"] == {
+        "headers": ("X-DEERFLOW-DOCS-KEY",),
+    }
+    assert (await resolver.materialize_mcp_secrets(context, resolved)).by_slot == {}
+
+
+@pytest.mark.parametrize(
+    ("actual", "expected", "matches"),
+    [
+        ({"value": False}, {"value": 0}, False),
+        ({"value": 1}, {"value": 1.0}, False),
+        ({"items": ["a", "b"]}, {"items": ["b", "a"]}, False),
+        ({"a": 1, "b": 2}, {"b": 2, "a": 1}, True),
+    ],
+)
+def test_bootstrap_graph_json_equality_is_type_and_order_strict(
+    actual: object,
+    expected: object,
+    matches: bool,
+) -> None:
+    service = importlib.import_module("app.shared_assets.bootstrap.service")
+
+    assert service._matches(SimpleNamespace(value=actual), value=expected) is matches
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_bootstrap_rejects_canonical_parent_metadata_drift(
     m7_database: M7Database,
 ) -> None:
