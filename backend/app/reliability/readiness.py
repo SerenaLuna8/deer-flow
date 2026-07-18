@@ -71,7 +71,7 @@ class ReliabilityReadinessService:
             worker_capacity=process.worker_capacity if process is not None else 0,
             worker_oldest_heartbeat_age_seconds=(process.worker_oldest_heartbeat_age_seconds if process is not None else None),
             scheduler_ownership=(process.scheduler_ownership if process is not None else "unavailable"),
-            schema_state=process.schema_state if process is not None else schema,
+            schema_state=process.schema_state if process is not None else "unavailable",
         )
 
     async def read(self) -> ReliabilityReadiness:

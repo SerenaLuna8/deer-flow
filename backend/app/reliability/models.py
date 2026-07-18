@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 ReliabilityReadinessStatus = Literal["ready", "degraded", "closed"]
+ReliabilitySchemaState = Literal["ready", "unavailable"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +24,7 @@ class ReliabilityReadiness:
     worker_capacity: int = 0
     worker_oldest_heartbeat_age_seconds: int | None = None
     scheduler_ownership: str = "unavailable"
-    schema_state: str = "unknown"
+    schema_state: ReliabilitySchemaState = "unavailable"
 
 
-__all__ = ["ReliabilityReadiness", "ReliabilityReadinessStatus"]
+__all__ = ["ReliabilityReadiness", "ReliabilityReadinessStatus", "ReliabilitySchemaState"]

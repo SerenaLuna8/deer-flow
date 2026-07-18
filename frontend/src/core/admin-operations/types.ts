@@ -40,7 +40,7 @@ const operationsReadinessSchema = z
     status: z.enum(["ready", "degraded", "closed"]),
     database: z.string().min(1),
     schema: z.string().min(1),
-    schema_state: z.string().min(1),
+    schema_state: z.enum(["ready", "unavailable"]),
     worker_fleet: z.string().min(1),
     scheduler: z.string().min(1),
     stream: z.string().min(1),

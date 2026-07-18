@@ -16,6 +16,7 @@ from app.final_schema import (
     FinalSchemaUnavailable,
 )
 from app.gateway.automation_schemas import AutomationReadinessResponse
+from app.gateway.routers.admin_operations import OperationsReadinessResponse
 from app.reliability.models import ReliabilityReadiness
 from app.scheduler import app as scheduler_app
 from app.worker import app as worker_app
@@ -92,6 +93,26 @@ def test_public_readiness_contract_has_no_cutover_field() -> None:
     assert "automation_cutover_ready" not in automation_fields
     assert "schema_state" in reliability_fields
     assert "cutover" not in reliability_fields
+
+    common = {
+        "status": "closed",
+        "database": "ready",
+        "schema": "unavailable",
+        "worker_fleet": "unavailable",
+        "scheduler": "disabled",
+        "stream": "closed",
+        "recovery": "closed",
+        "quota": "closed",
+        "audit": "closed",
+        "role": "gateway",
+        "worker_count": 0,
+        "worker_capacity": 0,
+        "worker_oldest_heartbeat_age_seconds": None,
+        "scheduler_ownership": "disabled",
+    }
+    assert OperationsReadinessResponse(**common, schema_state="unavailable").schema_state == "unavailable"
+    with pytest.raises(ValueError):
+        OperationsReadinessResponse(**common, schema_state="migration_required")
 
 
 @asynccontextmanager

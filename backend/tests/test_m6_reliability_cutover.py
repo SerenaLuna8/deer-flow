@@ -299,7 +299,7 @@ async def test_closed_readiness_preserves_public_process_snapshot_without_openin
         worker_oldest_heartbeat_age_seconds=4,
         scheduler=scheduler,
         scheduler_ownership=ownership,
-        schema_state="migration_required",
+        schema_state="unavailable",
     )
 
     closed = await ReliabilityReadinessService(ClosedGuard(), object(), "schema-request", process=process).read()
@@ -314,7 +314,7 @@ async def test_closed_readiness_preserves_public_process_snapshot_without_openin
     assert closed.worker_oldest_heartbeat_age_seconds == 4
     assert closed.scheduler == scheduler
     assert closed.scheduler_ownership == ownership
-    assert closed.schema_state == "migration_required"
+    assert closed.schema_state == "unavailable"
     assert (closed.stream, closed.recovery, closed.quota, closed.audit) == (
         "closed",
         "closed",

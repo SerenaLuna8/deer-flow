@@ -311,8 +311,8 @@ describe("M6 system operations console", () => {
       readiness: {
         status: "closed",
         database: "ready",
-        schema: "migration_required",
-        schema_state: "migration_required",
+        schema: "unavailable",
+        schema_state: "unavailable",
         worker_fleet: "closed",
         scheduler: "closed",
         stream: "closed",
@@ -333,6 +333,17 @@ describe("M6 system operations console", () => {
     expect(operationsOverviewSchema.parse(closedOverview)).toEqual(
       closedOverview,
     );
+    for (const retiredSchemaState of ["migration_required", "unknown"]) {
+      expect(() =>
+        operationsOverviewSchema.parse({
+          ...closedOverview,
+          readiness: {
+            ...closedOverview.readiness,
+            schema_state: retiredSchemaState,
+          },
+        }),
+      ).toThrow();
+    }
     expect(() =>
       operationsOverviewSchema.parse({
         ...closedOverview,

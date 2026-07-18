@@ -604,7 +604,7 @@ async def test_operations_overview_serializes_injected_closed_component_readines
             "worker_capacity": 0,
             "worker_oldest_heartbeat_age_seconds": None,
             "scheduler_ownership": "unavailable",
-            "schema_state": "unknown",
+            "schema_state": "unavailable",
         }
     finally:
         await seed.engine.dispose()
@@ -641,7 +641,7 @@ async def test_operations_overview_returns_closed_readiness_without_querying_agg
                 "status": "closed",
                 "database": "ready",
                 "schema": "unavailable",
-                "schema_state": "migration_required",
+                "schema_state": "unavailable",
                 "worker_fleet": "unavailable",
                 "scheduler": "disabled",
                 "stream": "closed",

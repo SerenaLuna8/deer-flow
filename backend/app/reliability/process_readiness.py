@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.automations.ownership import AUTOMATION_SCHEDULER_OWNERSHIP_LOCK_KEY
 from app.final_schema import FinalSchemaProbe
+
+SchemaState = Literal["ready", "unavailable"]
 
 
 class _SchedulerOwnership(Protocol):
@@ -32,7 +34,7 @@ class ProcessReadinessSnapshot:
     worker_oldest_heartbeat_age_seconds: int | None
     scheduler: str
     scheduler_ownership: str
-    schema_state: str
+    schema_state: SchemaState
 
     def as_public_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -90,7 +92,7 @@ async def read_process_readiness(
             worker_oldest_heartbeat_age_seconds=None,
             scheduler=scheduler,
             scheduler_ownership=scheduler_state,
-            schema_state="unavailable" if schema is None else "migration_required",
+            schema_state="unavailable",
         )
     worker_relation_ready = await session.scalar(text("SELECT to_regclass('worker_nodes') IS NOT NULL"))
     if worker_relation_ready is not True:
@@ -105,7 +107,7 @@ async def read_process_readiness(
             worker_oldest_heartbeat_age_seconds=None,
             scheduler=scheduler,
             scheduler_ownership=scheduler_state,
-            schema_state="migration_required",
+            schema_state="unavailable",
         )
     cutoff = selected_now - timedelta(seconds=worker_fresh_for_seconds)
     worker = (
@@ -155,4 +157,4 @@ async def read_process_readiness(
     )
 
 
-__all__ = ["ProcessReadinessSnapshot", "read_process_readiness"]
+__all__ = ["ProcessReadinessSnapshot", "SchemaState", "read_process_readiness"]

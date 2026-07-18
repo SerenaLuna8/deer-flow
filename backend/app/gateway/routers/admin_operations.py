@@ -91,7 +91,7 @@ class OperationsReadinessResponse(BaseModel):
     worker_capacity: int
     worker_oldest_heartbeat_age_seconds: int | None
     scheduler_ownership: str
-    schema_state: str
+    schema_state: Literal["ready", "unavailable"]
 
 
 class OperationsCountsResponse(BaseModel):

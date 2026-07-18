@@ -8,11 +8,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.automations.ownership import AutomationSchedulerOwnership
+from app.final_schema import FINAL_REQUIRED_RELATIONS, PRE_RESET_SCHEMA_REVISION
 from app.reliability.process_readiness import read_process_readiness
 
 
 @pytest.mark.asyncio
-async def test_pre_expand_missing_relations_report_migration_required_without_aggregate_queries() -> None:
+async def test_pre_expand_missing_relations_report_unavailable_without_aggregate_queries() -> None:
     class PreExpandSession:
         calls = 0
 
@@ -35,7 +36,37 @@ async def test_pre_expand_missing_relations_report_migration_required_without_ag
     assert snapshot.ready is False
     assert snapshot.worker_fleet == "unavailable"
     assert snapshot.scheduler_ownership == "unowned"
-    assert snapshot.schema_state == "migration_required"
+    assert snapshot.schema_state == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_missing_worker_relation_reports_schema_unavailable_without_aggregate_queries() -> None:
+    class MissingWorkerRelationSession:
+        def __init__(self) -> None:
+            self.values = iter(
+                (
+                    PRE_RESET_SCHEMA_REVISION,
+                    FINAL_REQUIRED_RELATIONS,
+                    False,
+                )
+            )
+
+        async def scalar(self, _query: object, _params: object = None) -> object:
+            return next(self.values)
+
+        async def execute(self, _query: object, _params: object = None) -> object:
+            raise AssertionError("missing worker relation must not query aggregates")
+
+    snapshot = await read_process_readiness(
+        MissingWorkerRelationSession(),  # type: ignore[arg-type]
+        role="worker",
+        scheduler_enabled=False,
+        worker_fresh_for_seconds=60,
+    )
+
+    assert snapshot.ready is False
+    assert snapshot.schema_state == "unavailable"
+    assert snapshot.worker_fleet == "unavailable"
 
 
 @pytest.mark.postgres
