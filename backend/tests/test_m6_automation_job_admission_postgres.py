@@ -29,6 +29,7 @@ from app.reliability.execution import (
 )
 from app.reliability.owner_refs import AuditHmacKeyring
 from app.reliability.workers import WorkerRegistry
+from app.scheduler.service import AutomationSchedulerService
 from app.worker.service import JobLeaseAuthority
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.jobs.sql import JobRepository, JobTerminalEvent
@@ -213,6 +214,79 @@ async def test_automation_admission_enforces_shared_project_run_quota_atomically
         assert reserved == 3
         assert run_count == 3
         assert rejected_occurrence == 0
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_scheduler_late_quota_failure_rolls_back_definition_admission_graph(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    task_id = f"m6-scheduler-rollback-{uuid.uuid4().hex[:14]}"
+
+    class RejectingQuota:
+        async def reserve_concurrent_run(self, *_args) -> None:
+            raise AutomationConcurrencyLimit("late-quota-rejection")
+
+    try:
+        task = await _create_due_task(seed, task_id=task_id)
+        service = AutomationSchedulerService(
+            occurrences=AutomationOccurrenceService(
+                seed.factory,
+                max_concurrent_runs=3,
+            ),
+            dispatcher=AutomationDispatcher(
+                seed.factory,
+                quota=RejectingQuota(),
+            ),
+            reconciler=AutomationReconciler(seed.factory),
+            max_concurrent_runs=3,
+        )
+
+        async with seed.factory() as session, session.begin():
+            admitted = await service.admit_due_occurrences(session, now=NOW)
+
+        assert admitted == ()
+        async with seed.factory() as session:
+            counts = (
+                await session.execute(
+                    text(
+                        """SELECT
+                            (SELECT count(*) FROM scheduled_task_runs WHERE task_id=:task_id),
+                            (SELECT count(*) FROM threads_meta WHERE metadata_json->>'scheduled_task_id'=:task_id),
+                            (SELECT count(*) FROM runs WHERE metadata_json->>'scheduled_task_id'=:task_id),
+                            (SELECT count(*) FROM run_asset_versions
+                              WHERE run_id IN (SELECT run_id FROM runs WHERE metadata_json->>'scheduled_task_id'=:task_id)),
+                            (SELECT count(*) FROM jobs
+                              WHERE run_id IN (SELECT run_id FROM runs WHERE metadata_json->>'scheduled_task_id'=:task_id)),
+                            (SELECT count(*)
+                               FROM jobs j
+                               JOIN runs r ON (r.project_id,r.owner_user_id,r.run_id)=(j.project_id,j.owner_user_id,j.run_id)
+                               JOIN scheduled_task_runs o
+                                 ON (o.project_id,o.owner_user_id,o.id)=(j.project_id,j.owner_user_id,j.automation_occurrence_id)
+                              WHERE o.task_id=:task_id)"""
+                    ),
+                    {"task_id": task_id},
+                )
+            ).one()
+            definition = (
+                await session.execute(
+                    text(
+                        """SELECT next_run_at,last_run_at,updated_at
+                           FROM scheduled_tasks WHERE id=:task_id"""
+                    ),
+                    {"task_id": task_id},
+                )
+            ).one()
+
+        assert tuple(counts) == (0, 0, 0, 0, 0, 0)
+        assert tuple(definition) == (
+            task.next_run_at,
+            task.last_run_at,
+            task.updated_at,
+        )
     finally:
         await seed.engine.dispose()
 

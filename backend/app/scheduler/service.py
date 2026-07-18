@@ -81,11 +81,12 @@ class AutomationSchedulerService:
                     definition.task_id,
                 )
                 try:
-                    result = await self._dispatcher.admit_occurrence_in_session(
-                        session,
-                        definition,
-                        scheduled_for=scheduled_for,
-                    )
+                    async with session.begin_nested():
+                        result = await self._dispatcher.admit_occurrence_in_session(
+                            session,
+                            definition,
+                            scheduled_for=scheduled_for,
+                        )
                 except AutomationConcurrencyLimit:
                     return tuple(admitted)
                 except AutomationError as error:

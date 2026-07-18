@@ -3,8 +3,10 @@
 ## Status
 
 PASS — implemented Task 4 only from baseline
-`2da9e6a62d37c88cb02cead1cc36f9027abe817a`. This report does not update the
-milestone ledger, start Task 5, claim M7 completion, or claim release readiness.
+`2da9e6a62d37c88cb02cead1cc36f9027abe817a`, including the frozen-review
+transaction repair against implementation commit `896cace8`. This report does
+not update the milestone ledger, start Task 5, claim M7 completion, or claim
+release readiness.
 
 ## Delivered
 
@@ -26,6 +28,11 @@ milestone ledger, start Task 5, claim M7 completion, or claim release readiness.
   reconciliation paths so Scheduler reads and writes use the exact caller-owned
   `AsyncSession`. Manual Gateway admission retains the existing atomic dispatcher
   transaction.
+- Isolated every scheduled definition admission in `session.begin_nested()`.
+  A late mapped failure now exits and rolls back its savepoint before the service
+  catches it: concurrency-limit rollback stops the batch, while other
+  `AutomationError` rollback permits paging to continue. The caller still owns
+  the outer transaction; the service contains no commit.
 - Preserved non-interactive authority: client Automation schemas still reject
   extra authority, while `AutomationDispatcher` alone writes
   `context.non_interactive=true` in the persisted Run snapshot.
@@ -51,6 +58,27 @@ The expected failures proved that the global router and deleted modules still
 existed, cutover errors remained public, and `AutomationSchedulerService` did not
 exist. The service tests were then rewritten around the two caller-transaction
 operations and ownership revalidation.
+
+Frozen-review repair RED:
+
+```text
+POSTGRES_TEST_URL=postgresql+asyncpg://jiangfeng@127.0.0.1:55437/postgres \
+PYTHONPATH=packages/harness .venv/bin/pytest \
+  tests/test_m6_automation_job_admission_postgres.py::test_scheduler_late_quota_failure_rolls_back_definition_admission_graph -q
+
+1 failed in 0.89s
+actual leaked counts: occurrence/Thread/Run/snapshot/job/parent relation =
+(1, 1, 1, 1, 1, 1)
+```
+
+The test triggers a quota rejection after the dispatcher has built the complete
+admission graph, then lets the caller-owned outer transaction exit normally. It
+also checks that definition `next_run_at`, `last_run_at`, and `updated_at` remain
+unchanged. The failure proved the pre-repair service committed partial state.
+After adding the per-definition savepoint, the same PostgreSQL test passed.
+Unit transaction doubles additionally prove that mapped failures are observed
+only after savepoint rollback, non-concurrency errors continue, and concurrency
+limits stop.
 
 Focused GREEN without PostgreSQL configuration:
 
@@ -81,24 +109,37 @@ PYTHONPATH=packages/harness .venv/bin/pytest \
   tests/test_automation_reconciliation.py \
   tests/test_m6_automation_job_admission_postgres.py -q
 
-152 passed in 34.55s
+153 passed in 34.19s
 ```
 
 This was 0 skipped. It covers the project-role/owner matrix, manual atomic
 occurrence/Run/job admission, server-owned non-interactive snapshot, Scheduler
 ownership-loss fail-stop, terminal reconciliation, and the durable PostgreSQL
-admission invariants. The sandboxed first attempt could not create a local test
+admission invariants, including the frozen-review late-quota rollback invariant.
+The sandboxed first attempt could not create a local test
 database; the same command passed after granting loopback access to the supplied
 local PostgreSQL server.
+
+Independent repair gates:
+
+```text
+tests/test_automation_scheduler_ownership.py +
+tests/test_automation_reconciliation.py: 27 passed in 6.76s
+
+tests/blocking_io/test_automations.py +
+tests/blocking_io/test_gate_smoke.py: 9 passed in 0.55s
+
+tests/test_scheduled_task_service.py: 7 passed in 0.46s
+```
 
 ## Collection and Task 3 lastfailed audit
 
 ```text
 PYTHONPATH=packages/harness .venv/bin/pytest --collect-only -q
-8238 tests collected in 2.99s
+8239 tests collected in 3.23s
 
 PYTHONPATH=packages/harness .venv/bin/pytest --lf --collect-only -q
-122/518 tests collected (396 deselected) in 1.18s
+122/518 tests collected (396 deselected) in 1.30s
 ```
 
 Task 3 had classified exactly two Task 4 nodes:

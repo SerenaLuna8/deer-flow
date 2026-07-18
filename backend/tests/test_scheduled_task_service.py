@@ -45,6 +45,25 @@ class FakeOccurrences:
         return tuple((definition, NOW) for definition in selected)
 
 
+class FakeNestedTransaction:
+    def __init__(self, session: FakeSession) -> None:
+        self._session = session
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, error_type, _error, _traceback) -> None:
+        self._session.nested_outcomes.append("rolled_back" if error_type is not None else "committed")
+
+
+class FakeSession:
+    def __init__(self) -> None:
+        self.nested_outcomes: list[str] = []
+
+    def begin_nested(self) -> FakeNestedTransaction:
+        return FakeNestedTransaction(self)
+
+
 class FakeDispatcher:
     def __init__(self, *, failures: dict[str, Exception] | None = None) -> None:
         self.failures = failures or {}
@@ -89,7 +108,7 @@ def _service(
 
 @pytest.mark.asyncio
 async def test_admit_due_occurrences_uses_the_caller_session_for_reads_and_writes() -> None:
-    session = object()
+    session = FakeSession()
     occurrences = FakeOccurrences(("occ-1", "occ-2"))
     dispatcher = FakeDispatcher()
     service = _service(occurrences=occurrences, dispatcher=dispatcher)
@@ -102,11 +121,12 @@ async def test_admit_due_occurrences_uses_the_caller_session_for_reads_and_write
         (session, "occ-1", NOW),
         (session, "occ-2", NOW),
     ]
+    assert session.nested_outcomes == ["committed", "committed"]
 
 
 @pytest.mark.asyncio
 async def test_admit_due_occurrences_pages_past_mapped_failure() -> None:
-    session = object()
+    session = FakeSession()
     occurrences = FakeOccurrences(("bad", "occ-2", "occ-3"))
     dispatcher = FakeDispatcher(
         failures={"bad": AutomationUnavailable("request-id")},
@@ -121,13 +141,14 @@ async def test_admit_due_occurrences_pages_past_mapped_failure() -> None:
 
     assert [item.occurrence.id for item in admitted] == ["occ-2", "occ-3"]
     assert [call[1] for call in dispatcher.calls] == ["bad", "occ-2", "occ-3"]
+    assert session.nested_outcomes == ["rolled_back", "committed", "committed"]
     assert len(occurrences.due_calls) == 2
     assert occurrences.due_calls[1]["after"][3] == "occ-2"
 
 
 @pytest.mark.asyncio
 async def test_admit_due_occurrences_stops_at_concurrency_limit() -> None:
-    session = object()
+    session = FakeSession()
     occurrences = FakeOccurrences(("first", "later"))
     dispatcher = FakeDispatcher(
         failures={"first": AutomationConcurrencyLimit("request-id")},
@@ -140,6 +161,7 @@ async def test_admit_due_occurrences_stops_at_concurrency_limit() -> None:
 
     assert admitted == ()
     assert [call[1] for call in dispatcher.calls] == ["first"]
+    assert session.nested_outcomes == ["rolled_back"]
 
 
 @pytest.mark.asyncio
@@ -152,16 +174,18 @@ async def test_admit_due_occurrences_reverifies_ownership_before_each_page() -> 
         ),
     )
 
+    session = FakeSession()
     with pytest.raises(AutomationUnavailable):
         await _service(
             occurrences=occurrences,
             dispatcher=dispatcher,
             max_concurrent_runs=1,
             ownership=ownership,
-        ).admit_due_occurrences(object(), now=NOW)
+        ).admit_due_occurrences(session, now=NOW)
 
     assert ownership.verify.await_count == 2
     assert [call[1] for call in dispatcher.calls] == ["first"]
+    assert session.nested_outcomes == ["committed"]
 
 
 @pytest.mark.asyncio
