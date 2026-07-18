@@ -1,10 +1,9 @@
 import {
   DownloadIcon,
   LoaderIcon,
-  PackageIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -15,15 +14,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { urlOfArtifact } from "@/core/artifacts/utils";
-import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   projectArtifactDownloadURL,
   projectFileDownloadURL,
 } from "@/core/private-work/files";
-import { usePrivateWorkAccess } from "@/core/private-work/provider";
-import { installSkill, SkillRequestError } from "@/core/skills/api";
+import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 import { useDeleteUploadedFile, useUploadedFiles } from "@/core/uploads";
 import {
   getFileExtensionDisplayName,
@@ -44,23 +40,13 @@ export function ArtifactFileList({
   threadId: string;
 }) {
   const { t } = useI18n();
-  const { user } = useAuth();
-  const privateWork = usePrivateWorkAccess();
-  const projectFiles = useUploadedFiles(
-    threadId,
-    privateWork,
-    privateWork.scope !== null,
-  );
+  const privateWork = useProjectPrivateWorkScope();
+  const projectFiles = useUploadedFiles(threadId, privateWork, true);
   const deleteProjectFile = useDeleteUploadedFile(threadId, privateWork);
-  const isAdmin = user?.system_role === "system_admin";
   const { select: selectArtifact, setOpen } = useArtifacts();
-  const [installingFile, setInstallingFile] = useState<string | null>(null);
 
   const downloadURL = useCallback(
     (filepath: string) => {
-      if (!privateWork.scope) {
-        return urlOfArtifact({ filepath, threadId, download: true });
-      }
       const normalizedPath = filepath
         .replace(/^\/mnt\/(?:data|user-data)\//u, "")
         .replace(/^\/+/, "");
@@ -85,38 +71,6 @@ export function ArtifactFileList({
       setOpen(true);
     },
     [selectArtifact, setOpen],
-  );
-
-  const handleInstallSkill = useCallback(
-    async (e: React.MouseEvent, filepath: string) => {
-      e.stopPropagation();
-      e.preventDefault();
-
-      if (installingFile) return;
-
-      setInstallingFile(filepath);
-      try {
-        const result = await installSkill({
-          thread_id: threadId,
-          path: filepath,
-        });
-        if (result.success) {
-          toast.success(result.message);
-        } else {
-          toast.error(result.message || "Failed to install skill");
-        }
-      } catch (error) {
-        console.error("Failed to install skill:", error);
-        if (error instanceof SkillRequestError && error.isAdminRequired) {
-          toast.error(t.settings.skills.installAdminRequired);
-        } else {
-          toast.error("Failed to install skill");
-        }
-      } finally {
-        setInstallingFile(null);
-      }
-    },
-    [threadId, installingFile, t],
   );
 
   const handleDeleteProjectFile = useCallback(
@@ -160,22 +114,7 @@ export function ArtifactFileList({
               {getFileExtensionDisplayName(file)} file
             </CardDescription>
             <CardAction className="row-span-1 self-center">
-              {!privateWork.scope && file.endsWith(".skill") && isAdmin && (
-                <Button
-                  variant="ghost"
-                  disabled={installingFile === file}
-                  onClick={(e) => handleInstallSkill(e, file)}
-                >
-                  {installingFile === file ? (
-                    <LoaderIcon className="size-4 animate-spin" />
-                  ) : (
-                    <PackageIcon className="size-4" />
-                  )}
-                  {t.common.install}
-                </Button>
-              )}
-              {privateWork.scope &&
-                projectFiles.data?.files.some(
+              {projectFiles.data?.files.some(
                   (candidate) =>
                     candidate.id &&
                     candidate.logical_path ===

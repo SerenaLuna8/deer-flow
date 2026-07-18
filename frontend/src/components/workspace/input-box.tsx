@@ -72,11 +72,11 @@ import { hasOpenHumanInputRequest } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import { useProjectSlashSkills } from "@/core/shared-assets";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
 } from "@/core/sidecar";
-import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { compactThreadContext } from "@/core/threads/api";
@@ -316,12 +316,12 @@ export function InputBox({
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
   const { thread, isMock } = useThread();
-  const privateWork = usePrivateWorkAccess(undefined, isMock);
+  const privateWork = usePrivateWorkAccess();
   const { attachments, textInput } = usePromptInputController();
   const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
   const removeAttachment = attachments.remove;
-  const { skills } = useSkills();
+  const { skills } = useProjectSlashSkills();
   const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);

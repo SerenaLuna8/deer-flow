@@ -28,6 +28,10 @@ export type PrivateWorkAccess = {
   isActive?(): boolean;
 };
 
+export type ProjectPrivateWorkScope = Omit<PrivateWorkAccess, "scope"> & {
+  scope: ProjectClientScope;
+};
+
 export function runPrivateWorkAbortable<T>(
   access: PrivateWorkAccess,
   operation: (signal?: AbortSignal) => Promise<T>,

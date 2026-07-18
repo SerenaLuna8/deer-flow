@@ -48,7 +48,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace` (multi-project workspace; `/workspace/projects` redirects here), `/projects/[project_slug]` (independent project home), `/projects/[project_slug]/chats` (owner-scoped project conversations), `/admin/assets/{agents,skills,mcp,credentials}` (server-gated system asset administration), `/workspace/chats/[thread_id]` (legacy chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace` (the only workspace route and live multi-project landing), `/projects/[project_slug]` plus its project-scoped Chats, Memory, Connections, Automation, and asset routes, `/admin/assets/{agents,skills,mcp,credentials}` (server-gated system asset administration), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and scoped `/api/…` route handlers. Static builds render a local no-network demo at `/workspace` and return not-found for `/projects/*`.
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
@@ -56,7 +56,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `projects/` — Project workbench cards/dialogs and the independent project-home shell
   - `landing/` — Landing page sections
   - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (explicit client construction), `auth/`, `artifacts/`, `private-work/` (account/project client registry plus project Memory and Connections), `project-automations/`, `shared-assets/`, `i18n/`, `settings/`, `skills/` (pure slash parsing only), `messages/`, `models/`, `input-polish/`, `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/`, `config/`, `notification/`, `blog/`, plus rendering helpers and `utils/`.
 
 Platform authorization uses `system_role: "system_admin" | "user"`. The project-level
 role name `admin` is a separate membership concept and must not be accepted as a
@@ -91,17 +91,15 @@ query/mutation key starts with `['account', accountId, 'project', projectId, 'pr
 SDK reconnect metadata is stored under the same account/project scope. Scope cleanup must call
 TanStack cancellation before removing queries, mutations, reconnect metadata, or the client.
 Thread and upload hooks consume `usePrivateWorkAccess()` or an explicitly supplied access value;
-do not reintroduce direct module-global `getAPIClient()` calls inside those hooks. The default
-workspace client and its legacy keys remain compatible only before the server cutover marker;
-after cutover those legacy APIs return `PRIVATE_WORK_CUTOVER`. `PROJECT_PRIVATE_WORKSPACE` is a
+do not reintroduce a module-global client or optional unscoped fallback. `PROJECT_PRIVATE_WORKSPACE` is a
 compile-time constant set to true for the M4 candidate. It must remain combined with server
 readiness and `private_work.read_own`; static demo builds must expose no project-private
 navigation or data requests.
-Project-first mode renders the normal `/workspace` landing directly without the legacy
-`WorkspaceContent` sidebar; `/workspace/projects` is a compatibility redirect, while legacy
-`/workspace/chats`, agents, memory, skills, tools, and scheduled-task routes keep the existing
-shell. Static demo builds preserve their existing chat landing and must not expose a project
-entry that can call the project API. Project slug URLs are resolved only by
+Project-first mode renders the normal `/workspace` landing directly without a legacy sidebar.
+There are no compatibility workspace subroutes: old chats, agents, memory, skills, tools,
+projects, and scheduled-task URLs must render Next not-found without redirect. Static demo builds
+render a local no-network card demo at the same `/workspace` URL and must not expose a project
+entry or import authenticated API modules. Project slug URLs are resolved only by
 paging the member-scoped list endpoint and exact-matching the returned slug; UUID-only detail,
 enter, pin, and update endpoints must never receive a slug. `/projects/[project_slug]` has its
 own server-side auth, QueryClient, and AuthProvider layout and must not be nested in
@@ -118,18 +116,17 @@ model，按系统级与项目级分组，并包含逐项 capability、当前已�
 启用状态和并发控制修订版本；Query key 必须同时按 account、project 和 kind 隔离。界面只按逐项
 capability 展示操作，禁止从角色推断权限。系统资产的项目内版本历史只返回已发布版本，系统
 Credential 仅展示安全元数据；暂停或归档资产必须按服务端状态限制创建、发布、审批和绑定移动。
-M3 不提供运行或开始对话入口。旧 `/workspace/{agents,skills,tools}` 只读展示 PostgreSQL 系统
-资产，并使用 account-scoped `/api/assets/catalog/*`，不得复用受旧 feature gate 限制的配置接口；
-普通用户不能写入，`system_admin` 仅可跳转 `/admin/assets` 管理。MCP 审批的 Credential 选择器
+M3 不提供运行或开始对话入口。Agent、Skill、MCP 和 Credential 只从项目资产页或
+`/admin/assets` 管理区访问；不得恢复全局 workspace catalog 或全局配置客户端。MCP 审批的 Credential 选择器
 只列出同一作用域内已启用 Credential 的 current version：项目审批只能使用项目 Credential，
 系统审批只能使用系统 Credential；只强制 required slot，optional slot 允许留空。Credential catalog
 的 loading/error 必须与空列表区分，并提供安全错误文案和重试。secret-bearing 字段不得进入 TanStack
 cache、响应或错误；用户在 password control 中输入的值提交后必须立即清空，不得继续在 DOM 中
 残留或被 UI 回显。
-M3 的前端资产交付到此为止：`/admin/assets`、四类项目资产页和旧入口只读 catalog 已接入。
+M3 的前端资产交付到此为止：`/admin/assets` 与四类项目资产页已接入。
 M4 提供 account/project-scoped LangGraph client、cache ownership、Thread/upload 注入，
-并让项目 chats 列表和详情复用 `ScopedChatPage`。项目 route 继续关闭 goal、compact、branch、
-regenerate、follow-up suggestions 和 scheduled-task；sidecar 与 artifact 只在 project-scoped
+并让项目 chats 列表和详情复用要求 `ProjectPrivateWorkScope` 的 `ScopedChatPage`。项目 route 继续关闭 goal、compact、branch、
+regenerate 与 follow-up suggestions；Automation 入口只指向项目 route。sidecar 与 artifact 只在 project-scoped
 Thread/file/artifact loaders 注入后启用，禁止回退到 legacy `/api/threads/*`、legacy artifact URL 或宿主
 文件路径。`private_work.read_own` 允许读取、下载并删除自己的 Thread/file，但不隐含
 create/run/upload/branch 权限。Thread metadata 只有规范化 404/403 且 history/messages 为空时才显示
@@ -151,8 +148,8 @@ account + project UUID 双重隔离；入口仍同时依赖非 static、服务�
 workspace；能力不足的 Automation 直达页在 `ProjectContextProvider` 完成客户端权限解析后进入 Next
 not-found boundary，且不得启动 readiness/list/history。由于 slug/enter 权限只有该 client provider
 拥有，初始 HTML status 可能仍为 200，真正的资源权限必须由项目 API 返回 403/404，页面不得复制
-server-side slug paging 或 enter。静态独立 build/browser 门禁必须同时证明 workspace 没有项目入口、
-项目 Automation 直达为 404、且没有 Automation 或 legacy scheduled-task API 请求。Task 18 的里程碑
+server-side slug paging 或 enter。静态独立 build/browser 门禁必须同时证明 `/workspace` 使用本地 demo、
+没有任何 `/api/` 请求且项目 Automation 直达为 404。Task 18 的里程碑
 总门禁与独立关闭审查已于 2026-07-16 完成；M6 的前端与整体关闭门禁于 2026-07-18 完成。M7–M8
 尚未交付，因此仍不能把界面描述为完整多用户 SaaS。
 Automation 的所有 query/mutation key 必须同时以认证 account UUID 和 entered project UUID 开头；
@@ -160,9 +157,9 @@ Automation 的所有 query/mutation key 必须同时以认证 account UUID 和 e
 client 与 reconnect 状态。Viewer 仅能读取自己的 definition/history，不能显示 mutation 或 manual
 trigger 控件。Automation edit 必须以当前 `Automation` 为基准构建 sparse PATCH：title、prompt、
 schedule_spec 与 timezone 只有发生规范化后的语义变化才发送，等价的 once 时间表示（如 `Z` 与
-`+00:00`）不得触发 schedule update；create payload 仍保持完整。M5 cutover 后 legacy
-`/workspace/scheduled-tasks` 只根据结构化
-`409 AUTOMATION_CUTOVER` 显示本地化迁移完成说明，不显示服务端文本或任何 legacy mutation 控件。
+`+00:00`）不得触发 schedule update；create payload 仍保持完整。Pure schedule validation、recipes
+和 types 位于 `core/project-automations/schedule/`，不得包含 URL、fetch、auth 或 query key；legacy
+scheduled-task route、client 与 mutation UI 不得恢复。
 当前前端已完成 M5，并已接入 M6 独立 Worker 对应的 PostgreSQL 持久化 SSE：标准重连游标按
 account/project/thread 隔离保存，重复 event ID 与 terminal 会被丢弃。Task 14 还提供项目 Admin
 Usage/Audit 页面；两类 query key 都以认证 account UUID 和 entered project UUID 开头，入口必须同时满足
@@ -219,23 +216,18 @@ Human input requests are a structured message protocol layered on normal chat hi
 
 - **Server Components by default**, `"use client"` only for interactive components
 - **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
-- **LangGraph client** — legacy workspace uses the `getAPIClient()` default/mock registry;
-  project pages use `ProjectPrivateWorkProvider` and the separate account/project registry in
-  `core/private-work/`
+- **LangGraph client** — live chat exists only inside a project and receives the explicit
+  account/project client from `ProjectPrivateWorkProvider`; there is no default/mock registry
 - **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
 - **Subtask step history** (`core/tasks/`) — the subtask card shows a subagent's full step timeline (#3779): its assistant reasoning turns interleaved with the tools it ran. `Subtask.steps[]` is accumulated live from `task_running` events (appended via `mergeSteps`, not overwritten) and backfilled on expand for historical runs by `fetchSubtaskSteps`, which pages the events endpoint scoped to one task (GET `/runs/{runId}/events?event_types=subagent.step&task_id=…&after_seq=…`) until a short page, so the run-wide limit can't truncate the timeline. `core/tasks/steps.ts` is the pure model: `messageToStep` (live), `eventsToSteps` (reload), `mergeSteps` (dedup by `message_index`), and `stepsForDisplay` (what the card renders — keeps tool steps + AI steps with text, drops the trailing final-answer AI step when completed since it's shown as `result`). `core/tasks/subtask-update.ts::computeNextSubtask` is the pure per-subtask state transition (merge step deltas, keep terminal status stable); `core/tasks/context.tsx`'s `useUpdateSubtask` applies it against a `tasksRef` mirroring the latest state (not a closure snapshot), so a late-resolving `fetchSubtaskSteps` backfill merges into current state instead of clobbering SSE steps or sibling subtasks that arrived meanwhile. The owning `run_id` is carried onto history content messages in `buildVisibleHistoryMessages` so the card can resolve the events endpoint.
 
 ### Interaction Ownership
 
-- `src/components/workspace/chats/scoped-chat-page.tsx` owns shared workspace/project composer busy-state wiring; route adapters supply capability and navigation scope.
+- `src/components/workspace/chats/scoped-chat-page.tsx` owns project composer busy-state wiring and requires an explicit project-private scope; route adapters supply capability and navigation scope.
 - `src/components/workspace/chats/scoped-chat-page.tsx` owns branch-from-turn submission and navigation when the route scope enables it; sidecar `MessageList` instances do not receive the branch action.
-- `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
 - `src/components/workspace/messages/message-list.tsx` owns human-input card answered/latest/pending gating; entry pages only translate a submitted card response into `sendMessage` calls.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
-- `src/app/workspace/scheduled-tasks/page.tsx` owns scheduled-task filters, selection, mutations, and the controlled create-task Sheet; the Sheet is presentation only and must reuse the page's existing payload and reset flow.
-- `src/components/workspace/settings/memory-settings-page.tsx` owns memory queries, filters, file import/export, dialogs, and mutations; components under `settings/memory/` are presentation and pure view-model helpers only, and must not call memory APIs or change mutation payloads.
-- `SkillSettingsList` owns skill selection, the opener reference, and the read-only preview Sheet state; `useSkillContent` owns the lazy per-skill query enabled while that Sheet is open.
-- `SkillDetailSheet` strips only a parser-compatible leading frontmatter fence and renders the remainder with the existing raw-HTML-disabled Markdown renderer.
+- `src/components/projects/private-work/project-memory-page.tsx` owns project-scoped Memory queries and mutations; `MemorySettingsView` and components under `settings/memory/` are reusable presentation and pure view-model helpers only.
 
 ## Code Style
 

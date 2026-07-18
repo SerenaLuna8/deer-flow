@@ -18,7 +18,6 @@ import {
 } from "@/components/projects/assets/project-assets-page";
 import { canManageSystemBinding } from "@/components/projects/assets/system-asset-section";
 import { canMoveSystemBinding } from "@/components/projects/assets/system-binding-dialog";
-import { LegacySystemAssetsCompatibilityView } from "@/components/workspace/legacy-system-assets-compatibility";
 import type {
   AssetVersion,
   ProjectAssetList,
@@ -473,30 +472,4 @@ describe("project shared asset pages", () => {
     expect(source).not.toContain("useMutation(");
   });
 
-  test("legacy workspace exposes only a system compatibility view", () => {
-    const ordinary = renderToStaticMarkup(
-      <LegacySystemAssetsCompatibilityView
-        kind="Agent"
-        isSystemAdmin={false}
-        items={[
-          { id: "system-agent", name: "Research Agent", description: "研究" },
-        ]}
-      />,
-    );
-    const admin = renderToStaticMarkup(
-      <LegacySystemAssetsCompatibilityView
-        kind="MCP"
-        isSystemAdmin
-        items={[{ id: "system-mcp", name: "Search MCP", description: "搜索" }]}
-      />,
-    );
-
-    expect(ordinary).toContain("系统资产兼容视图");
-    expect(ordinary).toContain("Research Agent");
-    expect(admin).toContain("Search MCP");
-    expect(ordinary).not.toContain("创建 Agent");
-    expect(ordinary).not.toContain("编辑 Agent");
-    expect(ordinary).not.toContain("/admin/assets");
-    expect(admin).toContain("/admin/assets");
-  });
 });

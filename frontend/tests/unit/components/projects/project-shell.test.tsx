@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { projectNavigationItems } from "@/components/projects/project-nav";
 import { ProjectShell } from "@/components/projects/project-shell";
 import { I18nProvider } from "@/core/i18n/context";
+import { ProjectPrivateWorkProvider } from "@/core/private-work/provider";
 import { CAPABILITIES, type Project } from "@/core/projects/types";
 
 const adminProject: Project = {
@@ -31,13 +32,18 @@ function renderShell(project: Project) {
   return renderToStaticMarkup(
     <I18nProvider initialLocale="en-US">
       <QueryClientProvider client={new QueryClient()}>
-        <ProjectShell
-          project={project}
-          accountEmail="member@example.com"
-          onLogout={() => undefined}
+        <ProjectPrivateWorkProvider
+          accountId="22222222-2222-4222-8222-222222222222"
+          projectId={project.id}
         >
-          <p>Project content</p>
-        </ProjectShell>
+          <ProjectShell
+            project={project}
+            accountEmail="member@example.com"
+            onLogout={() => undefined}
+          >
+            <p>Project content</p>
+          </ProjectShell>
+        </ProjectPrivateWorkProvider>
       </QueryClientProvider>
     </I18nProvider>,
   );

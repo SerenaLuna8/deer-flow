@@ -22,8 +22,8 @@ describe("project chat files and artifacts", () => {
     expect(detail).toContain("projectFileDownloadURL");
     expect(detail).toContain("projectArtifactDownloadURL");
     expect(list).toContain("projectFileDownloadURL");
-    expect(detail).toContain("usePrivateWorkAccess");
-    expect(list).toContain("usePrivateWorkAccess");
+    expect(detail).toContain("useProjectPrivateWorkScope");
+    expect(list).toContain("useProjectPrivateWorkScope");
     expect(list).toContain("useDeleteUploadedFile");
     expect(list).toContain("deleteProjectFile.mutateAsync");
   });

@@ -2,7 +2,6 @@ import { z } from "zod";
 
 import { throwGatewayApiError } from "@/core/api/errors";
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
-import type { UserMemory } from "@/core/memory/types";
 import type { Capability } from "@/core/projects/types";
 
 import { privateWorkQueryKey } from "./query-keys";
@@ -14,6 +13,19 @@ import {
 
 const memorySummarySchema = z
   .object({ summary: z.string(), updatedAt: z.string() })
+  .strict();
+
+const memoryFactSchema = z
+  .object({
+    id: z.string().min(1),
+    content: z.string(),
+    category: z.string(),
+    confidence: z.number().min(0).max(1),
+    createdAt: z.string(),
+    source: z.string(),
+    sourceThreadId: z.string().optional(),
+    sourceRunId: z.string().optional(),
+  })
   .strict();
 
 export const userMemorySchema = z
@@ -34,22 +46,17 @@ export const userMemorySchema = z
         longTermBackground: memorySummarySchema,
       })
       .strict(),
-    facts: z.array(
-      z
-        .object({
-          id: z.string().min(1),
-          content: z.string(),
-          category: z.string(),
-          confidence: z.number().min(0).max(1),
-          createdAt: z.string(),
-          source: z.string(),
-          sourceThreadId: z.string().optional(),
-          sourceRunId: z.string().optional(),
-        })
-        .strict(),
-    ),
+    facts: z.array(memoryFactSchema),
   })
   .strict();
+
+export type MemoryFact = z.infer<typeof memoryFactSchema>;
+export type UserMemory = z.infer<typeof userMemorySchema>;
+export type MemoryFactInput = Pick<
+  MemoryFact,
+  "content" | "category" | "confidence"
+>;
+export type MemoryFactPatchInput = Partial<MemoryFactInput>;
 
 const projectMemoryResponseSchema = z
   .object({

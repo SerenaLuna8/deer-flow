@@ -1,5 +1,5 @@
 import type { Translations } from "@/core/i18n/locales/types";
-import type { UserMemory } from "@/core/memory/types";
+import type { UserMemory } from "@/core/private-work/memory";
 
 export type MemoryViewFilter = "all" | "facts" | "summaries";
 export type MemoryFact = UserMemory["facts"][number];

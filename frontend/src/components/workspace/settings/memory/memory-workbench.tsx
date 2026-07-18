@@ -53,15 +53,10 @@ import {
 import type { Translations } from "@/core/i18n/locales/types";
 import { SafeStreamdown } from "@/core/streamdown/components";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
-import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 import { cn } from "@/lib/utils";
 
 export type MemorySourceThreadHref = (fact: MemoryFact) => string;
-
-export function defaultMemorySourceThreadHref(fact: MemoryFact) {
-  return pathOfThread(fact.sourceThreadId ?? fact.source);
-}
 
 export function MemoryHeaderActions(props: {
   t: Translations;
@@ -389,7 +384,7 @@ export function MemoryFactList(props: {
   isDeleting: boolean;
   onEdit?: (fact: MemoryFact) => void;
   onDelete?: (fact: MemoryFact) => void;
-  sourceThreadHref?: MemorySourceThreadHref;
+  sourceThreadHref: MemorySourceThreadHref;
 }): React.ReactNode {
   const {
     facts,
@@ -397,7 +392,7 @@ export function MemoryFactList(props: {
     isDeleting,
     onEdit,
     onDelete,
-    sourceThreadHref = defaultMemorySourceThreadHref,
+    sourceThreadHref,
   } = props;
 
   return (

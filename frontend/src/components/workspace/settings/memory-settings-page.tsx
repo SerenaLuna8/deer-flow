@@ -34,20 +34,11 @@ import {
   type MemorySourceThreadHref,
 } from "@/components/workspace/settings/memory/memory-workbench";
 import { useI18n } from "@/core/i18n/hooks";
-import { exportMemory } from "@/core/memory/api";
-import {
-  useClearMemory,
-  useCreateMemoryFact,
-  useDeleteMemoryFact,
-  useImportMemory,
-  useMemory,
-  useUpdateMemoryFact,
-} from "@/core/memory/hooks";
 import type {
   MemoryFactInput,
   MemoryFactPatchInput,
   UserMemory,
-} from "@/core/memory/types";
+} from "@/core/private-work/memory";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
 type PendingImport = {
@@ -152,39 +143,6 @@ const DEFAULT_FACT_FORM_STATE: FactFormState = {
   confidence: "0.8",
 };
 
-export function MemorySettingsPage() {
-  const { memory, isLoading, error } = useMemory();
-  const clearMemory = useClearMemory();
-  const createMemoryFact = useCreateMemoryFact();
-  const deleteMemoryFact = useDeleteMemoryFact();
-  const importMemoryMutation = useImportMemory();
-  const updateMemoryFact = useUpdateMemoryFact();
-  return (
-    <MemorySettingsView
-      controller={{
-        memory,
-        isLoading,
-        error,
-        clearMemory,
-        createMemoryFact,
-        deleteMemoryFact,
-        importMemory: importMemoryMutation,
-        updateMemoryFact,
-        exportMemory,
-      }}
-      permissions={{
-        canAdd: true,
-        canClear: true,
-        canDelete: true,
-        canExport: true,
-        canImport: true,
-        canModify: true,
-        canReload: false,
-      }}
-    />
-  );
-}
-
 export function MemorySettingsView({
   controller,
   permissions,
@@ -192,7 +150,7 @@ export function MemorySettingsView({
 }: {
   controller: MemorySettingsController;
   permissions: MemorySettingsPermissions;
-  sourceThreadHref?: MemorySourceThreadHref;
+  sourceThreadHref: MemorySourceThreadHref;
 }) {
   const { t } = useI18n();
   const {

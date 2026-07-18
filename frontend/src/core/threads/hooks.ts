@@ -837,10 +837,7 @@ export function useThreadStream({
   onFinish,
   onToolEnd,
 }: ThreadStreamOptions) {
-  const privateWork = usePrivateWorkAccess(
-    explicitPrivateWork,
-    Boolean(isMock),
-  );
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const { t } = useI18n();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
@@ -2098,7 +2095,7 @@ export function useThreadMetadata(
     privateWork?: PrivateWorkAccess;
   } = {},
 ) {
-  const privateWork = usePrivateWorkAccess(explicitPrivateWork, isMock);
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<AgentThread | null>({
     queryKey: scopedThreadQueryKey(
       privateWork.scope,

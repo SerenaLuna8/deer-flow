@@ -333,8 +333,8 @@ submit/approve 流程发布；Credential 页面不提供明文查看或复制，
 
 进入项目后，`/projects/{project_slug}/{agents,skills,mcp,credentials}` 分别展示系统资产与项目
 资产；系统资产只允许按 capability 固定、升级、回退或停用 binding，项目资产保留独立版本历史。
-旧 `/workspace/{agents,skills,tools}` 仅作为 PostgreSQL 系统 catalog 的只读兼容入口，不再承担
-文件配置式写入。所有 M3 项目页都不提供运行或开始对话入口。
+旧 `/workspace/{agents,skills,tools}` 入口已删除；Agent、Skill、MCP 和 Credential 只通过项目页或
+`/admin/assets` 管理。所有 M3 项目页都不提供运行或开始对话入口。
 
 完成 catalog cutover 后，系统 Agent、Skill 与 MCP 的运行时和旧版 GET 接口只读取 PostgreSQL
 已发布版本；旧文件即使仍存在也不会回退使用。旧版文件写接口统一返回
@@ -477,7 +477,7 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
    ```bash
    python scripts/load_memory_sample.py
    ```
-   This copies the sample fixture into the default local runtime memory file so reviewers can immediately test `Workspace sidebar > Memory`.
+   This copies the sample fixture into the default local runtime memory file. Project Memory review uses the entered project's `/projects/{project_slug}/memory` page.
    See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the shortest review flow.
 
 5. **Start services**:

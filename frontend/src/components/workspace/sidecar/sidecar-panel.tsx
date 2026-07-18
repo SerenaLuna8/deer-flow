@@ -67,7 +67,6 @@ import {
   buildSidecarContextPrompt,
   buildSidecarThreadMetadata,
 } from "@/core/sidecar";
-import { createSidecarThread } from "@/core/sidecar/api";
 import {
   useDeleteThread,
   useThreadStream,
@@ -193,7 +192,6 @@ export function SidecarPanel({ className }: { className?: string }) {
     threadId: sidecar.sidecarThreadId ?? undefined,
     displayThreadId: sidecar.sidecarThreadId ?? undefined,
     context: sidecar.context,
-    isMock: sidecar.isMock,
     onStart: (createdThreadId) => {
       sidecar.setSidecarThreadId(createdThreadId);
     },
@@ -233,7 +231,6 @@ export function SidecarPanel({ className }: { className?: string }) {
     isUploading ||
     hasOpenHumanInputCard ||
     (hasSidecarThread && isHistoryLoading) ||
-    (sidecar.isMock ?? false) ||
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
 
   useEffect(() => {
@@ -345,35 +342,29 @@ export function SidecarPanel({ className }: { className?: string }) {
       try {
         const contexts = references.map((reference) => reference.context);
         const projectScope = privateWork.scope;
-        const created = projectScope
-          ? await (async () => {
-              const parent = await privateWork.client.threads.get(
-                sidecar.parentThreadId,
-              );
-              const agentAssetId = parent.metadata?.agent_asset_id;
-              const agentScope = parent.metadata?.agent_scope;
-              if (
-                typeof agentAssetId !== "string" ||
-                (agentScope !== "project" && agentScope !== "system")
-              ) {
-                throw new Error(
-                  "Project side conversation Agent is unavailable.",
-                );
-              }
-              return createProjectThread(projectScope, {
-                threadId: uuid(),
-                agentAssetId,
-                agentScope,
-                metadata: buildSidecarThreadMetadata(
-                  sidecar.parentThreadId,
-                  contexts,
-                ),
-              });
-            })()
-          : await createSidecarThread({
-              parentThreadId: sidecar.parentThreadId,
-              context: contexts,
-            });
+        if (!projectScope) {
+          throw new Error("Project side conversation scope is unavailable.");
+        }
+        const parent = await privateWork.client.threads.get(
+          sidecar.parentThreadId,
+        );
+        const agentAssetId = parent.metadata?.agent_asset_id;
+        const agentScope = parent.metadata?.agent_scope;
+        if (
+          typeof agentAssetId !== "string" ||
+          (agentScope !== "project" && agentScope !== "system")
+        ) {
+          throw new Error("Project side conversation Agent is unavailable.");
+        }
+        const created = await createProjectThread(projectScope, {
+          threadId: uuid(),
+          agentAssetId,
+          agentScope,
+          metadata: buildSidecarThreadMetadata(
+            sidecar.parentThreadId,
+            contexts,
+          ),
+        });
         sidecar.setSidecarThreadId(created.thread_id);
         return created.thread_id;
       } finally {
@@ -629,7 +620,7 @@ export function SidecarPanel({ className }: { className?: string }) {
             initialScroll="instant"
             resizeScroll="instant"
             onSubmitHumanInput={
-              sidecar.isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+              env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
                 ? undefined
                 : handleSubmitHumanInput
             }

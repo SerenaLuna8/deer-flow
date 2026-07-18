@@ -10,7 +10,7 @@ import {
   upperFirst,
 } from "@/components/workspace/settings/memory/memory-view-model";
 import { enUS } from "@/core/i18n/locales/en-US";
-import type { UserMemory } from "@/core/memory/types";
+import type { UserMemory } from "@/core/private-work/memory";
 
 const memory: UserMemory = {
   version: "1",

@@ -1,7 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
 
-import { getAPIClient } from "@/core/api";
-import { getBackendBaseURL } from "@/core/config";
 import { automationRoot } from "@/core/project-automations/query-keys";
 import { governanceRoot } from "@/core/project-governance/query-keys";
 
@@ -112,17 +110,6 @@ export function createPrivateWorkScopeRegistry(): PrivateWorkScopeRegistry {
   return new PrivateWorkScopeRegistry();
 }
 
-export function getDefaultPrivateWorkAccess(isMock = false): PrivateWorkAccess {
-  const backendBaseURL = getBackendBaseURL();
-  return {
-    scope: null,
-    client: getAPIClient(isMock),
-    apiBaseURL: `${backendBaseURL}/api`,
-    queryKeyPrefix: [],
-    reconnectOnMount: true,
-  };
-}
-
 export async function transitionPrivateWorkScope(
   registry: PrivateWorkScopeRegistry,
   queryClient: QueryClient,
@@ -140,8 +127,8 @@ export async function transitionPrivateWorkScope(
   const cancellations = roots.map((queryKey) =>
     queryClient.cancelQueries({ queryKey }),
   );
-  registry.dispose(previous);
   await Promise.all(cancellations);
+  registry.dispose(previous);
   for (const root of roots) {
     queryClient.removeQueries({ queryKey: root });
     queryClient

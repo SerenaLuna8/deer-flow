@@ -168,8 +168,9 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    再清空当前 QueryClient，旧账户的缓存和迟到响应不会进入新账户。项目能力只采用后端
    返回值，不根据 `admin`、`editor`、`runner`、`viewer` 角色在浏览器中自行推导。
    登录后的默认入口是 `/workspace` 工作空间，可搜索、创建、置顶和按能力编辑项目，且不
-   显示旧版或项目级侧栏；`/workspace/projects` 仅作为兼容地址重定向到工作空间。静态
-   演示构建仍进入原有示例对话，且不会暴露会请求项目 API 的入口。项目卡只展示 API 的公开
+   显示旧版或项目级侧栏；旧 chats、agents、memory、scheduled-tasks、skills、tools 和 projects
+   工作空间子路由均返回 not-found。静态演示构建在同一 `/workspace` URL 渲染本地无网络示例卡片，
+   不会发起 `/api/` 请求或暴露项目入口。项目卡只展示 API 的公开
    字段。进入项目时，前端会通过成员可见的项目列表精确匹配 slug，再用返回的 UUID 调用
    enter，绝不会把 slug 传给只接受 UUID 的详情或 enter 接口。
    `/projects/<project_slug>` 使用独立的认证和查询容器，不继承旧聊天工作区外壳。项目首页
@@ -182,8 +183,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    M3 把 Agent、Skill、MCP 和 Credential 的系统级、项目级定义迁入 PostgreSQL。平台管理员
    通过 `/admin/assets` 管理系统资产；进入项目后，
    `/projects/<project_slug>/{agents,skills,mcp,credentials}` 分别显示系统资产与项目资产，系统
-   binding 固定到明确 version。旧 `/workspace/{agents,skills,tools}` 只保留 PostgreSQL 系统
-   catalog 的只读兼容视图。M3 资产页不直接启动运行，项目 Chats 从 M4 项目私有入口选择并执行
+   binding 固定到明确 version。旧 `/workspace/{agents,skills,tools}` 已删除，资产只通过项目页或
+   `/admin/assets` 管理。M3 资产页不直接启动运行，项目 Chats 从 M4 项目私有入口选择并执行
    已发布且获准的 Agent、Skill 和 MCP 版本。
 
    M4 项目私有工作在 `/projects/<project_slug>` 提供 Chats、Memory 和 Connections。入口同时要求
@@ -470,7 +471,7 @@ DeerFlow 支持可配置的 MCP Server 和 skills，用来扩展能力。
 
 DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
-DeerFlow 支持用户自有的 IM 渠道连接，并复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。项目级后端接口是 `/api/projects/{project_id}/connections`，绑定后的文本消息会在精确的项目与 owner 作用域运行。workspace UI 将在后续 M4 Task 迁移到该项目接口。设置和运维说明参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
+DeerFlow 支持用户自有的 IM 渠道连接，并复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。Connections 和 provider availability 只使用 `/api/projects/{project_id}/connections*`；绑定后的文本消息会在精确的项目与 owner 作用域运行，全局渠道绑定 UI 和 API 已删除。设置和运维说明参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
 
 | 渠道 | 传输方式 | 上手难度 |
 |---------|-----------|------------|

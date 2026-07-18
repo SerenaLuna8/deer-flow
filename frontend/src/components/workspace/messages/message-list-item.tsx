@@ -43,12 +43,12 @@ import {
   type FileInMessage,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { useProjectSlashSkills } from "@/core/shared-assets";
 import { readReferenceMessageContexts } from "@/core/sidecar";
 import {
   parseSlashSkillReference,
   resolveSlashSkillDisplay,
 } from "@/core/skills";
-import { useSkills } from "@/core/skills/hooks";
 import { SafeReasoningContent } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
@@ -235,7 +235,7 @@ function HumanMessageText({ content }: { content: string }) {
 }
 
 function HumanSlashSkillText({ content }: { content: string }) {
-  const { skills } = useSkills();
+  const { skills } = useProjectSlashSkills();
   const slashSkill = resolveSlashSkillDisplay(content, skills);
 
   if (!slashSkill) {

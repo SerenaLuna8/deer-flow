@@ -1,19 +1,12 @@
 "use client";
 
-import type { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
-import { SidebarTrigger } from "@/components/ui/sidebar";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
-import {
-  ChatBox,
-  useSpecificChatMode,
-  useThreadChat,
-} from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { GoalStatus } from "@/components/workspace/goal-status";
 import {
@@ -29,7 +22,6 @@ import {
   SidecarProvider,
   SidecarTrigger,
 } from "@/components/workspace/sidecar";
-import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
@@ -45,7 +37,7 @@ import {
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
-import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import {
   useBranchThread,
@@ -58,17 +50,22 @@ import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
+import {
+  ChatBox,
+  useSpecificChatMode,
+  useThreadChat,
+} from ".";
+
 export interface ChatRouteScope {
-  client: LangGraphClient;
+  privateWork: ProjectPrivateWorkScope;
   threadBasePath: string;
   newThreadPath: string;
   canCreate: boolean;
   canRun: boolean;
   canUpload: boolean;
   canDelete: boolean;
-  scheduledTasksVisible: boolean;
-  scheduledTasksHref: (threadId: string) => string;
-  scheduledTasksLabel: "automations" | "scheduledTasks";
+  automationVisible: boolean;
+  automationHref: (threadId: string) => string;
 }
 
 export type ScopedChatRouteScope = ChatRouteScope & {
@@ -78,35 +75,8 @@ export type ScopedChatRouteScope = ChatRouteScope & {
   regenerateVisible?: boolean;
   sidecarVisible?: boolean;
   artifactsVisible?: boolean;
-  sidebarTriggerVisible?: boolean;
   followupSuggestionsEnabled?: boolean;
 };
-
-export function workspaceChatRouteScope(
-  client: LangGraphClient,
-): ScopedChatRouteScope {
-  return {
-    client,
-    threadBasePath: "/workspace/chats",
-    newThreadPath: "/workspace/chats/new",
-    canCreate: true,
-    canRun: true,
-    canUpload: true,
-    canDelete: true,
-    scheduledTasksVisible: true,
-    scheduledTasksHref: (threadId) =>
-      `/workspace/scheduled-tasks?thread_id=${encodeURIComponent(threadId)}`,
-    scheduledTasksLabel: "scheduledTasks",
-    goalVisible: true,
-    compactVisible: true,
-    branchVisible: true,
-    regenerateVisible: true,
-    sidecarVisible: true,
-    artifactsVisible: true,
-    sidebarTriggerVisible: true,
-    followupSuggestionsEnabled: true,
-  };
-}
 
 function OptionalSidecarProvider({
   enabled,
@@ -126,18 +96,11 @@ export function ScopedChatPage({
 }) {
   const { t } = useI18n();
   const router = useRouter();
-  const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
-    useThreadChat({
-      allowNewThread: scope.canCreate && scope.newThreadPath.endsWith("/new"),
-    });
-  const contextualPrivateWork = usePrivateWorkAccess(undefined, isMock);
-  const privateWork = useMemo(
-    () => ({
-      ...contextualPrivateWork,
-      client: isMock ? contextualPrivateWork.client : scope.client,
-    }),
-    [contextualPrivateWork, isMock, scope.client],
-  );
+  const { threadId, setThreadId, isNewThread, setIsNewThread } = useThreadChat({
+    allowNewThread: scope.canCreate && scope.newThreadPath.endsWith("/new"),
+  });
+  const privateWork = scope.privateWork;
+  const isMock = false;
   // `isNewThread` tracks whether the backend has the thread yet — gates the
   // SDK's history fetch (see issue #2746).  `isWelcomeMode` is the visual
   // welcome layout (centered input, hero, quick actions); we flip it to false
@@ -371,7 +334,6 @@ export function ScopedChatPage({
         enabled={scope.sidecarVisible !== false}
         parentThreadId={threadId}
         context={settings.context}
-        isMock={isMock}
       >
         <ChatBox threadId={threadId}>
           <div className="relative flex size-full min-h-0 justify-between">
@@ -383,22 +345,16 @@ export function ScopedChatPage({
                   : "bg-background/80 shadow-xs backdrop-blur",
               )}
             >
-              {scope.sidebarTriggerVisible !== false && (
-                <SidebarTrigger className="md:hidden" />
-              )}
               <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
                 <ThreadTitle threadId={threadId} thread={thread} />
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {!isNewThread && scope.scheduledTasksVisible && (
-                  <ThreadScheduledTasksLink
-                    href={scope.scheduledTasksHref(threadId)}
-                    label={
-                      scope.scheduledTasksLabel === "automations"
-                        ? t.project.automations
-                        : t.sidebar.scheduledTasks
-                    }
-                  />
+                {!isNewThread && scope.automationVisible && (
+                  <Button asChild size="sm" variant="ghost">
+                    <a href={scope.automationHref(threadId)}>
+                      {t.project.automations}
+                    </a>
+                  </Button>
                 )}
                 <TokenUsageIndicator
                   threadId={isNewThread ? undefined : threadId}

@@ -3,13 +3,6 @@
 import { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
 
 import { getLangGraphBaseURL } from "../config";
-import { isStaticWebsiteOnly } from "../static-mode";
-import {
-  loadStaticDemoThread,
-  loadStaticDemoThreads,
-  staticDemoThreadState,
-} from "../threads/static-demo";
-import type { AgentThreadState } from "../threads/types";
 
 import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
 import { sanitizeRunStreamOptions } from "./stream-mode";
@@ -181,10 +174,6 @@ export function createCompatibleClient({
   isMock,
   runMetadataStorage,
 }: CompatibleClientOptions = {}): LangGraphClient {
-  if (isStaticWebsiteOnly() && !isMock && !configuredApiUrl) {
-    return createStaticClient();
-  }
-
   const apiUrl = configuredApiUrl ?? getLangGraphBaseURL(isMock);
   console.log(`Creating API client with base URL: ${apiUrl}`);
   const client = new LangGraphClient({
@@ -243,57 +232,6 @@ export function createCompatibleClient({
       throw error;
     }
   } as typeof client.runs.joinStream;
-
-  return client;
-}
-
-function createStaticClient(): LangGraphClient {
-  const apiUrl =
-    typeof window === "undefined"
-      ? "http://localhost:3000"
-      : window.location.origin;
-  const client = new LangGraphClient({ apiUrl });
-
-  client.threads.search = (async (query) => {
-    return loadStaticDemoThreads(query);
-  }) as typeof client.threads.search;
-
-  client.threads.get = (async (threadId) => {
-    return loadStaticDemoThread(threadId);
-  }) as typeof client.threads.get;
-
-  client.threads.getState = (async (threadId) => {
-    return staticDemoThreadState(await loadStaticDemoThread(threadId));
-  }) as typeof client.threads.getState;
-
-  client.threads.getHistory = (async (threadId) => {
-    return [staticDemoThreadState(await loadStaticDemoThread(threadId))];
-  }) as typeof client.threads.getHistory;
-
-  client.threads.update = (async (threadId) => {
-    return loadStaticDemoThread(threadId);
-  }) as typeof client.threads.update;
-
-  client.runs.list = (async () => []) as typeof client.runs.list;
-  client.runs.stream = async function* () {
-    /* empty */
-  } as typeof client.runs.stream;
-  client.runs.joinStream = async function* () {
-    /* empty */
-  } as typeof client.runs.joinStream;
-
-  return client as LangGraphClient<AgentThreadState>;
-}
-
-const _clients = new Map<string, LangGraphClient>();
-export function getAPIClient(isMock?: boolean): LangGraphClient {
-  const cacheKey = isMock ? "mock" : "default";
-  let client = _clients.get(cacheKey);
-
-  if (!client) {
-    client = createCompatibleClient({ isMock });
-    _clients.set(cacheKey, client);
-  }
 
   return client;
 }

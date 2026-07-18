@@ -1539,6 +1539,37 @@ export async function mockProjectAutomationAPI(
         request_id: `agents-${scopeKey}`,
       });
     }
+    if (path.endsWith("/private-work/threads/search") && method === "POST") {
+      return automationJson(route, { items: [] });
+    }
+    if (path.endsWith("/memory") && method === "GET") {
+      const updatedAt = "2026-07-16T00:00:00Z";
+      return automationJson(route, {
+        namespace: "default",
+        version: 1,
+        memory: {
+          version: "1.0",
+          lastUpdated: updatedAt,
+          user: {
+            workContext: { summary: "", updatedAt },
+            personalContext: { summary: "", updatedAt },
+            topOfMind: { summary: "", updatedAt },
+          },
+          history: {
+            recentMonths: { summary: "", updatedAt },
+            earlierContext: { summary: "", updatedAt },
+            longTermBackground: { summary: "", updatedAt },
+          },
+          facts: [],
+        },
+      });
+    }
+    if (path.endsWith("/connections/providers") && method === "GET") {
+      return automationJson(route, { enabled: true, providers: [] });
+    }
+    if (path.endsWith("/connections") && method === "GET") {
+      return automationJson(route, { connections: [] });
+    }
 
     if (!path.startsWith(base)) {
       return automationJson(route, { detail: "not found" }, 404);

@@ -2,24 +2,24 @@
 
 import { useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import {
   AutomationScheduleInput,
   detectBrowserTimezone,
   type AutomationScheduleValue,
-} from "@/components/workspace/scheduled-task-schedule-input";
+} from "@/components/projects/automations/automation-schedule-input";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  RECIPES,
+  type Recipe,
+  type RecipeTitleKey,
+} from "@/core/project-automations/schedule/recipes";
 import type {
   Automation,
   CreateAutomationInput,
   UpdateAutomationInput,
 } from "@/core/project-automations/types";
-import {
-  RECIPES,
-  type Recipe,
-  type RecipeTitleKey,
-} from "@/core/scheduled-tasks/recipes";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;

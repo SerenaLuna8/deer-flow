@@ -5,17 +5,17 @@ import { createContext, useContext, useEffect, useMemo, useRef } from "react";
 
 import {
   createPrivateWorkScopeRegistry,
-  getDefaultPrivateWorkAccess,
   transitionPrivateWorkScope,
 } from "./scope-registry";
-import type { PrivateWorkAccess, ProjectClientScope } from "./types";
+import type {
+  PrivateWorkAccess,
+  ProjectClientScope,
+  ProjectPrivateWorkScope,
+} from "./types";
 
 const PrivateWorkContext = createContext<PrivateWorkAccess | undefined>(
   undefined,
 );
-
-const defaultAccess = getDefaultPrivateWorkAccess();
-const mockAccess = getDefaultPrivateWorkAccess(true);
 
 export function PrivateWorkProvider({
   access,
@@ -35,7 +35,7 @@ export function ProjectPrivateWorkProvider({
   accountId,
   projectId,
   children,
-}: ProjectClientScope & { children: React.ReactNode }) {
+}: ProjectClientScope & { children?: React.ReactNode }) {
   const queryClient = useQueryClient();
   const registryRef = useRef<ReturnType<
     typeof createPrivateWorkScopeRegistry
@@ -59,8 +59,21 @@ export function ProjectPrivateWorkProvider({
 
 export function usePrivateWorkAccess(
   explicit?: PrivateWorkAccess,
-  isMock = false,
 ): PrivateWorkAccess {
   const contextual = useContext(PrivateWorkContext);
-  return explicit ?? contextual ?? (isMock ? mockAccess : defaultAccess);
+  const access = explicit ?? contextual;
+  if (!access) {
+    throw new Error("Private work access requires a project provider");
+  }
+  return access;
+}
+
+export function useProjectPrivateWorkScope(
+  explicit?: PrivateWorkAccess,
+): ProjectPrivateWorkScope {
+  const access = usePrivateWorkAccess(explicit);
+  if (!access.scope) {
+    throw new Error("An entered project private-work scope is required");
+  }
+  return access as ProjectPrivateWorkScope;
 }

@@ -5,18 +5,13 @@ import { LoaderCircleIcon, UnplugIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { ChannelProviderIcon } from "@/components/projects/private-work/channel-provider-icon";
 import { Button } from "@/components/ui/button";
-import { ChannelProviderIcon } from "@/components/workspace/channels/channel-provider-icon";
 import { useAuth } from "@/core/auth/AuthProvider";
-import {
-  closeConnectWindow,
-  openConnectUrl,
-  prepareConnectWindow,
-} from "@/core/channels/open-connect-url";
 import {
   labelOfChannelProvider,
   type ChannelProviderId,
-} from "@/core/channels/types";
+} from "@/core/private-work/connection-types";
 import {
   connectProjectConnection,
   disconnectProjectConnection,
@@ -25,6 +20,11 @@ import {
   projectConnectionProvidersQueryKey,
   projectConnectionsQueryKey,
 } from "@/core/private-work/connections";
+import {
+  closeConnectWindow,
+  openConnectUrl,
+  prepareConnectWindow,
+} from "@/core/private-work/open-connect-url";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import type { Project } from "@/core/projects/types";
 import { useProjectAssets, type ProjectAssetList } from "@/core/shared-assets";

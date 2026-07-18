@@ -11,8 +11,8 @@ import {
   type AutomationFormDraft,
 } from "@/components/projects/automations/automation-form";
 import { I18nProvider } from "@/core/i18n/context";
+import { RECIPES } from "@/core/project-automations/schedule/recipes";
 import type { Automation } from "@/core/project-automations/types";
-import { RECIPES } from "@/core/scheduled-tasks/recipes";
 
 const AGENT = {
   id: "22222222-2222-4222-8222-222222222222",
@@ -212,7 +212,7 @@ describe("AutomationForm", () => {
     const source = readFileSync(
       resolve(
         process.cwd(),
-        "src/components/workspace/scheduled-task-schedule-input.tsx",
+        "src/components/projects/automations/automation-schedule-input.tsx",
       ),
       "utf8",
     );

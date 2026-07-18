@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, test, rs } from "@rstest/core";
 
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
-import type { UserMemory } from "@/core/memory/types";
 import {
   exportProjectMemory,
   importProjectMemory,
@@ -11,6 +10,7 @@ import {
   reloadProjectMemory,
   deleteProjectMemoryFact,
   updateProjectMemoryFact,
+  type UserMemory,
 } from "@/core/private-work/memory";
 
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));

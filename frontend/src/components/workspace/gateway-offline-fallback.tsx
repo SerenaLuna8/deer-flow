@@ -6,10 +6,9 @@ import { GatewayOfflineBanner } from "./gateway-offline-banner";
 
 interface GatewayOfflineFallbackProps {
   /**
-   * When true, this component renders its own banner. The workspace layout
-   * sets this to false because WorkspaceContent already mounts the banner
-   * inside its sidebar layout. The (auth) layout sets it to true because
-   * its plain children have no banner of their own.
+   * When true, this component renders its own banner. The workspace live
+   * layout renders the banner separately, while the (auth) layout needs this
+   * fallback to own it.
    */
   renderBanner?: boolean;
   children?: React.ReactNode;

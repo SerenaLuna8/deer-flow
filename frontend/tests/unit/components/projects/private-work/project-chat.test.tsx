@@ -11,8 +11,7 @@ import {
   projectThreadAvailability,
 } from "@/components/projects/private-work/project-chat-page";
 import { ProjectPrivateWorkCta } from "@/components/projects/project-private-work-cta";
-import { workspaceChatRouteScope } from "@/components/workspace/chats/scoped-chat-page";
-import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
+import { ProjectPrivateWorkProvider } from "@/core/private-work/provider";
 import { CAPABILITIES, type Project } from "@/core/projects/types";
 
 const THREAD_ID = "33333333-3333-4333-8333-333333333333";
@@ -46,8 +45,7 @@ describe("project chat route", () => {
     expect(scope.canRun).toBe(true);
     expect(scope.canUpload).toBe(true);
     expect(scope.canDelete).toBe(true);
-    expect(scope.scheduledTasksVisible).toBe(false);
-    expect(scope.scheduledTasksLabel).toBe("automations");
+    expect(scope.automationVisible).toBe(false);
     expect(scope.goalVisible).toBe(false);
     expect(scope.compactVisible).toBe(false);
     expect(scope.branchVisible).toBe(false);
@@ -59,8 +57,8 @@ describe("project chat route", () => {
 
   test("uses only the project Automation route when every Chat entry gate is open", () => {
     const scope = projectChatRouteScope(project, true, true, false);
-    expect(scope.scheduledTasksVisible).toBe(true);
-    expect(scope.scheduledTasksHref(THREAD_ID)).toBe(
+    expect(scope.automationVisible).toBe(true);
+    expect(scope.automationHref(THREAD_ID)).toBe(
       `/projects/alpha/automations?thread_id=${THREAD_ID}`,
     );
 
@@ -70,24 +68,8 @@ describe("project chat route", () => {
       true,
       false,
     );
-    const html = renderToStaticMarkup(
-      <ThreadScheduledTasksLink
-        href={encodedScope.scheduledTasksHref(THREAD_ID)}
-        label="Automations"
-      />,
-    );
-    expect(html).toContain(
-      `href="/projects/alpha%2Fbeta/automations?thread_id=${THREAD_ID}"`,
-    );
-    expect(html).not.toContain("/workspace/scheduled-tasks");
-  });
-
-  test("keeps the workspace Chat link on the legacy scheduled-task route", () => {
-    const scope = workspaceChatRouteScope(null as never);
-    expect(scope.scheduledTasksVisible).toBe(true);
-    expect(scope.scheduledTasksLabel).toBe("scheduledTasks");
-    expect(scope.scheduledTasksHref(THREAD_ID)).toBe(
-      `/workspace/scheduled-tasks?thread_id=${THREAD_ID}`,
+    expect(encodedScope.automationHref(THREAD_ID)).toBe(
+      `/projects/alpha%2Fbeta/automations?thread_id=${THREAD_ID}`,
     );
   });
 
@@ -98,16 +80,16 @@ describe("project chat route", () => {
       capabilities: ["project.read", "private_work.read_own"],
     };
     expect(projectChatRouteScope(viewer, true, true, false)).toMatchObject({
-      scheduledTasksVisible: true,
+      automationVisible: true,
     });
     expect(projectChatRouteScope(viewer, false, true, false)).toMatchObject({
-      scheduledTasksVisible: false,
+      automationVisible: false,
     });
     expect(projectChatRouteScope(viewer, true, false, false)).toMatchObject({
-      scheduledTasksVisible: false,
+      automationVisible: false,
     });
     expect(projectChatRouteScope(viewer, true, true, true)).toMatchObject({
-      scheduledTasksVisible: false,
+      automationVisible: false,
     });
     expect(
       projectChatRouteScope(
@@ -116,7 +98,7 @@ describe("project chat route", () => {
         true,
         false,
       ),
-    ).toMatchObject({ scheduledTasksVisible: false });
+    ).toMatchObject({ automationVisible: false });
   });
 
   test("viewer sees read-only guidance and never gets a create control", () => {
@@ -127,7 +109,12 @@ describe("project chat route", () => {
     };
     const html = renderToStaticMarkup(
       <QueryClientProvider client={new QueryClient()}>
-        <ProjectPrivateWorkCta project={viewer} />
+        <ProjectPrivateWorkProvider
+          accountId="22222222-2222-4222-8222-222222222222"
+          projectId={viewer.id}
+        >
+          <ProjectPrivateWorkCta project={viewer} />
+        </ProjectPrivateWorkProvider>
       </QueryClientProvider>,
     );
     expect(html).toContain("你可以查看自己的既有对话，但不能创建新工作");
@@ -177,16 +164,12 @@ describe("project chat route", () => {
     expect(html).not.toMatch(/owner|project|跨项目|其他用户/iu);
   });
 
-  test("workspace and project details share the scoped chat implementation", () => {
+  test("project details use the mandatory scoped chat implementation", () => {
     const shared = readFileSync(
       resolve(
         process.cwd(),
         "src/components/workspace/chats/scoped-chat-page.tsx",
       ),
-      "utf8",
-    );
-    const workspace = readFileSync(
-      resolve(process.cwd(), "src/app/workspace/chats/[thread_id]/page.tsx"),
       "utf8",
     );
     const projectRoute = readFileSync(
@@ -197,7 +180,6 @@ describe("project chat route", () => {
       "utf8",
     );
 
-    expect(workspace).toContain("ScopedChatPage");
     expect(projectRoute).toContain("ProjectChatPage");
     const projectPage = readFileSync(
       resolve(
@@ -226,12 +208,12 @@ describe("project chat route", () => {
     expect(shared).toContain("scope.branchVisible");
     expect(shared).toContain("scope.sidecarVisible");
     expect(shared).toContain("scope.artifactsVisible");
-    expect(shared).toContain("scope.sidebarTriggerVisible");
     expect(shared).toContain("scope.followupSuggestionsEnabled");
-    expect(shared).toContain("href={scope.scheduledTasksHref(threadId)}");
+    expect(shared).toContain("scope.privateWork");
+    expect(shared).toContain("scope.automationHref(threadId)");
     expect(shared).toContain("enabled={scope.sidecarVisible !== false}");
     expect(projectPage).toContain("useProjectAutomationReadiness");
-    expect(projectPage).toContain("sidebarTriggerVisible: false");
+    expect(projectPage).toContain("useProjectPrivateWorkScope");
     expect(projectPage).toContain("sidecarVisible: canRun");
     expect(projectPage).toContain("artifactsVisible: canRead");
   });

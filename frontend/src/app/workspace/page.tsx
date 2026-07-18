@@ -1,23 +1,39 @@
-import fs from "fs";
-import path from "path";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
-import { redirect } from "next/navigation";
+const STATIC_PROJECTS = [
+  ["Research Lab", "Explore a local, read-only project workspace demo."],
+  ["Product Studio", "Preview the project-first navigation and layout."],
+  ["Operations", "See how independent project scopes stay separated."],
+] as const;
 
-import { ProjectWorkbenchPage } from "@/components/projects/project-workbench-page";
-import { workspaceLandingPath } from "@/core/projects/features";
-import { env } from "@/env";
+function StaticWorkspaceDemo() {
+  return (
+    <main
+      className="mx-auto min-h-screen w-full max-w-6xl space-y-8 px-6 py-12"
+      data-testid="static-workspace-demo"
+    >
+      <header className="space-y-2">
+        <h1 className="text-3xl font-semibold tracking-tight">Workspace</h1>
+        <p className="text-muted-foreground">
+          Local demo projects. Network-backed project actions are unavailable.
+        </p>
+      </header>
+      <ul className="grid gap-4 md:grid-cols-3">
+        {STATIC_PROJECTS.map(([name, description]) => (
+          <li key={name} className="bg-card rounded-2xl border p-5 shadow-sm">
+            <h2 className="font-medium">{name}</h2>
+            <p className="text-muted-foreground mt-2 text-sm">{description}</p>
+          </li>
+        ))}
+      </ul>
+    </main>
+  );
+}
 
-export default function WorkspacePage() {
-  if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true") {
-    const firstThread = fs
-      .readdirSync(path.resolve(process.cwd(), "public/demo/threads"), {
-        withFileTypes: true,
-      })
-      .find((thread) => thread.isDirectory() && !thread.name.startsWith("."));
-    if (firstThread) {
-      return redirect(workspaceLandingPath(true, firstThread.name));
-    }
-    return redirect(workspaceLandingPath(true, null));
-  }
+export default async function WorkspacePage() {
+  if (isStaticWebsiteOnly()) return <StaticWorkspaceDemo />;
+  const { ProjectWorkbenchPage } = await import(
+    "@/components/projects/project-workbench-page"
+  );
   return <ProjectWorkbenchPage />;
 }

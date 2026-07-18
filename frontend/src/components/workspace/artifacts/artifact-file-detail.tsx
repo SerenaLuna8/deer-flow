@@ -3,12 +3,10 @@ import {
   CopyIcon,
   DownloadIcon,
   EyeIcon,
-  LoaderIcon,
-  PackageIcon,
   SquareArrowOutUpRightIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -37,8 +35,6 @@ import {
   getArtifactViewState,
   HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
 } from "@/core/artifacts/preview";
-import { urlOfArtifact } from "@/core/artifacts/utils";
-import { useAuth } from "@/core/auth/AuthProvider";
 import { extractCitationSources } from "@/core/citations/sources";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
@@ -47,8 +43,7 @@ import {
   projectArtifactDownloadURL,
   projectFileDownloadURL,
 } from "@/core/private-work/files";
-import { usePrivateWorkAccess } from "@/core/private-work/provider";
-import { installSkill, SkillRequestError } from "@/core/skills/api";
+import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 import { SafeStreamdown } from "@/core/streamdown/components";
 import { useUploadedFiles } from "@/core/uploads";
 import {
@@ -58,13 +53,11 @@ import {
   getFileIcon,
   getFileName,
 } from "@/core/utils/files";
-import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { ArtifactLink } from "../citations/artifact-link";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { useThread } from "../messages/context";
-import { Tooltip } from "../tooltip";
 
 import { useArtifacts } from "./context";
 import { artifactMarkdownPlugins } from "./markdown-preview-plugins";
@@ -81,11 +74,9 @@ export function ArtifactFileDetail({
   threadId: string;
 }) {
   const { t } = useI18n();
-  const { user } = useAuth();
-  const privateWork = usePrivateWorkAccess();
-  const isAdmin = user?.system_role === "system_admin";
+  const privateWork = useProjectPrivateWorkScope();
   const { artifacts, setOpen, select } = useArtifacts();
-  const { thread, isMock } = useThread();
+  const { thread } = useThread();
   const isWriteFile = useMemo(() => {
     return filepathFromProps.startsWith("write-file:");
   }, [filepathFromProps]);
@@ -99,10 +90,10 @@ export function ArtifactFileDetail({
   const projectFiles = useUploadedFiles(
     threadId,
     privateWork,
-    privateWork.scope !== null && !isWriteFile,
+    !isWriteFile,
   );
   const projectURL = useMemo(() => {
-    if (!privateWork.scope || isWriteFile) return null;
+    if (isWriteFile) return null;
     const normalizedPath = filepath
       .replace(/^\/mnt\/(?:data|user-data)\//u, "")
       .replace(/^\/+/, "");
@@ -121,12 +112,8 @@ export function ArtifactFileDetail({
     }
     return null;
   }, [filepath, isWriteFile, privateWork, projectFiles.data?.files, threadId]);
-  const openURL = privateWork.scope
-    ? projectURL
-    : urlOfArtifact({ filepath, threadId, isMock });
-  const downloadURL = privateWork.scope
-    ? projectURL
-    : urlOfArtifact({ filepath, threadId, download: true, isMock });
+  const openURL = projectURL;
+  const downloadURL = projectURL;
   // Keep these local because ChatBox replaces context artifacts with thread state.
   const [openedPresentedFilepaths, setOpenedPresentedFilepaths] = useState<
     string[]
@@ -205,14 +192,14 @@ export function ArtifactFileDetail({
     enabled:
       isCodeFile &&
       !isWriteFile &&
-      (privateWork.scope === null || projectURL !== null),
+      projectURL !== null,
     url: openURL ?? undefined,
     privateWork,
   });
 
   const artifactContentState =
     isCodeFile && !isWriteFile
-      ? privateWork.scope !== null && projectURL === null
+      ? projectURL === null
         ? "unavailable"
         : isLoading
           ? "loading"
@@ -232,36 +219,10 @@ export function ArtifactFileDetail({
   const [viewMode, setViewMode] = useState<"code" | "preview">(
     artifactViewState.initialViewMode,
   );
-  const [isInstalling, setIsInstalling] = useState(false);
   useEffect(() => {
     setViewMode(artifactViewState.initialViewMode);
   }, [artifactViewState.initialViewMode]);
 
-  const handleInstallSkill = useCallback(async () => {
-    if (isInstalling) return;
-
-    setIsInstalling(true);
-    try {
-      const result = await installSkill({
-        thread_id: threadId,
-        path: filepath,
-      });
-      if (result.success) {
-        toast.success(result.message);
-      } else {
-        toast.error(result.message ?? "Failed to install skill");
-      }
-    } catch (error) {
-      console.error("Failed to install skill:", error);
-      if (error instanceof SkillRequestError && error.isAdminRequired) {
-        toast.error(t.settings.skills.installAdminRequired);
-      } else {
-        toast.error("Failed to install skill");
-      }
-    } finally {
-      setIsInstalling(false);
-    }
-  }, [threadId, filepath, isInstalling, t]);
   return (
     <Artifact className={cn(className)}>
       <ArtifactHeader className="px-2">
@@ -312,23 +273,6 @@ export function ArtifactFileDetail({
         </div>
         <div className="flex items-center gap-2">
           <ArtifactActions>
-            {!privateWork.scope &&
-              !isWriteFile &&
-              filepath.endsWith(".skill") &&
-              isAdmin && (
-                <Tooltip content={t.toolCalls.skillInstallTooltip}>
-                  <ArtifactAction
-                    icon={isInstalling ? LoaderIcon : PackageIcon}
-                    label={t.common.install}
-                    tooltip={t.common.install}
-                    disabled={
-                      isInstalling ||
-                      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
-                    }
-                    onClick={handleInstallSkill}
-                  />
-                </Tooltip>
-              )}
             {!isWriteFile && openURL && (
               <ArtifactAction
                 icon={SquareArrowOutUpRightIcon}

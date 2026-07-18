@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("static build hides project Automation and rejects its direct URL without data requests", async ({
+test("static workspace stays local and project routes stay absent without API requests", async ({
   page,
 }) => {
   const apiPaths: string[] = [];
@@ -11,7 +11,8 @@ test("static build hides project Automation and rejects its direct URL without d
   await page.route("**/api/**", (route) => route.abort());
 
   await page.goto("/workspace");
-  await expect(page).toHaveURL(/\/workspace\/chats\//u);
+  await expect(page).toHaveURL(/\/workspace$/u);
+  await expect(page.getByTestId("static-workspace-demo")).toBeVisible();
   await expect(page.getByRole("link", { name: "Automations" })).toHaveCount(0);
   await expect(page.locator('a[href^="/projects/"]')).toHaveCount(0);
 
@@ -19,8 +20,5 @@ test("static build hides project Automation and rejects its direct URL without d
   expect(direct?.status()).toBe(404);
   await expect(page.getByText("This page could not be found.")).toBeVisible();
 
-  expect(apiPaths.some((path) => path.includes("/automations"))).toBe(false);
-  expect(apiPaths.some((path) => path.startsWith("/api/scheduled-tasks"))).toBe(
-    false,
-  );
+  expect(apiPaths).toEqual([]);
 });

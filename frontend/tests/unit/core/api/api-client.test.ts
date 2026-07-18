@@ -2,10 +2,14 @@ import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
   clearReconnectRun,
-  getAPIClient,
+  createCompatibleClient,
   isInactiveRunStreamError,
   isRunNotCancellableError,
 } from "@/core/api/api-client";
+
+function createTestClient(isMock?: boolean) {
+  return createCompatibleClient({ isMock });
+}
 
 function makeSessionStorage() {
   const values = new Map<string, string>();
@@ -24,10 +28,9 @@ afterEach(() => {
   rs.unstubAllGlobals();
 });
 
-test("keeps the default and mock compatibility clients in separate registries", () => {
-  expect(getAPIClient()).toBe(getAPIClient());
-  expect(getAPIClient(true)).toBe(getAPIClient(true));
-  expect(getAPIClient()).not.toBe(getAPIClient(true));
+test("creates explicit compatibility clients without a global registry", () => {
+  expect(createTestClient()).not.toBe(createTestClient());
+  expect(createTestClient(true)).not.toBe(createTestClient(true));
 });
 
 test("identifies inactive run stream errors", () => {
@@ -100,7 +103,7 @@ test("clears stale reconnect metadata when join stream cannot be resumed", async
   );
 
   await expect(
-    getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
+    createTestClient(true).runs.joinStream("thread-1", "run-1").next(),
   ).resolves.toMatchObject({ done: true });
 
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
@@ -123,7 +126,7 @@ test("rethrows unrelated streaming errors", async () => {
   );
 
   await expect(
-    getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
+    createTestClient(true).runs.joinStream("thread-1", "run-1").next(),
   ).rejects.toThrow("HTTP 409");
 
   expect(sessionStorage.removeItem).not.toHaveBeenCalled();
@@ -174,7 +177,7 @@ test("swallows terminal-state cancel 409 and clears stale key", async () => {
 
   // Resolves (no throw) — cancelling an already-finished run is a no-op.
   await expect(
-    getAPIClient(true).runs.cancel("thread-1", "run-1"),
+    createTestClient(true).runs.cancel("thread-1", "run-1"),
   ).resolves.toBeUndefined();
 
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
@@ -201,7 +204,7 @@ test("rethrows not-active-on-worker cancel 409", async () => {
   );
 
   await expect(
-    getAPIClient(true).runs.cancel("thread-1", "run-1"),
+    createTestClient(true).runs.cancel("thread-1", "run-1"),
   ).rejects.toThrow("HTTP 409");
 
   expect(sessionStorage.removeItem).not.toHaveBeenCalled();
@@ -229,7 +232,7 @@ test("short-circuits reconnect to a terminal run", async () => {
   });
   rs.stubGlobal("fetch", fetchFn);
 
-  const gen = getAPIClient(true).runs.joinStream("thread-1", "run-1");
+  const gen = createTestClient(true).runs.joinStream("thread-1", "run-1");
   await expect(gen.next()).resolves.toMatchObject({ done: true });
 
   // Preflight only — no stream/join request beyond the GET.
@@ -263,7 +266,7 @@ test("falls back to join when preflight cannot resolve the run", async () => {
   rs.stubGlobal("fetch", fetchFn);
 
   await expect(
-    getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
+    createTestClient(true).runs.joinStream("thread-1", "run-1").next(),
   ).resolves.toMatchObject({ done: true });
 
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
@@ -299,7 +302,7 @@ test("proceeds to join when the run is still active", async () => {
   rs.stubGlobal("fetch", fetchFn);
 
   await expect(
-    getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
+    createTestClient(true).runs.joinStream("thread-1", "run-1").next(),
   ).resolves.toMatchObject({ done: true });
 
   // Two requests: preflight GET + the real join. A short-circuit would be one.
@@ -332,7 +335,7 @@ test("short-circuits reconnect to an interrupted (user-cancelled) run", async ()
   });
   rs.stubGlobal("fetch", fetchFn);
 
-  const gen = getAPIClient(true).runs.joinStream("thread-1", "run-1");
+  const gen = createTestClient(true).runs.joinStream("thread-1", "run-1");
   await expect(gen.next()).resolves.toMatchObject({ done: true });
 
   expect(fetchFn).toHaveBeenCalledTimes(1);

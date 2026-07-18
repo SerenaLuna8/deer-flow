@@ -7,8 +7,9 @@ import { Button } from "@/components/ui/button";
 import {
   ScopedChatPage,
   type ScopedChatRouteScope,
-} from "@/components/workspace/chats/scoped-chat-page";
-import { usePrivateWorkAccess } from "@/core/private-work/provider";
+} from "@/components/workspace/project-chat";
+import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
+import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
 import { useProjectAutomationReadiness } from "@/core/project-automations/readiness";
 import {
   PROJECT_AUTOMATION,
@@ -17,7 +18,10 @@ import {
 import type { Project } from "@/core/projects/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
-export type ProjectChatRouteScope = Omit<ScopedChatRouteScope, "client">;
+export type ProjectChatRouteScope = Omit<
+  ScopedChatRouteScope,
+  "privateWork"
+>;
 
 export function projectChatRouteScope(
   project: Project,
@@ -37,22 +41,20 @@ export function projectChatRouteScope(
     canRun,
     canUpload: canRun,
     canDelete: canRead,
-    scheduledTasksVisible: projectAutomationEntryEnabled(
+    automationVisible: projectAutomationEntryEnabled(
       automationFeatureEnabled,
       staticWebsiteOnly,
       canRead,
       automationReady ? "ready" : undefined,
     ),
-    scheduledTasksHref: (threadId) =>
+    automationHref: (threadId) =>
       `/projects/${encodeURIComponent(project.slug)}/automations?thread_id=${encodeURIComponent(threadId)}`,
-    scheduledTasksLabel: "automations",
     goalVisible: false,
     compactVisible: false,
     branchVisible: false,
     regenerateVisible: false,
     sidecarVisible: canRun,
     artifactsVisible: canRead,
-    sidebarTriggerVisible: false,
     followupSuggestionsEnabled: false,
   };
 }
@@ -89,7 +91,7 @@ export function ProjectChatNotFound() {
 }
 
 export function ProjectChatPage({ project }: { project: Project }) {
-  const privateWork = usePrivateWorkAccess();
+  const privateWork: ProjectPrivateWorkScope = useProjectPrivateWorkScope();
   const staticWebsiteOnly = isStaticWebsiteOnly();
   const canReadPrivateWork = project.capabilities.includes(
     "private_work.read_own",
@@ -110,9 +112,9 @@ export function ProjectChatPage({ project }: { project: Project }) {
         PROJECT_AUTOMATION,
         staticWebsiteOnly,
       ),
-      client: privateWork.client,
+      privateWork,
     }),
-    [automationReady, privateWork.client, project, staticWebsiteOnly],
+    [automationReady, privateWork, project, staticWebsiteOnly],
   );
   return (
     <div className="h-[calc(100vh-3.5rem)] min-h-0 md:h-screen">

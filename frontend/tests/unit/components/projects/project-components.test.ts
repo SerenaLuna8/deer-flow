@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ProjectCard } from "@/components/projects/project-card";
 import { ProjectHome } from "@/components/projects/project-home";
 import { ProjectPrivateWorkCta } from "@/components/projects/project-private-work-cta";
+import { ProjectPrivateWorkProvider } from "@/core/private-work/provider";
 import { CAPABILITIES, type Project } from "@/core/projects/types";
 
 const project: Project = {
@@ -33,7 +34,18 @@ const project: Project = {
 
 function renderWithQueryClient(node: ReactNode): string {
   return renderToStaticMarkup(
-    createElement(QueryClientProvider, { client: new QueryClient() }, node),
+    createElement(
+      QueryClientProvider,
+      { client: new QueryClient() },
+      createElement(
+        ProjectPrivateWorkProvider,
+        {
+          accountId: "22222222-2222-4222-8222-222222222222",
+          projectId: project.id,
+        },
+        node,
+      ),
+    ),
   );
 }
 

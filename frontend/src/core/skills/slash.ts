@@ -1,4 +1,8 @@
-import type { Skill } from "./type";
+export type Skill = {
+  name: string;
+  description: string;
+  enabled: boolean;
+};
 
 /**
  * Composer control commands that own the leading slash. They must never be

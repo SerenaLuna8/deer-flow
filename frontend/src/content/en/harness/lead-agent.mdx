@@ -138,7 +138,7 @@ The same Lead Agent runtime powers both the default agent and any custom agents 
 - which **tool groups** it can use, and
 - which **model** it defaults to.
 
-Custom agents are created through the DeerFlow App UI or via the `/api/agents` endpoint. Their configuration is stored in `agents/{name}/config.yaml` relative to the backend directory.
+Agents are created through a project's Agents page, or through the system asset administration surface for platform-wide agents. Their versioned definitions and explicit project bindings are stored in PostgreSQL.
 
 <Callout type="tip">
   When a custom agent is selected in a thread, the Lead Agent loads that agent's

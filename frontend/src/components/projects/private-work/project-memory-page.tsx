@@ -7,7 +7,6 @@ import {
   MemorySettingsView,
   type MemorySettingsController,
 } from "@/components/workspace/settings/memory-settings-page";
-import type { MemoryFact } from "@/core/memory/types";
 import {
   deleteProjectMemoryFact,
   exportProjectMemory,
@@ -18,6 +17,7 @@ import {
   projectMemoryQueryKey,
   reloadProjectMemory,
   updateProjectMemoryFact,
+  type MemoryFact,
   type ProjectMemorySnapshot,
 } from "@/core/private-work/memory";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";

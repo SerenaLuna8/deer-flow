@@ -6,7 +6,7 @@ import type {
   ChannelConnectResponse,
   ChannelConnection,
   ChannelProviderId,
-} from "@/core/channels/types";
+} from "@/core/private-work/connection-types";
 
 import { privateWorkQueryKey } from "./query-keys";
 import {
