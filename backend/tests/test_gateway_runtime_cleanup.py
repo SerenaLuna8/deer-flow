@@ -1,4 +1,4 @@
-"""Regression coverage for the Gateway-owned LangGraph API runtime."""
+"""Regression coverage for Gateway topology without an embedded agent runtime."""
 
 from __future__ import annotations
 

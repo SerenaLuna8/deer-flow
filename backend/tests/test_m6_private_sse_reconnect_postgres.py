@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 
@@ -25,6 +26,10 @@ from app.reliability.error_mapping import (
 )
 from deerflow.runtime.events.models import StreamFrame
 from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+
+
+def _sse_data_payloads(transcript: str) -> list[object]:
+    return [json.loads(line.removeprefix("data: ")) for line in transcript.splitlines() if line.startswith("data: ")]
 
 
 @pytest_asyncio.fixture()
@@ -161,8 +166,10 @@ async def test_replays_only_frames_after_last_event_id_across_gateway_restart(
     assert f"id: {first_id}\n" not in response.text
     assert response.text.count(f"id: {second_id}\n") == 1
     assert response.text.count(f"id: {terminal_id}\n") == 1
-    assert 'data: {"delta": "second"}' in response.text
-    assert 'event: end\ndata: {"status": "completed"}' in response.text
+    assert _sse_data_payloads(response.text) == [
+        {"delta": "second"},
+        {"status": "completed"},
+    ]
 
 
 @pytest.mark.postgres
@@ -317,8 +324,7 @@ async def test_replay_corrects_provisional_success_when_cancel_wins_settlement(
 
     assert response.status_code == 200
     assert f"id: {provisional.id}\n" in response.text
-    assert 'data: {"status": "interrupted"}' in response.text
-    assert 'data: {"status": "success"}' not in response.text
+    assert _sse_data_payloads(response.text) == [{"status": "interrupted"}]
     frames = await writer.read_after(
         harness.seed.owner_a.resource_scope,
         thread_id,

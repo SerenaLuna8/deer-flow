@@ -1113,9 +1113,9 @@ fail closed。故障分界、幂等重跑和 marker 决策见 `docs/operations/m
 M4 项目 Thread 的普通业务入口是 `app.private_work.PrivateThreadService`，repository 的每条
 create/get/search/check-access/update/delete SQL 必须把 `project_id`、`owner_user_id` 与
 `deleted_at` 放在数据库 predicate/insert authority 中；active 读取同时排除 frozen row，mutation
-使用 `version` 做 optimistic compare。legacy user-only Thread API 只能经显式
-`TrustedUnscopedThreadMetaStore`，final schema 下 trusted create 还必须在 adapter 构造时给出
-project、Agent 和 membership-version authority，禁止猜默认 project/Agent。项目 checkpoint 只能从
+使用 `version` 做 optimistic compare。global user-only Thread API 已删除，缺失路由返回普通 404；
+Gateway 只通过 `app.private_work.http_runtime.start_private_run` 原子持久化 project-private Run、snapshot
+与 durable job，不创建 checkpoint 或启动 Agent。项目 checkpoint 只能从
 `ProjectScopedCheckpointer.for_context()` 取得；sync/async get/tuple/list/put/put-writes/delete 每次先
 按 project → membership → Thread 锁序取得 PostgreSQL row lock，并在 raw saver IO 完成前保持
 同一 transaction，从而让多 worker 的 read/write/delete 与 membership revoke 串行；写入服务端
@@ -1124,15 +1124,12 @@ marker。Viewer 对自己的既有 Thread 可读取和删除，但 create/branch
 `private_work.create`。删除顺序固定为先将 Thread 标记 deleted +
 `checkpoint_delete_status=pending`，再调用 raw saver；raw 删除失败保留不可见并标记
 `retry_required`，成功标记 `complete`。Gateway production lifespan 只把 raw saver 放在私有
-`app.state._raw_checkpointer`；`get_checkpointer` 仅供 legacy，项目模块不得 import/call，项目依赖使用
-`get_project_checkpointer`。legacy delete 也必须经该 getter 取得 production raw saver，先保留不可见
-tombstone，再记录 `complete/retry_required`，不得物理删除唯一 authority row；tombstone/frozen row
-在 permissive legacy access check 中仍然 fail closed。production legacy factory 不猜 project/Agent，
-缺少显式 create authority 时，POST Thread 与 stateless run 必须在 checkpoint 校验、run admission 和
-graph launch 前返回稳定 `409 PRIVATE_WORK_CUTOVER`。create 固定锁序为 project → membership，再验
-`private_work.create` 与 Agent 可执行性、写 Thread、写 root checkpoint；root write 失败或结果不确定
-时先补偿删除 raw checkpoint，branch 同时回滚 PostgreSQL authority hook；只有两者成功才物理清除
-补偿 tombstone，失败则保留 `retry_required`。branch 禁止读取宿主 Thread 目录。
+`app.state._raw_checkpointer` 并向 project-scoped wrapper 提供；不存在 global `get_checkpointer` HTTP
+依赖。独立 Worker 中的 `RunAgentPrivateExecutor` 才能使用 project-scoped checkpointer 执行 admitted
+job；create 固定锁序为 project → membership，再验 `private_work.create` 与 Agent 可执行性、写 Thread
+和 root checkpoint。root write 失败或结果不确定时先补偿删除 raw checkpoint，branch 同时回滚
+PostgreSQL authority hook；只有两者成功才物理清除补偿 tombstone，失败则保留 `retry_required`。
+branch 禁止读取宿主 Thread 目录。
 
 已登记的活动项目 run 使用 `AuthorizationBoundary`，不再把 admission 时的
 `membership_version` 当成长时运行资格：Admin 降为 Editor/Runner 后 model、checkpoint、tool、MCP
@@ -1167,13 +1164,15 @@ restore 的 loser 保持 frozen 而治理 transaction 仍可提交。普通 iden
 真正 `connected` 的其他 owner 并清理其 credential；`frozen` row 及其保留 credential 不得被 normal
 connect 转成 revoked 或删除。
 
-M4 项目 Run 继续复用唯一的 `RunManager`/`RunStore`/`RunEventStore`。`RunRecord.scope`
-对项目 run 必须是 `PrivateResourceScope`；manager 即使命中内存记录也要比较 scope，后台
-status/model/progress/completion 只从已登记的 run record 派生 scope，禁止接收客户端 owner。
+M4 项目 Run 由 PostgreSQL Run/Event repositories 和 durable job authority 持久化；Gateway 不持有
+`RunManager`、`RunStore` 或 agent task。独立 Worker 的 `RunAgentPrivateExecutor` 为单次执行构造
+process-local、无 Run store 的 `RunManager`，`RunRecord.scope` 必须是从 admitted
+`PrivateWorkContext` 派生的 `PrivateResourceScope`；status/model/progress/completion 只从该已登记
+record 与当前 job lease 派生 scope，禁止接收客户端 owner。
 PostgreSQL Run/Event/Feedback 的项目入口每条 SQL 都同时包含 `project_id + owner_user_id`；
 event 与 feedback 写入先查 scoped parent run，再由 parent 派生 project/owner，忽略 event payload
-或 legacy `user_id` 中的 ownership。无 scope 的项目读 fail closed，startup orphan recovery 只走
-显式 `list_inflight_trusted_unscoped()`。`RunSnapshotRepository.create_run_with_snapshot()` 在单个
+中的 ownership。无 scope 的项目读 fail closed；不存在 Gateway startup orphan recovery。
+`RunSnapshotRepository.create_run_with_snapshot()` 在单个
 PostgreSQL transaction 中写 run、`run_asset_versions` 和 `run_mcp_grant_snapshots`：root Agent 固定
 order 0，随后按 resolver 的 Skill、MCP 稳定顺序写 exact version/checksum/catalog generation；grant
 closure 必须直接复用 M3 `lock_mcp_credential_closures(..., load_envelopes=False)` 的全局锁序与完整
