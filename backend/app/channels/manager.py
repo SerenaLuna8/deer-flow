@@ -780,7 +780,6 @@ class ChannelManager:
         default_session: dict[str, Any] | None = None,
         channel_sessions: dict[str, Any] | None = None,
         connection_repo: Any | None = None,
-        require_bound_identity: bool = False,
         private_inbound_dispatcher: ProjectInboundDispatcher | None = None,
     ) -> None:
         self.bus = bus
@@ -792,7 +791,6 @@ class ChannelManager:
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
         self._connection_repo = connection_repo
-        self._require_bound_identity = require_bound_identity
         self._private_inbound_dispatcher = private_inbound_dispatcher
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
@@ -1183,18 +1181,22 @@ class ChannelManager:
     # -- chat handling -----------------------------------------------------
 
     def _should_dispatch_project_inbound(self, msg: InboundMessage) -> bool:
-        if self._private_inbound_dispatcher is None or not self._require_bound_identity:
-            return False
-        policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
-        if policy is not None and not policy.requires_bound_identity:
-            return False
         if msg.msg_type == InboundMessageType.CHAT:
             return True
-        return msg.msg_type == InboundMessageType.COMMAND and parse_slash_skill_reference(msg.text) is not None
+        if msg.msg_type != InboundMessageType.COMMAND:
+            return False
+        command = msg.text.strip().split(maxsplit=1)[0].lower()
+        return command in {"/bootstrap", "/goal", "/new"} or parse_slash_skill_reference(msg.text) is not None
 
     async def _handle_project_inbound_chat(self, msg: InboundMessage) -> None:
         dispatcher = self._private_inbound_dispatcher
         if dispatcher is None:
+            await self._reject_unbound_channel_message(
+                msg,
+                bound_identity_rejection=_BoundIdentityRejection(
+                    message=BOUND_IDENTITY_UNAVAILABLE_MESSAGE,
+                ),
+            )
             return
         try:
             result = await dispatcher.dispatch(msg)
@@ -1243,17 +1245,6 @@ class ChannelManager:
         the connection repository, so rejection outbounds never trust a rejected
         inbound message's asserted connection metadata.
         """
-        if not self._require_bound_identity:
-            return None
-        # Webhook-authenticated channels (GitHub) opt out via
-        # ChannelRunPolicy.requires_bound_identity=False. Authenticity is
-        # enforced at the webhook route by HMAC, and the "sender → DeerFlow
-        # user" binding is encoded in the agent's config.yaml ownership, not
-        # in the channel-connections table — there is no per-sender
-        # /connect handshake to perform.
-        policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
-        if policy is not None and not policy.requires_bound_identity:
-            return None
         has_connection = bool(msg.connection_id)
         if not has_connection:
             return _BoundIdentityRejection()
@@ -1311,37 +1302,14 @@ class ChannelManager:
         await self.bus.publish_outbound(outbound)
 
     async def _lookup_thread_id(self, msg: InboundMessage) -> str | None:
-        if self._require_bound_identity:
-            return None
-        if msg.connection_id and self._connection_repo is not None:
-            return await self._connection_repo.get_thread_id(
-                msg.connection_id,
-                msg.chat_id,
-                msg.topic_id,
-            )
-        return self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        # Project channel conversations are resolved by
+        # ConnectionInboundResolver. The legacy process-local mapping is not
+        # an authority source and must never be consulted for executable
+        # inbound work.
+        return None
 
     async def _store_thread_id(self, msg: InboundMessage, thread_id: str) -> None:
-        if self._require_bound_identity:
-            raise RuntimeError("project channel conversations require the project inbound resolver")
-        if msg.connection_id and msg.owner_user_id and self._connection_repo is not None:
-            await self._connection_repo.set_thread_id(
-                connection_id=msg.connection_id,
-                owner_user_id=msg.owner_user_id,
-                provider=msg.channel_name,
-                external_conversation_id=msg.chat_id,
-                external_topic_id=msg.topic_id,
-                thread_id=thread_id,
-            )
-            return
-
-        self.store.set_thread_id(
-            msg.channel_name,
-            msg.chat_id,
-            thread_id,
-            topic_id=msg.topic_id,
-            user_id=msg.user_id,
-        )
+        raise RuntimeError("project channel conversations require the project inbound resolver")
 
     async def _create_thread(self, client, msg: InboundMessage) -> str:
         """Create a new thread through Gateway and store the mapping."""
@@ -1464,156 +1432,9 @@ class ChannelManager:
         *,
         bound_identity_checked: bool = False,
     ) -> None:
-        # Normal entry paths already run the bound-identity check in
-        # _handle_message() or _handle_command(). Keep this default False so
-        # direct callers and future internal paths still fail closed.
-        bound_identity_rejection = None if bound_identity_checked else await self._get_bound_identity_rejection(msg)
-        if bound_identity_rejection is not None:
-            await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
-            return
-
-        client = self._get_client()
-        storage_user_id = _channel_storage_user_id(msg)
-        run_headers = _run_headers(msg)
-
-        # Look up the existing DeerFlow thread, creating one if this is the
-        # first message for the chat. topic_id may be None (e.g. Telegram
-        # private chats) — the store handles this by using the "channel:chat_id"
-        # key without a topic suffix.
-        thread_id, created = await self._get_or_create_thread(client, msg)
-        if not created:
-            logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
-            await self._update_thread_channel_metadata(client, msg, thread_id)
-
-        assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
-
-        # Apply per-channel policy: credentials provider (e.g. GitHub
-        # installation-token mint) and the non-interactive flag for
-        # webhook channels. Driven by CHANNEL_RUN_POLICY so each new
-        # webhook channel is a one-row registration, not a fresh
-        # if-branch here.
-        policy = await self._apply_channel_policy(msg, run_context)
-
-        # If the inbound message contains file attachments, let the channel
-        # materialize (download) them and update msg.text to include sandbox file paths.
-        # This enables downstream models to access user-uploaded files by path.
-        # Channels that do not support file download will simply return the original message.
-        if msg.files:
-            from .service import get_channel_service
-
-            service = get_channel_service()
-            channel = service.get_channel(msg.channel_name) if service else None
-            logger.info("[Manager] preparing receive file context for %d attachments", len(msg.files))
-            msg = await channel.receive_file(msg, thread_id, user_id=storage_user_id) if channel else msg
-        if extra_context:
-            run_context.update(extra_context)
-
-        original_text = msg.text
-        uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
-        if uploaded:
-            msg.text = f"{_format_uploaded_files_block(uploaded)}\n\n{msg.text}".strip()
-        human_message = _human_input_message(msg.text, original_content=original_text)
-
-        if self._channel_supports_streaming(msg.channel_name):
-            await self._handle_streaming_chat(
-                client,
-                msg,
-                thread_id,
-                assistant_id,
-                run_config,
-                run_context,
-                human_message,
-                storage_user_id=storage_user_id,
-                run_headers=run_headers,
-            )
-            return
-
-        run_kwargs: dict[str, Any] = {
-            "input": {"messages": [human_message]},
-            "config": run_config,
-            "context": run_context,
-            "multitask_strategy": "reject",
-        }
-        run_kwargs["headers"] = run_headers
-
-        if policy is not None and policy.fire_and_forget:
-            # Fire-and-forget path: the channel does its own outbound
-            # during the run (GitHub agents post to the issue/PR via the
-            # ``gh`` CLI from inside the sandbox), so there is nothing
-            # for the manager to ferry back. Use ``runs.create`` — a
-            # short POST that returns once the run is ``pending`` — to
-            # avoid the SDK's 300s ``httpx.ReadTimeout`` on legitimately
-            # long autonomous runs, and the false "internal error"
-            # outbound that follows when it fires. ``ConflictError`` is
-            # still raised synchronously by ``start_run`` if a previous
-            # run on this thread is still active, so the existing
-            # busy-thread path is preserved.
-            logger.info(
-                "[Manager] invoking runs.create(thread_id=%s, text_len=%d) [fire_and_forget]",
-                thread_id,
-                len(msg.text or ""),
-            )
-            try:
-                await client.runs.create(thread_id, assistant_id, **run_kwargs)
-            except Exception as exc:
-                if _is_thread_busy_error(exc):
-                    logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
-                    await self._send_error(msg, THREAD_BUSY_MESSAGE)
-                    return
-                raise
-            return
-
-        logger.info("[Manager] invoking runs.wait(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
-        try:
-            result = await client.runs.wait(
-                thread_id,
-                assistant_id,
-                **run_kwargs,
-            )
-        except Exception as exc:
-            if _is_thread_busy_error(exc):
-                logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
-                await self._send_error(msg, THREAD_BUSY_MESSAGE)
-                return
-            else:
-                raise
-
-        response_text = _extract_response_text(result)
-        pending_clarification = _has_current_turn_clarification(result)
-        artifacts = _extract_artifacts(result)
-
-        logger.info(
-            "[Manager] agent response received: thread_id=%s, response_len=%d, artifacts=%d",
-            thread_id,
-            len(response_text) if response_text else 0,
-            len(artifacts),
-        )
-
-        # Reuse the storage owner cached at the top of _handle_chat so uploads and
-        # artifact delivery always resolve to the same bucket, even if a future
-        # channel.receive_file returns a rewritten InboundMessage.
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
-
-        if not response_text:
-            if attachments:
-                response_text = _format_artifact_text([a.virtual_path for a in attachments])
-            else:
-                response_text = "(No response from agent)"
-
-        outbound = OutboundMessage(
-            channel_name=msg.channel_name,
-            chat_id=msg.chat_id,
-            thread_id=thread_id,
-            text=response_text,
-            artifacts=artifacts,
-            attachments=attachments,
-            thread_ts=msg.thread_ts,
-            connection_id=msg.connection_id,
-            owner_user_id=msg.owner_user_id,
-            metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
-        )
-        logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
-        await self.bus.publish_outbound(outbound)
+        """Compatibility entry that cannot bypass project inbound authority."""
+        del extra_context, bound_identity_checked
+        await self._handle_project_inbound_chat(msg)
 
     async def _handle_streaming_chat(
         self,

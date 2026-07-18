@@ -2248,6 +2248,7 @@ class TestChannelManager:
             ResolvedInboundPrivateWork,
         )
         from app.private_work.context import PrivateWorkContext
+        from app.private_work.run_admission import PrivateRunInboundAuthority
         from app.projects.capabilities import capabilities_for
         from app.projects.context import ProjectContext
         from app.projects.models import ProjectRole
@@ -2275,6 +2276,14 @@ class TestChannelManager:
                         connection_id="connection-a",
                         thread_id="thread-a",
                         created=False,
+                        authority=PrivateRunInboundAuthority(
+                            connection_id="connection-a",
+                            provider="test",
+                            external_account_id="user1",
+                            workspace_id=None,
+                            external_conversation_id="chat1",
+                            external_topic_id=None,
+                        ),
                     )
                 )
             )
@@ -2282,7 +2291,6 @@ class TestChannelManager:
             manager = ChannelManager(
                 bus=bus,
                 store=store,
-                require_bound_identity=True,
                 private_inbound_dispatcher=ProjectInboundDispatcher(
                     resolver,
                     launcher,
@@ -2326,6 +2334,7 @@ class TestChannelManager:
             ResolvedInboundPrivateWork,
         )
         from app.private_work.context import PrivateWorkContext
+        from app.private_work.run_admission import PrivateRunInboundAuthority
         from app.projects.capabilities import capabilities_for
         from app.projects.context import ProjectContext
         from app.projects.models import ProjectRole
@@ -2353,6 +2362,14 @@ class TestChannelManager:
                         connection_id="connection-a",
                         thread_id="thread-a",
                         created=False,
+                        authority=PrivateRunInboundAuthority(
+                            connection_id="connection-a",
+                            provider="test",
+                            external_account_id="user1",
+                            workspace_id=None,
+                            external_conversation_id="chat1",
+                            external_topic_id=None,
+                        ),
                     )
                 )
             )
@@ -2360,7 +2377,6 @@ class TestChannelManager:
             manager = ChannelManager(
                 bus=bus,
                 store=store,
-                require_bound_identity=True,
                 private_inbound_dispatcher=ProjectInboundDispatcher(
                     resolver,
                     launcher,
@@ -3248,10 +3264,8 @@ class TestGithubFireAndForget:
         async def go():
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            # GitHub deliveries skip the bound-identity gate (authenticity is
-            # enforced at the webhook route by HMAC), but constructing the
-            # manager with the default require_bound_identity=False keeps the
-            # test focused on the dispatch path rather than the gate.
+            # This legacy SDK helper is isolated from the production inbound
+            # path, which now requires persisted project connection authority.
             manager = ChannelManager(bus=bus, store=store)
 
             mock_client = _make_mock_langgraph_client(thread_id="gh-thread-1")
@@ -3483,6 +3497,7 @@ class TestChannelManagerBoundIdentityPolicy:
             ResolvedInboundPrivateWork,
         )
         from app.private_work.context import PrivateWorkContext
+        from app.private_work.run_admission import PrivateRunInboundAuthority
         from app.projects.capabilities import capabilities_for
         from app.projects.context import ProjectContext
         from app.projects.models import ProjectRole
@@ -3509,6 +3524,14 @@ class TestChannelManagerBoundIdentityPolicy:
                 connection_id="server-connection",
                 thread_id="project-thread",
                 created=False,
+                authority=PrivateRunInboundAuthority(
+                    connection_id="server-connection",
+                    provider="slack",
+                    external_account_id="U-platform",
+                    workspace_id="T123",
+                    external_conversation_id="C123",
+                    external_topic_id="1710000000.000100",
+                ),
             )
             resolver = SimpleNamespace(resolve=AsyncMock(return_value=resolved))
             launcher = AsyncMock(
@@ -3525,7 +3548,6 @@ class TestChannelManagerBoundIdentityPolicy:
             manager = ChannelManager(
                 bus=bus,
                 store=store,
-                require_bound_identity=True,
                 private_inbound_dispatcher=dispatcher,
             )
             mock_client = _make_mock_langgraph_client()
@@ -3553,7 +3575,12 @@ class TestChannelManagerBoundIdentityPolicy:
             finally:
                 await manager.stop()
 
-            launcher.assert_awaited_once_with(context, "project-thread", inbound)
+            launcher.assert_awaited_once_with(
+                context,
+                "project-thread",
+                inbound,
+                resolved.authority,
+            )
             mock_client.threads.create.assert_not_called()
             mock_client.runs.wait.assert_not_called()
             mock_client.runs.create.assert_not_called()
@@ -3581,7 +3608,6 @@ class TestChannelManagerBoundIdentityPolicy:
             manager = ChannelManager(
                 bus=bus,
                 store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
-                require_bound_identity=True,
                 private_inbound_dispatcher=ProjectInboundDispatcher(resolver, launcher),
             )
             manager._client = _make_mock_langgraph_client()
@@ -3611,14 +3637,14 @@ class TestChannelManagerBoundIdentityPolicy:
         _run(go())
 
     def test_unbound_auth_enabled_chat_is_rejected_before_thread_or_run_creation(self, monkeypatch):
-        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+        from app.channels.manager import BOUND_IDENTITY_UNAVAILABLE_MESSAGE, ChannelManager
 
         monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
 
         async def go():
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            manager = ChannelManager(bus=bus, store=store)
             mock_client = _make_mock_langgraph_client()
             manager._client = mock_client
             outbound_received = []
@@ -3638,7 +3664,7 @@ class TestChannelManagerBoundIdentityPolicy:
             )
 
             assert len(outbound_received) == 1
-            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].text == BOUND_IDENTITY_UNAVAILABLE_MESSAGE
             assert outbound_received[0].thread_id == ""
             assert outbound_received[0].connection_id is None
             assert outbound_received[0].owner_user_id is None
@@ -3655,7 +3681,7 @@ class TestChannelManagerBoundIdentityPolicy:
         async def go():
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            manager = ChannelManager(bus=bus, store=store)
             mock_client = _make_mock_langgraph_client()
             manager._client = mock_client
             outbound_received = []
@@ -3686,14 +3712,14 @@ class TestChannelManagerBoundIdentityPolicy:
         _run(go())
 
     def test_unbound_auth_enabled_chat_is_rejected_before_semaphore(self, monkeypatch):
-        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+        from app.channels.manager import BOUND_IDENTITY_UNAVAILABLE_MESSAGE, ChannelManager
 
         monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
 
         async def go():
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            manager = ChannelManager(bus=bus, store=store)
             outbound_received = []
 
             async def capture(msg):
@@ -3720,7 +3746,7 @@ class TestChannelManagerBoundIdentityPolicy:
                 await manager.stop()
 
             assert len(outbound_received) == 1
-            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].text == BOUND_IDENTITY_UNAVAILABLE_MESSAGE
             assert outbound_received[0].connection_id is None
             assert outbound_received[0].owner_user_id is None
 
@@ -3745,7 +3771,7 @@ class TestChannelManagerBoundIdentityPolicy:
                     }
                 ]
             )
-            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo)
             mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
             manager._client = mock_client
 
@@ -3761,11 +3787,8 @@ class TestChannelManagerBoundIdentityPolicy:
                 )
             )
 
-            mock_client.threads.create.assert_called_once()
-            mock_client.runs.wait.assert_called_once()
-            run_context = mock_client.runs.wait.call_args.kwargs["context"]
-            assert run_context["user_id"] == "deerflow-user-1"
-            assert run_context["channel_user_id"] == "U-platform"
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
 
         _run(go())
 
@@ -3788,7 +3811,7 @@ class TestChannelManagerBoundIdentityPolicy:
                     }
                 ]
             )
-            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo)
             mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
             manager._client = mock_client
             await manager.start()
@@ -3807,20 +3830,14 @@ class TestChannelManagerBoundIdentityPolicy:
             finally:
                 await manager.stop()
 
-            assert repo.lookups == [
-                {
-                    "provider": "slack",
-                    "external_account_id": "U-platform",
-                    "workspace_id": "T123",
-                }
-            ]
-            mock_client.threads.create.assert_called_once()
-            mock_client.runs.wait.assert_called_once()
+            assert repo.lookups == []
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
 
         _run(go())
 
     def test_auth_enabled_chat_rejects_unverified_bound_identity(self, monkeypatch):
-        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+        from app.channels.manager import BOUND_IDENTITY_UNAVAILABLE_MESSAGE, ChannelManager
 
         monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
 
@@ -3838,7 +3855,7 @@ class TestChannelManagerBoundIdentityPolicy:
                     }
                 ]
             )
-            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo)
             mock_client = _make_mock_langgraph_client()
             manager._client = mock_client
             outbound_received = []
@@ -3859,9 +3876,9 @@ class TestChannelManagerBoundIdentityPolicy:
             )
 
             assert len(outbound_received) == 1
-            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
-            assert outbound_received[0].connection_id == "actual-connection"
-            assert outbound_received[0].owner_user_id == "actual-owner"
+            assert outbound_received[0].text == BOUND_IDENTITY_UNAVAILABLE_MESSAGE
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
             mock_client.threads.create.assert_not_called()
             mock_client.runs.wait.assert_not_called()
 
@@ -3869,14 +3886,13 @@ class TestChannelManagerBoundIdentityPolicy:
 
     def test_auth_disabled_chat_keeps_default_user_when_bound_identity_is_required(self, monkeypatch):
         from app.channels.manager import ChannelManager
-        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
 
         monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
 
         async def go():
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            manager = ChannelManager(bus=bus, store=store)
             mock_client = _make_mock_langgraph_client(thread_id="thread-local")
             manager._client = mock_client
 
@@ -3889,15 +3905,12 @@ class TestChannelManagerBoundIdentityPolicy:
                 )
             )
 
-            mock_client.threads.create.assert_called_once()
-            mock_client.runs.wait.assert_called_once()
-            run_context = mock_client.runs.wait.call_args.kwargs["context"]
-            assert run_context["user_id"] == AUTH_DISABLED_USER_ID
-            assert run_context["channel_user_id"] == "U-platform"
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
 
         _run(go())
 
-    def test_legacy_open_bot_mode_allows_unbound_auth_enabled_chat(self, monkeypatch):
+    def test_legacy_open_bot_mode_fails_closed(self, monkeypatch):
         from app.channels.manager import ChannelManager
 
         monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
@@ -3905,7 +3918,7 @@ class TestChannelManagerBoundIdentityPolicy:
         async def go():
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            manager = ChannelManager(bus=bus, store=store, require_bound_identity=False)
+            manager = ChannelManager(bus=bus, store=store)
             mock_client = _make_mock_langgraph_client(thread_id="thread-legacy")
             manager._client = mock_client
 
@@ -3918,11 +3931,8 @@ class TestChannelManagerBoundIdentityPolicy:
                 )
             )
 
-            mock_client.threads.create.assert_called_once()
-            mock_client.runs.wait.assert_called_once()
-            run_context = mock_client.runs.wait.call_args.kwargs["context"]
-            assert run_context["user_id"] == "U-platform"
-            assert run_context["channel_user_id"] == "U-platform"
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
 
         _run(go())
 
@@ -3934,7 +3944,7 @@ class TestChannelManagerBoundIdentityPolicy:
         async def go():
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            manager = ChannelManager(bus=bus, store=store)
             mock_client = _make_mock_langgraph_client()
             manager._client = mock_client
             outbound_received = []
@@ -3982,7 +3992,7 @@ class TestChannelManagerBoundIdentityPolicy:
                     }
                 ]
             )
-            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo)
             mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
             manager._client = mock_client
 
@@ -3999,64 +4009,14 @@ class TestChannelManagerBoundIdentityPolicy:
                 )
             )
 
-            mock_client.threads.create.assert_called_once()
+            mock_client.threads.create.assert_not_called()
 
         _run(go())
 
-    def test_webhook_channel_run_policy_opts_out_of_bound_identity_gate(self, monkeypatch):
-        """A channel whose ChannelRunPolicy declares ``requires_bound_identity=False``
-        is exempt from the per-sender bound-identity gate, even when
-        ``require_bound_identity=True`` is on for interactive IM channels in the
-        same deployment. This is what lets GitHub webhook deliveries reach the
-        agent: they are HMAC-authenticated at the route, and the sender→DeerFlow
-        binding lives in the agent's config.yaml ownership, not in the
-        channel-connections table.
-        """
-        from app.channels.manager import ChannelManager
-        from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+    def test_webhook_channel_run_policy_cannot_opt_out_of_project_authority(self):
+        from app.channels.run_policy import ChannelRunPolicy
 
-        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
-
-        # Save+restore so test parallelism / re-import side effects from
-        # app.gateway.github.run_policy don't leak across tests.
-        original = CHANNEL_RUN_POLICY.get("webhook-fixture")
-        CHANNEL_RUN_POLICY["webhook-fixture"] = ChannelRunPolicy(
-            is_interactive=False,
-            requires_bound_identity=False,
-        )
-        try:
-
-            async def go():
-                bus = MessageBus()
-                store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-                manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
-                mock_client = _make_mock_langgraph_client(thread_id="thread-webhook")
-                manager._client = mock_client
-
-                await manager._handle_chat(
-                    InboundMessage(
-                        channel_name="webhook-fixture",
-                        chat_id="repo-owner/repo-name",
-                        user_id="commenter-login",
-                        # owner_user_id is set by the dispatcher from the
-                        # agent binding, NOT from a channel-connection row.
-                        owner_user_id="agent-installer-user",
-                        text="hi",
-                    )
-                )
-
-                # If the gate fired, threads.create would never be called and
-                # one outbound rejection would be on the bus instead. We
-                # assert the agent path ran.
-                mock_client.threads.create.assert_called_once()
-                mock_client.runs.wait.assert_called_once()
-
-            _run(go())
-        finally:
-            if original is None:
-                CHANNEL_RUN_POLICY.pop("webhook-fixture", None)
-            else:
-                CHANNEL_RUN_POLICY["webhook-fixture"] = original
+        assert "requires_bound_identity" not in ChannelRunPolicy.__dataclass_fields__
 
 
 # ---------------------------------------------------------------------------
@@ -5312,12 +5272,12 @@ class TestChannelService:
 
         assert service.manager._connection_repo is repo
 
-    def test_require_bound_identity_is_forwarded_to_manager(self):
+    def test_service_has_no_bound_identity_opt_out(self):
         from app.channels.service import ChannelService
 
-        service = ChannelService(channels_config={}, require_bound_identity=True)
+        service = ChannelService(channels_config={})
 
-        assert service.manager._require_bound_identity is True
+        assert not hasattr(service.manager, "_require_bound_identity")
 
     def test_remove_channel_stops_running_channel_and_forgets_config(self):
         from app.channels.service import ChannelService

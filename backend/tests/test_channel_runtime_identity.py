@@ -12,6 +12,7 @@ from app.channels.message_bus import InboundMessage
 from app.private_work import connection_inbound
 from app.private_work.connection_inbound import build_gateway_project_run_launcher
 from app.private_work.context import PrivateWorkContext
+from app.private_work.run_admission import PrivateRunInboundAuthority
 from app.private_work.run_service import PrivateRunService
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
@@ -51,12 +52,20 @@ async def test_project_channel_launcher_uses_resolved_owner_scope_and_durable_ru
     run_id = str(uuid.uuid4())
     captured: dict[str, object] = {}
 
-    async def private_start(body, selected_thread_id, request, selected_context):
+    async def private_start(
+        body,
+        selected_thread_id,
+        request,
+        selected_context,
+        *,
+        server_context,
+    ):
         captured.update(
             body=body,
             thread_id=selected_thread_id,
             request=request,
             context=selected_context,
+            server_context=server_context,
         )
         return SimpleNamespace(run_id=run_id)
 
@@ -97,16 +106,27 @@ async def test_project_channel_launcher_uses_resolved_owner_scope_and_durable_ru
         channel_name="slack",
         chat_id="conversation-1",
         user_id="external-user",
+        workspace_id="workspace-1",
+        topic_id="topic-1",
         text="hello",
+    )
+    authority = PrivateRunInboundAuthority(
+        connection_id="connection-1",
+        provider="slack",
+        external_account_id="external-user",
+        workspace_id="workspace-1",
+        external_conversation_id="conversation-1",
+        external_topic_id="topic-1",
     )
 
     state = await build_gateway_project_run_launcher(
         app=app,
         start_private_run_fn=private_start,
-    )(context, thread_id, message)
+    )(context, thread_id, message, authority)
 
     assert captured["thread_id"] == thread_id
     assert captured["context"] is context
+    assert captured["server_context"].inbound_authority == authority
     body = captured["body"]
     assert body.input == {
         "messages": [{"role": "user", "content": "hello"}],

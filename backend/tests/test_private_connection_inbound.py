@@ -32,6 +32,7 @@ class FakeConnectionRepository:
         self.conversations: dict[tuple[object, str, str, str | None], str] = {}
         self.get_calls: list[dict[str, Any]] = []
         self.set_calls: list[dict[str, Any]] = []
+        self.set_result = True
 
     async def find_connection_by_external_identity(
         self,
@@ -59,8 +60,10 @@ class FakeConnectionRepository:
         self.get_calls.append(call)
         return self.conversations.get((scope, connection_id, external_conversation_id, external_topic_id))
 
-    async def set_thread_id(self, **kwargs: Any) -> None:
+    async def set_thread_id(self, **kwargs: Any) -> bool:
         self.set_calls.append(kwargs)
+        if not self.set_result:
+            return False
         self.conversations[
             (
                 kwargs["scope"],
@@ -69,6 +72,7 @@ class FakeConnectionRepository:
                 kwargs["external_topic_id"],
             )
         ] = kwargs["thread_id"]
+        return True
 
 
 class FakePrivateThreadService:
@@ -252,6 +256,36 @@ async def test_resolver_creates_missing_conversation_once_and_writes_exact_scope
 
 
 @pytest.mark.asyncio
+async def test_resolver_fails_closed_when_new_conversation_binding_loses_authority() -> None:
+    from app.private_work.connection_inbound import ConnectionInboundResolver
+
+    owner_id = uuid.uuid4()
+    context = SimpleNamespace(
+        user_id=owner_id,
+        project_id=uuid.uuid4(),
+        resource_scope=object(),
+    )
+    repository = FakeConnectionRepository()
+    repository.connections[("slack", "external-a", "workspace-a")] = _connection(
+        context,
+        connection_id="connection-a",
+        agent_id=uuid.uuid4(),
+    )
+    repository.set_result = False
+    resolver = ConnectionInboundResolver(
+        repository=repository,
+        session_factory=object(),
+        thread_service=FakePrivateThreadService(),
+        request_id_factory=lambda: "req-inbound",
+        thread_id_factory=lambda: THREAD_ID,
+    )
+    resolver._resolve_context = AsyncMock(return_value=context)
+
+    with pytest.raises(PrivateWorkNotFound):
+        await resolver.resolve(_identity())
+
+
+@pytest.mark.asyncio
 @pytest.mark.postgres
 @pytest.mark.parametrize("status", ["frozen", "revoked"])
 async def test_resolver_rejects_non_connected_connection_before_private_work(
@@ -399,13 +433,23 @@ async def test_project_inbound_dispatcher_uses_only_resolved_context_and_thread(
         ProjectInboundDispatcher,
         ResolvedInboundPrivateWork,
     )
+    from app.private_work.run_admission import PrivateRunInboundAuthority
 
+    authority = PrivateRunInboundAuthority(
+        connection_id="connection-a",
+        provider="slack",
+        external_account_id="external-a",
+        workspace_id="workspace-a",
+        external_conversation_id="chat-a",
+        external_topic_id="topic-a",
+    )
     resolved = ResolvedInboundPrivateWork(
         account_id=seed.owner_a.user_id,
         context=seed.owner_a,
         connection_id="connection-a",
         thread_id="private-thread",
         created=False,
+        authority=authority,
     )
     resolver = SimpleNamespace(resolve=AsyncMock(return_value=resolved))
     launcher = AsyncMock(return_value={"messages": [{"type": "ai", "content": "project response"}]})
@@ -428,7 +472,12 @@ async def test_project_inbound_dispatcher_uses_only_resolved_context_and_thread(
     assert identity.workspace_id == "workspace-a"
     assert identity.external_conversation_id == "chat-a"
     assert identity.external_topic_id == "topic-a"
-    launcher.assert_awaited_once_with(seed.owner_a, "private-thread", message)
+    launcher.assert_awaited_once_with(
+        seed.owner_a,
+        "private-thread",
+        message,
+        authority,
+    )
     assert result.resolved is resolved
     assert result.state["messages"][-1]["content"] == "project response"
 
@@ -439,6 +488,7 @@ async def test_gateway_project_run_launcher_calls_private_start_wait_and_scoped_
     seed: M4ThreadSeed,
 ) -> None:
     from app.private_work.connection_inbound import build_gateway_project_run_launcher
+    from app.private_work.run_admission import PrivateRunInboundAuthority
     from app.private_work.run_service import PrivateRunService
 
     channel_values = {
@@ -492,14 +542,23 @@ async def test_gateway_project_run_launcher_calls_private_start_wait_and_scoped_
         text="hello",
         topic_id="topic-a",
     )
+    authority = PrivateRunInboundAuthority(
+        connection_id="connection-a",
+        provider="slack",
+        external_account_id="external-a",
+        workspace_id="workspace-a",
+        external_conversation_id="chat-a",
+        external_topic_id="topic-a",
+    )
 
-    result = await launcher(seed.owner_a, "private-thread", message)
+    result = await launcher(seed.owner_a, "private-thread", message, authority)
 
     private_start.assert_awaited_once()
     body, thread_id, request, context = private_start.await_args.args
     assert thread_id == "private-thread"
     assert context is seed.owner_a
     assert body.input == {"messages": [{"role": "user", "content": "hello"}]}
+    assert private_start.await_args.kwargs["server_context"].inbound_authority == authority
     assert durable_reads == [
         (seed.owner_a, "private-thread", "run-a"),
         (seed.owner_a, "private-thread", "run-a"),
@@ -518,7 +577,6 @@ def test_channel_service_builds_project_dispatcher_from_gateway_runtime() -> Non
 
     service = ChannelService(
         connection_repo=repository,
-        require_bound_identity=True,
         gateway_app=gateway_app,
     )
 

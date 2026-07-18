@@ -67,9 +67,12 @@ def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], ap
 
 
 def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
-    if connection_config is None or not getattr(connection_config, "enabled", False):
-        return None
+    """Build the inbound authority repository independently of product gates.
 
+    ``channel_connections.enabled`` controls browser connection features. It
+    is not allowed to disable the PostgreSQL authority check for executable
+    inbound messages.
+    """
     try:
         from deerflow.persistence.channel_connections import ChannelConnectionRepository
         from deerflow.persistence.engine import get_session_factory
@@ -77,9 +80,13 @@ def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
         logger.exception("Failed to import channel connection repository")
         return None
 
-    session_factory = get_session_factory()
+    try:
+        session_factory = get_session_factory()
+    except RuntimeError:
+        logger.warning("Channel inbound authority persistence is not initialized")
+        return None
     if session_factory is None:
-        logger.warning("Channel connections are enabled but database persistence is not available")
+        logger.warning("Channel inbound authority persistence is not available")
         return None
     return ChannelConnectionRepository(session_factory)
 
@@ -147,7 +154,6 @@ class ChannelService:
         *,
         connection_repo: Any | None = None,
         connection_service: Any | None = None,
-        require_bound_identity: bool = False,
         gateway_app: Any | None = None,
     ) -> None:
         self.bus = MessageBus()
@@ -171,7 +177,6 @@ class ChannelService:
             default_session=default_session if isinstance(default_session, dict) else None,
             channel_sessions=channel_sessions,
             connection_repo=connection_repo,
-            require_bound_identity=require_bound_identity,
             private_inbound_dispatcher=private_inbound_dispatcher,
         )
         self._channels: dict[str, Any] = {}  # name -> Channel instance
@@ -198,13 +203,10 @@ class ChannelService:
             channels_config = dict(extra["channels"] or {})
         _merge_channel_connection_runtime_config(channels_config, app_config)
         connection_config = getattr(app_config, "channel_connections", None)
-        connections_enabled = connection_config is not None and getattr(connection_config, "enabled", False)
-        require_bound_identity = bool(connections_enabled and getattr(connection_config, "require_bound_identity", True))
         connection_repo = _make_connection_repo(connection_config)
         return cls(
             channels_config=channels_config,
             connection_repo=connection_repo,
-            require_bound_identity=require_bound_identity,
             gateway_app=gateway_app,
         )
 

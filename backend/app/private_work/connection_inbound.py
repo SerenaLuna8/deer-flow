@@ -19,6 +19,10 @@ from app.private_work.errors import (
     PrivateWorkUnavailable,
 )
 from app.private_work.http_runtime import start_private_run
+from app.private_work.run_admission import (
+    PrivateRunAdmissionServerContext,
+    PrivateRunInboundAuthority,
+)
 from app.private_work.run_service import (
     TERMINAL_PRIVATE_RUN_STATUSES,
     PrivateRunService,
@@ -49,11 +53,12 @@ class ResolvedInboundPrivateWork:
     connection_id: str
     thread_id: str
     created: bool
+    authority: PrivateRunInboundAuthority
 
 
 ProjectInboundState = dict[str, Any] | list[Any]
 ProjectInboundRunLauncher = Callable[
-    [PrivateWorkContext, str, InboundMessage],
+    [PrivateWorkContext, str, InboundMessage, PrivateRunInboundAuthority],
     Awaitable[ProjectInboundState],
 ]
 
@@ -91,7 +96,7 @@ class ConnectionInboundRepository(Protocol):
         external_conversation_id: str,
         external_topic_id: str | None,
         thread_id: str,
-    ) -> None: ...
+    ) -> bool: ...
 
 
 class PrivateThreadCreator(Protocol):
@@ -138,6 +143,7 @@ class ProjectInboundDispatcher:
             resolved.context,
             resolved.thread_id,
             message,
+            resolved.authority,
         )
         return ProjectInboundDispatchResult(resolved=resolved, state=state)
 
@@ -160,6 +166,7 @@ def build_gateway_project_run_launcher(
         context: PrivateWorkContext,
         thread_id: str,
         message: InboundMessage,
+        authority: PrivateRunInboundAuthority,
     ) -> ProjectInboundState:
         async def is_disconnected() -> bool:
             return False
@@ -193,7 +200,15 @@ def build_gateway_project_run_launcher(
             },
             multitask_strategy="reject",
         )
-        record = await private_start(body, thread_id, request, context)
+        record = await private_start(
+            body,
+            thread_id,
+            request,
+            context,
+            server_context=PrivateRunAdmissionServerContext(
+                inbound_authority=authority,
+            ),
+        )
         service = getattr(app.state, "private_run_service", None)
         if not isinstance(service, PrivateRunService):
             raise PrivateWorkUnavailable(context.request_id)
@@ -268,6 +283,14 @@ class ConnectionInboundResolver:
             request_id=request_id,
         )
         scope = context.resource_scope
+        authority = PrivateRunInboundAuthority(
+            connection_id=connection_id,
+            provider=provider_identity.provider,
+            external_account_id=provider_identity.external_account_id,
+            workspace_id=provider_identity.workspace_id,
+            external_conversation_id=provider_identity.external_conversation_id,
+            external_topic_id=provider_identity.external_topic_id,
+        )
         thread_id = await self._repository.get_thread_id(
             scope=scope,
             connection_id=connection_id,
@@ -283,6 +306,7 @@ class ConnectionInboundResolver:
                 connection_id=connection_id,
                 thread_id=thread_id,
                 created=False,
+                authority=authority,
             )
 
         agent = self._connection_agent(connection, request_id)
@@ -298,7 +322,7 @@ class ConnectionInboundResolver:
                 "external_topic_id": provider_identity.external_topic_id,
             },
         )
-        await self._repository.set_thread_id(
+        bound = await self._repository.set_thread_id(
             scope=scope,
             connection_id=connection_id,
             provider=provider_identity.provider,
@@ -306,12 +330,15 @@ class ConnectionInboundResolver:
             external_topic_id=provider_identity.external_topic_id,
             thread_id=thread_id,
         )
+        if bound is not True:
+            raise PrivateWorkNotFound(request_id)
         return ResolvedInboundPrivateWork(
             account_id=account_id,
             context=context,
             connection_id=connection_id,
             thread_id=thread_id,
             created=True,
+            authority=authority,
         )
 
     @staticmethod

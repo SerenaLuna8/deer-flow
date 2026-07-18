@@ -4,6 +4,7 @@ import copy
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,6 +45,10 @@ from app.shared_assets.errors import (
 )
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.persistence.channel_connections import (
+    ChannelConnectionRow,
+    ChannelConversationRow,
+)
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 
@@ -55,14 +60,44 @@ class PersistedRunSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class PrivateRunInboundAuthority:
+    """Exact persisted connection coordinates resolved for one inbound run."""
+
+    connection_id: str
+    provider: str
+    external_account_id: str
+    workspace_id: str | None
+    external_conversation_id: str
+    external_topic_id: str | None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "connection_id",
+            "provider",
+            "external_account_id",
+            "external_conversation_id",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise TypeError(f"{name} must be a non-empty string")
+        for name in ("workspace_id", "external_topic_id"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"{name} must be a string or None")
+
+
+@dataclass(frozen=True, slots=True)
 class PrivateRunAdmissionServerContext:
     """Typed authority supplied only by an authenticated server caller."""
 
     non_interactive: bool = False
+    inbound_authority: PrivateRunInboundAuthority | None = None
 
     def __post_init__(self) -> None:
         if type(self.non_interactive) is not bool:
             raise TypeError("non_interactive must be a boolean")
+        if self.inbound_authority is not None and type(self.inbound_authority) is not PrivateRunInboundAuthority:
+            raise TypeError("inbound_authority must be PrivateRunInboundAuthority")
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +202,54 @@ class PrivateRunAdmissionService:
         )
 
     @staticmethod
+    async def _require_inbound_authority(
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        thread_id: str,
+        server_context: PrivateRunAdmissionServerContext | None,
+    ) -> None:
+        authority = server_context.inbound_authority if server_context is not None else None
+        if authority is None:
+            return
+
+        connection = (
+            await session.execute(
+                select(ChannelConnectionRow.id)
+                .where(
+                    ChannelConnectionRow.id == authority.connection_id,
+                    ChannelConnectionRow.project_id == context.project_id,
+                    ChannelConnectionRow.owner_user_id == str(context.user_id),
+                    ChannelConnectionRow.provider == authority.provider,
+                    ChannelConnectionRow.external_account_id == authority.external_account_id,
+                    ChannelConnectionRow.workspace_id == (authority.workspace_id or ""),
+                    ChannelConnectionRow.status == "connected",
+                    ChannelConnectionRow.frozen_at.is_(None),
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if connection is None:
+            raise PrivateWorkNotFound(context.request_id)
+
+        conversation = (
+            await session.execute(
+                select(ChannelConversationRow.id)
+                .where(
+                    ChannelConversationRow.project_id == context.project_id,
+                    ChannelConversationRow.owner_user_id == str(context.user_id),
+                    ChannelConversationRow.connection_id == authority.connection_id,
+                    ChannelConversationRow.provider == authority.provider,
+                    ChannelConversationRow.external_conversation_id == authority.external_conversation_id,
+                    ChannelConversationRow.external_topic_id == (authority.external_topic_id or ""),
+                    ChannelConversationRow.thread_id == thread_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if conversation is None:
+            raise PrivateWorkNotFound(context.request_id)
+
+    @staticmethod
     def _is_same_request(
         run: PrivateRunRecord,
         *,
@@ -238,6 +321,12 @@ class PrivateRunAdmissionService:
                     Capability.PRIVATE_WORK_CREATE,
                     Capability.SHARED_ASSETS_EXECUTE,
                     lock=True,
+                )
+                await self._require_inbound_authority(
+                    session,
+                    context,
+                    thread_id,
+                    server_context,
                 )
                 thread = await PrivateThreadRepository(session).get(
                     scope=context.resource_scope,

@@ -29,9 +29,7 @@ class ChannelRunPolicy:
     ``recursion_limit`` for autonomous long runs, suppression of
     ``ask_clarification`` (no human is synchronously present), a
     credentials provider that mints platform tokens for the agent, and
-    an opt-out from the per-sender bound-identity gate (authenticity is
-    enforced at the webhook route by HMAC, and there is no equivalent
-    of a per-user ``/connect`` handshake to perform).
+    a channel-specific execution mode.
 
     Declaring all four on one dataclass keeps the channel's run
     behavior in a single discoverable place and turns "add a new
@@ -54,18 +52,6 @@ class ChannelRunPolicy:
             after ``_resolve_run_params``. Exceptions are caught and
             logged so a credential failure degrades gracefully (agent
             runs read-only) instead of dropping the delivery.
-        requires_bound_identity: When False, the manager skips the
-            per-sender bound-identity gate (``_get_bound_identity_rejection``)
-            for this channel even when ``channel_connections.enabled`` is
-            on. Webhook-authenticated channels (GitHub) have no
-            per-sender ``/connect`` handshake — authenticity is enforced
-            by HMAC at the webhook route, and the binding from "sender"
-            to DeerFlow user is encoded in the agent's ``config.yaml``
-            ownership, not in the channel-connections table. This exception is
-            only for an independently authenticated webhook path; interactive
-            IM inbound always resolves the exact PostgreSQL account, project,
-            owner, and connection tuple. Defaults to True (the safe default for
-            an interactive IM channel).
         fire_and_forget: When True, the manager schedules the run with
             ``runs.create`` (returns immediately once the run is
             ``pending``) instead of ``runs.wait`` (which keeps an HTTP
@@ -84,7 +70,6 @@ class ChannelRunPolicy:
     is_interactive: bool = True
     default_recursion_limit: int | None = None
     credentials_provider: Callable[[InboundMessage, dict[str, Any]], Awaitable[None]] | None = None
-    requires_bound_identity: bool = True
     fire_and_forget: bool = False
 
 

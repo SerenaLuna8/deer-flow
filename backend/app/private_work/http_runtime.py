@@ -43,7 +43,7 @@ async def start_private_run(
     context: PrivateWorkContext,
     *,
     run_id: str | None = None,
-    server_context: Mapping[str, object] | None = None,
+    server_context: PrivateRunAdmissionServerContext | Mapping[str, object] | None = None,
     admission_service: PrivateRunAdmissionService | None = None,
 ) -> RunRecord:
     """Persist a project-private Run and durable job for Worker execution."""
@@ -87,7 +87,14 @@ async def start_private_run(
         },
         multitask_strategy=getattr(body, "multitask_strategy", "reject"),
     )
-    trusted_admission_context = PrivateRunAdmissionServerContext(non_interactive=True) if isinstance(server_context, Mapping) and server_context.get("non_interactive") is True else None
+    if type(server_context) is PrivateRunAdmissionServerContext:
+        trusted_admission_context = server_context
+    elif isinstance(server_context, Mapping) and server_context.get("non_interactive") is True:
+        trusted_admission_context = PrivateRunAdmissionServerContext(
+            non_interactive=True,
+        )
+    else:
+        trusted_admission_context = None
     admitted = await admission_service.admit(
         context,
         thread_id,

@@ -395,8 +395,9 @@ def test_bash_tool_no_env_without_token(monkeypatch: pytest.MonkeyPatch) -> None
 # ---------------------------------------------------------------------------
 # ChannelManager._apply_channel_policy — the unified per-channel run-policy
 # hook. The github channel registers (is_interactive=False,
-# default_recursion_limit=250, credentials_provider=inject_github_credentials,
-# requires_bound_identity=False) via CHANNEL_RUN_POLICY; this section
+# default_recursion_limit=250, credentials_provider=inject_github_credentials)
+# via CHANNEL_RUN_POLICY; project connection authority is mandatory and is not
+# configurable through run policy. This section
 # exercises that one hook for github and the no-op path for unregistered
 # channels (Slack, Telegram, …).
 # ---------------------------------------------------------------------------

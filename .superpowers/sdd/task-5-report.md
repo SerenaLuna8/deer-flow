@@ -9,6 +9,66 @@ HTTP surfaces. It leaves project connections at
 
 No Task 6 work was started and `.superpowers/sdd/progress.md` was not changed.
 
+## 2026-07-19 independent-review repair
+
+The frozen Task 5 review reported three Important findings. This repair closes
+exactly those findings without starting Task 6 or changing the milestone
+progress ledger.
+
+- Removed both inbound-authority opt-outs:
+  `channel_connections.require_bound_identity` and
+  `ChannelRunPolicy.requires_bound_identity`. Executable chat plus `/new`,
+  `/goal`, `/bootstrap`, and slash-skill input always enters
+  `ProjectInboundDispatcher`; missing repository/dispatcher dependencies fail
+  closed. The directly callable legacy LangGraph `_handle_legacy_chat` method
+  was deleted. GitHub now supplies the repository workspace coordinate and has
+  no agent-config owner bypass; without a persisted project connection it is
+  rejected.
+- Added typed `PrivateRunInboundAuthority` to the server-only admission
+  context. After project and membership locks, the same admission transaction
+  locks the exact `ChannelConnectionRow FOR UPDATE`, verifies connected/non-
+  frozen project/owner/provider/external/workspace coordinates, then locks the
+  exact conversation-to-Thread binding before any Run, job, or snapshot is
+  written. A lost new-conversation `set_thread_id()` returns
+  `PrivateWorkNotFound` instead of continuing. The real PostgreSQL race test
+  pauses after initial resolve, revokes in another transaction, resumes
+  admission, and proves zero Run/job/snapshot rows.
+- Fixed the project Connections Playwright fixture with a later-registered
+  exact providers route and strict response shape. Input-polish browser tests
+  now run on `/projects/research-lab/chats/{thread_id}`, mock only
+  `/api/projects/{project_id}/private-work/input-polish`, and assert zero
+  requests to global `/api/input-polish`.
+
+The repair RED evidence was observed before implementation: all three bypass
+tests failed, GitHub reached no project dispatcher, and a false conversation
+binding result did not raise. All are GREEN in the final focused suites.
+
+### Repair verification
+
+```text
+Task 5 PostgreSQL gate: 87 passed in 14.67s, 0 skipped
+Real revoke-between-resolve-and-admission race: 1 passed
+Blocking-I/O gate: 5 passed in 0.72s
+Affected channel authority tests: 19 passed
+Frontend focused unit gate: 151 passed, 0 skipped
+Frontend pnpm check: eslint pass; tsc --noEmit pass
+Requested Chromium pair: 2 passed
+All changed Chromium cases: 4 passed
+Backend Ruff/format and git diff check: pass
+Complete backend collection: 8183 tests, 0 collection errors
+Current last-failed collection: 172/517 selected
+```
+
+The current last-failed classification is Task 2: 60, Task 7: 56, Task 8: 56,
+Task 5: 0, other: 0. The 53 newly visible `test_channels.py` nodes are tests of
+the now-deleted legacy SDK execution helper and remain in Task 7's channel
+legacy cleanup boundary; this repair did not restore that executable bypass.
+Final production/config/document residue searches found zero
+`require_bound_identity`, `requires_bound_identity`, or
+`_handle_legacy_chat` symbols. The implicit-project/global-route scan has only
+the intentional account-bootstrap `default-project` implementation and no
+Task 5 global route.
+
 ## TDD evidence
 
 Initial backend RED anchors produced the three expected failures: global routes

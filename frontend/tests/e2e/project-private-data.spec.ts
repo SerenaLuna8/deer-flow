@@ -177,6 +177,28 @@ async function mockProjectPrivateData(page: Page) {
       return json(route, { detail: "not found" }, 404);
     },
   );
+  // Playwright resolves matching routes in reverse registration order. Keep
+  // this exact provider fixture after the broader connections handler so a
+  // provider read can never be mistaken for the connections collection.
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/connections/providers`,
+    (route) =>
+      json(route, {
+        enabled: true,
+        providers: [
+          {
+            provider: "slack",
+            display_name: "Slack",
+            enabled: true,
+            configured: true,
+            connectable: true,
+            unavailable_reason: null,
+            auth_mode: "binding_code",
+            connection_status: connection ? "connected" : "disconnected",
+          },
+        ],
+      }),
+  );
 
   return {
     connectBody: () => connectBody,

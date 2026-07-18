@@ -354,6 +354,149 @@ test("project detail loads history and streams without legacy private-work calls
   expect(legacyPrivateRequests).toEqual([]);
 });
 
+test("project chat polishes draft through only the scoped endpoint", async ({
+  page,
+}) => {
+  const runBodies: unknown[] = [];
+  await mockPrivateWork(page, true, { runBodies });
+  let polishRequest: { text?: string; model_name?: string } | undefined;
+  let finishPolish!: () => void;
+  const polishCanFinish = new Promise<void>((resolve) => {
+    finishPolish = resolve;
+  });
+  const globalPolishRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/input-polish") {
+      globalPolishRequests.push(request.method());
+    }
+  });
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/private-work/input-polish`,
+    async (route) => {
+      polishRequest = route.request().postDataJSON() as {
+        text?: string;
+        model_name?: string;
+      };
+      await polishCanFinish;
+      return json(route, {
+        rewritten_text: "Please summarize the uploaded report clearly.",
+        changed: true,
+      });
+    },
+  );
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await expect(textarea).toBeVisible({ timeout: 15_000 });
+  await textarea.fill("summarize report");
+  await page.getByTestId("polish-input-button").click();
+
+  await expect
+    .poll(() => polishRequest?.text, { timeout: 10_000 })
+    .toBe("summarize report");
+  expect(polishRequest?.model_name).toBeUndefined();
+  await expect(textarea).toBeDisabled();
+  await expect(page.getByText("Polishing input...")).toBeVisible();
+
+  finishPolish();
+  await expect(textarea).toHaveValue(
+    "Please summarize the uploaded report clearly.",
+  );
+  await expect(textarea).toBeEnabled();
+  await expect(page.getByTestId("polish-input-button")).toHaveAccessibleName(
+    "Undo polish",
+  );
+
+  await textarea.press("Enter");
+  await expect.poll(() => runBodies.length, { timeout: 10_000 }).toBe(1);
+  const runBody = runBodies[0] as {
+    input?: { messages?: Array<{ content?: unknown }> };
+  };
+  expect(runBody.input?.messages?.at(-1)?.content).toEqual([
+    {
+      type: "text",
+      text: "Please summarize the uploaded report clearly.",
+    },
+  ]);
+  expect(globalPolishRequests).toEqual([]);
+});
+
+test("project chat undoes a scoped polished draft", async ({ page }) => {
+  await mockPrivateWork(page);
+  const globalPolishRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/input-polish") {
+      globalPolishRequests.push(request.method());
+    }
+  });
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/private-work/input-polish`,
+    (route) =>
+      json(route, {
+        rewritten_text: "Please summarize the uploaded report clearly.",
+        changed: true,
+      }),
+  );
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await textarea.fill("summarize report");
+  await page.getByTestId("polish-input-button").click();
+  await expect(textarea).toHaveValue(
+    "Please summarize the uploaded report clearly.",
+  );
+
+  const polishButton = page.getByTestId("polish-input-button");
+  await expect(polishButton).toHaveAccessibleName("Undo polish");
+  await polishButton.click();
+  await expect(textarea).toHaveValue("summarize report");
+  await expect(polishButton).toHaveAccessibleName("Polish input");
+  expect(globalPolishRequests).toEqual([]);
+});
+
+test("project chat cancels a scoped in-flight polish request", async ({
+  page,
+}) => {
+  await mockPrivateWork(page);
+  let releasePolish!: () => void;
+  const polishHeld = new Promise<void>((resolve) => {
+    releasePolish = resolve;
+  });
+  const globalPolishRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/input-polish") {
+      globalPolishRequests.push(request.method());
+    }
+  });
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/private-work/input-polish`,
+    async (route) => {
+      await polishHeld;
+      return json(route, {
+        rewritten_text: "Please summarize the uploaded report clearly.",
+        changed: true,
+      });
+    },
+  );
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await textarea.fill("summarize report");
+  await page.getByTestId("polish-input-button").click();
+  await expect(page.getByText("Polishing input...")).toBeVisible();
+  await expect(textarea).toBeDisabled();
+
+  await page.getByTestId("cancel-polish-input-button").click();
+  await expect(page.getByText("Polishing input...")).toBeHidden();
+  await expect(textarea).toBeEnabled();
+  await expect(textarea).toHaveValue("summarize report");
+  await expect(page.getByTestId("polish-input-button")).toHaveAccessibleName(
+    "Polish input",
+  );
+  expect(globalPolishRequests).toEqual([]);
+  releasePolish();
+});
+
 test("project list is owner-scoped and direct metadata misses show one public not-found", async ({
   page,
 }) => {

@@ -231,9 +231,10 @@ async def fanout_event(
             text=prompt,
             msg_type=InboundMessageType.CHAT,
             topic_id=topic_id,
-            # owner_user_id drives which user bucket the run executes in
-            # (custom agent lookup, sandbox, memory).
-            owner_user_id=match.user_id,
+            # The repository coordinate is resolved again by the project
+            # inbound dispatcher. Agent config ownership is routing metadata,
+            # never project authority.
+            workspace_id=repo,
             metadata={
                 # Routes to the right custom agent inside the manager:
                 # _resolve_run_params() pulls this and writes it into

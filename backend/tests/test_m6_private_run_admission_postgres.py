@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
 from sqlalchemy import text
 from support.m4_private_threads import seed_m4_thread_database
 
-from app.private_work.errors import PrivateWorkConflict, PrivateWorkUnavailable
+from app.channels.message_bus import InboundMessage
+from app.private_work.connection_inbound import (
+    ConnectionInboundResolver,
+    ProjectInboundDispatcher,
+)
+from app.private_work.errors import (
+    PrivateWorkConflict,
+    PrivateWorkNotFound,
+    PrivateWorkUnavailable,
+)
 from app.private_work.run_admission import (
     PrivateRunAdmissionServerContext,
     PrivateRunAdmissionService,
@@ -217,6 +227,108 @@ async def test_admission_persists_only_typed_server_non_interactive_authority(
             "project_id": "message-data-only",
         }
     finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_inbound_revoke_between_resolve_and_admission_persists_nothing(
+    migrated_postgres_database_url: str,
+) -> None:
+    from app.private_work.run_admission import PrivateRunInboundAuthority
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository
+
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    thread_id = f"m7-inbound-race-{uuid.uuid4()}"
+    run_id = str(uuid.uuid4())
+    repository = ChannelConnectionRepository(seed.factory)
+    resolver_finished = asyncio.Event()
+    continue_admission = asyncio.Event()
+
+    class NoCreateThreadService:
+        async def create(self, *args, **kwargs):
+            raise AssertionError("existing conversation must be reused")
+
+    try:
+        await _create_thread(seed, thread_id)
+        connection = await repository.upsert_connection(
+            scope=seed.owner_a.resource_scope,
+            provider="slack",
+            external_account_id="external-a",
+            workspace_id="workspace-a",
+            metadata={
+                "agent_asset_id": str(seed.project_agent_id),
+                "agent_scope": "project",
+            },
+        )
+        assert await repository.set_thread_id(
+            scope=seed.owner_a.resource_scope,
+            connection_id=connection["id"],
+            provider="slack",
+            external_conversation_id="chat-a",
+            external_topic_id="topic-a",
+            thread_id=thread_id,
+        )
+
+        resolver = ConnectionInboundResolver(
+            repository=repository,
+            session_factory=seed.factory,
+            thread_service=NoCreateThreadService(),
+        )
+        admission = PrivateRunAdmissionService(seed.factory)
+
+        async def launch(context, resolved_thread_id, message, authority):
+            assert isinstance(authority, PrivateRunInboundAuthority)
+            resolver_finished.set()
+            await continue_admission.wait()
+            admitted = await admission.admit(
+                context,
+                resolved_thread_id,
+                PrivateRunCreate(run_id=run_id),
+                server_context=PrivateRunAdmissionServerContext(
+                    inbound_authority=authority,
+                ),
+            )
+            return {"run_id": admitted.run.run_id}
+
+        dispatcher = ProjectInboundDispatcher(resolver, launch)
+        dispatch_task = asyncio.create_task(
+            dispatcher.dispatch(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="chat-a",
+                    user_id="external-a",
+                    workspace_id="workspace-a",
+                    topic_id="topic-a",
+                    text="hello",
+                )
+            )
+        )
+        await resolver_finished.wait()
+        assert await repository.disconnect_connection(
+            scope=seed.owner_a.resource_scope,
+            connection_id=connection["id"],
+        )
+        continue_admission.set()
+
+        with pytest.raises(PrivateWorkNotFound):
+            await dispatch_task
+
+        async with seed.factory() as session:
+            counts = (
+                await session.execute(
+                    text(
+                        """SELECT
+                        (SELECT count(*) FROM runs WHERE run_id=:run_id) AS runs,
+                        (SELECT count(*) FROM jobs WHERE run_id=:run_id) AS jobs,
+                        (SELECT count(*) FROM run_asset_versions WHERE run_id=:run_id) AS assets"""
+                    ),
+                    {"run_id": run_id},
+                )
+            ).one()
+        assert tuple(counts) == (0, 0, 0)
+    finally:
+        continue_admission.set()
         await seed.engine.dispose()
 
 
