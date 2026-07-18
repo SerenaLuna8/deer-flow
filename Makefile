@@ -90,8 +90,7 @@ help:
 test: test-project-foundation-postgres
 
 test-project-foundation-postgres:
-	@test -n "$${POSTGRES_TEST_URL:-}" || (echo "POSTGRES_TEST_URL is required for the PostgreSQL release gate" >&2; exit 1)
-	@cd backend && DEER_FLOW_REQUIRE_ZERO_SKIPS=1 uv run pytest $(PROJECT_FOUNDATION_POSTGRES_TESTS) -ra
+	@$(BACKEND_UV_RUN) python tests/support/release_gate_plugin.py $(PROJECT_FOUNDATION_POSTGRES_TESTS) -ra
 
 setup:
 	@$(BACKEND_UV_RUN) python ../scripts/setup_wizard.py

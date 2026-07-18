@@ -1223,7 +1223,7 @@ async def run_private_work_migration(
         async with engine.connect() as connection:
             revision = await _current_revision(connection)
             if revision != _PROJECT_AUTOMATION_FINAL_REVISION:
-                raise PrivateWorkMigrationError("database head revision is incomplete")
+                raise PrivateWorkMigrationError("project Automation final revision is incomplete")
             automation_marker = (
                 await connection.execute(
                     text(

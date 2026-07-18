@@ -93,15 +93,23 @@ describe("M6 static, capability, readiness and cache-isolation release gates", (
     queryClient.setQueryData([...privateWorkRoot(scopeA), "threads"], [
       "secret-a",
     ]);
-    queryClient.setMutationDefaults([...privateWorkRoot(scopeA), "mutation"], {
+    const mutationRoot = [...privateWorkRoot(scopeA), "mutation"];
+    queryClient.getMutationCache().build(queryClient, {
+      mutationKey: mutationRoot,
       mutationFn: async () => "secret-a",
     });
+    expect(
+      queryClient.getMutationCache().findAll({ mutationKey: mutationRoot }),
+    ).toHaveLength(1);
 
     await transitionPrivateWorkScope(registry, queryClient, scopeA, scopeB);
 
     expect(
       queryClient.getQueriesData({ queryKey: privateWorkRoot(scopeA) }),
     ).toEqual([]);
+    expect(
+      queryClient.getMutationCache().findAll({ mutationKey: mutationRoot }),
+    ).toHaveLength(0);
     expect(registry.has(scopeA)).toBe(false);
   });
 });

@@ -60,10 +60,12 @@ Final review-strengthening patch evidence available in this run:
 
 Final fresh runtime evidence after the review-strengthening patch:
 
-- Targeted PostgreSQL/process release suite: `9 passed`, `0 skipped` in `56.44s`.
-- Fixed root M1–M6 PostgreSQL release gate: `158 passed`, `0 skipped` in `96.02s`.
+- Targeted PostgreSQL/process release suite: `10 passed`, `0 skipped` in `56.23s` after the fixed-SHA review repair.
+- Fixed root M1–M6 PostgreSQL release gate: `159 passed`, `0 skipped` in `94.31s` after the fixed-SHA review repair.
 - Frontend static/full unit gate: `947 passed`, `0 skipped`; no snapshot changes.
 - Frontend `pnpm check`: passed.
+- Root Make release entry with no `POSTGRES_TEST_URL`: failed before pytest with the required public message.
+- Ruff check passed; Ruff format reported all `1170` backend Python files formatted; `git diff --check` passed.
 - PostgreSQL residual-state query returned no `deerflow_test_*` or `deerflow_restore_*` database.
 - Process residual-state query returned no Task 19 Worker, Gateway, or scheduler child.
 
@@ -72,13 +74,17 @@ Final fresh runtime evidence after the review-strengthening patch:
 - The repository's frontend tests live under `frontend/tests/unit/`, so the new file is `frontend/tests/unit/m6-static-gates.test.tsx` rather than the brief's non-conforming `frontend/tests/` path.
 - `.github/workflows/ci.yml` does not exist in this repository. The frontend portion was integrated into the existing `.github/workflows/frontend-unit-tests.yml`; the PostgreSQL portion was integrated into the existing project-foundation workflow.
 - The initial independent review found three Important issues (foreign-scope sentinel depth, non-exact Make list assertion, and Task 20 AGENTS scope) and one Minor issue (Gateway port TOCTOU). All four were implemented; AGENTS is back to the baseline text.
+- The first fixed-SHA review found three Important issues and one Minor: the root recipe used POSIX-only environment syntax despite the repository's Windows Make branch; the Gateway replay gate did not assert exact SSE ID order; the Task 19 static gate did not create or assert removal of a real mutation-cache entry; and the historical M4 migration error still called the intentional M5 boundary `head`.
+- The repair moves URL validation and `DEER_FLOW_REQUIRE_ZERO_SKIPS=1` setup into the Python release runner, makes Make invoke that runner through the existing cross-platform backend command, asserts exact replay order, creates/removes a real scoped mutation-cache row, and names the project Automation final revision accurately.
+- The repair RED was `3 failed, 3 deselected` for the Make/runner/message contracts. During the full GREEN gate, an existing quota rotation test exposed `ORDER BY` on a random UUID; the assertion now maps authoritative `source_kind` directly to old/new key IDs instead of inferring time from UUID order.
 
-Pre-final independent re-review verdict:
+Pre-repair independent review history:
 
 - Code quality: **PASS**.
 - Spec compliance was **pending fresh runtime evidence**.
 - Critical: 0; Important: 1; Minor: 0.
 - The sole remaining Important item was the unavailable fresh PostgreSQL/process evidence. The fresh gates above now close that evidence gap; a fixed-SHA post-commit review is still required before Task 19 acceptance.
+- The first fixed-SHA review at `0b3a4073` reported 0 Critical, 3 Important, and 1 Minor. All four findings have repair code and fresh evidence above; a post-repair fixed-SHA review is still required before Task 19 acceptance.
 
 ## Residual-state policy
 

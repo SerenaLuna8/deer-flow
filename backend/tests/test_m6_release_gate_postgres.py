@@ -504,10 +504,12 @@ def test_root_make_and_workflows_pin_the_exact_m1_to_m6_release_list() -> None:
 
     assert "test-project-foundation-postgres:" in makefile
     assert "test: test-project-foundation-postgres" in makefile
-    assert "DEER_FLOW_REQUIRE_ZERO_SKIPS=1" in makefile
     assert _make_variable(makefile, "PROJECT_FOUNDATION_POSTGRES_TESTS") == PROJECT_FOUNDATION_POSTGRES_TESTS
     recipe = makefile.split("test-project-foundation-postgres:", 1)[1].split("\n\n", 1)[0]
     assert "$(PROJECT_FOUNDATION_POSTGRES_TESTS)" in recipe
+    assert "tests/support/release_gate_plugin.py" in recipe
+    assert "test -n" not in recipe
+    assert "DEER_FLOW_REQUIRE_ZERO_SKIPS=1" not in recipe
     assert not any(test_file in recipe for test_file in PROJECT_FOUNDATION_POSTGRES_TESTS)
     assert 'test -n "${POSTGRES_TEST_URL:-}"' in postgres_workflow
     assert "make test-project-foundation-postgres" in postgres_workflow
@@ -515,8 +517,9 @@ def test_root_make_and_workflows_pin_the_exact_m1_to_m6_release_list() -> None:
     assert "m6-static-gates.test.tsx" in frontend_workflow
 
 
-def test_zero_skip_release_plugin_fails_a_real_child_pytest(tmp_path: Path) -> None:
+def test_cross_platform_release_runner_requires_url_and_fails_a_real_child_skip(tmp_path: Path) -> None:
     backend_tests = Path(__file__).parent
+    runner = backend_tests / "support" / "release_gate_plugin.py"
     child = tmp_path / "child"
     child.mkdir()
     (child / "conftest.py").write_text(
@@ -528,9 +531,22 @@ def test_zero_skip_release_plugin_fails_a_real_child_pytest(tmp_path: Path) -> N
         encoding="utf-8",
     )
     environment = os.environ.copy()
-    environment["DEER_FLOW_REQUIRE_ZERO_SKIPS"] = "1"
+    environment.pop("POSTGRES_TEST_URL", None)
+    missing_url = subprocess.run(
+        [sys.executable, str(runner), "test_skip.py", "-q"],
+        cwd=child,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert missing_url.returncode != 0
+    assert "POSTGRES_TEST_URL is required for the PostgreSQL release gate" in (missing_url.stdout + missing_url.stderr)
+
+    environment["POSTGRES_TEST_URL"] = "postgresql://release.invalid/postgres"
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "test_skip.py", "-q"],
+        [sys.executable, str(runner), "test_skip.py", "-q"],
         cwd=child,
         env=environment,
         capture_output=True,
@@ -542,3 +558,10 @@ def test_zero_skip_release_plugin_fails_a_real_child_pytest(tmp_path: Path) -> N
     output = result.stdout + result.stderr
     assert result.returncode != 0
     assert "collected=1 passed=0 skipped=1" in output
+
+
+def test_m4_migration_names_the_project_automation_revision_boundary() -> None:
+    source = (Path(__file__).parent.parent / "scripts" / "migrate_private_work.py").read_text(encoding="utf-8")
+
+    assert "database head revision is incomplete" not in source
+    assert "project Automation final revision is incomplete" in source

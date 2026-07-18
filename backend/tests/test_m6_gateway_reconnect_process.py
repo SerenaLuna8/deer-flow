@@ -297,6 +297,8 @@ async def test_last_event_id_replays_after_formal_gateway_process_replacement(
         assert f"id: {first_frame.id}\n" not in replay.text
         assert replay.text.count(f"id: {second_frame.id}\n") == 1
         assert replay.text.count(f"id: {terminal.id}\n") == 1
+        replay_ids = [line.removeprefix("id: ") for line in replay.text.splitlines() if line.startswith("id: ")]
+        assert replay_ids == [second_frame.id, terminal.id]
 
         async with httpx.AsyncClient(
             base_url=second_url,

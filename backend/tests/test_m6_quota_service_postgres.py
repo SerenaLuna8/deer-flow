@@ -87,21 +87,20 @@ async def test_exact_reservation_survives_active_hmac_key_rotation(
         assert replay.reserved == 1
         assert released.reserved == 0
         async with seed.factory() as session:
-            key_ids = tuple(
-                (
-                    await session.execute(
-                        text(
-                            """SELECT source_ref_key_id
-                               FROM project_usage_ledger
-                               WHERE project_id=:project_id
-                                 AND dimension='concurrent_runs'
-                               ORDER BY id"""
-                        ),
-                        {"project_id": seed.owner_a.project_id},
-                    )
-                ).scalars()
+            rows = await session.execute(
+                text(
+                    """SELECT source_kind,source_ref_key_id
+                       FROM project_usage_ledger
+                       WHERE project_id=:project_id
+                         AND dimension='concurrent_runs'"""
+                ),
+                {"project_id": seed.owner_a.project_id},
             )
-        assert key_ids == ("audit-old", "audit-new")
+            key_ids_by_kind = {kind: key_id for kind, key_id in rows}
+        assert key_ids_by_kind == {
+            "reserve": "audit-old",
+            "release": "audit-new",
+        }
     finally:
         await seed.engine.dispose()
 
