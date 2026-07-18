@@ -9,6 +9,7 @@
 ## M7 reviewed tasks
 
 - Task 1: complete at `08ed19be` (implementation `55d2e656`, review repair `08ed19be`; final independent review 0 Critical/Important/Minor). Marker-free final-schema readiness now uses only Alembic revision plus allowlisted relation presence, public contracts expose `schema_ready`/`schema_state` with safe `ready | unavailable`, and Gateway domains plus Worker/Scheduler fail closed. Fresh evidence: backend 75 passed plus repair gate 46 passed, frontend 39 passed plus repair gate 17 passed, all with 0 skips; Ruff, format, ESLint/TypeScript, Prettier, and diff checks clean. Temporary `PRE_RESET_SCHEMA_REVISION` remains intentionally until Task 8.
+- Task 2: complete at `b4df0137` (implementation `2d422c12`, review repairs `79af1dc3` and `b4df0137`; final independent review 0 Critical/Important/Minor). System-owned Agent, Skill, MCP and Feature assets now bootstrap deterministically into PostgreSQL under the fixed non-login builtin principal; global asset CRUD and filesystem/user-global runtime discovery are removed, run-owned exact project snapshots remain available, and ownerless GitHub fanout fails closed. Fresh evidence: Task 2 PostgreSQL gate 87 passed/0 skipped, adjacent regression gates 306 passed with only 11 declared external-dependency skips, full backend collection 8623 tests/0 errors, removed-symbol scans, Ruff, format, and diff checks clean. Packaged MCP slot validation now follows the authoritative domain contract with type-strict JSON equality and never stores a secret.
 
 ---
 
