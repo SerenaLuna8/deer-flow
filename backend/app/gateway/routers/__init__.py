@@ -6,7 +6,6 @@ from . import (
     project_lifecycle,
     project_members,
     projects,
-    scheduled_tasks,
 )
 
 __all__ = [
@@ -17,5 +16,4 @@ __all__ = [
     "project_members",
     "project_automations",
     "projects",
-    "scheduled_tasks",
 ]

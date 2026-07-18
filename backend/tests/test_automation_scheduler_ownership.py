@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.automations.errors import AutomationUnavailable
 from app.automations.ownership import (
@@ -15,7 +15,8 @@ from app.automations.ownership import (
     AutomationSchedulerOwnership,
 )
 from app.automations.reconciliation import ReconciliationReport
-from app.scheduler.service import ScheduledTaskService
+from app.scheduler.app import SchedulerApp
+from app.scheduler.service import AutomationSchedulerService
 
 
 @pytest.mark.asyncio
@@ -323,25 +324,31 @@ async def test_running_scheduler_fail_stops_before_reserve_after_backend_termina
         def __init__(self) -> None:
             self.due_count = 0
 
-        async def due_definitions(self, **_kwargs):
+        async def due_definitions_in_session(self, _session, **_kwargs):
             self.due_count += 1
             first_reserve.set()
             return ()
 
     occurrences = Occurrences()
-    dispatcher = SimpleNamespace(admit_occurrence=AsyncMock())
-    reconciler = SimpleNamespace(reconcile_restart=AsyncMock(return_value=ReconciliationReport()))
-    service = ScheduledTaskService(
+    dispatcher = SimpleNamespace(admit_occurrence_in_session=AsyncMock())
+    reconciler = SimpleNamespace(reconcile_admitted_runs=AsyncMock(return_value=ReconciliationReport()))
+    service = AutomationSchedulerService(
         occurrences=occurrences,
         dispatcher=dispatcher,
         reconciler=reconciler,
-        poll_interval_seconds=0.05,
         max_concurrent_runs=3,
         ownership=first,
     )
+    scheduler = SchedulerApp(
+        enabled=True,
+        ownership=first,
+        service=service,
+        session_factory=async_sessionmaker(first_engine, expire_on_commit=False),
+        poll_interval_seconds=0.05,
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(scheduler.run(stop))
     try:
-        await first.acquire()
-        await service.start()
         await asyncio.wait_for(first_reserve.wait(), timeout=1)
         backend_pid = first.backend_pid
         assert isinstance(backend_pid, int)
@@ -362,25 +369,25 @@ async def test_running_scheduler_fail_stops_before_reserve_after_backend_termina
             )
         due_count_after_termination = occurrences.due_count
 
-        task = service.task
-        assert task is not None
         await asyncio.wait_for(task, timeout=1)
         due_count_at_loss = occurrences.due_count
 
         assert first.is_lost is True
-        assert service.status == "ownership_lost"
         assert due_count_after_termination >= 1
         assert due_count_at_loss == due_count_after_termination
-        dispatcher.admit_occurrence.assert_not_awaited()
+        dispatcher.admit_occurrence_in_session.assert_not_awaited()
 
         await second.acquire()
         assert second.is_acquired is True
         with pytest.raises(AutomationUnavailable):
-            await service.start()
+            await scheduler.run(asyncio.Event())
         await asyncio.sleep(0.1)
         assert occurrences.due_count == due_count_at_loss
     finally:
-        await service.stop()
+        stop.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await first.release()
         await second.release()
         await first_engine.dispose()

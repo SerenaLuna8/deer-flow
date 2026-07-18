@@ -121,80 +121,98 @@ class AutomationOccurrenceService:
         creating the occurrence, Run, and job.
         """
 
-        from app.automations.dispatcher import AutomationDefinitionRef
-
         now = self._validated_now(now)
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("limit must be between 1 and 1000")
         cursor = self._validated_due_cursor(after)
         try:
             async with self._session_factory() as session:
-                statement = (
-                    sa.select(
-                        ScheduledTaskRow.project_id,
-                        ScheduledTaskRow.owner_user_id,
-                        ScheduledTaskRow.id,
-                        ScheduledTaskRow.next_run_at,
-                        ProjectMembershipRow.version,
-                    )
-                    .join(
-                        ProjectMembershipRow,
-                        sa.and_(
-                            ProjectMembershipRow.project_id == ScheduledTaskRow.project_id,
-                            ProjectMembershipRow.user_id == ScheduledTaskRow.owner_user_id,
-                        ),
-                    )
-                    .join(
-                        ProjectRow,
-                        ProjectRow.id == ScheduledTaskRow.project_id,
-                    )
-                    .where(
-                        ScheduledTaskRow.status == "enabled",
-                        ScheduledTaskRow.frozen_at.is_(None),
-                        ScheduledTaskRow.deleted_at.is_(None),
-                        ScheduledTaskRow.next_run_at.is_not(None),
-                        ScheduledTaskRow.next_run_at <= now,
-                        ProjectMembershipRow.status == "active",
-                        ProjectMembershipRow.role.in_(("admin", "editor", "runner")),
-                        ProjectRow.status == "active",
-                        ProjectRow.is_suspended.is_(False),
-                    )
+                return await self.due_definitions_in_session(
+                    session,
+                    now=now,
+                    limit=limit,
+                    after=cursor,
                 )
-                if cursor is not None:
-                    statement = statement.where(
-                        sa.tuple_(
-                            ScheduledTaskRow.next_run_at,
-                            ScheduledTaskRow.project_id,
-                            ScheduledTaskRow.owner_user_id,
-                            ScheduledTaskRow.id,
-                        )
-                        > sa.tuple_(*cursor)
-                    )
-                rows = (
-                    await session.execute(
-                        statement.order_by(
-                            ScheduledTaskRow.next_run_at,
-                            ScheduledTaskRow.project_id,
-                            ScheduledTaskRow.owner_user_id,
-                            ScheduledTaskRow.id,
-                        ).limit(limit)
-                    )
-                ).all()
-            return tuple(
-                (
-                    AutomationDefinitionRef(
-                        project_id=row.project_id,
-                        owner_user_id=row.owner_user_id,
-                        task_id=row.id,
-                        membership_version=row.version,
-                    ),
-                    row.next_run_at,
-                )
-                for row in rows
-                if row.next_run_at is not None
-            )
         except Exception as error:
             self._raise_mapped(error, "scheduler")
+
+    async def due_definitions_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        now: datetime,
+        limit: int,
+        after: AutomationDueCursor | None = None,
+    ):
+        """Read due definitions without owning or committing the transaction."""
+
+        from app.automations.dispatcher import AutomationDefinitionRef
+
+        now = self._validated_now(now)
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        cursor = self._validated_due_cursor(after)
+        statement = (
+            sa.select(
+                ScheduledTaskRow.project_id,
+                ScheduledTaskRow.owner_user_id,
+                ScheduledTaskRow.id,
+                ScheduledTaskRow.next_run_at,
+                ProjectMembershipRow.version,
+            )
+            .join(
+                ProjectMembershipRow,
+                sa.and_(
+                    ProjectMembershipRow.project_id == ScheduledTaskRow.project_id,
+                    ProjectMembershipRow.user_id == ScheduledTaskRow.owner_user_id,
+                ),
+            )
+            .join(ProjectRow, ProjectRow.id == ScheduledTaskRow.project_id)
+            .where(
+                ScheduledTaskRow.status == "enabled",
+                ScheduledTaskRow.frozen_at.is_(None),
+                ScheduledTaskRow.deleted_at.is_(None),
+                ScheduledTaskRow.next_run_at.is_not(None),
+                ScheduledTaskRow.next_run_at <= now,
+                ProjectMembershipRow.status == "active",
+                ProjectMembershipRow.role.in_(("admin", "editor", "runner")),
+                ProjectRow.status == "active",
+                ProjectRow.is_suspended.is_(False),
+            )
+        )
+        if cursor is not None:
+            statement = statement.where(
+                sa.tuple_(
+                    ScheduledTaskRow.next_run_at,
+                    ScheduledTaskRow.project_id,
+                    ScheduledTaskRow.owner_user_id,
+                    ScheduledTaskRow.id,
+                )
+                > sa.tuple_(*cursor)
+            )
+        rows = (
+            await session.execute(
+                statement.order_by(
+                    ScheduledTaskRow.next_run_at,
+                    ScheduledTaskRow.project_id,
+                    ScheduledTaskRow.owner_user_id,
+                    ScheduledTaskRow.id,
+                ).limit(limit)
+            )
+        ).all()
+        return tuple(
+            (
+                AutomationDefinitionRef(
+                    project_id=row.project_id,
+                    owner_user_id=row.owner_user_id,
+                    task_id=row.id,
+                    membership_version=row.version,
+                ),
+                row.next_run_at,
+            )
+            for row in rows
+            if row.next_run_at is not None
+        )
 
     @classmethod
     def _validated_due_cursor(

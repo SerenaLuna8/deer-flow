@@ -45,24 +45,23 @@ async def test_gate_restores_blockbuster_patches_after_exceptions() -> None:
 
 
 async def test_gate_catches_unoffloaded_blocking_io_in_scheduler_path() -> None:
-    from app.scheduler.service import ScheduledTaskService
+    from app.scheduler.service import AutomationSchedulerService
 
-    async def blocking_due_definitions(**_kwargs):
+    async def blocking_due_definitions(_session, **_kwargs):
         time.sleep(0.01)
         return ()
 
-    service = ScheduledTaskService(
+    service = AutomationSchedulerService(
         occurrences=SimpleNamespace(
-            due_definitions=blocking_due_definitions,
+            due_definitions_in_session=blocking_due_definitions,
         ),
-        dispatcher=SimpleNamespace(admit_occurrence=AsyncMock()),
-        reconciler=SimpleNamespace(reconcile_restart=AsyncMock()),
-        poll_interval_seconds=60,
+        dispatcher=SimpleNamespace(admit_occurrence_in_session=AsyncMock()),
+        reconciler=SimpleNamespace(reconcile_admitted_runs=AsyncMock()),
         max_concurrent_runs=3,
     )
 
     with pytest.raises(BlockingError):
-        await service.run_once(now=service._clock())
+        await service.admit_due_occurrences(object(), now=service._clock())
 
 
 @pytest.mark.allow_blocking_io

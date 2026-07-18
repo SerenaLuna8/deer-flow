@@ -180,6 +180,32 @@ class AutomationReconciler:
         except (DBAPIError, SATimeoutError):
             raise AutomationUnavailable("automation-restart") from None
 
+    async def reconcile_admitted_runs(
+        self,
+        session: AsyncSession,
+        *,
+        now: datetime,
+    ) -> ReconciliationReport:
+        """Settle admitted terminal runs without owning the transaction."""
+
+        now = self._validated_now(now)
+        candidates = await self._restart_candidates_in_session(session, now)
+        report = ReconciliationReport()
+        for candidate in candidates:
+            result = await self._reconcile_candidate_in_session(
+                session,
+                candidate,
+                now,
+            )
+            report = ReconciliationReport(
+                requeued=report.requeued + (result == "requeued"),
+                succeeded=report.succeeded + (result == "succeeded"),
+                failed=report.failed + (result == "failed"),
+                interrupted=report.interrupted + (result == "interrupted"),
+                unchanged=report.unchanged + (result == "unchanged"),
+            )
+        return report
+
     async def _lookup_run_coordinates(self, run_id: str) -> _RunCoordinates | None:
         # Trusted completion-only lookup. It returns coordinates, never content
         # or authority, and every subsequent mutation is project+owner scoped.
@@ -209,32 +235,39 @@ class AutomationReconciler:
         # Startup-only inventory. Rows carry their database scope into the
         # scoped, lock-ordered transaction below; no mutation is unscoped.
         async with self._session_factory() as session:
-            rows = (
-                await session.execute(
-                    sa.select(
-                        ScheduledTaskRunRow.id,
-                        ScheduledTaskRunRow.project_id,
-                        ScheduledTaskRunRow.owner_user_id,
-                        ScheduledTaskRunRow.task_id,
-                    )
-                    .where(
-                        sa.or_(
-                            ScheduledTaskRunRow.status == "running",
-                            sa.and_(
-                                ScheduledTaskRunRow.status == "launching",
-                                ScheduledTaskRunRow.lease_expires_at.is_not(None),
-                                ScheduledTaskRunRow.lease_expires_at <= now,
-                            ),
-                        )
-                    )
-                    .order_by(
-                        ScheduledTaskRunRow.project_id,
-                        ScheduledTaskRunRow.owner_user_id,
-                        ScheduledTaskRunRow.task_id,
-                        ScheduledTaskRunRow.id,
+            return await self._restart_candidates_in_session(session, now)
+
+    @staticmethod
+    async def _restart_candidates_in_session(
+        session: AsyncSession,
+        now: datetime,
+    ) -> tuple[_RestartCoordinates, ...]:
+        rows = (
+            await session.execute(
+                sa.select(
+                    ScheduledTaskRunRow.id,
+                    ScheduledTaskRunRow.project_id,
+                    ScheduledTaskRunRow.owner_user_id,
+                    ScheduledTaskRunRow.task_id,
+                )
+                .where(
+                    sa.or_(
+                        ScheduledTaskRunRow.status == "running",
+                        sa.and_(
+                            ScheduledTaskRunRow.status == "launching",
+                            ScheduledTaskRunRow.lease_expires_at.is_not(None),
+                            ScheduledTaskRunRow.lease_expires_at <= now,
+                        ),
                     )
                 )
-            ).all()
+                .order_by(
+                    ScheduledTaskRunRow.project_id,
+                    ScheduledTaskRunRow.owner_user_id,
+                    ScheduledTaskRunRow.task_id,
+                    ScheduledTaskRunRow.id,
+                )
+            )
+        ).all()
         return tuple(
             _RestartCoordinates(
                 occurrence_id=row.id,
@@ -247,49 +280,65 @@ class AutomationReconciler:
 
     async def _reconcile_candidate(self, candidate: _RestartCoordinates, now: datetime) -> str:
         async with self._session_factory() as session, session.begin():
-            await self._lock_project_membership(session, candidate)
-            tasks = ScheduledTaskRepository(session)
-            task = await tasks.lock_for_automation_outcome(candidate.scope, candidate.task_id)
-            if task is None:
-                return "unchanged"
-            occurrences = ScheduledTaskRunRepository(session)
-            occurrence = await occurrences.get(candidate.scope, candidate.occurrence_id, lock=True)
-            if occurrence is None or occurrence.status in TERMINAL_OCCURRENCE_STATUSES:
-                return "unchanged"
-            if occurrence.status not in {"launching", "running"}:
-                return "unchanged"
+            return await self._reconcile_candidate_in_session(
+                session,
+                candidate,
+                now,
+            )
 
-            run_id = occurrence.run_id or deterministic_run_id(occurrence.id)
-            run = await PrivateRunRepository(session).get(scope=candidate.scope, run_id=run_id, lock=True)
-            # M6 admission commits occurrence + Run + job together. A missing
-            # relation is therefore not safe to synthesize, and legacy
-            # launching rows are never replayed by restart reconciliation.
-            if run is None:
-                return "unchanged"
+    async def _reconcile_candidate_in_session(
+        self,
+        session: AsyncSession,
+        candidate: _RestartCoordinates,
+        now: datetime,
+    ) -> str:
+        await self._lock_project_membership(session, candidate)
+        tasks = ScheduledTaskRepository(session)
+        task = await tasks.lock_for_automation_outcome(candidate.scope, candidate.task_id)
+        if task is None:
+            return "unchanged"
+        occurrences = ScheduledTaskRunRepository(session)
+        occurrence = await occurrences.get(candidate.scope, candidate.occurrence_id, lock=True)
+        if occurrence is None or occurrence.status in TERMINAL_OCCURRENCE_STATUSES:
+            return "unchanged"
+        if occurrence.status not in {"launching", "running"}:
+            return "unchanged"
 
-            if not self._relation_is_valid(task, occurrence, run):
-                return "unchanged"
-            outcome = automation_outcome_for_private_run(run)
-            if outcome is not None:
-                changed = await self._settle(
-                    tasks,
-                    occurrences,
-                    candidate.scope,
-                    task,
-                    occurrence,
-                    outcome,
-                    finished_at=now,
-                    thread_id=run.thread_id,
-                    run_id=run.run_id,
-                )
-                if not changed:
-                    return "unchanged"
-                return "succeeded" if outcome.occurrence_status == "success" else ("interrupted" if outcome.occurrence_status == "interrupted" else "failed")
-
+        run_id = occurrence.run_id or deterministic_run_id(occurrence.id)
+        run = await PrivateRunRepository(session).get(
+            scope=candidate.scope,
+            run_id=run_id,
+            lock=True,
+        )
+        # M6 admission commits occurrence + Run + job together. A missing
+        # relation is therefore not safe to synthesize, and legacy launching
+        # rows are never replayed by restart reconciliation.
+        if run is None or not self._relation_is_valid(task, occurrence, run):
+            return "unchanged"
+        outcome = automation_outcome_for_private_run(run)
+        if outcome is None:
             # Pending/running work remains owned by its durable job. Scheduler
             # restart coordinates terminal state only; it never replays or
             # interrupts an admitted Worker Run.
             return "unchanged"
+        changed = await self._settle(
+            tasks,
+            occurrences,
+            candidate.scope,
+            task,
+            occurrence,
+            outcome,
+            finished_at=now,
+            thread_id=run.thread_id,
+            run_id=run.run_id,
+        )
+        if not changed:
+            return "unchanged"
+        if outcome.occurrence_status == "success":
+            return "succeeded"
+        if outcome.occurrence_status == "interrupted":
+            return "interrupted"
+        return "failed"
 
     @staticmethod
     async def _lock_project_membership(

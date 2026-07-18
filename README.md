@@ -71,7 +71,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
-  - [Scheduled Tasks](#scheduled-tasks)
+  - [Project Automations](#project-automations)
   - [Terminal Workbench (TUI)](#terminal-workbench-tui)
   - [Documentation](#documentation)
   - [⚠️ Security Notice](#️-security-notice)
@@ -966,7 +966,7 @@ client.clear_goal("thread-1")
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 
-## Scheduled Tasks
+## Project Automations
 
 M5 adds project Automation at
 `/projects/{project_slug}/automations`. Each definition and occurrence is private to
@@ -993,7 +993,10 @@ Enable background polling with `config.yaml -> scheduler.enabled` and run the ba
 Scheduler role with `cd backend && make scheduler`. It—not Gateway—holds the PostgreSQL
 scheduler ownership lock and only admits jobs. Disabling polling leaves the project API
 and manual trigger available; manual trigger uses the same atomic occurrence/Run/job
-path. PostgreSQL durable stream writing/reading, terminal uniqueness, Gateway SSE reconnect,
+path. The legacy global `/api/scheduled-tasks*` API has been removed; only the
+project-scoped Automation API remains, while the existing `scheduled_tasks` and
+`scheduled_task_runs` table names stay as private persistence details. PostgreSQL durable
+stream writing/reading, terminal uniqueness, Gateway SSE reconnect,
 frontend cursor/dedupe, and the atomic project quota core are implemented. Member, storage,
 concurrent-Run, and actual MCP-dispatch quota enforcement are also wired across Gateway,
 Worker, and Scheduler with stable 429/`Retry-After` responses. Tasks 16–17 add operator-only

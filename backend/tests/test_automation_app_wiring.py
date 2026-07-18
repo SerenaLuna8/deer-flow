@@ -32,7 +32,7 @@ def test_gateway_runtime_does_not_construct_scheduler_or_ownership() -> None:
 
     assert "_start_scheduled_task_service" not in app_source
     assert "_stop_scheduled_task_service" not in app_source
-    assert "ScheduledTaskService(" not in deps_source
+    assert "AutomationSchedulerService(" not in deps_source
     assert "AutomationSchedulerOwnership(" not in deps_source
     assert "reconcile_restart(" not in deps_source
 

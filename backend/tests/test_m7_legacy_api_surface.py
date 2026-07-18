@@ -4,6 +4,8 @@ import importlib.util
 import inspect
 from pathlib import Path
 
+from app.automations import error_mapping
+from app.automations.errors import AUTOMATION_ERROR_STATUS
 from app.gateway import private_work_schemas
 from app.gateway.app import create_app
 from app.gateway.deps import gateway_platform_runtime
@@ -14,6 +16,7 @@ LEGACY_PREFIXES = (
     "/api/runs",
     "/api/assistants",
     "/api/memory",
+    "/api/scheduled-tasks",
 )
 
 DELETED_MODULES = (
@@ -26,6 +29,9 @@ DELETED_MODULES = (
     "app.gateway.routers.thread_runs",
     "app.gateway.routers.threads",
     "app.gateway.routers.uploads",
+    "app.gateway.routers.scheduled_tasks",
+    "app.automations.cutover",
+    "app.automations.legacy_reads",
 )
 
 
@@ -35,10 +41,19 @@ def test_gateway_openapi_has_no_global_private_routes() -> None:
     assert all(not path.startswith(prefix) for path in paths for prefix in LEGACY_PREFIXES)
 
 
-def test_gateway_openapi_keeps_legacy_scheduled_tasks_until_task_4() -> None:
+def test_gateway_openapi_keeps_only_project_automation_routes() -> None:
     paths = create_app().openapi()["paths"]
 
-    assert "/api/scheduled-tasks" in paths
+    assert not any(path.startswith("/api/scheduled-tasks") for path in paths)
+    assert "/api/projects/{project_id}/automations" in paths
+
+
+def test_automation_error_contract_has_no_cutover_or_legacy_codes() -> None:
+    source = inspect.getsource(error_mapping)
+
+    assert all("CUTOVER" not in code and "LEGACY" not in code for code in AUTOMATION_ERROR_STATUS)
+    assert "AutomationCutover" not in source
+    assert "AutomationMigrationRequired" not in source
 
 
 def test_gateway_openapi_keeps_project_private_routes() -> None:
@@ -63,7 +78,7 @@ def test_gateway_runtime_has_no_legacy_execution_singletons() -> None:
         "_migrate_orphaned_threads",
         "ScheduledTaskRepository",
         "ScheduledTaskRunRepository",
-        "ScheduledTaskService",
+        "AutomationSchedulerService",
         "scheduled_task_repo",
         "scheduled_task_run_repo",
         "scheduled_task_service",

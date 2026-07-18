@@ -22,7 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from app.audit.service import AuditService, _bind_gateway_audit_process
 from app.audit.sinks import OperationalAuditSink
-from app.automations.cutover import AutomationCutoverGuard
 from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.readiness import AutomationReadinessService
 from app.automations.service import ProjectAutomationService
@@ -929,7 +928,6 @@ async def build_m5_app(seed: M5Seed) -> M5App:
         audit_service,
         process_context=_bind_gateway_audit_process(audit_service),
     )
-    app.state.automation_cutover_guard = AutomationCutoverGuard(seed.factory)
     app.state.automation_service = ProjectAutomationService(seed.factory, clock=lambda: M5_NOW)
     app.state.automation_occurrence_service = AutomationOccurrenceService(
         seed.factory,

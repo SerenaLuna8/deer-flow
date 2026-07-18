@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal
 from dataclasses import dataclass
+from datetime import UTC, datetime
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.automations.dispatcher import AutomationDispatcher
+from app.automations.errors import AutomationError
 from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.ownership import AutomationSchedulerOwnership
 from app.automations.reconciliation import AutomationReconciler
@@ -14,7 +19,7 @@ from app.final_schema import FinalSchemaProbe
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
 from app.reliability.owner_refs import AuditHmacKeyring
-from app.scheduler.service import ScheduledTaskService
+from app.scheduler.service import AutomationSchedulerService
 from deerflow.config import get_app_config
 from deerflow.persistence import (
     close_engine,
@@ -23,6 +28,8 @@ from deerflow.persistence import (
     init_engine,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(slots=True)
 class SchedulerApp:
@@ -30,32 +37,48 @@ class SchedulerApp:
 
     enabled: bool
     ownership: AutomationSchedulerOwnership
-    service: ScheduledTaskService
+    service: AutomationSchedulerService
+    session_factory: async_sessionmaker[AsyncSession]
+    poll_interval_seconds: float
 
     async def run(self, stop_event: asyncio.Event) -> None:
         if not self.enabled:
             return
         async with self.ownership.hold():
-            await self.service.start()
-            stop_wait = asyncio.create_task(
-                stop_event.wait(),
-                name="automation-scheduler-stop-wait",
-            )
-            try:
-                poll_task = self.service.task
-                if poll_task is None:
-                    await stop_wait
-                else:
-                    done, _pending = await asyncio.wait(
-                        {stop_wait, poll_task},
-                        return_when=asyncio.FIRST_COMPLETED,
+            async with self.session_factory() as session, session.begin():
+                await self.service.reconcile_admitted_runs(session)
+            while not stop_event.is_set():
+                try:
+                    async with self.session_factory() as session, session.begin():
+                        await self.service.admit_due_occurrences(
+                            session,
+                            now=datetime.now(UTC),
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except AutomationError as error:
+                    if self.ownership.is_lost:
+                        logger.error(
+                            "Automation scheduler ownership lost; polling stopped: code=%s",
+                            error.code,
+                        )
+                        return
+                    logger.error(
+                        "Automation scheduler poll failed: code=%s",
+                        error.code,
                     )
-                    if poll_task in done:
-                        await poll_task
-            finally:
-                stop_wait.cancel()
-                await asyncio.gather(stop_wait, return_exceptions=True)
-                await self.service.stop()
+                except Exception as error:  # noqa: BLE001 - keep polling after isolated faults
+                    logger.error(
+                        "Automation scheduler poll failed: error_type=%s",
+                        type(error).__name__,
+                    )
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(),
+                        timeout=self.poll_interval_seconds,
+                    )
+                except TimeoutError:
+                    pass
 
 
 async def run_scheduler(
@@ -94,7 +117,7 @@ async def run_scheduler(
             session_factory,
             max_concurrent_runs=config.scheduler.max_concurrent_runs,
         )
-        service = ScheduledTaskService(
+        service = AutomationSchedulerService(
             occurrences=occurrences,
             dispatcher=AutomationDispatcher(
                 session_factory,
@@ -103,7 +126,6 @@ async def run_scheduler(
                 audit=audit_sink,
             ),
             reconciler=AutomationReconciler(session_factory),
-            poll_interval_seconds=config.scheduler.poll_interval_seconds,
             max_concurrent_runs=config.scheduler.max_concurrent_runs,
             ownership=ownership,
         )
@@ -111,6 +133,8 @@ async def run_scheduler(
             enabled=True,
             ownership=ownership,
             service=service,
+            session_factory=session_factory,
+            poll_interval_seconds=config.scheduler.poll_interval_seconds,
         ).run(stop_event or asyncio.Event())
     finally:
         await close_engine()

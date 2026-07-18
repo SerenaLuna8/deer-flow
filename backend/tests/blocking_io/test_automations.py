@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from support.detectors.blocking_io_static import scan_paths
 
-from app.scheduler.service import ScheduledTaskService
+from app.scheduler.service import AutomationSchedulerService
 from scripts import migrate_automations
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -58,17 +58,16 @@ def test_migration_cli_wraps_its_only_sync_alembic_call_in_to_thread() -> None:
 
 @pytest.mark.asyncio
 async def test_scheduler_poll_path_runs_under_strict_runtime_gate() -> None:
-    service = ScheduledTaskService(
+    service = AutomationSchedulerService(
         occurrences=SimpleNamespace(
-            due_definitions=AsyncMock(return_value=()),
+            due_definitions_in_session=AsyncMock(return_value=()),
         ),
-        dispatcher=SimpleNamespace(admit_occurrence=AsyncMock()),
-        reconciler=SimpleNamespace(reconcile_restart=AsyncMock()),
-        poll_interval_seconds=60,
+        dispatcher=SimpleNamespace(admit_occurrence_in_session=AsyncMock()),
+        reconciler=SimpleNamespace(reconcile_admitted_runs=AsyncMock()),
         max_concurrent_runs=3,
     )
 
-    await service.run_once(now=service._clock())
+    await service.admit_due_occurrences(object(), now=service._clock())
 
 
 @pytest.mark.asyncio

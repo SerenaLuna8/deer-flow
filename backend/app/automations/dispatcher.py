@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -432,6 +433,7 @@ class AutomationDispatcher:
         *,
         scheduled_for: datetime,
         manual_idempotency_key: uuid.UUID | None = None,
+        _session: AsyncSession | None = None,
     ) -> AdmittedAutomationOccurrence | SkippedAutomationOccurrence:
         if type(definition) is not AutomationDefinitionRef:
             raise AutomationInvalid(_DISPATCH_REQUEST_ID)
@@ -444,7 +446,7 @@ class AutomationDispatcher:
         occurrence_id = self._occurrence_id(definition, occurrence_key)
         try:
             admitted_at = self._now()
-            async with self._session_factory() as session, session.begin():
+            async with self._admission_session(_session) as session:
                 await session.execute(
                     sa.text("SELECT pg_advisory_xact_lock(:lock_key)"),
                     {"lock_key": _AUTOMATION_ADMISSION_LOCK},
@@ -672,6 +674,29 @@ class AutomationDispatcher:
                 return result
         except Exception as error:
             raise self._map_error(error) from None
+
+    async def admit_occurrence_in_session(
+        self,
+        session: AsyncSession,
+        definition: AutomationDefinitionRef,
+        *,
+        scheduled_for: datetime,
+    ) -> AdmittedAutomationOccurrence | SkippedAutomationOccurrence:
+        """Admit scheduled work inside the caller-owned transaction."""
+
+        return await self.admit_occurrence(
+            definition,
+            scheduled_for=scheduled_for,
+            _session=session,
+        )
+
+    @asynccontextmanager
+    async def _admission_session(self, session: AsyncSession | None):
+        if session is not None:
+            yield session
+            return
+        async with self._session_factory() as owned_session, owned_session.begin():
+            yield owned_session
 
     async def admit_manual(
         self,

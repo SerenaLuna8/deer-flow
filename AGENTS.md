@@ -125,8 +125,15 @@ Gateway 只初始化 project-scoped checkpointer、PostgreSQL private Run/event 
 quota/audit/asset/project services；`app.private_work.http_runtime` 只负责 project Run admission
 和 SSE frame formatting，执行仍由独立 Worker 完成。M7 仍未整体完成。
 
+M7 Task 4 已删除 global `/api/scheduled-tasks*`、legacy Automation read adapter 和
+marker-derived Automation cutover guard。`/api/projects/{project_id}/automations*` 是唯一
+Automation HTTP surface；底层 `scheduled_tasks` / `scheduled_task_runs` 表和 scoped repositories
+继续作为最终 project Automation persistence。独立 Scheduler 通过
+`AutomationSchedulerService` 的 caller-owned transaction 操作完成 terminal reconciliation 与
+due occurrence/Run/job 原子 admission。M7 仍未整体完成。
+
 Scheduled-task note:
-- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks`; under final M6 cutover, `config.yaml -> scheduler.enabled` gates an independent Scheduler process rather than a Gateway lifespan task.
+- Project Automation is available only under `/projects/{project_slug}/automations` and `/api/projects/{project_id}/automations*`; the global scheduled-task HTTP API has been removed. `config.yaml -> scheduler.enabled` gates an independent Scheduler process rather than a Gateway lifespan task.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal Worker run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. `AutomationDispatcher` writes that flag as server-owned admission data in the atomic occurrence/Run/job transaction; client-supplied `context.non_interactive` is dropped.
 - Project Automation occurrence, private Run/snapshot, and `automation_run` job now commit atomically. Gateway retains manual admission but never constructs Scheduler ownership or a poller. When enabled, `make scheduler` owns the process-lifetime PostgreSQL session advisory lock on a dedicated connection; each poll verifies the same backend PID and existing lock without reacquiring it, and ownership loss exits polling/process lifetime. A competing Scheduler may take over only after PostgreSQL releases the old session lock. Worker startup always reconciles already-admitted terminal Runs before claiming jobs, and enabled Scheduler startup performs the same idempotent reconciliation before polling; neither path interrupts or replays active Worker work. Disabled Scheduler mode takes no lock or poll task while manual APIs and Worker restart reconciliation remain available.
 - Existing M5 installations follow `docs/operations/m6-reliability-migration.md`: authenticated Task16 archive evidence and maintenance acknowledgment are required before `0014`; `0015` and the complete marker are written only after job/quota/audit/stream/recovery probes.

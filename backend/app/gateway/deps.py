@@ -28,11 +28,7 @@ from langgraph.types import Checkpointer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.automations.error_mapping import automation_http_exception
-from app.automations.errors import (
-    AutomationError,
-    AutomationNotFound,
-    AutomationUnavailable,
-)
+from app.automations.errors import AutomationNotFound, AutomationUnavailable
 from app.private_work.context import PrivateWorkContext
 from app.private_work.cutover import PrivateWorkCutoverGuard
 from app.private_work.error_mapping import private_work_http_exception
@@ -235,7 +231,6 @@ async def gateway_platform_runtime(
         app.state.run_store = RunRepository(sf)
         app.state.feedback_repo = FeedbackRepository(sf)
 
-        from app.automations.cutover import AutomationCutoverGuard
         from app.automations.dispatcher import AutomationDispatcher
         from app.automations.occurrences import AutomationOccurrenceService
         from app.automations.readiness import AutomationReadinessService
@@ -244,7 +239,6 @@ async def gateway_platform_runtime(
 
         scheduler_config = getattr(config, "scheduler", None)
         effective_scheduler_config = scheduler_config or SchedulerConfig()
-        app.state.automation_cutover_guard = AutomationCutoverGuard(sf)
         app.state.automation_service = ProjectAutomationService(
             sf,
             min_once_delay_seconds=effective_scheduler_config.min_once_delay_seconds,
@@ -315,13 +309,6 @@ def get_private_work_cutover_guard(request: Request) -> PrivateWorkCutoverGuard:
     ):
         raise HTTPException(status_code=503, detail="Private work cutover guard not available")
     return cast(PrivateWorkCutoverGuard, value)
-
-
-def get_automation_cutover_guard(request: Request):
-    value = getattr(request.app.state, "automation_cutover_guard", None)
-    if value is None or not hasattr(value, "require_project_open"):
-        raise automation_http_exception(AutomationUnavailable(get_current_trace_id() or generate_trace_id()))
-    return value
 
 
 def _automation_state_dependency(
@@ -439,27 +426,6 @@ def get_project_checkpointer(request: Request, context: PrivateWorkContext):
     if project_scoped_checkpointer is None:
         raise HTTPException(status_code=503, detail="Project checkpointer not available")
     return project_scoped_checkpointer.for_context(context)
-
-
-def get_scheduled_task_repo(request: Request):
-    val = getattr(request.app.state, "scheduled_task_repo", None)
-    if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task repo not available")
-    return val
-
-
-def get_scheduled_task_run_repo(request: Request):
-    val = getattr(request.app.state, "scheduled_task_run_repo", None)
-    if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task run repo not available")
-    return val
-
-
-def get_scheduled_task_service(request: Request):
-    val = getattr(request.app.state, "scheduled_task_service", None)
-    if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task service not available")
-    return val
 
 
 # ---------------------------------------------------------------------------
@@ -596,29 +562,16 @@ async def automation_context(
         raise automation_http_exception(AutomationUnavailable(request_id)) from None
 
 
-async def require_legacy_automation_open(request: Request) -> None:
-    try:
-        await get_automation_cutover_guard(request).require_legacy_open()
-    except AutomationError as error:
-        raise automation_http_exception(error) from None
-
-
-async def require_legacy_automation_mutation_open(request: Request) -> None:
-    try:
-        await get_automation_cutover_guard(request).require_legacy_mutation_open()
-    except AutomationError as error:
-        raise automation_http_exception(error) from None
-
-
 async def require_project_automation_open(
-    request: Request,
     context: PrivateWorkContext = Depends(automation_context),
+    session: AsyncSession = Depends(project_session),
 ) -> None:
-    del context
+    from app.final_schema import FinalSchemaProbe, FinalSchemaRequired, FinalSchemaUnavailable
+
     try:
-        await get_automation_cutover_guard(request).require_project_open()
-    except AutomationError as error:
-        raise automation_http_exception(error) from None
+        await FinalSchemaProbe().require_ready(session)
+    except (FinalSchemaRequired, FinalSchemaUnavailable):
+        raise automation_http_exception(AutomationUnavailable(context.request_id)) from None
 
 
 async def require_legacy_private_open(

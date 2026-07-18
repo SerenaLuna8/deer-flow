@@ -2,10 +2,10 @@ from app.gateway import app as gateway_app
 from app.gateway.app import create_app
 
 
-def test_gateway_app_includes_scheduled_task_router():
+def test_gateway_app_excludes_global_scheduled_task_router():
     app = create_app()
     paths = {route.path for route in app.routes}
-    assert "/api/scheduled-tasks" in paths
+    assert "/api/scheduled-tasks" not in paths
 
 
 def test_gateway_exposes_no_scheduler_lifecycle_helpers() -> None:

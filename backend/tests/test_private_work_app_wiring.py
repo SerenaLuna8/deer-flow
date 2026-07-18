@@ -8,7 +8,6 @@ import pytest
 from fastapi import FastAPI
 from support.m4_private_threads import seed_m4_thread_database
 
-from app.automations.cutover import AutomationCutoverGuard
 from app.automations.dispatcher import AutomationDispatcher
 from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.readiness import AutomationReadinessService
@@ -113,7 +112,7 @@ async def test_gateway_platform_runtime_installs_project_private_work_services_f
             assert app.state.private_run_event_store._sf is session_factory
             assert app.state.private_run_event_store._max_trace_content == 321
 
-            assert isinstance(app.state.automation_cutover_guard, AutomationCutoverGuard)
+            assert not hasattr(app.state, "automation_cutover_guard")
             assert app.state.automation_service._min_once_delay_seconds == 73
             assert isinstance(
                 app.state.automation_readiness_service,

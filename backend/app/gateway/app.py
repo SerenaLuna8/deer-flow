@@ -35,7 +35,6 @@ from app.gateway.routers import (
     project_memory,
     project_usage,
     projects,
-    scheduled_tasks,
 )
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from app.reliability.error_mapping import (
@@ -328,10 +327,6 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(private_work.router)
     app.include_router(project_memory.router)
     app.include_router(project_connections.router)
-    # Task 3 keeps the legacy scheduled-task HTTP surface mounted so Task 4
-    # owns its removal. The Gateway platform runtime intentionally does not
-    # install its legacy repositories or service singletons.
-    app.include_router(scheduled_tasks.router)
     app.include_router(admin_assets.admin_router)
     app.include_router(admin_assets.admin_project_router)
     app.include_router(admin_operations.router)
