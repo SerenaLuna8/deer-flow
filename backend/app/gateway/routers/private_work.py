@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime
@@ -76,7 +75,10 @@ from deerflow.runtime.events.models import (
 )
 from deerflow.runtime.events.store import RunEventStore
 from deerflow.runtime.runs.store import RunStore
-from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+from deerflow.runtime.stream_bridge.postgres import (
+    PostgresStreamBridge,
+    parse_stream_cursor,
+)
 from deerflow.utils.time import coerce_iso
 
 router = APIRouter(
@@ -366,7 +368,6 @@ def _require_run_runtime(request: Request, request_id: str) -> PostgresStreamBri
     return _private_stream_bridge(request, request_id)
 
 
-_CANONICAL_STREAM_CURSOR = re.compile(r"0|[1-9][0-9]*")
 _PRIVATE_STREAM_POLL_SECONDS = 0.25
 _PRIVATE_STREAM_HEARTBEAT_SECONDS = 15.0
 _PRIVATE_RUN_TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
@@ -376,9 +377,10 @@ def _private_stream_cursor(request: Request, request_id: str) -> int:
     raw_cursor = request.headers.get("Last-Event-ID")
     if raw_cursor is None or raw_cursor == "":
         return 0
-    if _CANONICAL_STREAM_CURSOR.fullmatch(raw_cursor) is None:
+    try:
+        return parse_stream_cursor(raw_cursor)
+    except ValueError:
         raise ReliabilityInvalidStreamCursor(request_id)
-    return int(raw_cursor)
 
 
 def _private_stream_headers(

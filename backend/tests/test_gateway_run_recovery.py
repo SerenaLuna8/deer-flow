@@ -101,7 +101,7 @@ def _install_runtime_doubles(
         "init_engine_from_config",
         async_noop,
     )
-    monkeypatch.setattr(engine_module, "get_session_factory", lambda: object())
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: lambda: None)
     monkeypatch.setattr(engine_module, "close_engine", async_noop)
     monkeypatch.setattr(
         runtime_module,

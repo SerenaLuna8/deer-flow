@@ -23,6 +23,7 @@ from deerflow.persistence.automations.migration_digest import (
 )
 from deerflow.persistence.base import Base
 from deerflow.persistence.bootstrap import _get_alembic_config, bootstrap_schema
+from deerflow.persistence.revisions import REVISION_ANCESTRY
 
 M5_TABLES = {
     "scheduled_tasks",
@@ -173,7 +174,7 @@ def test_revision_ancestry_accepts_m5_as_m4_descendant() -> None:
     assert not ancestry.contains("unknown_branch", "0011_private_artifact_tombstone")
 
 
-def test_m5_revisions_form_the_linear_alembic_head() -> None:
+def test_m5_revisions_remain_in_the_linear_alembic_history() -> None:
     expand = importlib.import_module("deerflow.persistence.migrations.versions.0012_project_automation_expand")
     finalize = importlib.import_module("deerflow.persistence.migrations.versions.0013_project_automation_finalize")
     config = AlembicConfig()
@@ -186,7 +187,9 @@ def test_m5_revisions_form_the_linear_alembic_head() -> None:
     assert expand.down_revision == "0011_private_artifact_tombstone"
     assert finalize.revision == "0013_project_automation_finalize"
     assert finalize.down_revision == "0012_project_automation_expand"
-    assert ScriptDirectory.from_config(config).get_current_head() == finalize.revision
+    current_head = ScriptDirectory.from_config(config).get_current_head()
+    assert current_head == "0015_project_reliability_finalize"
+    assert REVISION_ANCESTRY.contains(current_head, finalize.revision)
 
 
 def test_m5_finalize_validates_readiness_before_any_ddl(

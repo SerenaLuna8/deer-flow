@@ -33,6 +33,23 @@ from deerflow.runtime.stream_bridge.base import (
 
 logger = logging.getLogger(__name__)
 _CANONICAL_CURSOR = re.compile(r"0|[1-9][0-9]*")
+_MAX_STREAM_CURSOR = (1 << 63) - 1
+_MAX_STREAM_CURSOR_DIGITS = len(str(_MAX_STREAM_CURSOR))
+
+
+def parse_stream_cursor(value: str) -> int:
+    """Parse one canonical cursor that is safe for PostgreSQL BIGINT binds."""
+
+    if len(value) > _MAX_STREAM_CURSOR_DIGITS or _CANONICAL_CURSOR.fullmatch(value) is None:
+        raise ValueError(
+            "durable stream cursor must be canonical ASCII decimal within PostgreSQL BIGINT range",
+        )
+    cursor = int(value)
+    if cursor > _MAX_STREAM_CURSOR:
+        raise ValueError(
+            "durable stream cursor must be canonical ASCII decimal within PostgreSQL BIGINT range",
+        )
+    return cursor
 
 
 class StreamNotifier(Protocol):
@@ -222,14 +239,7 @@ class PostgresStreamBridge(StreamBridge):
         last_event_id: str | None = None,
         heartbeat_interval: float = 15.0,
     ) -> AsyncIterator[StreamEvent]:
-        if last_event_id is None:
-            cursor = 0
-        elif _CANONICAL_CURSOR.fullmatch(last_event_id) is not None:
-            cursor = int(last_event_id)
-        else:
-            raise ValueError(
-                "durable stream cursor must be canonical ASCII decimal",
-            )
+        cursor = 0 if last_event_id is None else parse_stream_cursor(last_event_id)
         while True:
             frames = await self.read_after(
                 scope,

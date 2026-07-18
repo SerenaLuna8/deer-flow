@@ -18,11 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manual triggers available.
 - **frontend:** Add account/project-scoped Automation workbench, cache isolation,
   capability gates, and independent static-build browser coverage.
+- **reliability:** Complete M6 with PostgreSQL durable Jobs, independent Worker
+  execution, independent Scheduler ownership, ordered durable SSE replay, safe
+  lease takeover, dead-job retry policy, and aggregate process readiness.
+- **governance:** Enforce project quotas in authoritative transactions, add
+  privacy-safe append-only audit, project Admin usage/audit pages, and a
+  public-field-only system-admin operations console.
+- **recovery:** Add authenticated encrypted PostgreSQL backup, an external
+  hash-chained deletion journal, retention purge, new-database restore and
+  disposable drill commands, plus the explicit forward-only M6 cutover.
+- **release gates:** Pin one cross-platform, zero-skip 20-file M1–M6 PostgreSQL
+  gate with real Worker/Scheduler/Gateway recovery, frontend static/cache, and
+  backup/journal/restore coverage.
 
 M5 passed the Task 18 full-stack gates and independent closure review on 2026-07-16.
-Independent Workers, durable SSE, generic jobs/retries, quotas, audit, general
-backup/restore, legacy cleanup, and final release acceptance remain in M6-M8, so this
-is not yet a complete releasable multi-user SaaS.
+M6 completed its full reliability, governance, recovery, migration, and release gates
+on 2026-07-18. Overall progress is 6/8 (75%); M7 legacy cleanup and M8 final release
+acceptance remain open, so this is not yet a complete releasable multi-user SaaS.
 
 ## [2.0.0] — 2026-06-15
 

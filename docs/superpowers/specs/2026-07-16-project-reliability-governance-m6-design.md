@@ -1,11 +1,11 @@
 # M6 项目可靠执行、治理与恢复设计
 
 - 日期：2026-07-16
-- 状态：已批准，待实施
+- 状态：已完成（2026-07-18）
 - 总体规格：`docs/superpowers/specs/2026-07-12-project-first-saas-design.md`
 - 前置里程碑：M1、M2、M3、M4、M5 已正式完成
-- 当前总体进度：5/8（62.5%）
-- 本里程碑完成后总体进度：6/8（75%）
+- 当前总体进度：6/8（75%）
+- 后续里程碑：M7 legacy cleanup、M8 完整发布验收
 
 ## 1. 文档目的
 
@@ -450,8 +450,8 @@ operator archive root、external journal path 和 journal fsync policy。secret 
 ```bash
 make worker
 make scheduler
-make migrate-reliability ARGS="--dry-run --backup-proof /secure/m6-proof"
-make migrate-reliability ARGS="--execute --backup-proof /secure/m6-proof"
+make migrate-reliability ARGS="--dry-run --backup-proof /secure/m6-proof.json"
+make migrate-reliability ARGS="--execute --maintenance-acknowledged --backup-proof /secure/m6-proof.json"
 make backup-db ARGS="--output /secure/backups"
 make restore-db ARGS="--archive /secure/backups/<archive> --target-url <new-db-url> --journal /secure/recovery/tombstones --execute"
 make reconcile-usage ARGS="--dry-run"
@@ -609,6 +609,11 @@ M6 完成前必须提供：
 完成上述门禁后只能把总体进度更新为 6/8（75%）。M7 legacy cleanup 和 M8 完整发布验收仍未完成时，系统不得描述为
 完整可发布的多用户 SaaS。
 
+M6 的 operator 顺序以 `docs/operations/m6-reliability-migration.md` 和
+`docs/operations/m6-backup-recovery.md` 为准：backup proof → dry-run → maintenance → execute →
+`make check-db` → 固定 M1–M6 probes → 独立 restore drill。`0014`/`0015` 后只允许前向修复或认证 archive
+恢复到新数据库；no downgrade，且 restore 不自动切换 traffic。
+
 ## 18. 内部交付切片
 
 M6 按以下依赖顺序实施：
@@ -648,3 +653,9 @@ M6 验收的核心不是“增加后台页面”，而是把 DeerFlow 从单 Gat
 新数据库，并在开放服务前重放删除墓碑。
 
 只有这些能力、迁移链、真实 PostgreSQL 并发测试、多进程重启测试和恢复演练一起通过，M6 才可以标记完成。
+
+验收结果（2026-07-18）：Tasks 1–19 的实现与逐任务独立审查完成；固定 20 文件 M1–M6 PostgreSQL
+release gate 由跨平台 Python runner 硬校验 `POSTGRES_TEST_URL` 并强制 0 skip，真实覆盖 Scheduler session
+takeover、Worker SIGKILL/lease takeover、unsafe/unknown dead、跨项目不变式、两 Gateway 有序 SSE replay、
+archive tamper/journal gap/new-database restore、quota/audit 和 Frontend static/cache。Task 20 同步 operator、
+用户与开发文档，并以 fresh whole-branch gates 和独立 closure review 关闭 M6；M7/M8 仍保持未完成。

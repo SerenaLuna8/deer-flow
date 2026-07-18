@@ -20,7 +20,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 | Command                | Purpose                                           |
 | ---------------------- | ------------------------------------------------- |
 | `pnpm dev`             | Dev server with Turbopack (http://localhost:3000) |
-| `pnpm build`           | Production build                                  |
+| `pnpm build`           | Deterministic Webpack production build            |
 | `pnpm check`           | Lint + type check (run before committing)         |
 | `pnpm lint`            | ESLint only                                       |
 | `pnpm lint:fix`        | ESLint with auto-fix                              |
@@ -34,7 +34,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; its production WebServer build uses Webpack explicitly so the 120-second startup gate is deterministic across local and CI environments. Static-demo release coverage lives under `tests/e2e-static/` and uses `playwright.static.config.ts`; it builds with `NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true` into the independent `.next-static` dist directory, so normal and static production builds cannot reuse each other's output.
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; both `pnpm build` and its production WebServer build use Webpack explicitly so production compilation remains deterministic across local and CI environments. Static-demo release coverage lives under `tests/e2e-static/` and uses `playwright.static.config.ts`; it builds with `NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true` into the independent `.next-static` dist directory, so normal and static production builds cannot reuse each other's output.
 
 ## Architecture
 
@@ -152,7 +152,8 @@ not-found boundary，且不得启动 readiness/list/history。由于 slug/enter 
 拥有，初始 HTML status 可能仍为 200，真正的资源权限必须由项目 API 返回 403/404，页面不得复制
 server-side slug paging 或 enter。静态独立 build/browser 门禁必须同时证明 workspace 没有项目入口、
 项目 Automation 直达为 404、且没有 Automation 或 legacy scheduled-task API 请求。Task 18 的里程碑
-总门禁与独立关闭审查已于 2026-07-16 完成；M6–M8 尚未交付，因此仍不能把界面描述为完整多用户 SaaS。
+总门禁与独立关闭审查已于 2026-07-16 完成；M6 的前端与整体关闭门禁于 2026-07-18 完成。M7–M8
+尚未交付，因此仍不能把界面描述为完整多用户 SaaS。
 Automation 的所有 query/mutation key 必须同时以认证 account UUID 和 entered project UUID 开头；
 无论 account 还是 project 变化，都必须先 cancel in-flight query，再清理 scoped query、mutation、
 client 与 reconnect 状态。Viewer 仅能读取自己的 definition/history，不能显示 mutation 或 manual
@@ -182,13 +183,13 @@ account transition 先 abort safe-requeue controller 和 cancel queries，再 cl
 状态按精确 `(project_id, dead_job_id)` 坐标禁用被点击行。Overview 必须渲染后端的 `ready`/`degraded`/`closed`
 readiness 与全部组件状态；closed 响应固定为 `data_status="unavailable"` 且 `counts`/`usage` 为 null，界面只显示真实 readiness 和不可用状态，不能将不可读的聚合误显示为零。浏览器不得构造 ProjectContext、owner scope 或读取 raw error。四页
 loading/empty/error/data 与 shell/navigation（包括 accessibility label）文案统一使用 typed en-US/zh-CN i18n。
-通用备份恢复与最终 M6 关闭仍属于后续 task。
+通用备份恢复由 operator CLI/runbook 承担，不在浏览器暴露 locator、secret、restore 或 traffic-switch 控件；M6 已完成最终关闭。
 登录后的 `/workspace` 是展示多个项目卡片、待兑换邀请和可恢复项目的全局工作空间，不显示
 项目级侧栏；进入 `/projects/[project_slug]` 后才显示项目概览、成员与邀请、项目设置菜单。
 邀请页只从 URL fragment 接收一次性 token，立即清除 fragment，通过 HttpOnly claim cookie
 跨越登录流程，不写入 storage；产品不发送邀请邮件。M2 的退出/移除和删除恢复 UI 只反映
-30 天保留窗口，不代表私有数据或项目数据已被物理清除。M5 已完成，当前进度为 5/8（62.5%）；
-M6 通用备份恢复及最终关闭、M7 legacy cleanup 和 M8 完整发布验收仍未交付，因此不能作为完整多用户
+30 天保留窗口，不代表私有数据或项目数据已被物理清除。M6 已完成，当前进度为 6/8（75%）；
+M7 legacy cleanup 和 M8 完整发布验收仍未交付，因此不能作为完整多用户
 SaaS 发布。
 
 - **`hooks/`** — Shared React hooks

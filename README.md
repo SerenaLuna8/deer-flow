@@ -400,9 +400,11 @@ dry-run 只输出脱敏 counts 与稳定 source hash，不升级 schema、不写
 `cutover_complete` marker 的顺序执行；同一已完成 cutover 再执行会直接 no-op。
 
 M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation
-也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查；M6 durable job、独立 Worker、Worker-only
-private run、Automation 原子 admission、独立 Scheduler、PostgreSQL durable stream writer/reader、Gateway SSE reconnect、前端 cursor/dedupe 与项目配额 core 已完成当前实现。成员/存储/并发 Run/MCP 强制接线、完整审计和通用备份恢复、
-M7 legacy source/API 清理和 M8 完整发布验收仍未交付，因此 DeerFlow 仍不能作为完整多用户 SaaS 发布。
+也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查。M6 已于 2026-07-18 完成 durable job、
+独立 Worker、Worker-only private run、Automation 原子 admission、独立 Scheduler、PostgreSQL durable
+stream/SSE reconnect、配额、审计、平台运营、认证加密 backup、外部删除 journal、新库 restore/drill、
+显式 cutover 和真实多进程/Frontend/M1–M6 发布门禁。当前进度为 6/8（75%）；M7 legacy source/API
+清理和 M8 完整发布验收仍未交付，因此 DeerFlow 仍不能作为完整多用户 SaaS 发布。
 
 #### M3 共享资产迁移与 credential 轮换
 
@@ -444,7 +446,7 @@ tamper 会回滚当前批，已提交批保持可安全续跑；旧 envelope 仅
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 > [!IMPORTANT]
-> Under final M6 cutover, project-private and Automation runs are durable jobs consumed by the independent Worker; Gateway no longer executes them or owns Automation polling. Start the backend roles separately with `make gateway`, `make worker`, and—when `scheduler.enabled=true`—`make scheduler`. The Scheduler owns and verifies one PostgreSQL session advisory lock on its original backend connection; lock/PID/session loss fail-stops that process. Worker startup always performs terminal-only Automation reconciliation before claiming jobs, and enabled Scheduler startup repeats that idempotent check before polling; neither path replays or interrupts active Worker work. Worker stream frames are store-first PostgreSQL facts with one terminal frame per Run; Gateway SSE replay uses canonical `Last-Event-ID`, and the frontend persists and deduplicates cursors per account/project/thread. Full service orchestration, quotas, audit, and recovery gates are completed by later M6 tasks, so this intermediate branch is not yet a production release.
+> Under final M6 cutover, project-private and Automation runs are durable jobs consumed by the independent Worker; Gateway no longer executes them or owns Automation polling. Start the backend roles separately with `make gateway`, `make worker`, and—when `scheduler.enabled=true`—`make scheduler`. The Scheduler owns and verifies one PostgreSQL session advisory lock on its original backend connection; lock/PID/session loss fail-stops that process. Worker startup always performs terminal-only Automation reconciliation before claiming jobs, and enabled Scheduler startup repeats that idempotent check before polling; neither path replays or interrupts active Worker work. Worker stream frames are store-first PostgreSQL facts with one terminal frame per Run; Gateway SSE replay uses canonical `Last-Event-ID`, and the frontend persists and deduplicates cursors per account/project/thread. M6 service orchestration, quotas, audit, recovery, and release gates are complete; M7 legacy cleanup and M8 final release acceptance still prevent a complete production SaaS claim.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
@@ -1026,8 +1028,8 @@ while the successful audit commit is the durable operation commit point: later c
 engine disposal cannot delete the valid audited archive. Output remains limited to archive ID,
 schema revision, chunk count, and a truncated checksum.
 
-Existing M5 databases use the explicit forward-only M6 cutover runbook in
-`docs/operations/m6-reliability-migration.md`. First create the exact-0013 archive and its
+Existing M5 databases use the explicit forward-only
+[M6 reliability migration runbook](docs/operations/m6-reliability-migration.md). First create the exact-0013 archive and its
 externally committed sibling receipt, complete an isolated restore rehearsal, create the
 authenticated no-clobber attestation, review the zero-write dry-run, stop every writer, and execute:
 
@@ -1076,7 +1078,8 @@ make restore-db ARGS="--archive /secure/backups/<archive> --target-url postgresq
 make drill-restore ARGS="--archive /secure/backups/<archive> --journal /secure/recovery/tombstones.jsonl"
 ```
 
-The drill uses one generated restore database and removes only that database after verification.
+The complete operator sequence and failure decisions are in the
+[M6 backup and recovery runbook](docs/operations/m6-backup-recovery.md). The drill uses one generated restore database and removes only that database after verification.
 Command output contains only public proof metadata; operators must verify the proof before a
 separate, manual traffic switch.
 
@@ -1088,8 +1091,9 @@ background polling does not disable manual runs. During the M5 expand window the
 legacy read routes remain outside the mutation freeze, while legacy mutations
 return a migration-required conflict; after cutover every legacy route rejects
 requests in favor of the project API. M5 completed its Task 18 full-stack gates and
-independent closure review on 2026-07-16. M6-M8 remain open, so DeerFlow is still not
-a complete releasable multi-user SaaS.
+independent closure review on 2026-07-16. M6 completed its reliability, governance,
+recovery, migration, and release gates on 2026-07-18. Overall progress is 6/8 (75%);
+M7 and M8 remain open, so DeerFlow is still not a complete releasable multi-user SaaS.
 
 ## Terminal Workbench (TUI)
 

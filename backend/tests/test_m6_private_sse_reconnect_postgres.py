@@ -189,7 +189,19 @@ async def test_empty_cursor_means_zero_and_ahead_cursor_is_rejected(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cursor", ["-1", "+1", "01", "1.0", " 1", "abc"])
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "-1",
+        "+1",
+        "01",
+        "1.0",
+        " 1",
+        "abc",
+        "9223372036854775808",
+        "9" * 5_000,
+    ],
+)
 async def test_rejects_noncanonical_last_event_id(
     harness: _Harness,
     cursor: str,

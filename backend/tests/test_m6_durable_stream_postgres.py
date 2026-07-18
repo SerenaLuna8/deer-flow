@@ -333,7 +333,14 @@ async def test_stream_read_is_strictly_scoped_and_rejects_invalid_contract(
         with pytest.raises(StreamScopeRequired):
             bridge.subscribe(run_id)
 
-        for invalid_cursor in ("01", "١", "+1", "-1"):
+        for invalid_cursor in (
+            "01",
+            "١",
+            "+1",
+            "-1",
+            "9223372036854775808",
+            "9" * 5_000,
+        ):
             subscription = bridge.subscribe_scoped(
                 seed.owner_a_scope,
                 thread_id,

@@ -157,6 +157,40 @@ async def test_dry_run_preserves_catalog_counters_ledgers_and_sequences(
     assert await catalog_digest(database.url) == before
 
 
+async def test_dry_run_authenticates_backup_proof_before_returning(
+    m6_migration_database: M6MigrationDatabase,
+    tmp_path: Path,
+) -> None:
+    database = m6_migration_database.database
+    before = await catalog_digest(database.url)
+    missing = tmp_path / "missing-proof.json"
+    tampered = tmp_path / "tampered-proof.json"
+    original = m6_migration_database.proof.read_bytes()
+    tampered.write_bytes(original[:-1] + (b"0" if original[-1:] != b"0" else b"1"))
+    wrong_source = tmp_path / "wrong-source-proof.json"
+    await create_authenticated_backup_proof(
+        database.url,
+        archive=m6_migration_database.archive,
+        backup_commit=m6_migration_database.backup_commit,
+        output=wrong_source,
+        source_digest="0" * 64,
+        restore_verified=True,
+    )
+
+    for proof in (missing, tampered, wrong_source):
+        with pytest.raises(
+            ReliabilityMigrationError,
+            match="authenticated backup proof is invalid",
+        ):
+            await run_reliability_migration(
+                database.url,
+                backup_proof=proof,
+                execute=False,
+                maintenance_acknowledged=False,
+            )
+        assert await catalog_digest(database.url) == before
+
+
 async def test_execute_requires_maintenance_and_backup_before_expand_ddl(
     m6_migration_database: M6MigrationDatabase,
     tmp_path: Path,

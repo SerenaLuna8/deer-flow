@@ -213,8 +213,11 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    [M4 private-work migration runbook](docs/operations/m4-private-work-migration.md)。
 
    M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation
-   也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查；M6 Worker/SSE/配额/审计/通用备份恢复、
-   M7 legacy 清理和 M8 完整发布验收仍未交付，因此仍不能作为完整多用户 SaaS 发布。
+   也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查。M6 已于 2026-07-18 完成 Worker、
+   durable SSE、配额、审计、平台运营、通用 backup/restore、显式 cutover 与真实发布门禁；当前进度为
+   6/8（75%）。M7 legacy 清理和 M8 完整发布验收仍未交付，因此仍不能作为完整多用户 SaaS 发布。
+   运维顺序见 [M6 migration runbook](docs/operations/m6-reliability-migration.md) 和
+   [M6 backup/recovery runbook](docs/operations/m6-backup-recovery.md)。
 
    共享资产迁移和 credential 轮换只通过显式命令执行，不会在应用启动时自动运行。
    `DATABASE_URL` 指向资产权威 PostgreSQL 数据库；主密钥只从环境变量读取，数据库仅保存
@@ -845,13 +848,14 @@ Automation；Viewer 只能查看自己的 definition 和运行历史。
 - 没有渠道或 GitHub 分发目标
 - 第一版没有 `interval` 调度类型
 
-通过 `config.yaml -> scheduler.enabled` 开启后台轮询。M5 只支持一个 Gateway
-（`GATEWAY_WORKERS=1`）持有 PostgreSQL scheduler ownership lock；关闭轮询不影响项目 API
-和手动触发，手动触发仍使用同一 durable occurrence 与 private-run 链路。独立 Worker、持久化
-SSE、通用 jobs/retries、配额、审计和通用备份恢复属于 M6。
+通过 `config.yaml -> scheduler.enabled` 开启后台轮询。M6 由独立 Scheduler 持有并持续验证
+PostgreSQL session ownership lock；Gateway 不再持有 poller。关闭轮询不影响项目 API 和手动触发，
+手动触发仍使用同一 occurrence/Run/job 原子 admission。独立 Worker、持久化 SSE、通用 jobs/retries、
+配额、审计和通用备份恢复已在 M6 完成。
 
 项目 API 位于 `/api/projects/{project_id}/automations`。M5 已于 2026-07-16 通过 Task 18 全量门禁和
-独立关闭审查；M6-M8 仍未交付，因此当前不能作为完整可发布的多用户 SaaS。
+独立关闭审查；M6 于 2026-07-18 完成，当前进度为 6/8（75%）。M7-M8 仍未交付，因此当前不能作为
+完整可发布的多用户 SaaS。
 
 ## 终端工作台 (TUI)
 

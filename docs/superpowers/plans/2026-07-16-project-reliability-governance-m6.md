@@ -1388,7 +1388,7 @@ Expected: PASS with 0 skip in M6 PostgreSQL evidence。
 
 **Interfaces:** runbooks给出 dry-run→maintenance→backup proof→execute→check-db→M1–M6 probes→separate restore drill 的精确顺序、失败决策与不可 downgrade规则；状态文档只更新为 6/8（75%），明确 M7/M8未完成。
 
-- [ ] **Step 1: 写文档 contract checks**
+- [x] **Step 1: 写文档 contract checks**
 
 ```bash
 rg -n 'dry-run|maintenance|backup proof|0014|0015|check-db|restore drill|no downgrade' docs/operations/m6-*.md
@@ -1397,7 +1397,7 @@ rg -n '6/8|75%|M7|M8' AGENTS.md docs/superpowers/specs/2026-07-12-project-first-
 
 Expected: 在文档创建前命令失败或缺少 required terms。
 
-- [ ] **Step 2: 完成 operator/user/developer 文档并运行 fresh full gates**
+- [x] **Step 2: 完成 operator/user/developer 文档并运行 fresh full gates**
 
 ```bash
 cd backend
@@ -1417,11 +1417,11 @@ git diff --check
 
 Expected: 所有命令 exit 0；PostgreSQL release evidence 0 skip；build不暴露未授权 governance入口。
 
-- [ ] **Step 3: 执行独立关闭审查并只修实质问题**
+- [x] **Step 3: 执行独立关闭审查并只修实质问题**
 
 使用 `superpowers:requesting-code-review` 检查规格覆盖、scope/lease authority、retry safety、SSE顺序、quota原子性、audit privacy、backup authentication、journal连续性、migration fail-before-DDL和文档状态；任何 P0/P1/P2 先写复现测试再修复，并重新运行受影响 gate和 full gate。
 
-- [ ] **Step 4: 最终提交**
+- [x] **Step 4: 最终提交**
 
 ```bash
 git add README.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs/operations docs/superpowers/specs/2026-07-12-project-first-saas-design.md docs/superpowers/specs/2026-07-16-project-reliability-governance-m6-design.md
@@ -1430,6 +1430,8 @@ git status --short
 ```
 
 Expected: working tree clean；M6证据和文档一致，但不宣称 M7/M8 已完成。
+
+完成（2026-07-18）：同步 forward-only migration/backup/restore operator runbooks、root/backend/frontend guidance、English/Chinese release status 和 M6 design，整体进度更新为 6/8（75%）且 M7/M8 继续未完成。Fresh full gates：backend `8990` collected、`7888` passed、`1102` expected local skips、`0` failed；Task 20 PostgreSQL `24 passed/0 skipped`；固定 20 文件 M1–M6 gate `160 passed/0 skipped`；Frontend `947 passed/0 skipped`、`pnpm check` 和 `81/81` production pages；Ruff、1170-file format、doctor/check-db、文档/diff 和 residual database checks 全绿。初审 `0 Critical/3 Important/0 Minor`，第一轮复审追加一个 runbook Important；bounded cursor、dry-run backup-proof authentication、固定 gate 文档和双临时库前缀均修复，最终独立复审 `0 Critical/Important/Minor`、Ready to merge。M6 完成，M7/M8 保持未完成。
 
 ## File Structure
 

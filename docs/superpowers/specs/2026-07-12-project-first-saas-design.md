@@ -2,7 +2,7 @@
 
 - 日期：2026-07-12
 - 状态：实施中
-- 当前完成度：M1、M2、M3、M4、M5 已正式完成（5/8，62.5%）；M6、M7、M8 仍待交付
+- 当前完成度：M1、M2、M3、M4、M5、M6 已正式完成（6/8，75%）；M7、M8 仍待交付
 - 代码仓库：DeerFlow 单体仓库
 - 数据库：PostgreSQL
 - 权限边界：业务层、仓储层和数据库模型约束
@@ -11,10 +11,13 @@
 
 本文档定义 DeerFlow 从个人 Agent 工作区演进为项目优先、多用户 SaaS 的 V1 产品边界、架构原则和交付顺序。本文档是总体方向，不代替各里程碑的专项规格和实施计划。
 
-M1、M2、M3、M4、M5 已正式完成。M4 已交付项目 Chats、run、file/artifact、Memory、Connections、
+M1、M2、M3、M4、M5、M6 已正式完成。M4 已交付项目 Chats、run、file/artifact、Memory、Connections、
 project/owner scoped runtime、staged cutover、legacy SQLite→0007→M4 final 迁移链与全量门禁。
 M5 已交付 project/owner-scoped Automation、持久化 occurrence、单 Gateway Scheduler、项目 API/UI、
-staged migration、全量门禁和独立关闭审查。M6 至 M8 仍未交付，整体 SaaS 交付不得标记为已完成。
+staged migration、全量门禁和独立关闭审查。M6 已交付 PostgreSQL durable job、独立 Worker/Scheduler、
+持久化 SSE、配额、隐私安全审计、平台运营、认证加密 backup、外部删除 journal、新库 restore/drill、
+显式 forward-only migration 和真实多进程/Frontend/M1–M6 发布门禁。M7 与 M8 仍未交付，整体 SaaS
+交付不得标记为已完成。
 
 ## 2. 已冻结决策
 
@@ -436,7 +439,7 @@ V1 不采用长期双写。最终切换前执行维护窗口、最终增量回�
 | M3 | 系统与项目 Agent、Skill、MCP 版本、绑定、凭据审批和资产迁移 | 已完成 |
 | M4 | 私有对话、运行、文件、记忆和连接 | 已完成 |
 | M5 | 自动化项目化与持久化任务 | 已完成 |
-| M6 | Worker/持久化 SSE、配额、审计、平台管理和通用备份恢复 | 未完成 |
+| M6 | Worker/持久化 SSE、配额、审计、平台管理和通用备份恢复 | 已完成 |
 | M7 | 最终 legacy source/API 清理与回滚窗口收口 | 未完成 |
 | M8 | 完整隔离矩阵、安全审查、运维演练和发布验收 | 未完成 |
 

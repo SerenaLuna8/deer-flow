@@ -194,7 +194,7 @@ def test_m4_models_install_composite_scope_constraints_without_snapshot_secrets(
         assert not any(fragment in column for fragment in forbidden_fragments for column in columns)
 
 
-def test_private_artifact_tombstone_revision_is_alembic_head() -> None:
+def test_private_artifact_tombstone_revision_remains_in_alembic_history() -> None:
     migration = importlib.import_module("deerflow.persistence.migrations.versions.0011_private_artifact_tombstone")
     cfg = AlembicConfig()
     cfg.set_main_option(
@@ -205,7 +205,7 @@ def test_private_artifact_tombstone_revision_is_alembic_head() -> None:
     assert migration.revision == "0011_private_artifact_tombstone"
     assert migration.down_revision == "0010_private_file_source"
     current_head = ScriptDirectory.from_config(cfg).get_current_head()
-    assert current_head == "0013_project_automation_finalize"
+    assert current_head == "0015_project_reliability_finalize"
     assert REVISION_ANCESTRY.contains(current_head, migration.revision)
 
 

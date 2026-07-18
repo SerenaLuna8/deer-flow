@@ -1077,6 +1077,11 @@ async def run_reliability_migration(
         source_digest = hashlib.sha256(_canonical_json(payload)).hexdigest()
         source_count = sum(len(value) for value in payload.values() if isinstance(value, list))
         if not execute:
+            await _validate_backup_proof(
+                database_url,
+                Path(backup_proof),
+                expected_source=source_digest,
+            )
             return ReliabilityMigrationReport("dry-run", revision, False, source_count, source_digest[:12])
         if not maintenance_acknowledged:
             raise ReliabilityMigrationError("maintenance window acknowledgement is required")

@@ -89,7 +89,7 @@ legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `sta
 2026-07-16 完成：definition、occurrence、API/UI 和迁移均以认证 account、
 project 与 owner 为 authority，Viewer 只读自己的定义与历史；自动和手动触发都先持久化唯一
 occurrence 再进入 M4 private run admission，已 admitted 的 run 在 crash recovery 中只协调终态、
-绝不自动重放。M6 当前已实现通用 durable job、独立 Worker、Worker-only private Run、Automation
+绝不自动重放。M6 已完成通用 durable job、独立 Worker、Worker-only private Run、Automation
 原子 admission、独立 Scheduler、PostgreSQL durable stream writer/reader 与 terminal invariant、Gateway
 SSE reconnect 和按 account/project/thread 隔离的前端 cursor/dedupe，以及项目配额的原子
 counter/append-only ledger、平台默认值收紧、80% 单次阈值和 dry-run/execute reconciliation core。成员加入/
@@ -100,10 +100,11 @@ M6 审计、外部认证加密 backup、带 PostgreSQL 权威 head/source anchor
 绑定 journal ID/最终 sequence/head digest 的 restore proof 和 disposable drill 已实现；敏感临时文件在
 proof 前按 inode 身份清理并 fsync，未知文件拒绝认领；body 失败时仍在 purge authority 内清理，可靠
 unlock 后的取消也会重抛并删除本次 target。drill 仅在不可伪造的成功 ownership handoff 后删除其随机
-target。Task 18 已提供显式 M6 staged migration、认证 backup attestation、逐资源 exact quota/job
+target。显式 M6 staged migration、认证 backup attestation、逐资源 exact quota/job
 backfill、aggregate-only reconciliation 拒绝、process readiness 与 Gateway+Worker+可选 Scheduler
-本地/Docker 编排；独立关闭审查仍待完成。
-里程碑进度仍为 5/8（62.5%），因为 M6 尚未整体关闭；M6–M8
+本地/Docker 编排均已交付。Task 19 固定 20 文件 M1–M6 PostgreSQL gate，并以真实 Scheduler/Worker/Gateway
+多进程、SSE reconnect、Frontend static/cache 和新库 restore 覆盖发布边界；Task 20 的全量门禁和独立关闭
+审查于 2026-07-18 完成。里程碑进度为 6/8（75%）；M7 legacy source/API 清理与 M8 完整发布验收
 尚未交付，因此当前仍不能
 作为完整多用户 SaaS 发布。
 
@@ -112,6 +113,7 @@ Scheduled-task note:
 - Scheduled background runs are intentionally non-interactive: they execute through the normal Worker run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. `AutomationDispatcher` writes that flag as server-owned admission data in the atomic occurrence/Run/job transaction; client-supplied `context.non_interactive` is dropped.
 - Project Automation occurrence, private Run/snapshot, and `automation_run` job now commit atomically. Gateway retains manual admission but never constructs Scheduler ownership or a poller. When enabled, `make scheduler` owns the process-lifetime PostgreSQL session advisory lock on a dedicated connection; each poll verifies the same backend PID and existing lock without reacquiring it, and ownership loss exits polling/process lifetime. A competing Scheduler may take over only after PostgreSQL releases the old session lock. Worker startup always reconciles already-admitted terminal Runs before claiming jobs, and enabled Scheduler startup performs the same idempotent reconciliation before polling; neither path interrupts or replays active Worker work. Disabled Scheduler mode takes no lock or poll task while manual APIs and Worker restart reconciliation remain available.
 - Existing M5 installations follow `docs/operations/m6-reliability-migration.md`: authenticated Task16 archive evidence and maintenance acknowledgment are required before `0014`; `0015` and the complete marker are written only after job/quota/audit/stream/recovery probes.
+- Normal final-M6 backup, external tombstone journal, new-database restore, failure decisions, and the separate restore drill follow `docs/operations/m6-backup-recovery.md`; M6 never downgrades or restores in place.
 
 ## Commands: Root vs. Module
 
@@ -186,11 +188,12 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
-- **PostgreSQL release gate** — `.github/workflows/project-foundation-postgres-tests.yml`
-  固定运行 M1 cutover、project isolation、M2 governance、M3 shared-assets、M4 private-work、
-  M4 private-work migration、M5 project Automation 和 M5 Automation migration 八个真实 PostgreSQL
-  集成文件；每个测试使用临时 `deerflow_test_*` 数据库。缺少 `POSTGRES_TEST_URL` 只能在本地日常
-  测试中明确 skip，M1–M5 release evidence 必须提供该变量并保持 0 skip；CI 必须在进入 pytest 前硬失败。
+- **PostgreSQL release gate** — root `Makefile` 的 `PROJECT_FOUNDATION_POSTGRES_TESTS`
+  是固定 20 文件 M1–M6 真实 PostgreSQL gate 的唯一有序来源；覆盖 M1–M5 integration 以及 M6
+  migration/schema/process/job/stream/quota/audit/recovery/multi-process release 边界。每个数据库测试只创建
+  随机 `deerflow_test_*`/`deerflow_restore_*` 数据库。Release evidence 必须通过
+  `POSTGRES_TEST_URL=... make test-project-foundation-postgres` 运行并保持 0 skip；跨平台 Python runner 和
+  `.github/workflows/project-foundation-postgres-tests.yml` 都会在变量缺失时于 pytest 前硬失败。
 - **M4 private-work cutover 运维** — `migrate-private-work` 使用显式 owner UUID→active project UUID
   map；先 dry-run，再在停止 Gateway/Scheduler/channel/embedded writers 的维护窗口 execute，随后运行
   `make check-db` 与 M1–M4 probes。M4 marker 完成后，若 legacy Automation 任一表非空，命令固定停在
