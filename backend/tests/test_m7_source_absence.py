@@ -147,23 +147,45 @@ CONFIG_TOMBSTONES = frozenset(
         "stream_bridge",
     }
 )
-CONFIG_TOMBSTONE_ALLOWLIST = {
-    "backend/packages/harness/deerflow/config/app_config.py",
-}
+CONFIG_TOMBSTONE_VALIDATORS = frozenset({"reject_removed_legacy_config", "_drop_null_config_sections"})
+
+FRONTEND_PRODUCTION_SUFFIXES = frozenset({".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"})
+FRONTEND_NON_PRODUCTION_DIRS = frozenset({"__fixtures__", "__mocks__", "__tests__", "fixtures", "stories", "tests"})
+FRONTEND_NON_PRODUCTION_MARKERS = (
+    ".spec.",
+    ".stories.",
+    ".story.",
+    ".test.",
+)
+
+
+def _is_frontend_production_source(path: Path) -> bool:
+    frontend_root = REPO_ROOT / "frontend" / "src"
+    try:
+        relative = path.relative_to(frontend_root)
+    except ValueError:
+        return False
+    if path.suffix not in FRONTEND_PRODUCTION_SUFFIXES:
+        return False
+    if path.name.endswith(".d.ts"):
+        return False
+    if any(part in FRONTEND_NON_PRODUCTION_DIRS for part in relative.parts[:-1]):
+        return False
+    return not any(marker in path.name for marker in FRONTEND_NON_PRODUCTION_MARKERS)
 
 
 def _production_files() -> tuple[Path, ...]:
-    roots = (
+    backend_roots = (
         BACKEND_ROOT / "app",
         BACKEND_ROOT / "packages" / "harness" / "deerflow",
         BACKEND_ROOT / "scripts",
-        REPO_ROOT / "frontend" / "src" / "app",
-        REPO_ROOT / "frontend" / "src" / "components",
-        REPO_ROOT / "frontend" / "src" / "core",
-        REPO_ROOT / "docker" / "nginx",
     )
-    suffixes = {".py", ".ts", ".tsx", ".js", ".mjs", ".conf"}
-    return tuple(sorted(path for root in roots for path in root.rglob("*") if path.is_file() and path.suffix in suffixes))
+    backend_files = (path for root in backend_roots for path in root.rglob("*") if path.is_file() and path.suffix == ".py")
+    frontend_root = REPO_ROOT / "frontend" / "src"
+    frontend_files = (path for path in frontend_root.rglob("*") if path.is_file() and _is_frontend_production_source(path))
+    nginx_root = REPO_ROOT / "docker" / "nginx"
+    nginx_files = (path for path in nginx_root.rglob("*") if path.is_file() and path.suffix == ".conf")
+    return tuple(sorted((*backend_files, *frontend_files, *nginx_files)))
 
 
 def _python_imports(path: Path) -> set[str]:
@@ -200,7 +222,25 @@ def _python_symbols(path: Path) -> set[str]:
 
 
 def _contains_route(value: str, literal: str) -> bool:
-    return re.search(rf"{re.escape(literal)}(?:[/{{?*]|$)", value) is not None
+    for match in re.finditer(rf"{re.escape(literal)}(?:[/{{?*]|$)", value):
+        prefix = value[: match.start()]
+        if not prefix or prefix.endswith("}") or "://" in prefix:
+            return True
+    return False
+
+
+_JAVASCRIPT_STRING = re.compile(
+    r"""(?P<quote>["'`])(?P<value>(?:\\.|(?!(?P=quote)).)*)(?P=quote)""",
+    re.DOTALL,
+)
+
+
+def _javascript_string_literals(text: str) -> tuple[str, ...]:
+    return tuple(match.group("value") for match in _JAVASCRIPT_STRING.finditer(text))
+
+
+def _nginx_directives(text: str) -> str:
+    return "\n".join(line.partition("#")[0] for line in text.splitlines())
 
 
 def _banned_path_has_production_source(path: Path) -> bool:
@@ -250,14 +290,15 @@ def test_production_sources_have_no_legacy_route_literals() -> None:
             for symbol in BANNED_RUNTIME_SYMBOLS & symbols:
                 findings.append(f"{path.relative_to(REPO_ROOT)}:{symbol}")
         elif path.suffix == ".conf":
+            directives = _nginx_directives(text)
             for literal in BANNED_ROUTE_LITERALS:
                 nginx_route = re.compile(rf"\b(?:location|rewrite)\b[^\n]*{re.escape(literal)}(?:[/{{?*\s]|$)")
-                if nginx_route.search(text):
+                if nginx_route.search(directives):
                     findings.append(f"{path.relative_to(REPO_ROOT)}:{literal}")
         else:
+            strings = _javascript_string_literals(text)
             for literal in BANNED_ROUTE_LITERALS:
-                route_literal = re.compile(rf"""["'`]([^"'`]*{re.escape(literal)}(?:[/{{?*]|$))""")
-                if route_literal.search(text):
+                if any(_contains_route(value, literal) for value in strings):
                     findings.append(f"{path.relative_to(REPO_ROOT)}:{literal}")
     assert findings == []
 
@@ -281,13 +322,93 @@ def test_config_tombstones_exist_only_in_exact_validator_allowlist() -> None:
     config_root = BACKEND_ROOT / "packages" / "harness" / "deerflow" / "config"
     for path in config_root.rglob("*.py"):
         relative = path.relative_to(REPO_ROOT).as_posix()
-        if relative in CONFIG_TOMBSTONE_ALLOWLIST:
+        if path.name == "app_config.py":
+            findings.extend(_app_config_tombstone_findings(path, relative))
             continue
         legacy_strings = CONFIG_TOMBSTONES & _python_string_literals(path)
         legacy_symbols = CONFIG_TOMBSTONES & _python_symbols(path)
         for key in sorted(legacy_strings | legacy_symbols):
             findings.append(f"{relative}:{key}")
     assert findings == []
+
+
+def _is_before_model_validator(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for decorator in function.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        if not isinstance(decorator.func, ast.Name) or decorator.func.id != "model_validator":
+            continue
+        if any(keyword.arg == "mode" and isinstance(keyword.value, ast.Constant) and keyword.value.value == "before" for keyword in decorator.keywords):
+            return True
+    return False
+
+
+def _app_config_tombstone_findings(path: Path, relative: str) -> list[str]:
+    tree = _python_tree(path)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    definitions = [node for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "LEGACY_CONFIG_TOMBSTONES" for target in node.targets)]
+    findings: list[str] = []
+    if len(definitions) != 1:
+        findings.append(f"{relative}:LEGACY_CONFIG_TOMBSTONES:definition")
+        definition_nodes: set[ast.AST] = set()
+    else:
+        definition_nodes = set(ast.walk(definitions[0]))
+        definition_strings = {node.value for node in definition_nodes if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        if definition_strings != CONFIG_TOMBSTONES:
+            findings.append(f"{relative}:LEGACY_CONFIG_TOMBSTONES:definition-values")
+
+    validators: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in CONFIG_TOMBSTONE_VALIDATORS and _is_before_model_validator(node):
+            validators[node.name] = node
+    for missing in sorted(CONFIG_TOMBSTONE_VALIDATORS - validators.keys()):
+        findings.append(f"{relative}:LEGACY_CONFIG_TOMBSTONES:{missing}:missing")
+
+    allowed_consumers: set[ast.Name] = set()
+    reject_validator = validators.get("reject_removed_legacy_config")
+    if reject_validator is not None:
+        for node in ast.walk(reject_validator):
+            if not isinstance(node, ast.Name) or node.id != "LEGACY_CONFIG_TOMBSTONES":
+                continue
+            attribute = parents.get(node)
+            call = parents.get(attribute) if attribute is not None else None
+            if (
+                isinstance(attribute, ast.Attribute)
+                and attribute.value is node
+                and attribute.attr == "intersection"
+                and isinstance(call, ast.Call)
+                and call.func is attribute
+                and len(call.args) == 1
+                and isinstance(call.args[0], ast.Name)
+                and call.args[0].id == "value"
+            ):
+                allowed_consumers.add(node)
+
+    null_validator = validators.get("_drop_null_config_sections")
+    if null_validator is not None:
+        for node in ast.walk(null_validator):
+            if not isinstance(node, ast.Name) or node.id != "LEGACY_CONFIG_TOMBSTONES":
+                continue
+            comparison = parents.get(node)
+            if (
+                isinstance(comparison, ast.Compare)
+                and len(comparison.ops) == 1
+                and isinstance(comparison.ops[0], ast.In)
+                and len(comparison.comparators) == 1
+                and comparison.comparators[0] is node
+                and isinstance(comparison.left, ast.Name)
+                and comparison.left.id == "key"
+            ):
+                allowed_consumers.add(node)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in CONFIG_TOMBSTONES and node not in definition_nodes:
+            findings.append(f"{relative}:{node.value}:literal:{node.lineno}")
+        elif isinstance(node, ast.Name) and node.id == "LEGACY_CONFIG_TOMBSTONES" and isinstance(node.ctx, ast.Load) and node not in allowed_consumers:
+            findings.append(f"{relative}:LEGACY_CONFIG_TOMBSTONES:use:{node.lineno}")
+    for symbol in sorted(CONFIG_TOMBSTONES & _python_symbols(path)):
+        findings.append(f"{relative}:{symbol}:symbol")
+    return findings
 
 
 def _install_mutation_repo(
@@ -328,6 +449,74 @@ def test_source_gate_mutation_rejects_unquoted_nginx_location(
     )
 
 
+def test_source_gate_mutation_rejects_unquoted_nginx_rewrite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_mutation_repo(
+        monkeypatch,
+        tmp_path,
+        "docker/nginx/nginx.conf",
+        "server { rewrite ^/api/threads/(.*)$ /api/projects/$1 break; }\n",
+    )
+    _assert_gate_rejects(
+        test_production_sources_have_no_legacy_route_literals,
+        "source gate accepted an unquoted legacy Nginx rewrite",
+    )
+
+
+def test_source_gate_mutation_ignores_commented_nginx_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_mutation_repo(
+        monkeypatch,
+        tmp_path,
+        "docker/nginx/nginx.conf",
+        "# location /api/threads { proxy_pass http://gateway; }\nserver { location /api/projects { proxy_pass http://gateway; } }\n",
+    )
+    test_production_sources_have_no_legacy_route_literals()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "frontend/src/hooks/useLegacy.ts",
+        "frontend/src/core/legacy.ts",
+        "frontend/src/core/legacy.tsx",
+        "frontend/src/core/legacy.js",
+    ),
+)
+def test_source_gate_mutation_rejects_exact_frontend_route_literal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    _install_mutation_repo(
+        monkeypatch,
+        tmp_path,
+        relative,
+        'const url = "/api/threads";\n',
+    )
+    _assert_gate_rejects(
+        test_production_sources_have_no_legacy_route_literals,
+        f"source gate accepted an exact legacy route in {relative}",
+    )
+
+
+def test_source_gate_mutation_excludes_frontend_test_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_mutation_repo(
+        monkeypatch,
+        tmp_path,
+        "frontend/src/__tests__/legacy.test.ts",
+        'const historicalFixture = "/api/threads";\n',
+    )
+    test_production_sources_have_no_legacy_route_literals()
+
+
 def test_source_gate_mutation_rejects_config_key_literal_outside_validator(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -341,6 +530,23 @@ def test_source_gate_mutation_rejects_config_key_literal_outside_validator(
     _assert_gate_rejects(
         test_config_tombstones_exist_only_in_exact_validator_allowlist,
         "source gate accepted a legacy config key outside app_config.py",
+    )
+
+
+def test_source_gate_mutation_rejects_app_config_literal_outside_validators(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_config = (BACKEND_ROOT / "packages" / "harness" / "deerflow" / "config" / "app_config.py").read_text(encoding="utf-8")
+    _install_mutation_repo(
+        monkeypatch,
+        tmp_path,
+        "backend/packages/harness/deerflow/config/app_config.py",
+        f'{app_config}\nREINTRODUCED = "run_events"\n',
+    )
+    _assert_gate_rejects(
+        test_config_tombstones_exist_only_in_exact_validator_allowlist,
+        "source gate accepted a tombstone literal outside app_config validators",
     )
 
 

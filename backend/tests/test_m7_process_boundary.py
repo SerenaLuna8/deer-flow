@@ -30,13 +30,15 @@ from test_m6_worker_crash_recovery_postgres import (
 from app.automations.ownership import AUTOMATION_SCHEDULER_OWNERSHIP_LOCK_KEY
 
 _PROCESS_TIMEOUT = 60.0
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_process_probe_records_all_authority_boundaries() -> None:
     from support import m6_process_child
 
     source = inspect.getsource(m6_process_child)
-    assert "run_worker(handlers=None" in source
+    assert "run_worker(handlers=None)" in source
+    assert "runner=_controlled_agent_runner" in source
     assert "_CoordinatedExecutor" not in source
     assert "_CoordinatedPrivateRunHandler" not in source
     for event in (
@@ -49,22 +51,20 @@ def test_process_probe_records_all_authority_boundaries() -> None:
         assert event in source
 
 
-def test_worker_production_constructor_injects_only_the_controlled_runner() -> None:
+def test_worker_production_constructor_has_no_test_runner_seam() -> None:
     from app.worker.app import run_worker
 
-    assert "agent_runner" in inspect.signature(run_worker).parameters
+    assert "agent_runner" not in inspect.signature(run_worker).parameters
     source = inspect.getsource(run_worker)
     assert "RunAgentPrivateExecutor(" in source
-    assert 'executor_options["runner"] = agent_runner' in source
     assert "handlers is None" in source
 
 
 def _local_module_file(module: str) -> Path | None:
-    backend_root = Path(__file__).resolve().parents[1]
     if module == "app" or module.startswith("app."):
-        root = backend_root
+        root = BACKEND_ROOT
     elif module == "deerflow" or module.startswith("deerflow."):
-        root = backend_root / "packages" / "harness"
+        root = BACKEND_ROOT / "packages" / "harness"
     else:
         return None
     relative = Path(*module.split("."))
@@ -83,19 +83,7 @@ def _local_imports(module: str, path: Path) -> tuple[set[str], set[str]]:
     symbols: set[str] = set()
     package = module if path.name == "__init__.py" else module.rpartition(".")[0]
 
-    def import_time_nodes(node: ast.AST):
-        for child in ast.iter_child_nodes(node):
-            if isinstance(
-                child,
-                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
-            ):
-                continue
-            if isinstance(child, (ast.Import, ast.ImportFrom)):
-                yield child
-            else:
-                yield from import_time_nodes(child)
-
-    for node in import_time_nodes(tree):
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
             continue
@@ -139,6 +127,28 @@ def _production_import_graph(*roots: str) -> tuple[set[str], set[str]]:
     return visited, symbols
 
 
+def test_import_graph_mutation_finds_function_scoped_worker_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backend_root = tmp_path / "backend"
+    gateway = backend_root / "app" / "gateway" / "app.py"
+    gateway.parent.mkdir(parents=True)
+    gateway.write_text(
+        "def gateway_handler():\n    from app.reliability.execution import RunAgentPrivateExecutor\n    return RunAgentPrivateExecutor\n",
+        encoding="utf-8",
+    )
+    execution = backend_root / "app" / "reliability" / "execution.py"
+    execution.parent.mkdir(parents=True)
+    execution.write_text("class RunAgentPrivateExecutor: pass\n", encoding="utf-8")
+    monkeypatch.setattr("test_m7_process_boundary.BACKEND_ROOT", backend_root)
+
+    modules, symbols = _production_import_graph("app.gateway.app")
+
+    assert "app.reliability.execution" in modules
+    assert "RunAgentPrivateExecutor" in symbols
+
+
 def test_gateway_and_scheduler_cannot_import_worker_graph_execution() -> None:
     modules, symbols = _production_import_graph(
         "app.gateway.app",
@@ -161,7 +171,6 @@ def test_gateway_and_scheduler_cannot_import_worker_graph_execution() -> None:
         & symbols
     )
 
-    backend_root = Path(__file__).resolve().parents[1]
     probe = subprocess.run(
         [
             sys.executable,
@@ -175,12 +184,12 @@ def test_gateway_and_scheduler_cannot_import_worker_graph_execution() -> None:
                 "for item in banned)))"
             ),
         ],
-        cwd=backend_root,
+        cwd=BACKEND_ROOT,
         env={
             **os.environ,
             "PYTHONPATH": os.pathsep.join(
                 (
-                    str(backend_root / "packages" / "harness"),
+                    str(BACKEND_ROOT / "packages" / "harness"),
                     os.environ.get("PYTHONPATH", ""),
                 )
             ),

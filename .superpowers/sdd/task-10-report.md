@@ -182,3 +182,69 @@ was confirmed closed, and no process-test child from this worktree remained.
 
 All fixed review findings are repaired. Formal acceptance still requires the
 independent re-review of the repair commit; Task 11 remains out of scope.
+
+## Second independent-review repair (2026-07-19)
+
+The fixed second review found `0 Critical / 2 Important / 0 Minor`. The repair
+again stayed inside Task 10: it did not update the progress ledger or begin
+Task 11.
+
+- The production frontend scan now covers every JavaScript/TypeScript source
+  suffix under `frontend/src`, with explicit fixture, mock, story, test, and
+  declaration exclusions. JavaScript string extraction catches exact route
+  literals in hooks and `.ts`/`.tsx`/`.js` core files without treating module
+  aliases such as `@/core/api/feedback` as HTTP routes.
+- Nginx comments are stripped before checking real `location` and `rewrite`
+  directives. Mutations prove that comments do not fail the gate while both
+  real directive forms do.
+- The file-wide `app_config.py` tombstone allowlist is gone. The source gate
+  permits exactly one `LEGACY_CONFIG_TOMBSTONES` definition and only the two
+  expected AST consumption shapes in the two `mode="before"` validators; an
+  extra `REINTRODUCED = "run_events"` literal is rejected.
+- The structured local import graph now walks every scope, so imports nested
+  inside Gateway or Scheduler functions are visible. A mutation proves a
+  function-local `RunAgentPrivateExecutor` import is rejected.
+- Production `run_worker` no longer exposes an `agent_runner` test seam. The
+  process child patches the existing `RunAgentPrivateExecutor` runner seam in
+  the child process, then calls the exact production entrypoint
+  `run_worker(handlers=None)`. The real executor, handler, Worker PID evidence,
+  PostgreSQL settlement, and reconnect boundary remain exercised.
+
+Second-repair RED evidence:
+
+```text
+18 focused tests: 9 failed, 9 passed
+```
+
+The nine intended failures covered Nginx comment handling, the unscanned hooks
+and exact frontend literals, file-wide `app_config.py` bypass, the production
+runner seam, the non-exact child entrypoint, and function-local import graph
+coverage.
+
+Second-repair verification:
+
+```text
+Focused source/process contracts: 20 passed
+Related backend regression: 169 passed, 1 PostgreSQL skip
+Real M7 Gateway/Scheduler/Worker process gate: 5 passed
+Worker crash/takeover process gate: 3 passed
+M1-M7 PostgreSQL gate: 256 passed, 0 skipped in 117.66s
+Full backend: 6831 passed, 944 skipped in 98.92s
+Blocking-I/O: 27 passed in 10.99s
+Ruff: All checks passed; 1047 files already formatted
+git diff --check: PASS
+```
+
+The single related-regression skip was the PostgreSQL-only rollback case in a
+non-PostgreSQL invocation; both the dedicated process gates and the fixed
+22-file PostgreSQL gate ran separately with zero skips. No frontend production
+file changed in this repair; the prior full frontend verification remains the
+Task 10 frontend evidence.
+
+The second-repair PostgreSQL cluster listened only on
+`127.0.0.1:55445`. Before shutdown it contained no `deerflow_test_*` or
+`deerflow_restore_*` databases. It was stopped cleanly, its exact temporary
+directory `/private/tmp/deerflow_m7_task10_repair2_pg_bmHfGF` was removed, port
+`55445` was confirmed closed, and no process-test child from this worktree
+remained. Formal acceptance still requires independent re-review; Task 11
+remains out of scope.

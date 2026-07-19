@@ -7,7 +7,6 @@ import signal
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any
 
 from app.automations.reconciliation import AutomationReconciler
 from app.final_schema import FinalSchemaProbe
@@ -38,7 +37,6 @@ async def run_worker(
     *,
     handlers: dict[str, JobHandler] | None = None,
     stop_event: asyncio.Event | None = None,
-    agent_runner: Any | None = None,
 ) -> None:
     config = await asyncio.to_thread(get_app_config)
     if not config.worker.enabled:
@@ -104,9 +102,6 @@ async def run_worker(
                 session_factory,
                 quota=quota_enforcer,
             )
-            executor_options: dict[str, Any] = {}
-            if agent_runner is not None:
-                executor_options["runner"] = agent_runner
             executor = RunAgentPrivateExecutor(
                 session_factory,
                 app_config=config,
@@ -115,7 +110,6 @@ async def run_worker(
                 store=store,
                 event_store=DbRunEventStore(session_factory),
                 quota=quota_enforcer,
-                **executor_options,
             )
             private_run_handler = PrivateRunJobHandler(
                 session_factory,

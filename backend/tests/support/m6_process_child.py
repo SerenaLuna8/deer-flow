@@ -11,10 +11,13 @@ import argparse
 import asyncio
 import json
 import os
+from functools import partial
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import select
 
+from app.reliability.execution import RunAgentPrivateExecutor
 from app.worker.app import run_worker
 from deerflow.persistence import get_session_factory
 from deerflow.persistence.jobs.model import JobRow
@@ -99,7 +102,12 @@ async def _controlled_agent_runner(
 
 
 async def _run_worker_child() -> None:
-    await run_worker(handlers=None, agent_runner=_controlled_agent_runner)
+    controlled_executor = partial(
+        RunAgentPrivateExecutor,
+        runner=_controlled_agent_runner,
+    )
+    with patch("app.worker.app.RunAgentPrivateExecutor", controlled_executor):
+        await run_worker(handlers=None)
 
 
 def main() -> None:
