@@ -23,6 +23,32 @@ LANGGRAPH_TABLES = frozenset(
         "store_migrations",
     }
 )
+FINAL_APP_SEQUENCES = frozenset(
+    {
+        ("deletion_tombstones_journal_sequence_seq", "deletion_tombstones"),
+        ("run_events_id_seq", "run_events"),
+    }
+)
+ALEMBIC_INDEXES = frozenset({("alembic_version_pkc", "alembic_version")})
+LANGGRAPH_INDEXES = frozenset(
+    {
+        ("checkpoint_blobs_pkey", "checkpoint_blobs"),
+        ("checkpoint_blobs_thread_id_idx", "checkpoint_blobs"),
+        ("checkpoint_migrations_pkey", "checkpoint_migrations"),
+        ("checkpoint_writes_pkey", "checkpoint_writes"),
+        ("checkpoint_writes_thread_id_idx", "checkpoint_writes"),
+        ("checkpoints_pkey", "checkpoints"),
+        ("checkpoints_thread_id_idx", "checkpoints"),
+        ("idx_store_expires_at", "store"),
+        ("store_pkey", "store"),
+        ("store_prefix_idx", "store"),
+        ("store_migrations_pkey", "store_migrations"),
+    }
+)
+LANGGRAPH_SEQUENCES: frozenset[tuple[str, str]] = frozenset()
+LANGGRAPH_ROOT_OBJECTS = frozenset(
+    {f"relation:r:{table_name}" for table_name in LANGGRAPH_TABLES} | {f"index:{index_name}:{owner}" for index_name, owner in LANGGRAPH_INDEXES} | {f"sequence:{sequence_name}:{owner}" for sequence_name, owner in LANGGRAPH_SEQUENCES}
+)
 REQUIRED_FUNCTIONS = frozenset(
     {
         "bump_asset_catalog_generation",
@@ -356,22 +382,44 @@ async def inventory_user_schema_objects(connection: AsyncConnection) -> frozense
 
 
 def inventory_is_m7_allowed(objects: frozenset[str]) -> bool:
-    """Validate the explicit app/LangGraph root-object allowlist."""
+    """Validate exact app-only or complete app-plus-LangGraph root objects."""
 
     allowed_relations = FINAL_APP_TABLES | LANGGRAPH_TABLES | {"alembic_version"}
+    app_sequences: set[tuple[str, str]] = set()
+    alembic_indexes: set[tuple[str, str]] = set()
+    langgraph_objects: set[str] = set()
     for descriptor in objects:
         kind, _, remainder = descriptor.partition(":")
         if kind == "relation":
             relkind, _, name = remainder.partition(":")
             if relkind not in {"r", "p"} or name not in allowed_relations:
                 return False
+            if name in LANGGRAPH_TABLES:
+                langgraph_objects.add(descriptor)
         elif kind == "sequence":
-            _name, _, owner = remainder.partition(":")
-            if owner not in allowed_relations:
+            name, _, owner = remainder.partition(":")
+            identity = (name, owner)
+            if owner in FINAL_APP_TABLES:
+                app_sequences.add(identity)
+                if identity not in FINAL_APP_SEQUENCES:
+                    return False
+            elif owner in LANGGRAPH_TABLES:
+                langgraph_objects.add(descriptor)
+            else:
                 return False
         elif kind == "index":
-            _name, _, owner = remainder.partition(":")
-            if owner not in allowed_relations:
+            name, _, owner = remainder.partition(":")
+            identity = (name, owner)
+            if owner in FINAL_APP_TABLES:
+                # Full definitions for every app index are locked by the canonical digest.
+                continue
+            if owner in LANGGRAPH_TABLES:
+                langgraph_objects.add(descriptor)
+            elif owner == "alembic_version":
+                alembic_indexes.add(identity)
+                if identity not in ALEMBIC_INDEXES:
+                    return False
+            else:
                 return False
         elif kind == "trigger":
             _name, _, owner = remainder.partition(":")
@@ -383,13 +431,20 @@ def inventory_is_m7_allowed(objects: frozenset[str]) -> bool:
                 return False
         else:
             return False
-    return True
+    if app_sequences != FINAL_APP_SEQUENCES or alembic_indexes != ALEMBIC_INDEXES:
+        return False
+    return not langgraph_objects or langgraph_objects == set(LANGGRAPH_ROOT_OBJECTS)
 
 
 __all__ = [
     "CatalogInvariant",
+    "ALEMBIC_INDEXES",
     "FINAL_APP_TABLES",
+    "FINAL_APP_SEQUENCES",
     "FINAL_M7_CATALOG_SIGNATURE",
+    "LANGGRAPH_INDEXES",
+    "LANGGRAPH_ROOT_OBJECTS",
+    "LANGGRAPH_SEQUENCES",
     "LANGGRAPH_TABLES",
     "REQUIRED_FUNCTIONS",
     "inventory_is_m7_allowed",

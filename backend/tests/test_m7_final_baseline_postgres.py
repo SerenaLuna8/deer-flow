@@ -75,6 +75,23 @@ EXPECTED_TRIGGER_IDENTITIES = {
     "trg_run_events_stream_terminal": ("run_events", "enforce_stream_terminal_invariant", 7),
     "trg_scheduled_tasks_updated_at": ("scheduled_tasks", "set_m7_updated_at", 19),
 }
+EXPECTED_APP_SEQUENCE_OWNERS = {
+    ("deletion_tombstones_journal_sequence_seq", "deletion_tombstones"),
+    ("run_events_id_seq", "run_events"),
+}
+EXPECTED_LANGGRAPH_INDEX_OWNERS = {
+    ("checkpoint_blobs_pkey", "checkpoint_blobs"),
+    ("checkpoint_blobs_thread_id_idx", "checkpoint_blobs"),
+    ("checkpoint_migrations_pkey", "checkpoint_migrations"),
+    ("checkpoint_writes_pkey", "checkpoint_writes"),
+    ("checkpoint_writes_thread_id_idx", "checkpoint_writes"),
+    ("checkpoints_pkey", "checkpoints"),
+    ("checkpoints_thread_id_idx", "checkpoints"),
+    ("idx_store_expires_at", "store"),
+    ("store_pkey", "store"),
+    ("store_prefix_idx", "store"),
+    ("store_migrations_pkey", "store_migrations"),
+}
 
 
 def _versions_dir() -> Path:
@@ -145,6 +162,74 @@ async def _table_row_counts(connection: AsyncConnection) -> tuple[tuple[str, int
         assert str(table_name).replace("_", "").isalnum()
         counts.append((str(table_name), int(await connection.scalar(text(f'SELECT count(*) FROM "{table_name}"')) or 0)))
     return tuple(counts)
+
+
+async def _entrypoint_refusal_result(
+    engine,
+    database_url: str,
+) -> tuple[bool, bool, bool, bool, str, tuple[tuple[str, int], ...]]:
+    """Exercise every final-schema entrypoint without hiding partial acceptance."""
+
+    classify_rejected = False
+    async with engine.connect() as connection:
+        try:
+            await bootstrap_module.classify_database(connection)
+        except bootstrap_module.M7RecreateRequired:
+            classify_rejected = True
+
+    bootstrap_rejected = False
+    try:
+        await bootstrap_module.bootstrap_schema(engine)
+    except bootstrap_module.M7RecreateRequired:
+        bootstrap_rejected = True
+
+    setup_rejected = False
+    try:
+        await _bootstrap_existing(database_url)
+    except PostgresSetupError as exc:
+        setup_rejected = "M7_RECREATE_REQUIRED" in str(exc)
+
+    check = await check_postgres(database_url)
+    async with engine.connect() as connection:
+        catalog = await _schema_digest(connection)
+        row_counts = await _table_row_counts(connection)
+    return (
+        classify_rejected,
+        bootstrap_rejected,
+        setup_rejected,
+        "M7_RECREATE_REQUIRED" in check.error,
+        catalog,
+        row_counts,
+    )
+
+
+async def _sequence_index_owners(
+    connection: AsyncConnection,
+) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    sequence_rows = await connection.execute(
+        text(
+            """SELECT seq.relname,COALESCE(owner.relname,'')
+            FROM pg_class seq JOIN pg_namespace n ON n.oid=seq.relnamespace
+            LEFT JOIN pg_depend d ON d.classid='pg_class'::regclass
+              AND d.objid=seq.oid AND d.refclassid='pg_class'::regclass
+              AND d.deptype IN ('a','i')
+            LEFT JOIN pg_class owner ON owner.oid=d.refobjid
+            WHERE n.nspname=current_schema() AND seq.relkind='S'"""
+        )
+    )
+    index_rows = await connection.execute(
+        text(
+            """SELECT idx.relname,owner.relname
+            FROM pg_class idx JOIN pg_namespace n ON n.oid=idx.relnamespace
+            JOIN pg_index x ON x.indexrelid=idx.oid
+            JOIN pg_class owner ON owner.oid=x.indrelid
+            WHERE n.nspname=current_schema() AND idx.relkind IN ('i','I')"""
+        )
+    )
+    return (
+        {(str(name), str(owner)) for name, owner in sequence_rows},
+        {(str(name), str(owner)) for name, owner in index_rows},
+    )
 
 
 async def _native_relational_catalog(
@@ -330,6 +415,125 @@ async def test_extension_owned_schema_objects_are_allowed_during_empty_bootstrap
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == M7_FINAL_SCHEMA_REVISION
             assert await connection.scalar(text("SELECT extname FROM pg_extension WHERE extname='hstore'")) == "hstore"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_unexpected_app_owned_sequence_is_rejected_by_every_entrypoint_without_mutation(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_module.bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await connection.execute(text("CREATE SEQUENCE unexpected_owned_sequence OWNED BY projects.membership_version"))
+        async with engine.connect() as connection:
+            before_catalog = await _schema_digest(connection)
+            before_rows = await _table_row_counts(connection)
+
+        result = await _entrypoint_refusal_result(engine, postgres_database_url)
+
+        assert result == (True, True, True, True, before_catalog, before_rows)
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT to_regclass('unexpected_owned_sequence')")) == "unexpected_owned_sequence"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_unexpected_langgraph_index_is_rejected_by_every_entrypoint_without_mutation(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await _bootstrap_existing(postgres_database_url)
+        async with engine.begin() as connection:
+            await connection.execute(text("CREATE INDEX unexpected_lg_index ON checkpoints(thread_id)"))
+        async with engine.connect() as connection:
+            before_catalog = await _schema_digest(connection)
+            before_rows = await _table_row_counts(connection)
+
+        result = await _entrypoint_refusal_result(engine, postgres_database_url)
+
+        assert result == (True, True, True, True, before_catalog, before_rows)
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT to_regclass('unexpected_lg_index')")) == "unexpected_lg_index"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_app_only_and_full_langgraph_stages_have_exact_sequence_index_inventory(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    langgraph_tables = set(bootstrap_module._LANGGRAPH_TABLES)
+    try:
+        await bootstrap_module.bootstrap_schema(engine)
+        async with engine.connect() as connection:
+            app_sequences, app_indexes = await _sequence_index_owners(connection)
+            assert app_sequences == EXPECTED_APP_SEQUENCE_OWNERS
+            assert not {identity for identity in app_indexes if identity[1] in langgraph_tables}
+            assert await bootstrap_module.classify_database(connection) == "m7"
+
+        await _bootstrap_existing(postgres_database_url)
+        async with engine.connect() as connection:
+            full_sequences, full_indexes = await _sequence_index_owners(connection)
+            assert full_sequences == EXPECTED_APP_SEQUENCE_OWNERS
+            assert {identity for identity in full_indexes if identity[1] in langgraph_tables} == EXPECTED_LANGGRAPH_INDEX_OWNERS
+            assert await bootstrap_module.classify_database(connection) == "m7"
+        check = await check_postgres(postgres_database_url)
+        assert check.healthy is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_partial_langgraph_inventory_is_rejected_without_mutation(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_module.bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await connection.execute(text("CREATE TABLE checkpoints (thread_id text PRIMARY KEY)"))
+        async with engine.connect() as connection:
+            before_catalog = await _schema_digest(connection)
+            before_rows = await _table_row_counts(connection)
+
+        result = await _entrypoint_refusal_result(engine, postgres_database_url)
+
+        assert result == (True, True, True, True, before_catalog, before_rows)
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT to_regclass('checkpoints')")) == "checkpoints"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_missing_langgraph_index_is_rejected_without_repair(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await _bootstrap_existing(postgres_database_url)
+        async with engine.begin() as connection:
+            await connection.execute(text("DROP INDEX checkpoints_thread_id_idx"))
+        async with engine.connect() as connection:
+            before_catalog = await _schema_digest(connection)
+            before_rows = await _table_row_counts(connection)
+
+        result = await _entrypoint_refusal_result(engine, postgres_database_url)
+
+        assert result == (True, True, True, True, before_catalog, before_rows)
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT to_regclass('checkpoints_thread_id_idx')")) is None
     finally:
         await engine.dispose()
 

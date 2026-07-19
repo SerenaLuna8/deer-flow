@@ -628,6 +628,11 @@ database is verified idempotently; every old revision or unknown nonempty schema
 `M7_RECREATE_REQUIRED` before DDL. Downgrade is unsupported. The dedicated `AUTOCOMMIT`/`NullPool`
 session advisory lock serializes concurrent setup, and cancellation cannot release that lock until the
 synchronous Alembic worker settles.
+The read-only root-object inventory accepts exactly two post-baseline stages: application-only (including
+the two audited application-owned sequences and no LangGraph root objects), or complete LangGraph
+installation (all six locked tables, eleven exact name+owner indexes, and zero sequences). A partial,
+missing, or extra LangGraph object and any additional application-owned sequence fail closed before DDL;
+application index definitions remain covered by the canonical final-catalog digest.
 
 **本地初始化与检查**：`make setup-db` 仅从显式 `POSTGRES_ADMIN_URL` 取得连接
 `postgres` maintenance database 的管理员连接，并从显式 `DATABASE_URL` 取得目标连接。

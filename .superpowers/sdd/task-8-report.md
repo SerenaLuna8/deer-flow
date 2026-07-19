@@ -104,6 +104,39 @@ gate, 87 passed/0 skipped for the bounded baseline/default/setup/check/
 bootstrap group, full collection with zero errors, Ruff format/lint clean, and
 `git diff --check` clean.
 
+## Second bounded review repair
+
+The second rereview found one remaining Important inventory gap: sequences and
+indexes were accepted by owner table alone, while the canonical application
+signature did not cover owned sequences or LangGraph indexes. This repair is
+limited to that finding.
+
+- Independent catalog audit locked the application-owned sequence inventory to
+  two exact name/owner pairs: `deletion_tombstones_journal_sequence_seq` owned
+  by `deletion_tombstones`, and `run_events_id_seq` owned by `run_events`.
+  The Alembic index is also locked to `alembic_version_pkc`.
+- LangGraph owns zero sequences and eleven exact name/owner indexes across its
+  six tables. Root-object validation now permits only two states: the complete
+  application baseline with no LangGraph objects, or that baseline plus the
+  complete six-table/eleven-index LangGraph inventory. Partial, missing, or
+  extra LangGraph objects fail closed. Application index definitions remain
+  covered by the existing canonical full-definition digest.
+- The two required real-PostgreSQL RED tests failed as expected: an unexpected
+  sequence owned by `projects.membership_version` and an unexpected index on
+  `checkpoints(thread_id)` were accepted by classify/bootstrap/setup/check.
+  The GREEN rerun was 2 passed. Both tests also prove that failure does not
+  delete or repair the unknown object.
+- Independent positive/negative stage coverage verifies the exact app-only and
+  full LangGraph inventories, plus partial installation, missing index, and
+  extra-object refusal. That focused group is 5 passed; the retained
+  object-only/schema-drift group is 9 passed; the complete baseline file is
+  26 passed.
+
+Fresh second-repair evidence is 155 passed/0 skipped for the fixed 16-file
+release gate and 92 passed for the bounded baseline/default/setup/check/
+bootstrap group. Full backend collection completes with zero collection
+errors, Ruff format/lint are clean, and `git diff --check` is clean.
+
 ## Residue audit
 
 The Task 8 production scan for old revisions, migration ledgers, cutover state,
@@ -130,8 +163,16 @@ The repair-only canonical-signature database
 `deerflow_test_99999_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` was also dropped. The
 same final catalog query remained empty after the repair gates.
 
+The second repair used a new dedicated disposable PostgreSQL cluster at
+`/private/tmp/deerflow_m7_task8b.Q0HJbG`, listening only on
+`127.0.0.1:55438`, because the retained 55437 cluster was not responsive. No
+normal-port database was accessed. After the final gate, a catalog query
+returned zero `deerflow_test_*`/`deerflow_autogen_*` databases; the 55438
+server was stopped, its exact data directory was removed, and `pg_isready`
+confirmed no response.
+
 ## Handoff
 
-Task 8 plus the first bounded repair is ready for independent rereview. Task 9
-has not started, and milestone progress must remain unchanged until the
-independent review is accepted.
+Task 8 plus both bounded repairs is ready for independent rereview. Task 9 has
+not started, and milestone progress must remain unchanged until the independent
+review is accepted.
