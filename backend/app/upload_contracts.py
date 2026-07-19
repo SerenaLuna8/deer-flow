@@ -6,42 +6,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
-
-
-class UploadedFileInfo(BaseModel):
-    """Legacy host-backed upload metadata; private PostgreSQL files use another schema."""
-
-    filename: str
-    size: int
-    path: str
-    virtual_path: str
-    artifact_url: str
-    extension: str | None = None
-    modified: float | None = None
-    original_filename: str | None = None
-    markdown_file: str | None = None
-    markdown_path: str | None = None
-    markdown_virtual_path: str | None = None
-    markdown_artifact_url: str | None = None
-
-
-class UploadResponse(BaseModel):
-    """Legacy host-backed upload response."""
-
-    success: bool
-    files: list[UploadedFileInfo]
-    message: str
-    skipped_files: list[str] = Field(default_factory=list)
-
-
-class UploadListResponse(BaseModel):
-    """Legacy host-backed upload listing response."""
-
-    files: list[UploadedFileInfo]
-    count: int
 
 
 class UploadLimits(BaseModel):

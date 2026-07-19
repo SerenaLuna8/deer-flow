@@ -1,8 +1,8 @@
 """Real process entrypoints used by the M6 release-gate tests.
 
-This module deliberately lives under ``tests/support``.  It supplies only
-coordination handlers; process construction, leasing, repository access and
-shutdown remain the production Worker/Gateway/Scheduler paths.
+This module deliberately lives under ``tests/support``. It supplies only a
+controlled graph runner; production constructs the executor, handler, leasing,
+repository access, and shutdown path.
 """
 
 from __future__ import annotations
@@ -11,28 +11,14 @@ import argparse
 import asyncio
 import json
 import os
-from functools import partial
 from pathlib import Path
 
-from app.audit.service import AuditService, _bind_worker_audit_process
-from app.audit.sinks import OperationalAuditSink
-from app.quotas.integration import ProjectQuotaEnforcer
-from app.quotas.service import QuotaService
-from app.reliability.execution import (
-    AgentExecutionResult,
-    LeaseAuthorizedStreamBridge,
-    PrivateRunExecutionBoundary,
-    PrivateRunJobHandler,
-    PrivateRunJobTerminalPort,
-)
-from app.reliability.owner_refs import AuditHmacKeyring
+from sqlalchemy import select
+
 from app.worker.app import run_worker
-from app.worker.service import JobSettlement
-from deerflow.config import get_app_config
-from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence import get_session_factory
-from deerflow.persistence.jobs.sql import JobRepository
-from deerflow.runtime.events.stream import PostgresStreamBridge
+from deerflow.persistence.jobs.model import JobRow
+from deerflow.runtime.runs.schemas import RunStatus
 
 
 def _append_barrier(path: Path, payload: dict[str, object]) -> None:
@@ -43,148 +29,77 @@ def _append_barrier(path: Path, payload: dict[str, object]) -> None:
         os.fsync(stream.fileno())
 
 
-class _CoordinatedExecutor:
-    """Pause execution while all durable authority stays production-owned."""
-
-    def __init__(self, factory) -> None:
-        self._factory = factory
-
-    async def execute(self, execution, authority) -> AgentExecutionResult:
-        claim = authority.claim
-        barrier = Path(os.environ["M6_PROCESS_BARRIER"])
-        release = Path(os.environ["M6_PROCESS_RELEASE"])
-        _append_barrier(
-            barrier,
-            {
-                "event": "leased",
-                "role": "worker",
-                "job_id": str(claim.job_id),
-                "pid": os.getpid(),
-                "project_id": str(claim.scope.project_id),
-                "owner_user_id": claim.scope.owner_user_id,
-            },
-        )
-        _append_barrier(
-            barrier,
-            {
-                "event": "graph_execution",
-                "role": "worker",
-                "job_id": str(claim.job_id),
-                "pid": os.getpid(),
-            },
-        )
-        while not release.exists():
-            await asyncio.sleep(0.05)
-
-        boundary = PrivateRunExecutionBoundary(
-            self._factory,
-            context=execution.context,
-            claim=claim,
-        )
-        bridge = LeaseAuthorizedStreamBridge(
-            PostgresStreamBridge(self._factory),
-            boundary,
-            scope=execution.context.resource_scope,
-            thread_id=execution.run.thread_id,
-            terminal_status=lambda: "success",
-        )
-        await bridge.publish(
-            execution.run.run_id,
-            "updates",
-            {"worker_pid": os.getpid()},
-        )
-        _append_barrier(
-            barrier,
-            {
-                "event": "stream_append",
-                "role": "worker",
-                "job_id": str(claim.job_id),
-                "pid": os.getpid(),
-            },
-        )
-        await bridge.publish_end(execution.run.run_id)
-        _append_barrier(
-            barrier,
-            {
-                "event": "terminal_append",
-                "role": "worker",
-                "job_id": str(claim.job_id),
-                "pid": os.getpid(),
-            },
-        )
-        return AgentExecutionResult.succeeded()
+_SETTLEMENT_TASKS: set[asyncio.Task[None]] = set()
 
 
-class _CoordinatedPrivateRunHandler:
-    """Lazily wrap the production handler after ``run_worker`` initializes."""
+async def _record_production_settlement(job_id: object) -> None:
+    """Observe the real handler commit without replacing or wrapping it."""
 
-    def __init__(self) -> None:
-        self._handler: PrivateRunJobHandler | None = None
-
-    def _production_handler(self) -> PrivateRunJobHandler:
-        if self._handler is not None:
-            return self._handler
-        factory = get_session_factory()
-        keyring = AuditHmacKeyring.from_environment()
-        audit_service = AuditService(factory, keyring)
-        audit = OperationalAuditSink(
-            audit_service,
-            process_context=_bind_worker_audit_process(audit_service),
-        )
-        config = get_app_config()
-        quota = ProjectQuotaEnforcer(
-            QuotaService(
-                factory,
-                getattr(config, "quotas", None) or QuotaConfig(),
-                source_ref_hasher=keyring,
-            )
-        )
-        terminal_port = PrivateRunJobTerminalPort(quota=quota, audit=audit)
-        repository_builder = partial(
-            JobRepository,
-            owner_ref_hasher=keyring.job_owner_ref,
-            terminal_port=terminal_port,
-        )
-        self._handler = PrivateRunJobHandler(
-            factory,
-            executor=_CoordinatedExecutor(factory),
-            retry_initial_seconds=config.worker.retry_initial_seconds,
-            retry_max_seconds=config.worker.retry_max_seconds,
-            job_repository_builder=repository_builder,
-            quota=quota,
-            audit=audit,
-        )
-        return self._handler
-
-    async def __call__(self, claim, authority) -> JobSettlement:
-        _append_barrier(
-            Path(os.environ["M6_PROCESS_BARRIER"]),
-            {
-                "event": "claim",
-                "role": "worker",
-                "job_id": str(claim.job_id),
-                "pid": os.getpid(),
-            },
-        )
-        settlement = await self._production_handler()(claim, authority)
-
-        async def commit() -> None:
-            await settlement.commit()
+    factory = get_session_factory()
+    while True:
+        async with factory() as session:
+            status = await session.scalar(select(JobRow.status).where(JobRow.id == job_id))
+        if status in {"succeeded", "failed", "cancelled", "dead"}:
             _append_barrier(
                 Path(os.environ["M6_PROCESS_BARRIER"]),
                 {
                     "event": "settled",
                     "role": "worker",
-                    "job_id": str(claim.job_id),
+                    "job_id": str(job_id),
                     "pid": os.getpid(),
                 },
             )
+            return
+        await asyncio.sleep(0.05)
 
-        return JobSettlement(settlement.outcome, commit)
+
+async def _controlled_agent_runner(
+    bridge,
+    run_manager,
+    record,
+    *,
+    ctx,
+    **_kwargs,
+) -> None:
+    """Pause the graph body inside the real production execution boundary."""
+
+    boundary = ctx.authorization_boundary
+    job_id = boundary.execution_job_id
+    barrier = Path(os.environ["M6_PROCESS_BARRIER"])
+    payload = {
+        "role": "worker",
+        "job_id": str(job_id),
+        "pid": os.getpid(),
+        "project_id": str(record.scope.project_id),
+        "owner_user_id": record.scope.owner_user_id,
+        "run_id": record.run_id,
+    }
+    await run_manager.set_status(record.run_id, RunStatus.running)
+    _append_barrier(barrier, {**payload, "event": "claim"})
+    _append_barrier(barrier, {**payload, "event": "leased"})
+    _append_barrier(barrier, {**payload, "event": "graph_execution"})
+
+    release = Path(os.environ["M6_PROCESS_RELEASE"])
+    while not release.exists():
+        await asyncio.sleep(0.05)
+
+    await bridge.publish(
+        record.run_id,
+        "updates",
+        {"worker_pid": os.getpid()},
+    )
+    _append_barrier(barrier, {**payload, "event": "stream_append"})
+    await run_manager.set_status(record.run_id, RunStatus.success)
+    await bridge.publish_end(record.run_id)
+    _append_barrier(barrier, {**payload, "event": "terminal_append"})
+
+    task = asyncio.create_task(_record_production_settlement(job_id))
+    _SETTLEMENT_TASKS.add(task)
+    task.add_done_callback(_SETTLEMENT_TASKS.discard)
 
 
 async def _run_worker_child() -> None:
-    await run_worker(handlers={"private_run": _CoordinatedPrivateRunHandler()})
+    await run_worker(handlers=None, agent_runner=_controlled_agent_runner)
 
 
 def main() -> None:

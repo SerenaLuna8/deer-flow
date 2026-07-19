@@ -1403,6 +1403,17 @@ class TestMemoryManagement:
 
 
 class TestUploads:
+    def test_embedded_upload_methods_document_virtual_path_only_contract(self):
+        upload_doc = DeerFlowClient.upload_files.__doc__ or ""
+        list_doc = DeerFlowClient.list_uploads.__doc__ or ""
+
+        assert "UploadResponse" not in upload_doc
+        assert "Gateway API" not in upload_doc
+        assert "list_uploaded_files" not in list_doc
+        assert "Gateway API" not in list_doc
+        assert "virtual_path" in upload_doc
+        assert "virtual_path" in list_doc
+
     def test_upload_files(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

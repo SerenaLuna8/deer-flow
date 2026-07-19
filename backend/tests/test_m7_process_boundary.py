@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import os
@@ -35,6 +36,9 @@ def test_process_probe_records_all_authority_boundaries() -> None:
     from support import m6_process_child
 
     source = inspect.getsource(m6_process_child)
+    assert "run_worker(handlers=None" in source
+    assert "_CoordinatedExecutor" not in source
+    assert "_CoordinatedPrivateRunHandler" not in source
     for event in (
         '"role": "worker"',
         '"event": "claim"',
@@ -45,21 +49,148 @@ def test_process_probe_records_all_authority_boundaries() -> None:
         assert event in source
 
 
-def test_gateway_and_scheduler_cannot_import_worker_graph_execution() -> None:
-    from app.gateway import deps as gateway_deps
-    from app.scheduler import app as scheduler_app
-    from app.scheduler import service as scheduler_service
+def test_worker_production_constructor_injects_only_the_controlled_runner() -> None:
+    from app.worker.app import run_worker
 
-    source = "\n".join(
-        (
-            inspect.getsource(gateway_deps),
-            inspect.getsource(scheduler_app),
-            inspect.getsource(scheduler_service),
-        )
+    assert "agent_runner" in inspect.signature(run_worker).parameters
+    source = inspect.getsource(run_worker)
+    assert "RunAgentPrivateExecutor(" in source
+    assert 'executor_options["runner"] = agent_runner' in source
+    assert "handlers is None" in source
+
+
+def _local_module_file(module: str) -> Path | None:
+    backend_root = Path(__file__).resolve().parents[1]
+    if module == "app" or module.startswith("app."):
+        root = backend_root
+    elif module == "deerflow" or module.startswith("deerflow."):
+        root = backend_root / "packages" / "harness"
+    else:
+        return None
+    relative = Path(*module.split("."))
+    for candidate in (
+        root / f"{relative}.py",
+        root / relative / "__init__.py",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _local_imports(module: str, path: Path) -> tuple[set[str], set[str]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    modules: set[str] = set()
+    symbols: set[str] = set()
+    package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+
+    def import_time_nodes(node: ast.AST):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+            ):
+                continue
+            if isinstance(child, (ast.Import, ast.ImportFrom)):
+                yield child
+            else:
+                yield from import_time_nodes(child)
+
+    for node in import_time_nodes(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level:
+            package_parts = package.split(".") if package else []
+            base_parts = package_parts[: len(package_parts) - (node.level - 1)]
+            if node.module:
+                base_parts.extend(node.module.split("."))
+            base = ".".join(base_parts)
+        else:
+            base = node.module or ""
+        if base:
+            modules.add(base)
+        for alias in node.names:
+            symbols.add(alias.name)
+            candidate = f"{base}.{alias.name}" if base else alias.name
+            if _local_module_file(candidate) is not None:
+                modules.add(candidate)
+    return modules, symbols
+
+
+def _production_import_graph(*roots: str) -> tuple[set[str], set[str]]:
+    pending = list(roots)
+    visited: set[str] = set()
+    symbols: set[str] = set()
+    while pending:
+        module = pending.pop()
+        if module in visited:
+            continue
+        path = _local_module_file(module)
+        if path is None:
+            continue
+        visited.add(module)
+        parts = module.split(".")
+        pending.extend(".".join(parts[:index]) for index in range(1, len(parts)))
+        imported, imported_symbols = _local_imports(module, path)
+        symbols.update(imported_symbols)
+        pending.extend(imported - visited)
+    return visited, symbols
+
+
+def test_gateway_and_scheduler_cannot_import_worker_graph_execution() -> None:
+    modules, symbols = _production_import_graph(
+        "app.gateway.app",
+        "app.scheduler.app",
     )
-    assert "RunAgentPrivateExecutor" not in source
-    assert "PrivateRunJobHandler" not in source
-    assert "run_agent" not in source
+    banned_modules = {
+        "app.reliability.execution",
+        "app.worker",
+        "deerflow.agents.lead_agent.agent",
+        "deerflow.runtime.runs.worker",
+    }
+    assert not {module for module in modules if any(module == banned or module.startswith(f"{banned}.") for banned in banned_modules)}
+    assert (
+        not {
+            "PrivateRunJobHandler",
+            "RunAgentPrivateExecutor",
+            "make_lead_agent",
+            "run_agent",
+        }
+        & symbols
+    )
+
+    backend_root = Path(__file__).resolve().parents[1]
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import app.gateway.app, app.scheduler.app; "
+                "banned=('app.worker','app.reliability.execution',"
+                "'deerflow.runtime.runs.worker','deerflow.agents.lead_agent.agent'); "
+                "print('\\n'.join(name for name in sys.modules "
+                "if any(name == item or name.startswith(item + '.') "
+                "for item in banned)))"
+            ),
+        ],
+        cwd=backend_root,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                (
+                    str(backend_root / "packages" / "harness"),
+                    os.environ.get("PYTHONPATH", ""),
+                )
+            ),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert probe.stdout.strip() == ""
 
 
 def _scheduler_config(database_url: str) -> str:

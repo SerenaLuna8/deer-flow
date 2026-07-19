@@ -1,5 +1,13 @@
 from types import SimpleNamespace
 
+
+def test_removed_global_upload_response_schemas_are_absent() -> None:
+    from app import upload_contracts
+
+    for name in ("UploadedFileInfo", "UploadResponse", "UploadListResponse"):
+        assert not hasattr(upload_contracts, name)
+
+
 MIB = 1024 * 1024
 
 

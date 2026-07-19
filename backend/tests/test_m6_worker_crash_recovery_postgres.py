@@ -67,7 +67,13 @@ def _project_context(context: PrivateWorkContext) -> ProjectContext:
 def _config(database_url: str) -> str:
     return f"""\
 log_level: warning
-models: []
+models:
+  - name: test-model
+    use: langchain_openai.ChatOpenAI
+    model: test-model
+  - name: release-model
+    use: langchain_openai.ChatOpenAI
+    model: release-model
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 database:

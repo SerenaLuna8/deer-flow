@@ -1197,8 +1197,10 @@ class DeerFlowClient:
             files: List of local file paths to upload.
 
         Returns:
-            Dict with success, files, message — matching the Gateway API
-            ``UploadResponse`` schema.
+            Embedded-client dict with ``success``, ``files``, and ``message``.
+            Each file contains its local ``path`` and sandbox
+            ``virtual_path``; this contract does not expose host HTTP artifact
+            URLs.
 
         Raises:
             FileNotFoundError: If any file does not exist.
@@ -1291,8 +1293,9 @@ class DeerFlowClient:
             thread_id: Thread ID.
 
         Returns:
-            Dict with "files" and "count" keys, matching the Gateway API
-            ``list_uploaded_files`` response.
+            Embedded-client dict with ``files`` and ``count``. Each listed file
+            includes its local ``path`` and sandbox ``virtual_path``; this
+            contract does not expose host HTTP artifact URLs.
         """
         uploads_dir = get_uploads_dir(thread_id)
         result = list_files_in_dir(uploads_dir)

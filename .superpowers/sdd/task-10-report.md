@@ -102,3 +102,83 @@ Production source-absence: 4 passed
 ## Remaining acceptance boundary
 
 Task 10 implementation and mandatory gates are complete. Independent review must still inspect the committed diff before Task 10 is formally accepted; M7 final documentation/closure belongs to Task 11.
+
+## Independent-review repair (2026-07-19)
+
+The first independent review found `0 Critical / 2 Important / 1 Minor`. The
+repair stayed inside Task 10 and did not update the progress ledger or begin
+Task 11.
+
+- Source absence now inventories 83 unique deleted production paths, including
+  every removed frontend surface, global router, config backend, memory store,
+  pre-M7 migration, migration CLI, legacy skill writer, and recovery helper.
+  The route inventory contains 18 removed global prefixes, including
+  `/api/assistants`, `/api/console`, `/api/input-polish`, and
+  `/api/suggestions`.
+- Python route, import, runtime-symbol, and config checks are AST-based, so
+  comments cannot create false positives. Nginx `location` and `rewrite`
+  directives have a dedicated unquoted scan. Mutation tests prove that an
+  unquoted Nginx route and a config tombstone literal are rejected while a
+  historical Python comment is ignored.
+- The process child no longer constructs a custom executor or handler. It calls
+  `run_worker(handlers=None, agent_runner=...)`; production constructs the real
+  `RunAgentPrivateExecutor` and `PrivateRunJobHandler`, and only the graph runner
+  is controlled. Claim, graph, stream, and terminal PID evidence is recorded
+  from inside that real execution boundary, while settlement evidence observes
+  the production handler commit from PostgreSQL.
+- Gateway and Scheduler are checked through a structured, transitive local
+  import graph and an isolated runtime `sys.modules` probe. The general runtime
+  packages now lazy-load `run_agent`/`RunContext` only for explicit Worker-side
+  consumers, so importing Gateway or Scheduler does not import the Worker,
+  private executor, graph runner, or lead-agent graph.
+- Embedded upload docs now state the local-path plus `virtual_path` contract and
+  explicitly exclude host HTTP artifact URLs. The unused global
+  `UploadedFileInfo`, `UploadResponse`, and `UploadListResponse` models were
+  removed. The stale global suggestions-config request was also removed; the
+  composer continues to use its project-scoped suggestions endpoint.
+
+Repair RED evidence:
+
+```text
+12 focused tests: 9 failed, 3 passed
+```
+
+The failures covered the incomplete path/route inventory, Nginx and config
+mutations, Python comment false positive, custom process executor/handler,
+missing production runner seam, stale upload docs, and old response models.
+
+Repair verification:
+
+```text
+Focused source/process/upload contracts: 13 passed
+Related backend regression: 273 passed, 2 PostgreSQL skips
+Real M7 Gateway/Scheduler/Worker process gate: 4 passed
+Worker crash/takeover process gate: 3 passed
+M1-M7 PostgreSQL gate: 247 passed, 0 skipped in 124.95s
+Full backend: 6825 passed, 941 skipped in 109.78s
+Blocking-I/O: 27 passed in 11.24s
+Ruff: All checks passed; 1047 files already formatted
+Frontend unit: 122 files, 888 passed, 0 skipped
+Frontend check: PASS
+Production Playwright: 14 passed
+Static Playwright: 2 passed
+BUILD_MODE=production pnpm build: PASS
+BUILD_MODE=static pnpm build: PASS
+Prettier changed scope: PASS
+git diff --check: PASS
+```
+
+The first sandboxed frontend unit invocation failed to bind `::1:3000` with
+`EPERM`; the unchanged command passed with local-server permission. The first
+verbose backend run completed but its final summary was truncated, so the same
+suite was rerun with quiet output to capture the counts above. Neither event was
+a product failure.
+
+The repair PostgreSQL cluster listened only on `127.0.0.1:55444`. Before
+shutdown it contained no `deerflow_test_*` or `deerflow_restore_*` databases.
+It was stopped cleanly, its exact temporary directory
+`/private/tmp/deerflow_m7_task10_repair_pg_0Vfwla` was removed, port `55444`
+was confirmed closed, and no process-test child from this worktree remained.
+
+All fixed review findings are repaired. Formal acceptance still requires the
+independent re-review of the repair commit; Task 11 remains out of scope.
