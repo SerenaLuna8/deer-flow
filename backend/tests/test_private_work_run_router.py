@@ -90,7 +90,6 @@ async def harness(seed: M4ThreadSeed) -> _Harness:
     app.state.project_scoped_checkpointer = scoped
     app.state.private_stream_bridge = PostgresStreamBridge(seed.factory)
     app.state.stream_bridge = object()
-    app.state.run_manager = object()
 
     async def context_override(project_id: uuid.UUID, request: Request):
         identity = request.headers.get("x-test-private-identity", "owner-a")
@@ -209,7 +208,6 @@ async def test_start_run_strips_nested_authority_and_serializes_no_private_coord
     launcher = AsyncMock(return_value=record)
     monkeypatch.setattr(private_work_router, "start_private_run", launcher)
     del harness.app.state.stream_bridge
-    del harness.app.state.run_manager
 
     response = await harness.request(
         "POST",

@@ -248,15 +248,6 @@ class TestLiveConfigQueries:
     def test_get_model_not_found(self, client):
         assert client.get_model("nonexistent-model-xyz") is None
 
-    def test_list_skills(self, client):
-        """list_skills() runs without error."""
-        result = client.list_skills()
-        assert "skills" in result
-        assert isinstance(result["skills"], list)
-        print(f"  skills count: {len(result['skills'])}")
-        for s in result["skills"][:3]:
-            print(f"    - {s['name']}: {s['enabled']}")
-
 
 # ===========================================================================
 # Scenario 7: Artifact read after agent writes

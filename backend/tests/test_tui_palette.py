@@ -13,9 +13,6 @@ class _FakeClient:
     def list_models(self):
         return {"models": [{"name": "m"}]}
 
-    def list_skills(self, enabled_only=False):
-        return {"skills": [{"name": "tdd", "description": "Test first", "enabled": True}]}
-
     def stream(self, *args, **kwargs):
         yield StreamEvent(type="end", data={})
 
@@ -55,12 +52,12 @@ async def test_palette_index_resets_when_filter_changes():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
     async with app.run_test() as pilot:
         await pilot.pause()
-        await pilot.press("slash", "m")  # memory / mcp / model …
+        await pilot.press("slash", "t")  # threads / tools
         await _settle(pilot, lambda: app._palette_open and len(app._palette_items) > 1)
         await pilot.press("down", "down")
         await pilot.pause()
         assert app._palette_index > 0
-        await pilot.press("e")  # filter narrows ("/me") -> highlight must reset
+        await pilot.press("h")  # filter narrows ("/th") -> highlight must reset
         await pilot.pause()
     assert app._palette_index == 0
 
@@ -91,19 +88,6 @@ async def test_escape_closes_palette():
         await pilot.press("escape")
         await _settle(pilot, lambda: not app._palette_open)
     assert not app._palette_open
-
-
-@pytest.mark.asyncio
-async def test_skill_command_tab_completes_with_trailing_space():
-    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("slash", "t", "d", "d")
-        await _settle(pilot, lambda: app._palette_open and any(c.name == "tdd" for c in app._palette_items))
-        await pilot.press("tab")
-        await _settle(pilot, lambda: not app._palette_open)
-        value = app.query_one("#composer").value
-    assert value == "/tdd "
 
 
 @pytest.mark.asyncio

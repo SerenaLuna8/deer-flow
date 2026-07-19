@@ -1707,7 +1707,7 @@ git commit -m "test: enforce M4 private work release gates"
 **Files:**
 
 - Modify: `README.md`
-- Modify: `README_zh.md`
+- Modify: `README.md`
 - Modify: `AGENTS.md`
 - Modify: `backend/AGENTS.md`
 - Modify: `frontend/AGENTS.md`
@@ -1791,7 +1791,7 @@ Run:
 ```bash
 make check-db
 make doctor
-rg -n "3/8|37.5%|M4.*未开始|private work.*later milestone|M1, M2 and M3 PostgreSQL" README.md README_zh.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs .github/workflows
+rg -n "3/8|37.5%|M4.*未开始|private work.*later milestone|M1, M2 and M3 PostgreSQL" README.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs .github/workflows
 git diff --check
 git status --short
 ```
@@ -1809,7 +1809,7 @@ review scope覆盖规格全部完成标准，重点检查：unscoped query/raw s
 - [x] **Step 10: 提交文档与完成状态**
 
 ```bash
-git add README.md README_zh.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs .github/workflows/project-foundation-postgres-tests.yml
+git add README.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs .github/workflows/project-foundation-postgres-tests.yml
 git commit -m "docs: complete M4 private work milestone"
 ```
 

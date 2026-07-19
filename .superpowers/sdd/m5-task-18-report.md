@@ -9,7 +9,7 @@ stale current-status statement at
 
 ## Documentation mapping
 
-- `README.md` / `README_zh.md`: project Automation entry, Viewer read-only behavior,
+- `README.md`: project Automation entry, Viewer read-only behavior,
   manual trigger, single-Gateway `scheduler.enabled`, occurrence-before-admission,
   no replay after admission, and M6 boundary.
 - root/backend/frontend `AGENTS.md`: project+owner authority, Scheduler ownership,

@@ -2953,7 +2953,7 @@ git commit -m "test: release project automation frontend"
 **Files:**
 
 - Modify: `README.md`
-- Modify: `README_zh.md`
+- Modify: `README.md`
 - Modify: `AGENTS.md`
 - Modify: `backend/AGENTS.md`
 - Modify: `frontend/AGENTS.md`
@@ -2975,7 +2975,7 @@ Run:
 
 ```bash
 if rg -n "M5.*尚未完成|M1.M2.M3.*M4 PostgreSQL|PROJECT_AUTOMATION.*false" \
-  README.md README_zh.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md \
+  README.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md \
   docs/superpowers/specs config.example.yaml .github/workflows frontend/src/core/projects/features.ts; then
   exit 1
 fi
@@ -3053,7 +3053,7 @@ pnpm test:e2e
 cd ..
 git diff --check
 rg -n "M5.*尚未完成|M1.M2.M3.*M4 PostgreSQL|PROJECT_AUTOMATION.*false" \
-  README.md README_zh.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md \
+  README.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md \
   docs/superpowers/specs config.example.yaml .github/workflows frontend/src/core/projects/features.ts
 ```
 
@@ -3078,7 +3078,7 @@ Expected: Frontend命令PASS、`git diff --check`无输出；一致性扫描只�
 - [x] **Step 8: 提交文档与完成标记**
 
 ```bash
-git add README.md README_zh.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs/superpowers/specs/2026-07-12-project-first-saas-design.md docs/superpowers/specs/2026-07-14-project-private-work-m4-design.md docs/superpowers/specs/2026-07-16-project-automation-m5-design.md docs/operations/m5-automation-migration.md CHANGELOG.md
+git add README.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs/superpowers/specs/2026-07-12-project-first-saas-design.md docs/superpowers/specs/2026-07-14-project-private-work-m4-design.md docs/superpowers/specs/2026-07-16-project-automation-m5-design.md docs/operations/m5-automation-migration.md CHANGELOG.md
 git commit -m "docs: complete M5 project automation"
 ```
 

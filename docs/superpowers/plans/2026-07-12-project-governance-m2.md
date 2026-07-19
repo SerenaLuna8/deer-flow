@@ -686,7 +686,7 @@ git commit -m "feat(frontend): add project governance workflows"
 - 新建：`backend/tests/integration/test_m2_project_governance_postgres.py`
 - 修改：`.github/workflows/project-foundation-postgres-tests.yml`
 - 修改：`README.md`
-- 修改：`README_zh.md`
+- 修改：`README.md`
 - 修改：`AGENTS.md`
 - 修改：`backend/AGENTS.md`
 - 修改：`frontend/AGENTS.md`
@@ -744,7 +744,7 @@ cd frontend && pnpm exec playwright test --workers=1
 只有步骤 4 全部通过且审查结论无阻塞项时，才把总体设计和专项规格的 M2 状态改为“已完成”。
 
 ```bash
-git add .github/workflows/project-foundation-postgres-tests.yml README.md README_zh.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md backend/tests/integration/test_m2_project_governance_postgres.py docs/superpowers/specs/2026-07-12-project-first-saas-design.md docs/superpowers/specs/2026-07-12-project-governance-m2-design.md
+git add .github/workflows/project-foundation-postgres-tests.yml README.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md backend/tests/integration/test_m2_project_governance_postgres.py docs/superpowers/specs/2026-07-12-project-first-saas-design.md docs/superpowers/specs/2026-07-12-project-governance-m2-design.md
 git commit -m "docs: record M2 project governance completion"
 ```
 

@@ -17,9 +17,6 @@ class _FakeClient:
     def list_models(self):
         return {"models": [{"name": "fake-model", "display_name": "Fake Model"}]}
 
-    def list_skills(self, enabled_only=False):
-        return {"skills": [{"name": "tdd", "enabled": True}]}
-
     def stream(self, message, *, thread_id=None, **kwargs):
         yield StreamEvent(type="messages-tuple", data={"type": "ai", "content": "Hello ", "id": "m1"})
         yield StreamEvent(type="messages-tuple", data={"type": "ai", "content": "world", "id": "m1"})

@@ -280,7 +280,7 @@ async def test_executable_role_downgrade_keeps_active_runs(new_role: ProjectRole
 
 
 @pytest.mark.asyncio
-async def test_viewer_downgrade_marks_runs_in_transaction_then_notifies_after_commit() -> None:
+async def test_viewer_downgrade_marks_runs_in_governance_transaction() -> None:
     events: list[str] = []
     repository = _repository()
 
@@ -308,15 +308,11 @@ async def test_viewer_downgrade_marks_runs_in_transaction_then_notifies_after_co
 
     retention.freeze_owner.side_effect = freeze_owner
 
-    async def notify(run_ids, reason):
-        events.append(f"notify:{run_ids}:{reason}")
-
     await MembershipService(
         repository,
         clock=lambda: NOW,
         authorization=authorization,
         retention=retention,
-        notify_local_cancellation=notify,
     ).change_role(context, target.id, ProjectRole.VIEWER, expected_version=1)
 
     assert events == [
@@ -324,7 +320,6 @@ async def test_viewer_downgrade_marks_runs_in_transaction_then_notifies_after_co
         "retention-freeze",
         "authorization-mark",
         "transaction-commit",
-        "notify:('run-1',):authorization_revoked",
     ]
     authorization.mark_revoked.assert_awaited_once()
     retention.freeze_owner.assert_awaited_once_with(
@@ -336,7 +331,7 @@ async def test_viewer_downgrade_marks_runs_in_transaction_then_notifies_after_co
 
 
 @pytest.mark.asyncio
-async def test_viewer_downgrade_retention_failure_prevents_role_change_and_notification() -> None:
+async def test_viewer_downgrade_retention_failure_prevents_role_change_and_revocation() -> None:
     repository = _repository()
     context = _context()
     target = _member(role=ProjectRole.RUNNER)
@@ -348,15 +343,12 @@ async def test_viewer_downgrade_retention_failure_prevents_role_change_and_notif
     authorization.mark_revoked.return_value = ("run-1",)
     retention = AsyncMock()
     retention.freeze_owner.side_effect = RuntimeError("retention unavailable")
-    notifier = AsyncMock()
-
     with pytest.raises(RuntimeError, match="retention unavailable"):
         await MembershipService(
             repository,
             clock=lambda: NOW,
             authorization=authorization,
             retention=retention,
-            notify_local_cancellation=notifier,
         ).change_role(
             context,
             target.id,
@@ -366,11 +358,10 @@ async def test_viewer_downgrade_retention_failure_prevents_role_change_and_notif
 
     repository.set_role.assert_not_awaited()
     authorization.mark_revoked.assert_not_awaited()
-    notifier.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_remove_marks_runs_and_freezes_owner_but_notifier_failure_cannot_rollback() -> None:
+async def test_remove_marks_runs_and_freezes_owner() -> None:
     context = _context()
     repository = _repository()
     target = _member(role=ProjectRole.VIEWER)
@@ -378,15 +369,11 @@ async def test_remove_marks_runs_and_freezes_owner_but_notifier_failure_cannot_r
     authorization = AsyncMock()
     authorization.mark_revoked.return_value = ("run-1",)
     retention = AsyncMock()
-    notifier = AsyncMock(side_effect=RuntimeError("local task disappeared"))
-
     await MembershipService(
         repository,
         authorization=authorization,
         retention=retention,
-        notify_local_cancellation=notifier,
     ).remove(context, target.id, expected_version=1)
 
     authorization.mark_revoked.assert_awaited_once()
     retention.freeze_owner.assert_awaited_once()
-    notifier.assert_awaited_once_with(("run-1",), "authorization_revoked")

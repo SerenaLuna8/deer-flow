@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -122,6 +123,16 @@ BANNED_ROUTE_LITERALS = frozenset(
         "/api/uploads",
     }
 )
+PUBLIC_SKILL_BANNED_ROUTES = frozenset(
+    {
+        "/api/agents",
+        "/api/langgraph",
+        "/api/mcp/config",
+        "/api/memory",
+        "/api/skills",
+        "/api/threads",
+    }
+)
 
 BANNED_IMPORT_PREFIXES = (
     "app.automations.legacy_reads",
@@ -136,6 +147,37 @@ BANNED_IMPORT_PREFIXES = (
     "deerflow.tools.builtins.update_agent_tool",
 )
 BANNED_RUNTIME_SYMBOLS = frozenset({"setup_agent", "update_agent"})
+
+REMOVED_CLIENT_COMPAT_METHODS = frozenset(
+    {
+        "clear_memory",
+        "create_memory_fact",
+        "delete_memory_fact",
+        "export_memory",
+        "get_mcp_config",
+        "get_memory",
+        "get_memory_config",
+        "get_memory_status",
+        "get_skill",
+        "import_memory",
+        "install_skill",
+        "list_skills",
+        "reload_memory",
+        "update_mcp_config",
+        "update_memory_fact",
+        "update_skill",
+    }
+)
+REMOVED_GATEWAY_RUN_MANAGER_SYMBOLS = frozenset({"get_run_manager", "notify_local_cancellation"})
+REMOVED_README_TRANSLATION_LITERALS = tuple(f"README_{language}.md" for language in ("zh", "ja", "fr", "ru"))
+REMOVED_HELM_LITERALS = (
+    "configmap-extensions",
+    "DEER_FLOW_EXTENSIONS_CONFIG_PATH",
+    "DEER_FLOW_STREAM_BRIDGE_REDIS_URL",
+    "extensionsChecksum",
+    "extensionsConfig",
+    "stream_bridge",
+)
 
 BANNED_LEGACY_SYMBOLS_BY_PATH = {
     "backend/packages/harness/deerflow/agents/memory/queue.py": frozenset({"ConversationContext", "MemoryUpdateQueue", "get_memory_queue", "reset_memory_queue"}),
@@ -152,7 +194,6 @@ M7_CHANGED_MARKDOWN_DOCS = (
     "backend/AGENTS.md",
     "frontend/AGENTS.md",
     "README.md",
-    "README_zh.md",
     "CHANGELOG.md",
     "docs/operations/m6-backup-recovery.md",
     "docs/superpowers/specs/2026-07-12-project-first-saas-design.md",
@@ -195,11 +236,13 @@ ACTIVE_ROOT_MARKDOWN = frozenset(
     }
 )
 ACTIVE_MARKDOWN_PREFIXES = (
+    ".github/",
     "backend/docs/",
     "deploy/",
     "docker/",
     "docs/",
     "frontend/src/content/",
+    "skills/public/",
 )
 
 CONFIG_TOMBSTONES = frozenset(
@@ -253,7 +296,11 @@ def _production_files() -> tuple[Path, ...]:
     frontend_files = (path for path in frontend_root.rglob("*") if path.is_file() and _is_frontend_production_source(path))
     nginx_root = REPO_ROOT / "docker" / "nginx"
     nginx_files = (path for path in nginx_root.rglob("*") if path.is_file() and path.suffix == ".conf")
-    return tuple(sorted((*backend_files, *frontend_files, *nginx_files)))
+    helm_root = REPO_ROOT / "deploy" / "helm" / "deer-flow"
+    helm_files = (path for path in helm_root.rglob("*") if path.is_file() and path.suffix.lower() in {".txt", ".tpl", ".yaml", ".yml"})
+    public_skills_root = REPO_ROOT / "skills" / "public"
+    public_skill_sources = (path for path in public_skills_root.rglob("*") if path.is_file() and path.suffix.lower() in {".py", ".sh"})
+    return tuple(sorted((*backend_files, *frontend_files, *nginx_files, *helm_files, *public_skill_sources)))
 
 
 def _active_markdown_docs(repo_root: Path) -> tuple[Path, ...]:
@@ -262,7 +309,10 @@ def _active_markdown_docs(repo_root: Path) -> tuple[Path, ...]:
         if not path.is_file() or path.suffix.lower() not in {".md", ".mdx"}:
             continue
         relative = path.relative_to(repo_root).as_posix()
-        if relative not in ACTIVE_ROOT_MARKDOWN and not any(relative.startswith(prefix) for prefix in ACTIVE_MARKDOWN_PREFIXES):
+        parts = path.relative_to(repo_root).parts
+        is_root_document = len(parts) == 1
+        is_module_root_document = len(parts) == 2 and parts[0] in {"backend", "frontend"}
+        if relative not in ACTIVE_ROOT_MARKDOWN and not is_root_document and not is_module_root_document and not any(relative.startswith(prefix) for prefix in ACTIVE_MARKDOWN_PREFIXES):
             continue
         if relative in HISTORICAL_MARKDOWN_PATHS or any(relative.startswith(prefix) for prefix in HISTORICAL_MARKDOWN_PREFIXES):
             continue
@@ -303,6 +353,77 @@ def _python_symbols(path: Path) -> set[str]:
         elif isinstance(node, ast.alias):
             symbols.add(node.asname or node.name.rsplit(".", 1)[-1])
     return symbols
+
+
+def _class_method_names(path: Path, class_name: str) -> set[str]:
+    for node in _python_tree(path).body:  # type: ignore[attr-defined]
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {child.name for child in node.body if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return set()
+
+
+def _client_compat_method_findings(path: Path) -> list[str]:
+    return sorted(REMOVED_CLIENT_COMPAT_METHODS & _class_method_names(path, "DeerFlowClient"))
+
+
+def _is_app_state_run_manager(node: ast.AST) -> bool:
+    return isinstance(node, ast.Attribute) and node.attr == "run_manager" and isinstance(node.value, ast.Attribute) and node.value.attr == "state" and isinstance(node.value.value, ast.Name) and node.value.value.id == "app"
+
+
+def _gateway_run_manager_findings(root: Path) -> list[str]:
+    findings: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root).as_posix()
+        tree = _python_tree(path)
+        for symbol in sorted(REMOVED_GATEWAY_RUN_MANAGER_SYMBOLS & _python_symbols(path)):
+            findings.append(f"{relative}:{symbol}")
+        if any(_is_app_state_run_manager(node) for node in ast.walk(tree)):
+            findings.append(f"{relative}:app.state.run_manager")
+    return findings
+
+
+def _tracked_text_readme_findings(repo_root: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+    )
+    findings: list[str] = []
+    for raw_relative in result.stdout.split(b"\0"):
+        if not raw_relative:
+            continue
+        relative = raw_relative.decode("utf-8")
+        path = repo_root / relative
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for literal in REMOVED_README_TRANSLATION_LITERALS:
+            if literal in text:
+                findings.append(f"{relative}:{literal}")
+    return findings
+
+
+def _helm_legacy_findings(repo_root: Path) -> list[str]:
+    chart_root = repo_root / "deploy" / "helm" / "deer-flow"
+    findings: list[str] = []
+    for path in sorted(chart_root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(repo_root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        for literal in REMOVED_HELM_LITERALS:
+            if literal in text:
+                findings.append(f"{relative}:{literal}")
+        if re.search(r"\bredis\b", text, flags=re.IGNORECASE):
+            findings.append(f"{relative}:Redis")
+        for route in BANNED_ROUTE_LITERALS:
+            if route in text:
+                findings.append(f"{relative}:{route}")
+    return findings
 
 
 def _contains_route(value: str, literal: str) -> bool:
@@ -369,8 +490,17 @@ def _markdown_link_findings(documents: tuple[Path, ...], *, repo_root: Path) -> 
         if not document.is_file():
             findings.append(f"{relative_document}:0:<missing-document>")
             continue
+        fence: str | None = None
         for line_number, line in enumerate(document.read_text(encoding="utf-8").splitlines(), start=1):
-            for raw_target in _relative_markdown_targets(line):
+            fence_match = re.match(r"^\s*(`{3,}|~{3,})", line)
+            if fence_match is not None:
+                marker = fence_match.group(1)[0]
+                fence = None if fence == marker else marker
+                continue
+            if fence is not None:
+                continue
+            line_without_inline_code = re.sub(r"(`+)(?:\\.|(?!\1).)*?\1", "", line)
+            for raw_target in _relative_markdown_targets(line_without_inline_code):
                 target = raw_target[1:-1] if raw_target.startswith("<") and raw_target.endswith(">") else raw_target
                 if not target or target.startswith(("#", "/", "//")):
                     continue
@@ -460,7 +590,9 @@ def test_production_sources_have_no_legacy_route_literals() -> None:
         if path.suffix == ".py":
             strings = _python_string_literals(path)
             symbols = _python_symbols(path)
-            for literal in BANNED_ROUTE_LITERALS:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            route_literals = PUBLIC_SKILL_BANNED_ROUTES if relative.startswith("skills/public/") else BANNED_ROUTE_LITERALS
+            for literal in route_literals:
                 if any(_contains_route(value, literal) for value in strings):
                     findings.append(f"{path.relative_to(REPO_ROOT)}:{literal}")
             for symbol in BANNED_RUNTIME_SYMBOLS & symbols:
@@ -471,12 +603,116 @@ def test_production_sources_have_no_legacy_route_literals() -> None:
                 nginx_route = re.compile(rf"\b(?:location|rewrite)\b[^\n]*{re.escape(literal)}(?:[/{{?*\s]|$)")
                 if nginx_route.search(directives):
                     findings.append(f"{path.relative_to(REPO_ROOT)}:{literal}")
+        elif path.suffix.lower() in {".sh", ".txt", ".tpl", ".yaml", ".yml"}:
+            for literal in BANNED_ROUTE_LITERALS:
+                if literal in text:
+                    findings.append(f"{path.relative_to(REPO_ROOT)}:{literal}")
         else:
             strings = _javascript_string_literals(text)
             for literal in BANNED_ROUTE_LITERALS:
                 if any(_contains_route(value, literal) for value in strings):
                     findings.append(f"{path.relative_to(REPO_ROOT)}:{literal}")
     assert findings == []
+
+
+def test_deerflow_client_has_no_removed_global_compat_methods() -> None:
+    from deerflow.client import DeerFlowClient
+
+    client_path = BACKEND_ROOT / "packages" / "harness" / "deerflow" / "client.py"
+    assert _client_compat_method_findings(client_path) == []
+    for method_name in REMOVED_CLIENT_COMPAT_METHODS:
+        assert not hasattr(DeerFlowClient, method_name), method_name
+
+
+def test_client_method_gate_mutation_rejects_exists_but_raises(tmp_path: Path) -> None:
+    client_path = tmp_path / "client.py"
+    client_path.write_text(
+        "class DeerFlowClient:\n    def list_skills(self):\n        raise RuntimeError('removed')\n",
+        encoding="utf-8",
+    )
+
+    assert _client_compat_method_findings(client_path) == ["list_skills"]
+
+
+def test_tui_has_no_removed_global_asset_or_memory_commands() -> None:
+    tui_root = BACKEND_ROOT / "packages" / "harness" / "deerflow" / "tui"
+    app_path = tui_root / "app.py"
+    registry_path = tui_root / "command_registry.py"
+    app_strings = _python_string_literals(app_path)
+    registry_strings = _python_string_literals(registry_path)
+    findings: list[str] = []
+    for command in ("/skills", "/mcp", "/memory"):
+        if any(command in value for value in (*app_strings, *registry_strings)):
+            findings.append(command)
+    for symbol in ("_show_skills", "_show_mcp", "_show_memory", "list_skills"):
+        if symbol in (_python_symbols(app_path) | _python_symbols(registry_path)):
+            findings.append(symbol)
+    assert findings == []
+
+
+def test_gateway_has_no_legacy_run_manager_cancellation_chain() -> None:
+    gateway_root = BACKEND_ROOT / "app" / "gateway"
+    assert _gateway_run_manager_findings(gateway_root) == []
+    authorization_path = BACKEND_ROOT / "app" / "private_work" / "authorization.py"
+    assert "notify_local_cancellation" not in _python_symbols(authorization_path)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "def get_run_manager():\n    return None\n",
+        "from app.private_work.authorization import notify_local_cancellation\n",
+        "app.state.run_manager = object()\n",
+    ),
+    ids=("getter", "notifier", "app-state"),
+)
+def test_gateway_run_manager_gate_mutation_rejects_every_chain_shape(tmp_path: Path, source: str) -> None:
+    gateway_root = tmp_path / "backend" / "app" / "gateway"
+    path = gateway_root / "legacy.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(source, encoding="utf-8")
+
+    assert _gateway_run_manager_findings(gateway_root) != []
+
+
+def test_all_tracked_text_has_no_deleted_readme_translation_literals() -> None:
+    assert _tracked_text_readme_findings(REPO_ROOT) == []
+
+
+def test_helm_chart_has_no_extensions_redis_or_legacy_global_routes() -> None:
+    assert _helm_legacy_findings(REPO_ROOT) == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    ("redis:\n  enabled: true\n", "extensionsConfig: '{}'"),
+)
+def test_helm_gate_mutation_rejects_removed_values(tmp_path: Path, content: str) -> None:
+    path = tmp_path / "deploy" / "helm" / "deer-flow" / "values.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(content, encoding="utf-8")
+
+    assert _helm_legacy_findings(tmp_path) != []
+
+
+def test_rendered_helm_chart_has_no_extensions_redis_or_legacy_global_routes() -> None:
+    chart = REPO_ROOT / "deploy" / "helm" / "deer-flow"
+    result = subprocess.run(
+        ["helm", "template", "m7-source-gate", str(chart)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered = result.stdout
+    for literal in (*REMOVED_HELM_LITERALS, *BANNED_ROUTE_LITERALS):
+        assert literal not in rendered, literal
+    assert re.search(r"\bredis\b", rendered, flags=re.IGNORECASE) is None
+
+
+def test_readme_describes_project_postgres_memory_not_local_memory() -> None:
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert re.search(r"(?:memory|记忆)[^\n]{0,120}(?:本地|local (?:file|filesystem))", text, re.IGNORECASE) is None
+    assert "项目 Memory 保存在 PostgreSQL" in text
 
 
 def test_python_production_sources_have_no_legacy_imports() -> None:
@@ -725,6 +961,17 @@ def test_active_doc_inventory_mutation_scans_new_docs_and_whitelists_history_exa
     active = tmp_path / "backend" / "docs" / "new-guide.md"
     active.parent.mkdir(parents=True)
     active.write_text("Call `/api/threads`.\n", encoding="utf-8")
+    github_doc = tmp_path / ".github" / "new-guide.md"
+    github_doc.parent.mkdir(parents=True)
+    github_doc.write_text("Call `/api/threads`.\n", encoding="utf-8")
+    skill_doc = tmp_path / "skills" / "public" / "new-skill" / "SKILL.md"
+    skill_doc.parent.mkdir(parents=True)
+    skill_doc.write_text("Call `/api/threads`.\n", encoding="utf-8")
+    root_doc = tmp_path / "NEW.md"
+    root_doc.write_text("Call `/api/threads`.\n", encoding="utf-8")
+    module_doc = tmp_path / "frontend" / "NEW.md"
+    module_doc.parent.mkdir(parents=True)
+    module_doc.write_text("Call `/api/threads`.\n", encoding="utf-8")
     historical = tmp_path / "docs" / "superpowers" / "specs" / "old.md"
     historical.parent.mkdir(parents=True)
     historical.write_text("Call `/api/threads`.\n", encoding="utf-8")
@@ -734,13 +981,42 @@ def test_active_doc_inventory_mutation_scans_new_docs_and_whitelists_history_exa
 
     documents = _active_markdown_docs(tmp_path)
     assert {path.relative_to(tmp_path).as_posix() for path in documents} == {
+        ".github/new-guide.md",
+        "NEW.md",
         "backend/docs/new-guide.md",
         "docs/superpowers/specs-current/guide.md",
+        "frontend/NEW.md",
+        "skills/public/new-skill/SKILL.md",
     }
     assert _active_doc_residue_findings(documents, repo_root=tmp_path) == [
+        ".github/new-guide.md:1:/api/threads",
+        "NEW.md:1:/api/threads",
         "backend/docs/new-guide.md:1:/api/threads",
         "docs/superpowers/specs-current/guide.md:1:/api/threads",
+        "frontend/NEW.md:1:/api/threads",
+        "skills/public/new-skill/SKILL.md:1:/api/threads",
     ]
+
+
+@pytest.mark.parametrize(
+    ("relative", "content"),
+    (
+        ("skills/public/new-skill/scripts/call.sh", "curl /api/threads\n"),
+        ("deploy/helm/deer-flow/templates/legacy.yaml", "path: /api/threads\n"),
+    ),
+    ids=("public-skill-script", "helm-template"),
+)
+def test_source_gate_mutation_scans_new_skill_scripts_and_helm_templates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    relative: str,
+    content: str,
+) -> None:
+    _install_mutation_repo(monkeypatch, tmp_path, relative, content)
+    _assert_gate_rejects(
+        test_production_sources_have_no_legacy_route_literals,
+        f"source gate accepted a legacy route in {relative}",
+    )
 
 
 @pytest.mark.parametrize(

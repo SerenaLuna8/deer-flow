@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -20,8 +19,6 @@ from app.projects.membership_models import MembershipView
 from app.projects.membership_repository import MembershipRepository
 from app.projects.models import ProjectRole
 from deerflow.runtime.private_scope import PrivateResourceScope
-
-logger = logging.getLogger(__name__)
 
 
 class MembershipQuotaPort(Protocol):
@@ -95,7 +92,6 @@ class MembershipService:
         clock: Callable[[], datetime] | None = None,
         authorization: object = PrivateRunAuthorizationService,
         retention: object = PrivateWorkRetentionService,
-        notify_local_cancellation: Callable[[tuple[str, ...], str], object] | None = None,
         quota: MembershipQuotaPort | None = None,
         audit: MembershipAuditPort | None = None,
     ):
@@ -103,7 +99,6 @@ class MembershipService:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._authorization = authorization
         self._retention = retention
-        self._notifier = notify_local_cancellation
         self._quota = quota or _NoopMembershipQuota()
         self._audit = audit or _NoopMembershipAudit()
 
@@ -119,7 +114,6 @@ class MembershipService:
         expected_version: int,
     ) -> MembershipView:
         context.require(Capability.PROJECT_MEMBERS_MANAGE)
-        run_ids: tuple[str, ...] = ()
         async with self.repository.transaction():
             project, target = await self.repository.lock_project_and_member(context, membership_id)
             self._require_version(target.version, expected_version)
@@ -134,7 +128,7 @@ class MembershipService:
                     owner_user_id=target.user_id,
                     now=revoked_at,
                 )
-                run_ids = await self._authorization.mark_revoked(
+                await self._authorization.mark_revoked(
                     self.repository.session,
                     project_id=project.id,
                     owner_user_id=target.user_id,
@@ -150,7 +144,6 @@ class MembershipService:
                     target_role,
                     role,
                 )
-        await self._notify(run_ids)
         return result
 
     async def remove(
@@ -165,8 +158,7 @@ class MembershipService:
             self._require_version(target.version, expected_version)
             if self._role(target.role) is ProjectRole.ADMIN:
                 await self.repository.require_another_active_admin(project.id, target.id)
-            result, run_ids = await self._end(context, project, target, status="removed")
-        await self._notify(run_ids)
+            result = await self._end(context, project, target, status="removed")
         return result
 
     async def leave(self, context: ProjectContext, expected_version: int) -> MembershipView:
@@ -176,11 +168,10 @@ class MembershipService:
             self._require_version(target.version, expected_version)
             if self._role(target.role) is ProjectRole.ADMIN:
                 await self.repository.require_another_active_admin(project.id, target.id)
-            result, run_ids = await self._end(context, project, target, status="left")
-        await self._notify(run_ids)
+            result = await self._end(context, project, target, status="left")
         return result
 
-    async def _end(self, context: ProjectContext, project, target, *, status: str) -> tuple[MembershipView, tuple[str, ...]]:
+    async def _end(self, context: ProjectContext, project, target, *, status: str) -> MembershipView:
         ended_at = self._clock()
         active_version = target.version
         await self._retention.freeze_owner(
@@ -189,7 +180,7 @@ class MembershipService:
             owner_user_id=target.user_id,
             now=ended_at,
         )
-        run_ids = await self._authorization.mark_revoked(
+        await self._authorization.mark_revoked(
             self.repository.session,
             project_id=project.id,
             owner_user_id=target.user_id,
@@ -220,17 +211,7 @@ class MembershipService:
             target.id,
             status,
         )
-        return result, run_ids
-
-    async def _notify(self, run_ids: tuple[str, ...]) -> None:
-        if not run_ids or self._notifier is None:
-            return
-        try:
-            result = self._notifier(run_ids, AUTHORIZATION_REVOKED_REASON)
-            if hasattr(result, "__await__"):
-                await result
-        except Exception:
-            logger.warning("Local authorization cancellation notification failed", exc_info=True)
+        return result
 
     @staticmethod
     def _require_version(actual: int, expected: int) -> None:

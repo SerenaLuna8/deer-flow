@@ -281,7 +281,6 @@ def _require(attr: str, label: str) -> Callable[[Request], T]:
     return dep
 
 
-get_run_manager: Callable[[Request], object] = _require("run_manager", "Run manager")
 get_private_run_event_store: Callable[[Request], RunEventStore] = _require(
     "private_run_event_store",
     "Private run event store",

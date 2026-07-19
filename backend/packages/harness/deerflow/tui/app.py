@@ -36,7 +36,7 @@ from .view_state import (
 )
 from .widgets.composer import ComposerInput
 
-_HELP_TEXT = "Commands:  /new  /threads  /goal  /model  /skills  /tools  /mcp  /memory  /usage  /config  /quit\nKeys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
+_HELP_TEXT = "Commands:  /new  /threads  /goal  /model  /tools  /usage  /config  /quit\nKeys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
 
 
 class SelectScreen(ModalScreen):
@@ -162,12 +162,9 @@ class DeerFlowTUI(App):
         self.state = initial_state()
         self._conv_thread_id: str | None = None
         self._model = ""
-        self._skill_names: list[str] = []
-        self._skills = 0
         self._spinner_idx = 0
         self._streaming = False
         self._cancelled = False
-        self._skills_meta: list[dict] = []
         self._model_override: str | None = None
         self._palette_open = False
         self._palette_items: list = []
@@ -204,15 +201,6 @@ class DeerFlowTUI(App):
             self._model = next((m.get("display_name") or m.get("name") for m in models if m.get("name")), "")
         except Exception:  # noqa: BLE001 - header is best-effort
             self._model = ""
-        try:
-            skills = client.list_skills(enabled_only=True).get("skills", [])
-            self._skills_meta = [s for s in skills if s.get("name")]
-            self._skill_names = [s["name"] for s in self._skills_meta]
-            self._skills = len(self._skill_names)
-        except Exception:  # noqa: BLE001
-            self._skills_meta = []
-            self._skill_names = []
-            self._skills = 0
 
     # ----- input --------------------------------------------------------- #
 
@@ -230,7 +218,7 @@ class DeerFlowTUI(App):
         if value.startswith("/") and " " not in value:
             from .command_registry import build_registry, filter_commands
 
-            items = filter_commands(build_registry(self._skills_meta), value[1:])
+            items = filter_commands(build_registry(), value[1:])
             # The candidate set changed, so the previous highlight index is stale —
             # reset to the top rather than clamping to a now-different command.
             self._palette_index = 0
@@ -322,10 +310,6 @@ class DeerFlowTUI(App):
         item = self._current_palette_item()
         if item is None:
             return
-        if getattr(item, "category", "") == "skill":
-            # Skills need a task argument; fill and let the user keep typing.
-            self._fill_from_palette()
-            return
         self._close_palette()
         self.query_one("#composer", Input).value = ""
         self._handle_submit(f"/{item.name}")
@@ -342,15 +326,14 @@ class DeerFlowTUI(App):
     def _handle_submit(self, text: str) -> None:
         from .command_registry import resolve
 
-        res = resolve(text, skills=self._skill_names)
+        res = resolve(text)
         if res.kind == "builtin":
             self._handle_builtin(res.name, res.args)
             return
         if res.kind == "unknown":
             self._dispatch(SystemMessage(f"Unknown command /{res.name}. Try /help.", tone="error"))
             return
-        # plain message or skill activation (/skill task) both go to the agent,
-        # which applies skill-activation semantics on the raw text.
+        # Plain messages go to the embedded agent.
         self._send_to_agent(text)
 
     def _handle_builtin(self, name: str, args: str) -> None:
@@ -372,18 +355,12 @@ class DeerFlowTUI(App):
             self._resume_thread(args)
         elif name == "goal":
             self._handle_goal(args)
-        elif name == "skills":
-            self._show_skills()
-        elif name == "mcp":
-            self._show_mcp()
-        elif name == "memory":
-            self._show_memory()
         elif name == "usage":
             self._show_usage()
         elif name == "config":
             self._show_config()
         elif name == "tools":
-            self._dispatch(SystemMessage("Tools are listed in the agent's runtime; use /mcp for MCP servers."))
+            self._dispatch(SystemMessage("Tools are listed in the admitted agent runtime."))
         elif name == "uploads":
             self._show_uploads()
         elif name == "artifacts":
@@ -487,32 +464,6 @@ class DeerFlowTUI(App):
             self._dispatch(SystemMessage("Could not set goal.", tone="error"))
             return
         self._dispatch(SystemMessage(f"Goal set: {goal.get('objective') if goal else command.objective}"))
-
-    def _show_skills(self) -> None:
-        names = ", ".join(self._skill_names) or "none"
-        self._dispatch(SystemMessage(f"Enabled skills ({self._skills}): {names}"))
-
-    def _show_mcp(self) -> None:
-        try:
-            servers = self.session.client.get_mcp_config().get("mcp_servers", {})
-        except Exception:  # noqa: BLE001
-            self._dispatch(SystemMessage("Could not read MCP config.", tone="error"))
-            return
-        if not servers:
-            self._dispatch(SystemMessage("No MCP servers configured."))
-            return
-        lines = [f"{name}: {'on' if cfg.get('enabled') else 'off'}" for name, cfg in servers.items()]
-        self._dispatch(SystemMessage("MCP servers — " + "  ·  ".join(lines)))
-
-    def _show_memory(self) -> None:
-        try:
-            data = self.session.client.get_memory()
-        except Exception:  # noqa: BLE001
-            self._dispatch(SystemMessage("Could not read memory.", tone="error"))
-            return
-        facts = data.get("facts", []) if isinstance(data, dict) else []
-        top = (data.get("topOfMind") if isinstance(data, dict) else "") or "—"
-        self._dispatch(SystemMessage(f"Memory: {len(facts)} facts · top of mind: {top}"))
 
     def _show_usage(self) -> None:
         usage = self.state.usage or {}
@@ -662,7 +613,6 @@ class DeerFlowTUI(App):
                 model=self._model,
                 thread_label=self._thread_label(),
                 cwd=os.getcwd(),
-                skills=self._skills,
             )
         )
 

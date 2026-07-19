@@ -496,7 +496,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 | `/help` | 查看帮助 |
 | `/<skill-name> <task>` | 在项目作用域内激活一个技能执行本轮任务 |
 
-> 没有命令前缀的消息会被当作普通项目聊天处理。已移除的旧命令（`/bootstrap`、`/goal`、`/new`、`/status`、`/memory`）会返回不支持命令的稳定响应，绝不会作为普通 prompt 提交。
+> 没有命令前缀的消息会被当作普通项目聊天处理；不支持的命令不会作为普通 prompt 提交。
 
 #### LangSmith 链路追踪
 
@@ -596,7 +596,7 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 
 大多数 agents 会在对话结束后把一切都忘掉，DeerFlow 不一样。
 
-跨 session 使用时，DeerFlow 会逐步积累关于你的持久 memory，包括你的个人偏好、知识背景，以及长期沉淀下来的工作习惯。你用得越多，它越了解你的写作风格、技术栈和重复出现的工作流。memory 保存在本地，控制权也始终在你手里。
+跨 session 使用时，DeerFlow 会在当前项目内逐步积累持久 memory，包括你的个人偏好、知识背景，以及长期沉淀下来的工作习惯。项目 Memory 保存在 PostgreSQL，并按认证账号、项目和 owner 强制隔离；你用得越多，它越了解你的写作风格、技术栈和重复出现的工作流。
 
 ## 推荐模型
 

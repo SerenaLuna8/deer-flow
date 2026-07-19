@@ -82,28 +82,6 @@ Database ({{ if .Values.postgresql.enabled }}bundled postgres{{ else }}external 
     Ensure that Secret exists and contains your managed-postgres DSN.
 {{- end }}
 
-Redis stream bridge ({{ if .Values.redis.enabled }}bundled redis{{ else if (include "deer-flow.redisConfigured" .) }}external redis{{ else }}none{{ end }}):
-
-{{- if .Values.redis.enabled }}
-  • A redis StatefulSet (`{{ include "deer-flow.redisFullname" . }}`) is deployed
-    in this namespace. The gateway connects via the in-cluster Service
-    `{{ include "deer-flow.redisFullname" . }}:6379`.
-  • DEER_FLOW_STREAM_BRIDGE_REDIS_URL is in Secret
-    `{{ include "deer-flow.redisUrlSecret" . }}` (key `redis-url`).
-  • Per-run SSE events are stored in Redis Streams so a client connected to any
-    gateway pod receives live events; reconnect resumes from Last-Event-ID.
-  • To use a managed Redis, disable this (`redis.enabled: false`) and point at it
-    via `redis.external`.
-{{- else if (include "deer-flow.redisConfigured" .) }}
-  • The gateway reads DEER_FLOW_STREAM_BRIDGE_REDIS_URL from Secret
-    `{{ include "deer-flow.redisUrlSecret" . }}` (key `redis-url`). Ensure that
-    Secret exists and contains your managed-Redis URL.
-{{- else }}
-  • No redis configured — the gateway falls back to the in-process memory stream
-    bridge. This is single-pod only: cross-pod SSE delivery and reconnect will
-    not work with `gateway.replicas > 1`.
-{{- end }}
-
 {{- if or .Values.secrets .Values.existingSecret }}
 
 Provider/channel keys are in Secret `{{ include "deer-flow.providerSecret" . }}`

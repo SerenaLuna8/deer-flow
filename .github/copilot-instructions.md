@@ -200,7 +200,6 @@ Important root entries:
 - `CONTRIBUTING.md`
 - `Makefile`
 - `config.example.yaml`
-- `extensions_config.example.json`
 
 ## 9) Instruction Priority
 

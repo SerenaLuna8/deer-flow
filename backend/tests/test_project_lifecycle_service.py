@@ -105,7 +105,7 @@ async def test_restore_uses_dedicated_user_scope_without_project_context() -> No
 
 
 @pytest.mark.asyncio
-async def test_pending_deletion_revokes_and_freezes_all_members_before_commit_then_notifies() -> None:
+async def test_pending_deletion_revokes_and_freezes_all_members_before_commit() -> None:
     events: list[str] = []
     repository = AsyncMock()
 
@@ -135,14 +135,10 @@ async def test_pending_deletion_revokes_and_freezes_all_members_before_commit_th
     authorization.mark_revoked.side_effect = mark_revoked
     retention.freeze_owner.side_effect = freeze_owner
 
-    async def notify(run_ids, reason):
-        events.append(f"notify:{run_ids}:{reason}")
-
     await ProjectLifecycleService(
         repository,
         authorization=authorization,
         retention=retention,
-        notify_local_cancellation=notify,
     ).request_deletion(context, NOW)
 
     assert events == [
@@ -152,7 +148,6 @@ async def test_pending_deletion_revokes_and_freezes_all_members_before_commit_th
         "retention-freeze",
         "authorization-mark",
         "transaction-commit",
-        "notify:('run-1', 'run-2'):authorization_revoked",
     ]
     assert authorization.mark_revoked.await_count == 2
     assert retention.freeze_owner.await_count == 2

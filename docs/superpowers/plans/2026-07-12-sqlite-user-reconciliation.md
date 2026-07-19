@@ -54,7 +54,7 @@
 
 **Files:**
 - Modify: `backend/AGENTS.md`
-- Modify: `README_zh.md`
+- Modify: `README.md`
 
 - [ ] Document the fixed allowlist, explicit flags, safety gates and ledger behavior.
 - [ ] Run focused, affected, blocking-I/O, Ruff, format, lock and full backend tests.

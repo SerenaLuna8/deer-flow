@@ -738,7 +738,7 @@ execution lease。
 
 实施 M5 时同步更新：
 
-- `README.md`、`README_zh.md`：项目 Automation用户行为和scheduler config；
+- `README.md`：项目 Automation用户行为和scheduler config；
 - root/backend/frontend `AGENTS.md`：M5 authority、scope、poll/lease、UI/cache和M6边界；
 - 总体 SaaS设计：M5状态和5/8进度；
 - M4专项规格：把通用 jobs/Worker lease旧归属修正为M6；

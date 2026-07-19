@@ -18,26 +18,26 @@ def test_empty_items_render_nothing():
 
 
 def test_lists_commands_with_descriptions():
-    registry = build_registry([])
+    registry = build_registry()
     out = _text(render_palette(registry, 0, limit=5))
     assert "/help" in out
     assert "Show commands" in out
 
 
 def test_highlight_marker_present_on_selected_row():
-    registry = build_registry([])
+    registry = build_registry()
     out = _text(render_palette(registry, 0, limit=5))
     assert "▌" in out
 
 
 def test_windowing_shows_more_indicator_when_truncated():
-    registry = build_registry([])
+    registry = build_registry()
     out = _text(render_palette(registry, 0, limit=3))
     assert "more" in out
 
 
 def test_window_follows_selection_index():
-    registry = build_registry([])
+    registry = build_registry()
     # Selecting an index beyond the first window must keep that command visible.
     target = registry[6]
     out = _text(render_palette(registry, 6, limit=4))

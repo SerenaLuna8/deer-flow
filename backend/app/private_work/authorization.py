@@ -191,18 +191,3 @@ class PrivateRunAuthorizationBoundary:
         """Reserved for Task 8 finalization; no Task 7 file authority lives here."""
 
         await self._check()
-
-
-async def notify_local_cancellation(
-    run_ids: tuple[str, ...],
-    reason: str,
-    *,
-    run_manager: Any,
-) -> None:
-    """Best-effort post-commit acceleration; the database marker is authoritative."""
-
-    for run_id in run_ids:
-        try:
-            await run_manager.cancel_authorization_revoked(run_id, reason=reason)
-        except Exception:
-            continue

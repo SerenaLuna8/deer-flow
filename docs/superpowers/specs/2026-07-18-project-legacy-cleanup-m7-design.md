@@ -399,7 +399,7 @@ Evidence: [reviewed task ledger](../../../.superpowers/sdd/progress.md),
 M7 实施时同步更新：
 
 - 根、backend、frontend `AGENTS.md`；
-- `README.md`、`README_zh.md`、`CHANGELOG.md`；
+- `README.md`、`CHANGELOG.md`；
 - `config.example.yaml`、Make help、setup/doctor/support-bundle 文案；
 - M6 backup/recovery runbook，使其只描述 M7 baseline archive；
 - 总体规格第 19 节和当前完成度。

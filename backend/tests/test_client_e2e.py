@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-from deerflow.assets.catalog import AssetCatalogUnavailable
 from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.app_config import AppConfig
 
@@ -538,20 +537,6 @@ class TestArtifactAccess:
 
 
 # ---------------------------------------------------------------------------
-# Step 9: Skill installation (no LLM needed)
-# ---------------------------------------------------------------------------
-
-
-class TestSkillInstallation:
-    """The embedded archive-install surface is permanently unavailable."""
-
-    def test_install_skill_is_removed(self, e2e_env, tmp_path):
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(AssetCatalogUnavailable, match="archive installation was removed"):
-            c.install_skill(tmp_path / "skill.skill")
-
-
-# ---------------------------------------------------------------------------
 # Step 10: Configuration management (no LLM needed)
 # ---------------------------------------------------------------------------
 
@@ -582,57 +567,3 @@ class TestConfigManagement:
         """get_model() returns None for nonexistent model."""
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
         assert c.get_model("nonexistent-model") is None
-
-    def test_list_skills_is_removed(self, e2e_env):
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(AssetCatalogUnavailable, match="global Skill listing was removed"):
-            c.list_skills()
-
-    def test_get_skill_is_removed(self, e2e_env):
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(AssetCatalogUnavailable, match="global Skill lookup was removed"):
-            c.get_skill("deep-research")
-
-    def test_get_mcp_config_is_removed(self, e2e_env):
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(AssetCatalogUnavailable, match="global MCP configuration was removed"):
-            c.get_mcp_config()
-
-    def test_update_mcp_config_is_removed(self, e2e_env):
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(AssetCatalogUnavailable, match="global MCP mutation was removed"):
-            c.update_mcp_config({"test-server": {}})
-
-    def test_update_skill_is_removed(self, e2e_env):
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(AssetCatalogUnavailable, match="global Skill mutation was removed"):
-            c.update_skill("deep-research", enabled=False)
-
-
-# ---------------------------------------------------------------------------
-# Step 11: Memory access (no LLM needed)
-# ---------------------------------------------------------------------------
-
-
-class TestMemoryAccess:
-    """The embedded client fails closed for removed global Memory surfaces."""
-
-    def test_get_memory_is_removed(self, e2e_env):
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(AssetCatalogUnavailable, match="global Memory was removed"):
-            c.get_memory()
-
-    def test_reload_memory_is_removed(self, e2e_env):
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(AssetCatalogUnavailable, match="global Memory reload was removed"):
-            c.reload_memory()
-
-    def test_get_memory_config_is_removed(self, e2e_env):
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(AssetCatalogUnavailable, match="global Memory configuration was removed"):
-            c.get_memory_config()
-
-    def test_get_memory_status_is_removed(self, e2e_env):
-        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        with pytest.raises(AssetCatalogUnavailable, match="global Memory status was removed"):
-            c.get_memory_status()

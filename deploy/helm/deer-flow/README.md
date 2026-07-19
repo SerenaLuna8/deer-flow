@@ -26,7 +26,7 @@ helm install deer-flow deploy/helm/deer-flow \
 - Scheduler, when enabled, owns its PostgreSQL session lock and Automation polling.
 - PostgreSQL is authoritative for private work, jobs, streams, quota, audit and recovery state.
 
-Do not add Redis or in-memory event persistence as a production substitute. Horizontal scaling requires the same PostgreSQL authority and process readiness probes.
+Horizontal scaling uses the same PostgreSQL authority and process readiness probes.
 
 ## Storage and backup
 

@@ -129,7 +129,6 @@ class DeerFlowClient:
 
         # Configuration queries
         print(client.list_models())
-        print(client.list_skills())
     """
 
     def __init__(
@@ -1014,22 +1013,6 @@ class DeerFlowClient:
             "token_usage": {"enabled": token_usage_enabled},
         }
 
-    def list_skills(self, enabled_only: bool = False) -> dict:
-        """Reject the removed global Skill catalog surface."""
-        raise AssetCatalogUnavailable("global Skill listing was removed; use the authenticated project asset API")
-
-    def get_memory(self) -> dict:
-        """Reject the removed global Memory read surface."""
-        raise AssetCatalogUnavailable("global Memory was removed; use the authenticated project Memory API")
-
-    def export_memory(self) -> dict:
-        """Reject the removed global Memory export surface."""
-        raise AssetCatalogUnavailable("global Memory export was removed; use the authenticated project Memory API")
-
-    def import_memory(self, memory_data: dict) -> dict:
-        """Reject the removed global Memory import surface."""
-        raise AssetCatalogUnavailable("global Memory import was removed; use the authenticated project Memory API")
-
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
 
@@ -1051,72 +1034,6 @@ class DeerFlowClient:
             "supports_thinking": getattr(model, "supports_thinking", False),
             "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
         }
-
-    # ------------------------------------------------------------------
-    # Public API — MCP configuration
-    # ------------------------------------------------------------------
-
-    def get_mcp_config(self) -> dict:
-        """Reject the removed global MCP configuration surface."""
-        raise AssetCatalogUnavailable("global MCP configuration was removed; use the authenticated project asset API")
-
-    def update_mcp_config(self, mcp_servers: dict[str, dict]) -> dict:
-        """Reject the removed global MCP mutation surface."""
-        raise AssetCatalogUnavailable("global MCP mutation was removed; use the authenticated project asset API")
-
-    # ------------------------------------------------------------------
-    # Public API — skills management
-    # ------------------------------------------------------------------
-
-    def get_skill(self, name: str) -> dict | None:
-        """Reject the removed global Skill lookup surface."""
-        raise AssetCatalogUnavailable("global Skill lookup was removed; use the authenticated project asset API")
-
-    def update_skill(self, name: str, *, enabled: bool) -> dict:
-        """Reject the removed global Skill mutation surface."""
-        raise AssetCatalogUnavailable("global Skill mutation was removed; use the authenticated project asset API")
-
-    def install_skill(self, skill_path: str | Path) -> dict:
-        """Reject the removed archive-install surface."""
-        raise AssetCatalogUnavailable("Skill archive installation was removed; use project asset version APIs")
-
-    # ------------------------------------------------------------------
-    # Public API — memory management
-    # ------------------------------------------------------------------
-
-    def reload_memory(self) -> dict:
-        """Reject the removed global Memory reload surface."""
-        raise AssetCatalogUnavailable("global Memory reload was removed; use the authenticated project Memory API")
-
-    def clear_memory(self) -> dict:
-        """Reject the removed global Memory clear surface."""
-        raise AssetCatalogUnavailable("global Memory clear was removed; use the authenticated project Memory API")
-
-    def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
-        """Reject the removed global Memory fact-create surface."""
-        raise AssetCatalogUnavailable("global Memory mutation was removed; use the authenticated project Memory API")
-
-    def delete_memory_fact(self, fact_id: str) -> dict:
-        """Reject the removed global Memory fact-delete surface."""
-        raise AssetCatalogUnavailable("global Memory mutation was removed; use the authenticated project Memory API")
-
-    def update_memory_fact(
-        self,
-        fact_id: str,
-        content: str | None = None,
-        category: str | None = None,
-        confidence: float | None = None,
-    ) -> dict:
-        """Reject the removed global Memory fact-update surface."""
-        raise AssetCatalogUnavailable("global Memory mutation was removed; use the authenticated project Memory API")
-
-    def get_memory_config(self) -> dict:
-        """Reject the removed global Memory config surface."""
-        raise AssetCatalogUnavailable("global Memory configuration was removed; use project readiness and Memory APIs")
-
-    def get_memory_status(self) -> dict:
-        """Reject the removed global Memory status surface."""
-        raise AssetCatalogUnavailable("global Memory status was removed; use project readiness and Memory APIs")
 
     # ------------------------------------------------------------------
     # Public API — file uploads

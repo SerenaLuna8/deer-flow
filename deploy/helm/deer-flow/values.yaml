@@ -25,9 +25,7 @@ image:
 
 # -- Gateway (backend) deployment.
 gateway:
-  replicas: 1               # Safe default. Postgres + the Redis stream bridge are
-                            # wired, but multi-replica needs issue #3948's run-control
-                            # work (cancel/dedup/reconcile) — see README "Gateway replicas".
+  replicas: 1
   resources:
     requests:
       cpu: 200m
@@ -134,53 +132,8 @@ postgresql:
     #    / Vault / Sealed Secrets so the DSN never appears in values files.
     existingSecret: ""
 
-# -- Redis stream bridge. The gateway stores per-run SSE events in Redis Streams
-#    so live run events reach a client connected to any gateway pod (cross-pod
-#    SSE delivery + reconnect replay, PR #3191). Bundled mode (default) deploys
-#    a single-instance redis StatefulSet; set `enabled: false` to use an external
-#    managed Redis. The gateway reads DEER_FLOW_STREAM_BRIDGE_REDIS_URL from the
-#    resolved Secret; config.yaml's stream_bridge.type is `redis` by default.
-redis:
-  # -- Deploy a bundled redis StatefulSet. Disable to use an external Redis.
-  enabled: true
-  image:
-    repository: redis
-    tag: "7-alpine"
-  auth:
-    # -- Empty (default) = no auth, matching the compose deployment (ClusterIP
-    #    isolation only). Set a password to enable AUTH; the DSN becomes
-    #    redis://:<password>@host:6379/0. Ignored if existingSecret is set.
-    password: ""
-  # -- Use an existing Secret (key `redis-url`, plus `redis-password` if auth)
-  #    instead of generating one. Skips Secret creation.
-  existingSecret: ""
-  primary:
-    resources:
-      requests:
-        cpu: 50m
-        memory: 64Mi
-      limits:
-        cpu: "1"
-        memory: 512Mi
-    persistence:
-      enabled: true
-      storageClass: ""           # "" = cluster default
-      accessMode: ReadWriteOnce  # RWX (NFS) only needed if redis itself is HA
-      size: 5Gi
-  # -- External redis (used when `enabled: false`). Provide either a full
-  #    `redisUrl` (chart wraps it into a Secret for you) or an `existingSecret`
-  #    you manage (key `redis-url`).
-  external:
-    # -- Full URL, e.g. redis://:pass@myredis.example:6379/0. Chart writes it
-    #    into the Secret so it never touches the gateway env directly.
-    redisUrl: ""
-    # -- Secret you manage (key `redis-url`). Use with External Secrets / Vault
-    #    / Sealed Secrets so the URL never appears in values files.
-    existingSecret: ""
-
-# -- Persistent volume for runtime state (.deer-flow): sqlite DB, memory,
-#    custom agents, and per-thread user-data. Also mounted (PVC mode) into
-#    provisioner-spawned sandbox Pods.
+# -- Persistent volume for sandbox scratch space and per-thread object bytes.
+#    Project metadata, Memory and durable streams remain in PostgreSQL.
 persistence:
   home:
     enabled: true
@@ -246,14 +199,6 @@ config: |
     # resolved by the harness before the config is instantiated.
     url: $DATABASE_URL
 
-  # Stream bridge: `redis` (default) stores per-run SSE events in Redis Streams
-  # so live run events reach a client on any gateway pod (cross-pod SSE delivery
-  # + reconnect replay, PR #3191). The URL is read from the
-  # DEER_FLOW_STREAM_BRIDGE_REDIS_URL env var injected from the redis Secret.
-  # Set `type: memory` (and disable the redis chart) for single-pod-only mode.
-  stream_bridge:
-    type: redis
-
   memory:
 
   # -- Tools configuration. The agent gets NO tools unless they're listed here
@@ -304,7 +249,3 @@ config: |
     - name: bash
       group: bash
       use: deerflow.sandbox.tools:bash_tool
-
-# -- DeerFlow extensions_config.json content (MCP servers + skill state).
-extensionsConfig: |
-  {"mcpServers":{},"skills":{}}

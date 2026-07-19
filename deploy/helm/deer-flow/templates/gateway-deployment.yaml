@@ -21,13 +21,12 @@ spec:
         # Roll pods when the mounted ConfigMaps change (subPath mounts don't
         # get live updates, so without this a config-only upgrade is ignored).
         checksum/config: {{ include "deer-flow.configChecksum" . }}
-        checksum/extensions: {{ include "deer-flow.extensionsChecksum" . }}
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
       securityContext:
         # Non-root: the gateway image has no USER directive and would otherwise
         # run as root. uid/gid 1000; fsGroup 1000 so the .deer-flow PVC is
-        # group-writable for memory/sqlite/custom-agent state.
+        # group-writable for sandbox scratch and object bytes.
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
@@ -81,8 +80,6 @@ spec:
               value: /app/backend/.deer-flow
             - name: DEER_FLOW_CONFIG_PATH
               value: /app/backend/config.yaml
-            - name: DEER_FLOW_EXTENSIONS_CONFIG_PATH
-              value: /app/backend/extensions_config.json
             - name: DEER_FLOW_CHANNELS_LANGGRAPH_URL
               value: http://gateway:8001/api
             - name: DEER_FLOW_CHANNELS_GATEWAY_URL
@@ -110,17 +107,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "deer-flow.databaseUrlSecret" . }}
                   key: database-url
-            {{- end }}
-            {{- /* Redis stream-bridge URL — only mounted when redis is configured
-                  (bundled StatefulSet, external URL, or an existing Secret).
-                  Drives cross-pod SSE delivery (PR #3191). redis-py connects via
-                  raw TCP so HTTP_PROXY/NO_PROXY do not apply. */ -}}
-            {{- if (include "deer-flow.redisConfigured" .) }}
-            - name: DEER_FLOW_STREAM_BRIDGE_REDIS_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "deer-flow.redisUrlSecret" . }}
-                  key: redis-url
             {{- end }}
             - name: NO_PROXY
               value: localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner
@@ -155,10 +141,6 @@ spec:
               mountPath: /app/backend/config.yaml
               subPath: config.yaml
               readOnly: true
-            - name: extensions
-              mountPath: /app/backend/extensions_config.json
-              subPath: extensions_config.json
-              readOnly: true
             - name: skills
               mountPath: /app/skills
               readOnly: true
@@ -171,9 +153,6 @@ spec:
         - name: config
           configMap:
             name: {{ include "deer-flow.fullname" . }}-config
-        - name: extensions
-          configMap:
-            name: {{ include "deer-flow.fullname" . }}-extensions
         - name: skills
           {{- if .Values.skills.existingClaim }}
           persistentVolumeClaim:

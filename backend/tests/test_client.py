@@ -103,7 +103,7 @@ class TestClientInit:
 
 
 # ---------------------------------------------------------------------------
-# list_models / list_skills / get_memory
+# list_models
 # ---------------------------------------------------------------------------
 
 
@@ -118,22 +118,6 @@ class TestConfigQueries:
         assert "model" in result["models"][0]
         assert "display_name" in result["models"][0]
         assert "supports_thinking" in result["models"][0]
-
-    def test_list_skills_is_removed(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="global Skill listing was removed"):
-            client.list_skills()
-
-    def test_list_skills_enabled_only_is_removed(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="global Skill listing was removed"):
-            client.list_skills(enabled_only=True)
-
-    def test_get_memory_is_removed(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="global Memory was removed"):
-            client.get_memory()
-
-    def test_export_memory_is_removed(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="global Memory export was removed"):
-            client.export_memory()
 
 
 # ---------------------------------------------------------------------------
@@ -1247,40 +1231,6 @@ class TestGoalManagement:
 
 
 # ---------------------------------------------------------------------------
-# MCP config
-# ---------------------------------------------------------------------------
-
-
-# Legacy MCP client tests were replaced by fail-closed conformance coverage below.
-# Skills management
-# ---------------------------------------------------------------------------
-
-
-# Global Skill management tests were replaced by fail-closed conformance coverage.
-# Memory management
-# ---------------------------------------------------------------------------
-
-
-class TestMemoryManagement:
-    @pytest.mark.parametrize(
-        ("method_name", "args", "message"),
-        (
-            ("import_memory", ({"version": "1.0"},), "global Memory import was removed"),
-            ("reload_memory", (), "global Memory reload was removed"),
-            ("clear_memory", (), "global Memory clear was removed"),
-            ("create_memory_fact", ("fact",), "global Memory mutation was removed"),
-            ("delete_memory_fact", ("fact-id",), "global Memory mutation was removed"),
-            ("update_memory_fact", ("fact-id", "updated"), "global Memory mutation was removed"),
-            ("get_memory_config", (), "global Memory configuration was removed"),
-            ("get_memory_status", (), "global Memory status was removed"),
-        ),
-    )
-    def test_global_memory_management_is_removed(self, client, method_name, args, message):
-        with pytest.raises(AssetCatalogUnavailable, match=message):
-            getattr(client, method_name)(*args)
-
-
-# ---------------------------------------------------------------------------
 # Uploads
 # ---------------------------------------------------------------------------
 
@@ -1838,19 +1788,6 @@ class TestScenarioThreadIsolation:
                     client.get_artifact("thread-b", "mnt/user-data/outputs/result.txt")
 
 
-class TestScenarioMemoryWorkflow:
-    """Scenario: the embedded client cannot enter project Memory workflows."""
-
-    def test_memory_full_lifecycle_requires_project_api(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="authenticated project Memory API"):
-            client.get_memory()
-        with pytest.raises(AssetCatalogUnavailable, match="authenticated project Memory API"):
-            client.reload_memory()
-        with pytest.raises(AssetCatalogUnavailable, match="project readiness and Memory APIs"):
-            client.get_memory_status()
-
-
-# Archive-install scenarios are covered by the removed-surface tests.
 class TestScenarioEdgeCases:
     """Scenario: Edge cases and error boundaries in realistic workflows."""
 
@@ -2008,26 +1945,6 @@ class TestGatewayConformance:
         assert parsed.name == "test-model"
         assert parsed.model == "gpt-test"
 
-    def test_list_skills(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="global Skill listing was removed"):
-            client.list_skills()
-
-    def test_get_skill(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="global Skill lookup was removed"):
-            client.get_skill("web-search")
-
-    def test_install_skill(self, client, tmp_path):
-        with pytest.raises(AssetCatalogUnavailable, match="archive installation was removed"):
-            client.install_skill(tmp_path / "my-skill.skill")
-
-    def test_get_mcp_config(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="global MCP configuration was removed"):
-            client.get_mcp_config()
-
-    def test_update_mcp_config(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="global MCP mutation was removed"):
-            client.update_mcp_config({"srv": {}})
-
     def test_upload_files(self, client, tmp_path):
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()
@@ -2053,21 +1970,7 @@ class TestGatewayConformance:
         assert result["goal"]["objective"] == "ship it"
         assert client.clear_goal("t-goal")["goal"] is None
 
-    def test_get_memory_config(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="global Memory configuration was removed"):
-            client.get_memory_config()
 
-    def test_get_memory_status(self, client):
-        with pytest.raises(AssetCatalogUnavailable, match="global Memory status was removed"):
-            client.get_memory_status()
-
-
-# ===========================================================================
-# Hardening — install_skill security gates
-# ===========================================================================
-
-
-# Archive extraction security belongs to the removed installer and has no client path.
 class TestAtomicWriteJson:
     def test_temp_file_cleaned_on_serialization_failure(self):
         """If json.dump raises, the temp file is removed."""

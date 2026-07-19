@@ -851,7 +851,7 @@ BUILD_MODE=production pnpm build
 BUILD_MODE=static pnpm build
 rg -n "/workspace/(chats|agents|memory|scheduled-tasks|skills|tools|projects)|/api/(memory|agents|skills|mcp/config)|LEGACY_WORKSPACE_CHAT_SCOPE" src
 cd ..
-git add frontend/src frontend/tests frontend/AGENTS.md README.md README_zh.md
+git add frontend/src frontend/tests frontend/AGENTS.md README.md
 git commit -m "refactor: remove legacy workspace surfaces"
 ```
 
@@ -1305,7 +1305,7 @@ git commit -m "test: establish M1-M7 release gate"
 - Modify: `backend/AGENTS.md`
 - Modify: `frontend/AGENTS.md`
 - Modify: `README.md`
-- Modify: `README_zh.md`
+- Modify: `README.md`
 - Modify: `CHANGELOG.md`
 - Modify: `docs/superpowers/specs/2026-07-12-project-first-saas-design.md`
 - Modify: `docs/superpowers/specs/2026-07-18-project-legacy-cleanup-m7-design.md`
@@ -1330,7 +1330,7 @@ Document fresh install: create empty PostgreSQL DB → `make setup-db` → `make
 - [ ] **Step 2: 运行 doc/source consistency checks**
 
 ```bash
-rg -n "migrate-(sqlite|assets|private-work|automations|reliability)|/api/(threads|runs|assistants|memory|scheduled-tasks|agents|skills|mcp/config)|extensions_config|CUTOVER" README.md README_zh.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs/operations
+rg -n "migrate-(sqlite|assets|private-work|automations|reliability)|/api/(threads|runs|assistants|memory|scheduled-tasks|agents|skills|mcp/config)|extensions_config|CUTOVER" README.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs/operations
 rg -n "M7|7/8|87.5%|M8" AGENTS.md docs/superpowers/specs/2026-07-12-project-first-saas-design.md docs/superpowers/specs/2026-07-18-project-legacy-cleanup-m7-design.md CHANGELOG.md
 ```
 
@@ -1372,7 +1372,7 @@ For every Critical/Important finding, use `superpowers:receiving-code-review`, r
 - [ ] **Step 5: 提交 closure docs**
 
 ```bash
-git add AGENTS.md backend/AGENTS.md frontend/AGENTS.md README.md README_zh.md CHANGELOG.md docs
+git add AGENTS.md backend/AGENTS.md frontend/AGENTS.md README.md CHANGELOG.md docs
 git commit -m "docs: close M7 legacy cleanup"
 git status --short
 git log --oneline --decorate -12

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import logging
 import uuid
-from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Protocol
 
@@ -17,8 +15,6 @@ from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.lifecycle_repository import ProjectLifecycleRepository
 from app.projects.models import ProjectView
-
-logger = logging.getLogger(__name__)
 
 
 class ProjectLifecycleAuditPort(Protocol):
@@ -82,13 +78,11 @@ class ProjectLifecycleService:
         *,
         authorization: object = PrivateRunAuthorizationService,
         retention: object = PrivateWorkRetentionService,
-        notify_local_cancellation: Callable[[tuple[str, ...], str], object] | None = None,
         audit: ProjectLifecycleAuditPort | None = None,
     ):
         self.repository = repository
         self._authorization = authorization
         self._retention = retention
-        self._notifier = notify_local_cancellation
         self._audit = audit or _NoopProjectLifecycleAudit()
 
     async def request_deletion(
@@ -97,7 +91,6 @@ class ProjectLifecycleService:
         now: datetime,
     ) -> ProjectView:
         context.require(Capability.PROJECT_LIFECYCLE_MANAGE)
-        run_ids: list[str] = []
         async with self.repository.transaction():
             project, actor = await self.repository.lock_pending_deletion(context)
             members = await self.repository.lock_active_members(project.id)
@@ -108,14 +101,12 @@ class ProjectLifecycleService:
                     owner_user_id=member.user_id,
                     now=now,
                 )
-                run_ids.extend(
-                    await self._authorization.mark_revoked(
-                        self.repository.session,
-                        project_id=project.id,
-                        owner_user_id=member.user_id,
-                        reason=AUTHORIZATION_REVOKED_REASON,
-                        now=now,
-                    )
+                await self._authorization.mark_revoked(
+                    self.repository.session,
+                    project_id=project.id,
+                    owner_user_id=member.user_id,
+                    reason=AUTHORIZATION_REVOKED_REASON,
+                    now=now,
                 )
             result = await self.repository.mark_pending_locked(
                 project,
@@ -129,7 +120,6 @@ class ProjectLifecycleService:
                 self.repository.session,
                 context,
             )
-        await self._notify(tuple(run_ids))
         return result
 
     async def restore(
@@ -167,7 +157,6 @@ class ProjectLifecycleService:
         now: datetime,
     ) -> ProjectView:
         context.require(Capability.PROJECT_LIFECYCLE_MANAGE)
-        run_ids: list[str] = []
         async with self.repository.transaction():
             project, actor = await self.repository.lock_suspend(context)
             members = await self.repository.lock_active_members(project.id)
@@ -178,14 +167,12 @@ class ProjectLifecycleService:
                     owner_user_id=member.user_id,
                     now=now,
                 )
-                run_ids.extend(
-                    await self._authorization.mark_revoked(
-                        self.repository.session,
-                        project_id=project.id,
-                        owner_user_id=member.user_id,
-                        reason=AUTHORIZATION_REVOKED_REASON,
-                        now=now,
-                    )
+                await self._authorization.mark_revoked(
+                    self.repository.session,
+                    project_id=project.id,
+                    owner_user_id=member.user_id,
+                    reason=AUTHORIZATION_REVOKED_REASON,
+                    now=now,
                 )
             result = await self.repository.suspend_locked(
                 project,
@@ -196,7 +183,6 @@ class ProjectLifecycleService:
                 self.repository.session,
                 context,
             )
-        await self._notify(tuple(run_ids))
         return result
 
     async def resume(
@@ -223,13 +209,3 @@ class ProjectLifecycleService:
                 request_id=request_id,
             )
         return result
-
-    async def _notify(self, run_ids: tuple[str, ...]) -> None:
-        if not run_ids or self._notifier is None:
-            return
-        try:
-            result = self._notifier(run_ids, AUTHORIZATION_REVOKED_REASON)
-            if hasattr(result, "__await__"):
-                await result
-        except Exception:
-            logger.warning("Local authorization cancellation notification failed", exc_info=True)

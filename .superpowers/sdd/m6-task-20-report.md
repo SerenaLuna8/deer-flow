@@ -55,7 +55,7 @@ The `1102` skips in the backend whole-suite run are its normal no-`POSTGRES_TEST
 ## Plan reconciliation
 
 - `docs/operations/m6-reliability-migration.md` already existed from Task 18, so Task 20 updated it and created only `m6-backup-recovery.md`.
-- `README_zh.md` and `CHANGELOG.md` were synchronized in addition to the brief's file list because the M6 design release checklist requires both user-facing languages and release notes to agree.
+- `README.md` and `CHANGELOG.md` were synchronized in addition to the brief's file list because the M6 design release checklist requires both user-facing languages and release notes to agree.
 - Backup proof precedes dry-run because the production dry-run command authenticates `--backup-proof`; maintenance begins only after proof and dry-run review. This is the executable Task 18/CLI contract even though the Task 20 interface summary listed the terms in a different shorthand order.
 - The four backend test files and frontend build script were not planned documentation files, but fresh full gates exposed concrete compatibility/build failures. Their changes are minimal gate repairs, not scope expansion into M7/M8.
 

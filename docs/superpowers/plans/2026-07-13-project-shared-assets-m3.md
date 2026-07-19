@@ -1092,7 +1092,7 @@ git commit -m "feat: add project shared asset pages"
 - Modify: `.github/workflows/project-foundation-postgres-tests.yml`
 - Create: `backend/tests/integration/test_m3_shared_assets_postgres.py`
 - Modify: `README.md`
-- Modify: `README_zh.md`
+- Modify: `README.md`
 - Modify: `AGENTS.md`
 - Modify: `backend/AGENTS.md`
 - Modify: `frontend/AGENTS.md`
@@ -1179,7 +1179,7 @@ Expected: 第一次 execute 完成导入与 cutover；第二次为 no-op；rotat
 - [ ] **Step 7: 提交发布门禁与文档**
 
 ```bash
-git add .github/workflows/project-foundation-postgres-tests.yml backend/tests/support/m3_shared_assets.py backend/tests/integration/test_m3_shared_assets_postgres.py README.md README_zh.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs/superpowers/specs/2026-07-12-project-first-saas-design.md docs/superpowers/specs/2026-07-13-project-shared-assets-m3-design.md
+git add .github/workflows/project-foundation-postgres-tests.yml backend/tests/support/m3_shared_assets.py backend/tests/integration/test_m3_shared_assets_postgres.py README.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs/superpowers/specs/2026-07-12-project-first-saas-design.md docs/superpowers/specs/2026-07-13-project-shared-assets-m3-design.md
 git commit -m "docs: complete M3 shared asset milestone"
 ```
 

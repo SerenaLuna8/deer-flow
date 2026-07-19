@@ -92,30 +92,6 @@ imagePullSecrets:
 {{- else -}}{{- include "deer-flow.postgresFullname" . -}}{{- end -}}
 {{- end -}}
 
-{{/* Name of the redis StatefulSet/Service. */}}
-{{- define "deer-flow.redisFullname" -}}
-{{- printf "%s-redis" (include "deer-flow.fullname" .) -}}
-{{- end -}}
-
-{{/* Name of the Secret holding the redis stream-bridge URL (key `redis-url`,
-     plus `redis-password` in bundled mode when a password is set). Resolution:
-       1. redis.external.existingSecret (user-managed, key=redis-url)
-       2. redis.existingSecret          (user-managed, bundled image)
-       3. chart-managed secret `<release>-redis`
-     Only #3 is created by this chart; #1/#2 must exist already. */}}
-{{- define "deer-flow.redisUrlSecret" -}}
-{{- if .Values.redis.external.existingSecret -}}{{- .Values.redis.external.existingSecret -}}
-{{- else if .Values.redis.existingSecret -}}{{- .Values.redis.existingSecret -}}
-{{- else -}}{{- include "deer-flow.redisFullname" . -}}{{- end -}}
-{{- end -}}
-
-{{/* Whether any redis stream-bridge backend is configured (bundled StatefulSet,
-     external URL, or a user-managed Secret). Drives the env injection in the
-     gateway deployment. */}}
-{{- define "deer-flow.redisConfigured" -}}
-{{- or .Values.redis.enabled .Values.redis.external.redisUrl .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
-{{- end -}}
-
 {{/* SHA256 checksums of the ConfigMaps. Mount these as pod-template
      annotations: ConfigMaps mounted via subPath do NOT receive live updates,
      so a `helm upgrade` that only changes a ConfigMap would leave pods on stale
@@ -123,10 +99,6 @@ imagePullSecrets:
      which triggers a rolling restart. */}}
 {{- define "deer-flow.configChecksum" -}}
 {{- include (print $.Template.BasePath "/configmap-config.yaml") . | sha256sum -}}
-{{- end -}}
-
-{{- define "deer-flow.extensionsChecksum" -}}
-{{- include (print $.Template.BasePath "/configmap-extensions.yaml") . | sha256sum -}}
 {{- end -}}
 
 {{- define "deer-flow.nginxChecksum" -}}

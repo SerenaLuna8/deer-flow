@@ -13,9 +13,6 @@ class _FakeClient:
     def list_models(self):
         return {"models": [{"name": "fast", "display_name": "Fast"}, {"name": "smart", "display_name": "Smart"}]}
 
-    def list_skills(self, enabled_only=False):
-        return {"skills": []}
-
     def list_threads(self, limit=10):
         return {
             "thread_list": [

@@ -8,53 +8,43 @@ from deerflow.tui.command_registry import (
 )
 
 
-def _skills():
-    return [
-        {"name": "brainstorming", "description": "Explore ideas", "enabled": True},
-        {"name": "tdd", "description": "Test driven dev", "enabled": True},
-        {"name": "disabled-one", "description": "off", "enabled": False},
-    ]
-
-
 def test_build_registry_includes_all_builtins():
-    registry = build_registry([])
+    registry = build_registry()
     names = {c.name for c in registry}
     for builtin in BUILTIN_COMMANDS:
         assert builtin.name in names
 
 
-def test_build_registry_adds_enabled_skill_commands_only():
-    registry = build_registry(_skills())
-    skill_names = {c.name for c in registry if c.category == "skill"}
-    assert "brainstorming" in skill_names
-    assert "tdd" in skill_names
-    assert "disabled-one" not in skill_names
+def test_build_registry_excludes_removed_global_commands():
+    names = {command.name for command in build_registry()}
+    assert names.isdisjoint({"skills", "mcp", "memory"})
 
 
 def test_filter_empty_query_returns_all():
-    registry = build_registry([])
+    registry = build_registry()
     assert filter_commands(registry, "") == registry
 
 
 def test_filter_matches_name_substring_case_insensitive():
-    registry = build_registry([])
+    registry = build_registry()
     results = filter_commands(registry, "MOD")
     assert any(c.name == "model" for c in results)
 
 
 def test_filter_matches_description():
-    registry = build_registry(_skills())
-    results = filter_commands(registry, "explore")
-    assert any(c.name == "brainstorming" for c in results)
+    registry = build_registry()
+    results = filter_commands(registry, "keybindings")
+    assert any(c.name == "help" for c in results)
 
 
 def test_filter_ranks_prefix_matches_before_substring():
-    registry = build_registry([])
-    results = filter_commands(registry, "me")
-    # "memory" (prefix) should rank above a command that only contains "me"
+    registry = build_registry()
+    results = filter_commands(registry, "re")
+    # "resume" (prefix) should rank above "threads" (substring).
     names = [c.name for c in results]
-    assert "memory" in names
-    assert names.index("memory") == 0
+    assert "resume" in names
+    assert "threads" in names
+    assert names.index("resume") < names.index("threads")
 
 
 def test_resolve_plain_text_is_message():
@@ -76,15 +66,14 @@ def test_resolve_builtin_with_args():
     assert res.args == "thread-123"
 
 
-def test_resolve_skill_activation():
-    res = resolve("/tdd write the test first", skills=["tdd"])
-    assert res.kind == "skill"
+def test_resolve_removed_dynamic_skill_activation_is_unknown():
+    res = resolve("/tdd write the test first")
+    assert res.kind == "unknown"
     assert res.name == "tdd"
-    assert res.args == "write the test first"
 
 
 def test_resolve_unknown_command():
-    res = resolve("/definitely-not-a-command", skills=["tdd"])
+    res = resolve("/definitely-not-a-command")
     assert res.kind == "unknown"
     assert res.name == "definitely-not-a-command"
 
@@ -102,8 +91,7 @@ def test_goal_is_builtin_command():
     assert resolved.args == "finish the implementation"
 
 
-def test_goal_builtin_takes_precedence_over_skill():
-    registry = build_registry([{"name": "goal", "description": "skill", "enabled": True}])
+def test_goal_occurs_once_in_builtin_registry():
+    registry = build_registry()
 
     assert [command.name for command in registry].count("goal") == 1
-    assert resolve("/goal finish", skills=["goal"]).kind == "builtin"
