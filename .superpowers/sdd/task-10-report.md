@@ -248,3 +248,62 @@ directory `/private/tmp/deerflow_m7_task10_repair2_pg_bmHfGF` was removed, port
 `55445` was confirmed closed, and no process-test child from this worktree
 remained. Formal acceptance still requires independent re-review; Task 11
 remains out of scope.
+
+## Third independent-review repair (2026-07-19)
+
+The fixed third review found `0 Critical / 1 Important / 1 Minor`. This
+gate-only repair stayed inside Task 10: it changed no production source, did
+not update the progress ledger, and did not begin Task 11.
+
+- The structured import graph now recognizes literal module names loaded by
+  all six common dynamic forms: `importlib.import_module`, an aliased
+  `importlib`, direct and aliased `from importlib import import_module`,
+  `__import__`, and `builtins.__import__`. The AST walk covers module,
+  function, class, and lambda scopes.
+- Unknown or variable dynamic targets fail closed with an unresolved-import
+  marker. The two configuration-driven external module loaders have exact
+  module/scope/argument-name exceptions.
+- Legitimate lazy graph imports are allowlisted only by exact
+  module/scope/literal triples. A mutation in `deerflow.agents.__getattr__`
+  proves that the expected factory target is accepted while an added private
+  executor target is still followed and rejected; there is no path-wide
+  exemption.
+- The frontend lexical scanner now skips real `//` and multi-line `/* */`
+  comments before collecting JavaScript/TypeScript strings. It preserves
+  comment markers and escaped quotes inside strings, continues to inspect URL
+  double slashes, and rejects real single-quoted, double-quoted, and template
+  route literals.
+
+Third-repair RED evidence:
+
+```text
+15 focused cases: 10 failed, 5 passed
+```
+
+The ten intended failures were the six unrecognized constant dynamic import
+forms, an imprecise lazy-import boundary, a variable target that did not fail
+closed, and the two JavaScript comment false positives. The five pre-green
+cases proved that comment-looking text inside strings could not hide a real
+route even before the lexer repair.
+
+Third-repair verification:
+
+```text
+New focused mutations: 15 passed
+Complete source/process non-PostgreSQL slice: 38 passed, 1 PostgreSQL deselected
+Real M7 Gateway/Scheduler/Worker process file: 13 passed
+Worker crash/takeover process gate: 3 passed
+M1-M7 PostgreSQL gate: 274 passed, 0 skipped in 117.65s
+Blocking-I/O: 27 passed in 11.01s
+Ruff: All checks passed; 1047 files already formatted
+git diff --check: PASS
+```
+
+The process file now contains the original five boundary tests plus eight new
+dynamic-import mutation cases. The third-repair PostgreSQL cluster listened
+only on `127.0.0.1:55446`; before shutdown it contained no `deerflow_test_*` or
+`deerflow_restore_*` databases. It was stopped cleanly, its exact temporary
+directory `/private/tmp/deerflow_m7_task10_repair3_pg_Ab3hPC` was removed, port
+`55446` was confirmed closed, and no process-test child from this worktree
+remained. Formal acceptance still requires independent re-review; Task 11
+remains out of scope.

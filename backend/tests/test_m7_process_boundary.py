@@ -31,6 +31,23 @@ from app.automations.ownership import AUTOMATION_SCHEDULER_OWNERSHIP_LOCK_KEY
 
 _PROCESS_TIMEOUT = 60.0
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+_UNRESOLVED_DYNAMIC_IMPORT = "<unresolved-dynamic-import>"
+_DYNAMIC_IMPORT_LITERAL_ALLOWLIST = frozenset(
+    {
+        ("deerflow.agents", "__getattr__", "deerflow.agents.factory"),
+        ("deerflow.agents", "__getattr__", "deerflow.agents.lead_agent"),
+        ("deerflow.agents", "__getattr__", "deerflow.agents.lead_agent.prompt"),
+        ("deerflow.agents", "__getattr__", "deerflow.agents.thread_state"),
+        ("deerflow.runtime", "__getattr__", "deerflow.runtime.runs.worker"),
+        ("deerflow.runtime.runs", "__getattr__", "deerflow.runtime.runs.worker"),
+    }
+)
+_DYNAMIC_IMPORT_VARIABLE_ALLOWLIST = frozenset(
+    {
+        ("deerflow.agents.memory.storage", "get_memory_storage", "module_path"),
+        ("deerflow.reflection.resolvers", "resolve_variable", "module_path"),
+    }
+)
 
 
 def test_process_probe_records_all_authority_boundaries() -> None:
@@ -82,10 +99,20 @@ def _local_imports(module: str, path: Path) -> tuple[set[str], set[str]]:
     modules: set[str] = set()
     symbols: set[str] = set()
     package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    importlib_aliases = {"importlib"}
+    import_module_aliases: set[str] = set()
+    builtins_aliases = {"builtins"}
+    builtin_import_aliases = {"__import__"}
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_aliases.add(alias.asname or alias.name)
+                elif alias.name == "builtins":
+                    builtins_aliases.add(alias.asname or alias.name)
             continue
         if not isinstance(node, ast.ImportFrom):
             continue
@@ -101,9 +128,45 @@ def _local_imports(module: str, path: Path) -> tuple[set[str], set[str]]:
             modules.add(base)
         for alias in node.names:
             symbols.add(alias.name)
+            if base == "importlib" and alias.name == "import_module":
+                import_module_aliases.add(alias.asname or alias.name)
+            elif base == "builtins" and alias.name == "__import__":
+                builtin_import_aliases.add(alias.asname or alias.name)
             candidate = f"{base}.{alias.name}" if base else alias.name
             if _local_module_file(candidate) is not None:
                 modules.add(candidate)
+
+    def enclosing_scope(node: ast.AST) -> str:
+        parent = parents.get(node)
+        while parent is not None:
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                return parent.name
+            if isinstance(parent, ast.Lambda):
+                return "<lambda>"
+            parent = parents.get(parent)
+        return "<module>"
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        is_dynamic_import = False
+        if isinstance(function, ast.Name):
+            is_dynamic_import = function.id in import_module_aliases | builtin_import_aliases
+        elif isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
+            is_dynamic_import = (function.attr == "import_module" and function.value.id in importlib_aliases) or (function.attr == "__import__" and function.value.id in builtins_aliases)
+        if not is_dynamic_import:
+            continue
+        argument = node.args[0] if node.args else next((keyword.value for keyword in node.keywords if keyword.arg == "name"), None)
+        scope = enclosing_scope(node)
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+            target = argument.value
+            if (module, scope, target) not in _DYNAMIC_IMPORT_LITERAL_ALLOWLIST:
+                modules.add(target)
+            continue
+        if isinstance(argument, ast.Name) and (module, scope, argument.id) in _DYNAMIC_IMPORT_VARIABLE_ALLOWLIST:
+            continue
+        symbols.add(_UNRESOLVED_DYNAMIC_IMPORT)
     return modules, symbols
 
 
@@ -149,6 +212,93 @@ def test_import_graph_mutation_finds_function_scoped_worker_import(
     assert "RunAgentPrivateExecutor" in symbols
 
 
+def _install_dynamic_import_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+) -> None:
+    backend_root = tmp_path / "backend"
+    gateway = backend_root / "app" / "gateway" / "app.py"
+    gateway.parent.mkdir(parents=True)
+    gateway.write_text(source, encoding="utf-8")
+    execution = backend_root / "app" / "reliability" / "execution.py"
+    execution.parent.mkdir(parents=True)
+    execution.write_text("class RunAgentPrivateExecutor: pass\n", encoding="utf-8")
+    monkeypatch.setattr("test_m7_process_boundary.BACKEND_ROOT", backend_root)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "import importlib\ndef load():\n    return importlib.import_module('app.reliability.execution')\n",
+        "import importlib as loader\nclass Loader:\n    target = loader.import_module('app.reliability.execution')\n",
+        "from importlib import import_module\nload = lambda: import_module('app.reliability.execution')\n",
+        "from importlib import import_module as load\ndef handler():\n    return load('app.reliability.execution')\n",
+        "class Loader:\n    def load(self):\n        return __import__('app.reliability.execution')\n",
+        "import builtins\nload = lambda: builtins.__import__('app.reliability.execution')\n",
+    ),
+    ids=(
+        "importlib",
+        "importlib-alias-class",
+        "from-import-lambda",
+        "from-import-alias",
+        "dunder-import",
+        "builtins-dunder-import",
+    ),
+)
+def test_import_graph_mutation_finds_constant_dynamic_import_forms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+) -> None:
+    _install_dynamic_import_mutation(monkeypatch, tmp_path, source)
+
+    modules, _ = _production_import_graph("app.gateway.app")
+
+    assert "app.reliability.execution" in modules
+
+
+def test_import_graph_agents_lazy_allowlist_is_exact_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backend_root = tmp_path / "backend"
+    agents = backend_root / "packages" / "harness" / "deerflow" / "agents" / "__init__.py"
+    agents.parent.mkdir(parents=True)
+    agents.write_text(
+        "from importlib import import_module\ndef __getattr__(name):\n    import_module('deerflow.agents.factory')\n    import_module('app.reliability.execution')\n",
+        encoding="utf-8",
+    )
+    for relative in (
+        "packages/harness/deerflow/agents/factory.py",
+        "app/reliability/execution.py",
+    ):
+        target = backend_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr("test_m7_process_boundary.BACKEND_ROOT", backend_root)
+
+    modules, _ = _production_import_graph("deerflow.agents")
+
+    assert "deerflow.agents.factory" not in modules
+    assert "app.reliability.execution" in modules
+
+
+def test_import_graph_unknown_dynamic_module_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_dynamic_import_mutation(
+        monkeypatch,
+        tmp_path,
+        "from importlib import import_module\nTARGET = get_runtime_target()\nload = lambda: import_module(TARGET)\n",
+    )
+
+    _, symbols = _production_import_graph("app.gateway.app")
+
+    assert _UNRESOLVED_DYNAMIC_IMPORT in symbols
+
+
 def test_gateway_and_scheduler_cannot_import_worker_graph_execution() -> None:
     modules, symbols = _production_import_graph(
         "app.gateway.app",
@@ -170,6 +320,7 @@ def test_gateway_and_scheduler_cannot_import_worker_graph_execution() -> None:
         }
         & symbols
     )
+    assert _UNRESOLVED_DYNAMIC_IMPORT not in symbols
 
     probe = subprocess.run(
         [

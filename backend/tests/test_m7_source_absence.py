@@ -229,14 +229,37 @@ def _contains_route(value: str, literal: str) -> bool:
     return False
 
 
-_JAVASCRIPT_STRING = re.compile(
-    r"""(?P<quote>["'`])(?P<value>(?:\\.|(?!(?P=quote)).)*)(?P=quote)""",
-    re.DOTALL,
-)
-
-
 def _javascript_string_literals(text: str) -> tuple[str, ...]:
-    return tuple(match.group("value") for match in _JAVASCRIPT_STRING.finditer(text))
+    strings: list[str] = []
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            newline = text.find("\n", index + 2)
+            index = len(text) if newline == -1 else newline + 1
+            continue
+        if text.startswith("/*", index):
+            closing = text.find("*/", index + 2)
+            index = len(text) if closing == -1 else closing + 2
+            continue
+        quote = text[index]
+        if quote not in {'"', "'", "`"}:
+            index += 1
+            continue
+        index += 1
+        value: list[str] = []
+        while index < len(text):
+            character = text[index]
+            if character == "\\" and index + 1 < len(text):
+                value.extend((character, text[index + 1]))
+                index += 2
+                continue
+            if character == quote:
+                index += 1
+                break
+            value.append(character)
+            index += 1
+        strings.append("".join(value))
+    return tuple(strings)
 
 
 def _nginx_directives(text: str) -> str:
@@ -515,6 +538,88 @@ def test_source_gate_mutation_excludes_frontend_test_source(
         'const historicalFixture = "/api/threads";\n',
     )
     test_production_sources_have_no_legacy_route_literals()
+
+
+@pytest.mark.parametrize(
+    "comment",
+    (
+        '// const legacy = "/api/threads";\nconst current = "/api/projects";\n',
+        '/* const legacy = "/api/threads";\nconst second = `/api/runs`; */\nconst current = "/api/projects";\n',
+    ),
+    ids=("line-comment", "multiline-block-comment"),
+)
+def test_source_gate_mutation_ignores_javascript_comment_literals(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    comment: str,
+) -> None:
+    _install_mutation_repo(
+        monkeypatch,
+        tmp_path,
+        "frontend/src/hooks/useLegacy.ts",
+        comment,
+    )
+    test_production_sources_have_no_legacy_route_literals()
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        'const marker = "// not a comment"; const route = "/api/threads";\n',
+        'const marker = "/* not a comment */"; const route = "/api/threads";\n',
+        'const marker = "\\"// escaped quote"; const route = "/api/threads";\n',
+        "const marker = `/* template text */`; const route = `/api/threads`;\n",
+        'const route = "https://gateway.example/api/threads";\n',
+    ),
+    ids=(
+        "line-marker-in-string",
+        "block-marker-in-string",
+        "escaped-quote-before-line-marker",
+        "block-marker-in-template",
+        "url-double-slash",
+    ),
+)
+def test_source_gate_mutation_keeps_comment_markers_inside_strings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+) -> None:
+    _install_mutation_repo(
+        monkeypatch,
+        tmp_path,
+        "frontend/src/hooks/useLegacy.ts",
+        source,
+    )
+    _assert_gate_rejects(
+        test_production_sources_have_no_legacy_route_literals,
+        "source gate let a string-contained comment marker hide a legacy route",
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "const route = '/api/threads';\n",
+        'const route = "/api/threads";\n',
+        "const route = `/api/threads`;\n",
+    ),
+    ids=("single-quoted", "double-quoted", "template-literal"),
+)
+def test_source_gate_mutation_rejects_javascript_string_quote_styles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+) -> None:
+    _install_mutation_repo(
+        monkeypatch,
+        tmp_path,
+        "frontend/src/hooks/useLegacy.ts",
+        source,
+    )
+    _assert_gate_rejects(
+        test_production_sources_have_no_legacy_route_literals,
+        "source gate accepted a real legacy JavaScript string literal",
+    )
 
 
 def test_source_gate_mutation_rejects_config_key_literal_outside_validator(
