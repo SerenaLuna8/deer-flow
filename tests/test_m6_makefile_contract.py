@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -29,7 +30,9 @@ def test_local_launcher_owns_gateway_worker_and_optional_scheduler_processes() -
     assert "kill -0" in source
     assert source.index("app.worker.app") < source.index("Frontend")
     assert "scheduler.enabled" in source
-    assert "cd backend && exec env PYTHONPATH=. uv run python -m app.worker.app" in source
+    assert (
+        "cd backend && exec env PYTHONPATH=. uv run python -m app.worker.app" in source
+    )
     assert "startup_failure 1" in source
     assert "kill_process_tree" in source
 
@@ -89,5 +92,10 @@ def test_docker_launchers_enable_scheduler_profile_only_from_config_flag() -> No
         source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
         assert "detect_scheduler_enabled" in source
         assert "--profile scheduler" in source
-        assert 'services="redis frontend gateway worker nginx"' in source
+        assert re.search(
+            r'^\s*services="frontend gateway worker nginx"$',
+            source,
+            re.MULTILINE,
+        )
         assert 'services="$services scheduler"' in source
+        assert not re.search(r'^\s*services="[^"]*\bredis\b', source, re.MULTILINE)

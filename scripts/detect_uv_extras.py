@@ -33,6 +33,7 @@ from pathlib import Path
 # `uv sync --extra <name>` invocation free of shell metacharacters even when
 # `UV_EXTRAS` comes from `.env` or another semi-trusted source.
 _EXTRA_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _validate_extras(names: list[str]) -> list[str]:
@@ -60,15 +61,19 @@ def parse_env_extras(value: str) -> list[str]:
 
 
 def find_config_file() -> Path | None:
-    """Locate config.yaml using the same precedence as serve.sh."""
+    """Resolve explicit/env config first, otherwise repository-root config."""
     explicit = os.environ.get("DEER_FLOW_CONFIG_PATH")
     if explicit:
         candidate = Path(explicit)
-        if candidate.is_file():
-            return candidate
-    for path in (Path("config.yaml"), Path("backend/config.yaml")):
-        if path.is_file():
-            return path
+        if not candidate.is_file():
+            raise FileNotFoundError(
+                "Config file specified by DEER_FLOW_CONFIG_PATH "
+                f"does not exist: {candidate}"
+            )
+        return candidate.resolve()
+    path = REPO_ROOT / "config.yaml"
+    if path.is_file():
+        return path
     return None
 
 

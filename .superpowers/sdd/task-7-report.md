@@ -27,8 +27,9 @@ implementation.
 - An exact top-level validator rejects `agents_api`, `run_events`,
   `stream_bridge`, `extensions`, `extensions_config`, `mcp_config`,
   `mcp_config_path`, `legacy_run_store`, and `legacy_event_store`, including
-  keys whose value is `null`. Unknown non-tombstone keys continue to use the
-  normal strict Pydantic error.
+  keys whose value is `null`. Other unknown top-level extension fields remain
+  allowed and are preserved in `model_extra`; rejection is exact rather than a
+  general extra-field policy.
 - Deleted the four legacy config modules, the file-backed extensions loader,
   the local channel runtime-config overlay, the memory event/run stores, and
   the complete `runtime/stream_bridge` package.
@@ -88,13 +89,18 @@ asset bootstrap and M3 migration: 11 passed
 Static and operational checks:
 
 ```text
-ruff check: 75 changed Python files passed
-ruff format --check: 75 changed Python files already formatted
+ruff check for the initial tracked Python diff: passed
+ruff format --check for the initial tracked Python diff: passed
 bash/sh syntax checks: passed
 uv lock --check --offline: resolved 232 packages
 git diff --check: passed
 make doctor: Ready, with 2 non-blocking warnings
 ```
+
+The initial tracked-diff formatting command did not include the then-untracked
+new `test_m7_config_contract.py`. The first review repair below formats that
+file and replaces the ambiguous file-count claim with an explicit fresh file
+list.
 
 The doctor gate used a temporary random `deerflow_test_m7_task7_doctor`
 database on port 55437 and a generated ignored local config. The database and
@@ -105,5 +111,52 @@ names `agents_api` and `extensions_config` in the strict validator. It returns
 no live config section, factory, memory/Redis backend, or removed-module
 reference in the requested production paths.
 
-Task 7 is ready for the required independent review. It is not marked accepted
-or complete in the M7 progress ledger by this implementation commit.
+## First independent-review repair
+
+The first review found that three local launch paths still admitted the old
+`backend/config.yaml` or current-working-directory authority even though
+`AppConfig` itself had already become repository-root-only.
+
+### RED evidence and fixes
+
+- The new focused path tests first ran 63 tests with 7 expected failures. They
+  proved that a lone backend config was selected, a detector started from the
+  backend directory selected the wrong file, an invalid explicit environment
+  path silently fell through, and both shell launchers retained the legacy
+  probes.
+- `serve.sh` now validates and canonicalizes an explicit
+  `DEER_FLOW_CONFIG_PATH`, or exports the absolute repository-root
+  `config.yaml`. It never tests a backend-relative or current-directory path.
+- `config-upgrade.sh` now uses the same explicit environment then repository
+  root order. An invalid explicit file fails instead of falling through, and a
+  missing repository-root file is created from the repository-root example.
+- `detect_uv_extras.py` resolves its repository root from the script location,
+  independent of process cwd. It rejects an invalid explicit path and never
+  probes `./config.yaml` or `./backend/config.yaml`.
+- The repair also exposed a Task 7-stale M6 launcher assertion. Its RED was 4
+  passed and 1 failed because it still required Redis in the production
+  service list. The contract now requires exactly Frontend, Gateway, Worker,
+  and Nginx by default, optional Scheduler, optional Provisioner, and no Redis.
+- Corrected this report's unknown-field contract: exact tombstones are
+  rejected while other top-level extension fields remain allowed.
+
+### Fresh repair gates
+
+```text
+focused config/scripts: 63 passed
+bounded config/Docker/support adjacency: 154 passed
+root M6 launcher contract: 5 passed
+ruff check: scripts/detect_uv_extras.py,
+  backend/tests/test_detect_uv_extras.py,
+  backend/tests/test_m7_config_contract.py,
+  tests/test_m6_makefile_contract.py passed
+ruff format --check: the same 4 Python files passed
+bash -n scripts/serve.sh scripts/config-upgrade.sh: passed
+Task 7 config-path residue: zero matches
+Task 7 production legacy residue: only explicit validator tombstones
+git diff --check: passed
+```
+
+Task 8 was not started, and `.superpowers/sdd/progress.md` remains unchanged.
+Task 7 is ready for the next independent review; it is not marked accepted in
+the M7 progress ledger by this repair commit.

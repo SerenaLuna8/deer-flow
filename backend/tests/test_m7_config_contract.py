@@ -120,12 +120,39 @@ def test_removed_runtime_and_config_modules_are_not_importable(module_name: str)
 
 def test_docker_configuration_has_no_extensions_or_redis_stream_authority() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    compose_text = "\n".join(
-        (repo_root / relative).read_text(encoding="utf-8")
-        for relative in ("docker/docker-compose.yaml", "docker/docker-compose-dev.yaml")
-    )
+    compose_text = "\n".join((repo_root / relative).read_text(encoding="utf-8") for relative in ("docker/docker-compose.yaml", "docker/docker-compose-dev.yaml"))
 
     assert "DEER_FLOW_EXTENSIONS_CONFIG_PATH" not in compose_text
     assert "DEER_FLOW_STREAM_BRIDGE_REDIS_URL" not in compose_text
     assert "extensions_config.json" not in compose_text
     assert "redis://redis" not in compose_text
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ("scripts/serve.sh", "scripts/config-upgrade.sh"),
+)
+def test_local_launch_scripts_never_probe_backend_config(relative_path: str) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / relative_path).read_text(encoding="utf-8")
+
+    assert "backend/config.yaml" not in source
+    assert '"$REPO_ROOT/config.yaml"' in source
+
+
+def test_serve_exports_valid_explicit_or_repo_root_config() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "scripts/serve.sh").read_text(encoding="utf-8")
+
+    assert 'export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"' in source
+    assert "DEER_FLOW_CONFIG_PATH does not name a file" in source
+
+
+def test_config_upgrade_uses_explicit_path_before_repo_root() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "scripts/config-upgrade.sh").read_text(encoding="utf-8")
+
+    explicit_branch = source.index('if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]')
+    repo_root_fallback = source.index('CONFIG="$REPO_ROOT/config.yaml"')
+    assert explicit_branch < repo_root_fallback
+    assert "DEER_FLOW_CONFIG_PATH does not name a file" in source

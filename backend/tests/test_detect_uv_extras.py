@@ -23,7 +23,8 @@ spec.loader.exec_module(detect)
 
 @pytest.fixture
 def isolated_cwd(tmp_path, monkeypatch):
-    """Isolate `find_config_file()` from the real repo by chdir + clearing env."""
+    """Isolate config resolution from the real repository and process env."""
+    monkeypatch.setattr(detect, "REPO_ROOT", tmp_path, raising=False)
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("UV_EXTRAS", raising=False)
     monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
@@ -219,17 +220,64 @@ def test_resolve_extras_no_config_no_env(isolated_cwd):
     assert detect.resolve_extras() == []
 
 
-def test_resolve_extras_finds_backend_subdir_config(isolated_cwd):
+def test_resolve_extras_does_not_accept_backend_subdir_config(isolated_cwd):
     sub = isolated_cwd / "backend"
     sub.mkdir()
-    (sub / "config.yaml").write_text("database:\n  backend: postgres\n")
+    (sub / "config.yaml").write_text(
+        "channels:\n  discord:\n    enabled: true\n",
+        encoding="utf-8",
+    )
+
     assert detect.resolve_extras() == []
 
 
-def test_resolve_extras_root_config_takes_precedence(isolated_cwd):
-    (isolated_cwd / "config.yaml").write_text("database:\n  backend: sqlite\n")
+def test_resolve_extras_uses_repo_root_when_started_from_backend(isolated_cwd, monkeypatch):
+    (isolated_cwd / "config.yaml").write_text(
+        "channels:\n  discord:\n    enabled: true\n",
+        encoding="utf-8",
+    )
     sub = isolated_cwd / "backend"
     sub.mkdir()
-    (sub / "config.yaml").write_text("database:\n  backend: postgres\n")
-    # Root config.yaml is checked first, matching the precedence in serve.sh.
-    assert detect.resolve_extras() == []
+    (sub / "config.yaml").write_text(
+        "channels:\n  discord:\n    enabled: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(sub)
+
+    assert detect.find_config_file() == isolated_cwd / "config.yaml"
+    assert detect.resolve_extras() == ["discord"]
+
+
+def test_resolve_extras_explicit_path_precedes_repo_root_from_backend(
+    isolated_cwd,
+    monkeypatch,
+    tmp_path,
+):
+    (isolated_cwd / "config.yaml").write_text(
+        "channels:\n  discord:\n    enabled: false\n",
+        encoding="utf-8",
+    )
+    backend = isolated_cwd / "backend"
+    backend.mkdir()
+    selected = tmp_path / "selected.yaml"
+    selected.write_text(
+        "channels:\n  discord:\n    enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(backend)
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(selected))
+
+    assert detect.find_config_file() == selected
+    assert detect.resolve_extras() == ["discord"]
+
+
+def test_find_config_file_rejects_invalid_explicit_path(isolated_cwd, monkeypatch):
+    (isolated_cwd / "config.yaml").write_text(
+        "channels:\n  discord:\n    enabled: true\n",
+        encoding="utf-8",
+    )
+    missing = isolated_cwd / "missing.yaml"
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(missing))
+
+    with pytest.raises(FileNotFoundError, match="DEER_FLOW_CONFIG_PATH"):
+        detect.find_config_file()

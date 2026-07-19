@@ -11,15 +11,16 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
 
-# Resolve config.yaml location: env var > backend/ > repo root
-if [ -n "$DEER_FLOW_CONFIG_PATH" ] && [ -f "$DEER_FLOW_CONFIG_PATH" ]; then
-    CONFIG="$DEER_FLOW_CONFIG_PATH"
-elif [ -f "$REPO_ROOT/backend/config.yaml" ]; then
-    CONFIG="$REPO_ROOT/backend/config.yaml"
-elif [ -f "$REPO_ROOT/config.yaml" ]; then
-    CONFIG="$REPO_ROOT/config.yaml"
+# Resolve config.yaml location: explicit environment path > repository root.
+if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]; then
+    if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+        echo "✗ DEER_FLOW_CONFIG_PATH does not name a file: $DEER_FLOW_CONFIG_PATH"
+        exit 1
+    fi
+    CONFIG_DIR="$(cd "$(dirname "$DEER_FLOW_CONFIG_PATH")" && pwd -P)"
+    CONFIG="$CONFIG_DIR/$(basename "$DEER_FLOW_CONFIG_PATH")"
 else
-    CONFIG=""
+    CONFIG="$REPO_ROOT/config.yaml"
 fi
 
 if [ ! -f "$EXAMPLE" ]; then
@@ -27,7 +28,7 @@ if [ ! -f "$EXAMPLE" ]; then
     exit 1
 fi
 
-if [ -z "$CONFIG" ]; then
+if [ ! -f "$CONFIG" ]; then
     echo "No config.yaml found — creating from example..."
     cp "$EXAMPLE" "$REPO_ROOT/config.yaml"
     echo "OK config.yaml created. Please review and set your API keys."

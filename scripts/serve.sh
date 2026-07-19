@@ -353,11 +353,18 @@ fi
 
 # ── Config check ─────────────────────────────────────────────────────────────
 
-if ! { \
-        [ -n "$DEER_FLOW_CONFIG_PATH" ] && [ -f "$DEER_FLOW_CONFIG_PATH" ] || \
-        [ -f backend/config.yaml ] || \
-        [ -f config.yaml ]; \
-    }; then
+if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]; then
+    if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+        echo "✗ DEER_FLOW_CONFIG_PATH does not name a file: $DEER_FLOW_CONFIG_PATH"
+        exit 1
+    fi
+    CONFIG_DIR="$(builtin cd "$(dirname "$DEER_FLOW_CONFIG_PATH")" >/dev/null 2>&1 && pwd -P)"
+    export DEER_FLOW_CONFIG_PATH="$CONFIG_DIR/$(basename "$DEER_FLOW_CONFIG_PATH")"
+else
+    export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"
+fi
+
+if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
     echo "✗ No DeerFlow config file found."
     echo "  Run 'make setup' (recommended) or 'make config' to generate config.yaml."
     exit 1
