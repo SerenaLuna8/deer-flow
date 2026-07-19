@@ -44,7 +44,7 @@ DeerFlow 应用通过单个 nginx 反向代理提供：
 └──────────────────┘       └──────────────────────┘
 ```
 
-- **nginx**：路由请求——`/api/*` 和 `/api/langgraph/*` 到 Gateway，其余到前端。
+- **nginx**：把项目 REST 与流式请求路由到 Gateway，其余页面请求路由到前端。
 - **前端**（Next.js + React）：浏览器界面，与 Gateway 通信。
 - **Gateway**（FastAPI）：处理 API 操作，并通过内置 LangGraph-compatible 运行时管理线程状态、Agent 执行和流式传输。
 

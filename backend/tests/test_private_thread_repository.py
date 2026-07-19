@@ -5,7 +5,6 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from langgraph.store.memory import InMemoryStore
 from sqlalchemy import text
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
@@ -206,7 +205,6 @@ async def test_harness_thread_store_project_path_requires_full_scope_in_sql(
     assert (
         await repository.check_access(
             "harness-scoped-thread",
-            str(seed.owner_a.user_id),
             scope=seed.owner_a_scope,
         )
         is False
@@ -263,53 +261,6 @@ async def test_harness_thread_store_project_path_requires_full_scope_in_sql(
     )
 
 
-@pytest.mark.asyncio
-async def test_memory_thread_store_scope_path_excludes_frozen_and_deleted_records() -> None:
-    from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
-    from deerflow.runtime.private_scope import PrivateResourceScope
-
-    owner_id = str(uuid.uuid4())
-    scope = PrivateResourceScope(
-        project_id=str(uuid.uuid4()),
-        owner_user_id=owner_id,
-        membership_version=1,
-    )
-    store = InMemoryStore()
-    repository = MemoryThreadMetaStore(store)
-    created = await repository.create(
-        "memory-frozen-thread",
-        scope=scope,
-        agent_asset_id=uuid.uuid4(),
-        agent_scope="project",
-    )
-    assert created["version"] == 1
-
-    frozen = dict(created)
-    frozen["frozen_at"] = "2026-07-14T00:00:00+00:00"
-    await store.aput(THREADS_NS, "memory-frozen-thread", frozen)
-    assert await repository.get("memory-frozen-thread", scope=scope) is None
-    assert await repository.search(scope=scope) == []
-    assert (
-        await repository.check_access(
-            "memory-frozen-thread",
-            owner_id,
-            scope=scope,
-        )
-        is False
-    )
-    await repository.update_status("memory-frozen-thread", "busy", scope=scope)
-    await repository.delete("memory-frozen-thread", scope=scope)
-    untouched = await store.aget(THREADS_NS, "memory-frozen-thread")
-    assert untouched is not None
-    assert untouched.value["status"] == "idle"
-
-    deleted = dict(created)
-    deleted["deleted_at"] = "2026-07-14T00:00:00+00:00"
-    await store.aput(THREADS_NS, "memory-frozen-thread", deleted)
-    assert await repository.get("memory-frozen-thread", scope=scope) is None
-    assert await repository.search(scope=scope) == []
-
-
 def test_private_thread_repository_has_no_fetch_then_python_scope_checks() -> None:
     from app.private_work.thread_repository import PrivateThreadRepository
 
@@ -318,10 +269,3 @@ def test_private_thread_repository_has_no_fetch_then_python_scope_checks() -> No
     assert "ThreadMetaRow.project_id" in source
     assert "ThreadMetaRow.owner_user_id" in source
     assert "ThreadMetaRow.deleted_at" in source
-
-
-def test_gateway_legacy_thread_store_is_explicitly_trusted_unscoped() -> None:
-    from deerflow.persistence.thread_meta import TrustedUnscopedThreadMetaStore
-    from deerflow.persistence.thread_meta.base import ThreadMetaStore
-
-    assert not issubclass(TrustedUnscopedThreadMetaStore, ThreadMetaStore)

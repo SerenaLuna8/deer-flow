@@ -1,10 +1,4 @@
-"""Memory module for DeerFlow.
-
-This module provides a global memory mechanism that:
-- Stores user context and conversation history in memory.json
-- Uses LLM to summarize and extract facts from conversations
-- Injects relevant memory into system prompts for personalized responses
-"""
+"""Project-scoped Memory processing and persistence."""
 
 from deerflow.agents.memory.prompt import (
     FACT_EXTRACTION_PROMPT,
@@ -12,25 +6,12 @@ from deerflow.agents.memory.prompt import (
     format_conversation_for_update,
     format_memory_for_injection,
 )
-from deerflow.agents.memory.queue import (
-    ConversationContext,
-    MemoryUpdateQueue,
-    get_memory_queue,
-    reset_memory_queue,
-)
 from deerflow.agents.memory.storage import (
-    FileMemoryStorage,
-    MemoryStorage,
-    get_memory_storage,
+    ProjectMemorySnapshot,
+    ProjectMemoryStorage,
+    create_empty_memory,
 )
-from deerflow.agents.memory.updater import (
-    MemoryUpdater,
-    clear_memory_data,
-    delete_memory_fact,
-    get_memory_data,
-    reload_memory_data,
-    update_memory_from_conversation,
-)
+from deerflow.agents.memory.updater import MemoryUpdater
 
 __all__ = [
     # Prompt utilities
@@ -38,20 +19,10 @@ __all__ = [
     "FACT_EXTRACTION_PROMPT",
     "format_memory_for_injection",
     "format_conversation_for_update",
-    # Queue
-    "ConversationContext",
-    "MemoryUpdateQueue",
-    "get_memory_queue",
-    "reset_memory_queue",
     # Storage
-    "MemoryStorage",
-    "FileMemoryStorage",
-    "get_memory_storage",
+    "ProjectMemorySnapshot",
+    "ProjectMemoryStorage",
+    "create_empty_memory",
     # Updater
     "MemoryUpdater",
-    "clear_memory_data",
-    "delete_memory_fact",
-    "get_memory_data",
-    "reload_memory_data",
-    "update_memory_from_conversation",
 ]

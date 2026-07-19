@@ -240,7 +240,6 @@ export const operationsServerErrorSchema = z
       "RELIABILITY_NOT_FOUND",
       "RELIABILITY_CONFLICT",
       "RELIABILITY_INVALID",
-      "RELIABILITY_CUTOVER",
       "DATABASE_UNAVAILABLE",
     ]),
     message: z.string().min(1),

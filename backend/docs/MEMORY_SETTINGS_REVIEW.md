@@ -1,4 +1,7 @@
-# Memory Settings Review
+# Memory Settings Review (Historical Archive)
+
+> Historical only: this predates PostgreSQL project Memory and is not a
+> current configuration guide.
 
 Use this when reviewing the Memory Settings add/edit flow locally with the fewest possible manual steps.
 

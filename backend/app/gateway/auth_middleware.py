@@ -3,10 +3,8 @@
 Rejects unauthenticated requests to non-public paths with 401. When a
 request passes the cookie check, resolves the JWT payload to a real
 ``User`` object and stamps it into both ``request.state.user`` and the
-``deerflow.runtime.user_context`` contextvar so that repository-layer
-owner filtering works automatically via the sentinel pattern.
-
-Fine-grained permission checks remain in authz.py decorators.
+``deerflow.runtime.user_context`` contextvar. Project authorization is enforced
+by immutable project context and project-scoped repositories.
 """
 
 from collections.abc import Callable
@@ -24,7 +22,6 @@ from app.gateway.auth_disabled import (
     get_auth_disabled_user,
     is_auth_disabled,
 )
-from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -76,11 +73,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
     On success, stamps ``request.state.user`` and the
     ``deerflow.runtime.user_context`` contextvar so that repository-layer
     owner filters work downstream without every route needing a
-    ``@require_auth`` decorator. Routes that need per-resource
-    authorization (e.g. "user A cannot read user B's thread by guessing
-    the URL") should additionally use ``@require_permission(...,
-    owner_check=True)`` for explicit enforcement — but authentication
-    itself is fully handled here.
+    Project routers add immutable project context and capability checks after
+    this global authentication boundary.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -146,13 +140,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 },
             )
 
-        # Stamp both request.state.user (for the contextvar pattern)
-        # and request.state.auth (so @require_permission's "auth is
-        # None" branch short-circuits instead of running the entire
-        # JWT-decode + DB-lookup pipeline a second time per request).
+        # Project authorization derives from this authenticated user plus the
+        # immutable ProjectContext resolved by project routers.
         request.state.user = user
         request.state.auth_source = auth_source
-        request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
         token = set_current_user(user)
         try:
             return await call_next(request)

@@ -1,36 +1,26 @@
-"""Shared-persistence wiring so terminal sessions show up in the Web UI.
-
-The Web UI lists conversations from the ``threads_meta`` SQL table (filtered by
-``user_id``), not from the checkpointer. An embedded run only writes the
-checkpointer, so a TUI thread would be invisible in the sidebar. This module
-closes that gap: it writes a ``threads_meta`` row (owned by the local default
-user) into the **same** database the Gateway reads — without requiring the
-Gateway process to be running.
-
-Everything here is best-effort: when PostgreSQL is unavailable, the writer
-degrades to a no-op and the TUI keeps working.
-
-The SQLAlchemy async engine is bound to the event loop that created it, so all
-DB work runs on one long-lived background loop (``_LoopThread``) rather than a
-fresh ``asyncio.run`` per call (which would bind connections to throwaway loops).
-"""
+"""Explicitly project-scoped Thread metadata wiring for trusted TUI embeddings."""
 
 from __future__ import annotations
 
 import asyncio
 import threading
+import uuid
 from collections.abc import Awaitable
 from typing import Any
 
-from deerflow.runtime.user_context import DEFAULT_USER_ID
+from deerflow.private_scope import PrivateResourceScope
 
 
 class _LoopThread:
-    """A daemon thread running a single asyncio event loop for DB work."""
+    """A daemon thread running one asyncio event loop for database work."""
 
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._run, name="deerflow-tui-db", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run,
+            name="deerflow-tui-db",
+            daemon=True,
+        )
         self._thread.start()
 
     def _run(self) -> None:
@@ -46,65 +36,74 @@ class _LoopThread:
 
 
 class ThreadMetaWriter:
-    """Writes/updates ``threads_meta`` rows for the local default user.
+    """Write Thread metadata only with frozen project, owner, and Agent authority."""
 
-    All methods swallow errors: persistence visibility is a convenience, never a
-    reason to break the conversation.
-    """
-
-    def __init__(self, loop: _LoopThread, store: Any) -> None:
+    def __init__(
+        self,
+        loop: _LoopThread,
+        store: Any,
+        *,
+        scope: PrivateResourceScope,
+        agent_asset_id: uuid.UUID,
+        agent_scope: str,
+    ) -> None:
+        if type(scope) is not PrivateResourceScope:
+            raise TypeError("TUI Thread persistence requires PrivateResourceScope")
+        if not isinstance(agent_asset_id, uuid.UUID):
+            raise TypeError("TUI Thread persistence requires an Agent asset UUID")
+        if agent_scope not in {"system", "project"}:
+            raise ValueError("TUI Thread persistence requires a final Agent scope")
+        if store is None:
+            raise TypeError("TUI Thread persistence requires a scoped store")
         self._loop = loop
         self._store = store
-        self.user_id = DEFAULT_USER_ID
+        self._scope = scope
+        self._agent_asset_id = agent_asset_id
+        self._agent_scope = agent_scope
 
     @property
     def enabled(self) -> bool:
-        return self._store is not None
+        return True
 
-    def ensure_created(self, thread_id: str, *, assistant_id: str | None = None, metadata: dict | None = None) -> None:
-        if not self._store or not thread_id:
+    @property
+    def user_id(self) -> str:
+        return self._scope.owner_user_id
+
+    def ensure_created(
+        self,
+        thread_id: str,
+        *,
+        assistant_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        if not thread_id:
             return
-        try:
-            self._loop.run(self._ensure_created(thread_id, assistant_id, metadata))
-        except Exception:  # noqa: BLE001 - best-effort
-            pass
+        self._loop.run(self._ensure_created(thread_id, assistant_id, metadata))
 
-    async def _ensure_created(self, thread_id: str, assistant_id: str | None, metadata: dict | None) -> None:
-        existing = await self._store.get(thread_id, user_id=self.user_id)
+    async def _ensure_created(
+        self,
+        thread_id: str,
+        assistant_id: str | None,
+        metadata: dict | None,
+    ) -> None:
+        existing = await self._store.get(thread_id, scope=self._scope)
         if existing is None:
             await self._store.create(
                 thread_id,
                 assistant_id=assistant_id,
-                user_id=self.user_id,
                 metadata=metadata or {"source": "tui"},
+                scope=self._scope,
+                agent_asset_id=self._agent_asset_id,
+                agent_scope=self._agent_scope,
             )
 
     def set_title(self, thread_id: str, title: str) -> None:
-        if not self._store or not thread_id or not title:
+        if not thread_id or not title:
             return
-        try:
-            self._loop.run(self._store.update_display_name(thread_id, title, user_id=self.user_id))
-        except Exception:  # noqa: BLE001 - best-effort
-            pass
-
-
-def build_persistence() -> tuple[_LoopThread, ThreadMetaWriter]:
-    """Initialise the shared engine on a background loop and return a writer.
-
-    Returns a ``ThreadMetaWriter`` that is a no-op when PostgreSQL
-    initialization fails.
-    """
-    loop = _LoopThread()
-    store = None
-    try:
-        from deerflow.config.app_config import get_app_config
-        from deerflow.persistence.engine import get_session_factory, init_engine_from_config
-        from deerflow.persistence.thread_meta import make_thread_store
-
-        config = get_app_config()
-        loop.run(init_engine_from_config(config.database))
-        session_factory = get_session_factory()
-        store = make_thread_store(session_factory)
-    except Exception:  # noqa: BLE001 - degrade to no-op writer
-        store = None
-    return loop, ThreadMetaWriter(loop, store)
+        self._loop.run(
+            self._store.update_display_name(
+                thread_id,
+                title,
+                scope=self._scope,
+            )
+        )

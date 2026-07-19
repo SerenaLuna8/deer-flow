@@ -127,19 +127,13 @@ class TestConfigQueries:
         with pytest.raises(AssetCatalogUnavailable, match="global Skill listing was removed"):
             client.list_skills(enabled_only=True)
 
-    def test_get_memory(self, client):
-        memory = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory) as mock_mem:
-            result = client.get_memory()
-            mock_mem.assert_called_once()
-        assert result == memory
+    def test_get_memory_is_removed(self, client):
+        with pytest.raises(AssetCatalogUnavailable, match="global Memory was removed"):
+            client.get_memory()
 
-    def test_export_memory(self, client):
-        memory = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory) as mock_mem:
-            result = client.export_memory()
-            mock_mem.assert_called_once()
-        assert result == memory
+    def test_export_memory_is_removed(self, client):
+        with pytest.raises(AssetCatalogUnavailable, match="global Memory export was removed"):
+            client.export_memory()
 
 
 # ---------------------------------------------------------------------------
@@ -896,9 +890,10 @@ class TestEnsureAgent:
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
         assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
 
-    def test_uses_default_checkpointer_when_available(self, client):
+    def test_uses_explicit_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
         mock_checkpointer = MagicMock()
+        client._checkpointer = mock_checkpointer
         config = client._get_runnable_config("t1")
 
         with (
@@ -907,7 +902,6 @@ class TestEnsureAgent:
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
-            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=mock_checkpointer),
         ):
             client._ensure_agent(config)
 
@@ -1177,16 +1171,9 @@ class TestThreadQueries:
         assert threads[1]["latest_checkpoint_id"] == "c2"
         assert threads[1]["title"] == "Thread 1 Updated"
 
-    def test_list_threads_fallback_checkpointer(self, client):
-        mock_checkpointer = MagicMock()
-        mock_checkpointer.list.return_value = []
-
-        with patch("deerflow.runtime.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
-            # No internal checkpointer, should fetch from provider
-            result = client.list_threads()
-
-        assert result == {"thread_list": []}
-        mock_checkpointer.list.assert_called_once()
+    def test_list_threads_without_explicit_checkpointer_fails_closed(self, client):
+        with pytest.raises(AssetCatalogUnavailable, match="explicitly scoped checkpointer"):
+            client.list_threads()
 
     def test_get_thread(self, client):
         mock_checkpointer = MagicMock()
@@ -1231,16 +1218,9 @@ class TestThreadQueries:
         assert checkpoints[2]["pending_writes"][0]["task_id"] == "task_1"
         assert checkpoints[2]["pending_writes"][0]["channel"] == "messages"
 
-    def test_get_thread_fallback_checkpointer(self, client):
-        mock_checkpointer = MagicMock()
-        mock_checkpointer.list.return_value = []
-
-        with patch("deerflow.runtime.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
-            result = client.get_thread("t99")
-
-        assert result["thread_id"] == "t99"
-        assert result["checkpoints"] == []
-        mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t99"}})
+    def test_get_thread_without_explicit_checkpointer_fails_closed(self, client):
+        with pytest.raises(AssetCatalogUnavailable, match="explicitly scoped checkpointer"):
+            client.get_thread("t99")
 
 
 # ---------------------------------------------------------------------------
@@ -1282,119 +1262,22 @@ class TestGoalManagement:
 
 
 class TestMemoryManagement:
-    def test_import_memory(self, client):
-        imported = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.import_memory_data", return_value=imported) as mock_import:
-            result = client.import_memory(imported)
-
-        assert mock_import.call_count == 1
-        call_args = mock_import.call_args
-        assert call_args.args == (imported,)
-        assert "user_id" in call_args.kwargs
-        assert result == imported
-
-    def test_reload_memory(self, client):
-        data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.reload_memory_data", return_value=data):
-            result = client.reload_memory()
-        assert result == data
-
-    def test_clear_memory(self, client):
-        data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.clear_memory_data", return_value=data):
-            result = client.clear_memory()
-        assert result == data
-
-    def test_create_memory_fact(self, client):
-        data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.create_memory_fact", return_value=data) as create_fact:
-            result = client.create_memory_fact(
-                "User prefers concise code reviews.",
-                category="preference",
-                confidence=0.88,
-            )
-            create_fact.assert_called_once_with(
-                content="User prefers concise code reviews.",
-                category="preference",
-                confidence=0.88,
-            )
-        assert result == data
-
-    def test_delete_memory_fact(self, client):
-        data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.delete_memory_fact", return_value=data) as delete_fact:
-            result = client.delete_memory_fact("fact_123")
-            delete_fact.assert_called_once_with("fact_123")
-        assert result == data
-
-    def test_update_memory_fact(self, client):
-        data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
-            result = client.update_memory_fact(
-                "fact_123",
-                "User prefers spaces",
-                category="workflow",
-                confidence=0.91,
-            )
-            update_fact.assert_called_once_with(
-                fact_id="fact_123",
-                content="User prefers spaces",
-                category="workflow",
-                confidence=0.91,
-            )
-        assert result == data
-
-    def test_update_memory_fact_preserves_omitted_fields(self, client):
-        data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
-            result = client.update_memory_fact(
-                "fact_123",
-                "User prefers spaces",
-            )
-            update_fact.assert_called_once_with(
-                fact_id="fact_123",
-                content="User prefers spaces",
-                category=None,
-                confidence=None,
-            )
-        assert result == data
-
-    def test_get_memory_config(self, client):
-        config = MagicMock()
-        config.enabled = True
-        config.storage_path = ".deer-flow/memory.json"
-        config.debounce_seconds = 30
-        config.max_facts = 100
-        config.fact_confidence_threshold = 0.7
-        config.injection_enabled = True
-        config.max_injection_tokens = 2000
-
-        with patch("deerflow.config.memory_config.get_memory_config", return_value=config):
-            result = client.get_memory_config()
-
-        assert result["enabled"] is True
-        assert result["max_facts"] == 100
-
-    def test_get_memory_status(self, client):
-        config = MagicMock()
-        config.enabled = True
-        config.storage_path = ".deer-flow/memory.json"
-        config.debounce_seconds = 30
-        config.max_facts = 100
-        config.fact_confidence_threshold = 0.7
-        config.injection_enabled = True
-        config.max_injection_tokens = 2000
-
-        data = {"version": "1.0", "facts": []}
-
-        with (
-            patch("deerflow.config.memory_config.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=data),
-        ):
-            result = client.get_memory_status()
-
-        assert "config" in result
-        assert "data" in result
+    @pytest.mark.parametrize(
+        ("method_name", "args", "message"),
+        (
+            ("import_memory", ({"version": "1.0"},), "global Memory import was removed"),
+            ("reload_memory", (), "global Memory reload was removed"),
+            ("clear_memory", (), "global Memory clear was removed"),
+            ("create_memory_fact", ("fact",), "global Memory mutation was removed"),
+            ("delete_memory_fact", ("fact-id",), "global Memory mutation was removed"),
+            ("update_memory_fact", ("fact-id", "updated"), "global Memory mutation was removed"),
+            ("get_memory_config", (), "global Memory configuration was removed"),
+            ("get_memory_status", (), "global Memory status was removed"),
+        ),
+    )
+    def test_global_memory_management_is_removed(self, client, method_name, args, message):
+        with pytest.raises(AssetCatalogUnavailable, match=message):
+            getattr(client, method_name)(*args)
 
 
 # ---------------------------------------------------------------------------
@@ -1956,43 +1839,15 @@ class TestScenarioThreadIsolation:
 
 
 class TestScenarioMemoryWorkflow:
-    """Scenario: Memory query → reload → status check."""
+    """Scenario: the embedded client cannot enter project Memory workflows."""
 
-    def test_memory_full_lifecycle(self, client):
-        """get_memory → reload → get_status covers the full memory API."""
-        initial_data = {"version": "1.0", "facts": [{"id": "f1", "content": "User likes Python"}]}
-        updated_data = {
-            "version": "1.0",
-            "facts": [
-                {"id": "f1", "content": "User likes Python"},
-                {"id": "f2", "content": "User prefers dark mode"},
-            ],
-        }
-
-        config = MagicMock()
-        config.enabled = True
-        config.storage_path = ".deer-flow/memory.json"
-        config.debounce_seconds = 30
-        config.max_facts = 100
-        config.fact_confidence_threshold = 0.7
-        config.injection_enabled = True
-        config.max_injection_tokens = 2000
-
-        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=initial_data):
-            mem = client.get_memory()
-        assert len(mem["facts"]) == 1
-
-        with patch("deerflow.agents.memory.updater.reload_memory_data", return_value=updated_data):
-            refreshed = client.reload_memory()
-        assert len(refreshed["facts"]) == 2
-
-        with (
-            patch("deerflow.config.memory_config.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=updated_data),
-        ):
-            status = client.get_memory_status()
-        assert status["config"]["enabled"] is True
-        assert len(status["data"]["facts"]) == 2
+    def test_memory_full_lifecycle_requires_project_api(self, client):
+        with pytest.raises(AssetCatalogUnavailable, match="authenticated project Memory API"):
+            client.get_memory()
+        with pytest.raises(AssetCatalogUnavailable, match="authenticated project Memory API"):
+            client.reload_memory()
+        with pytest.raises(AssetCatalogUnavailable, match="project readiness and Memory APIs"):
+            client.get_memory_status()
 
 
 # Archive-install scenarios are covered by the removed-surface tests.
@@ -2199,69 +2054,12 @@ class TestGatewayConformance:
         assert client.clear_goal("t-goal")["goal"] is None
 
     def test_get_memory_config(self, client):
-        mem_cfg = MagicMock()
-        mem_cfg.enabled = True
-        mem_cfg.storage_path = ".deer-flow/memory.json"
-        mem_cfg.debounce_seconds = 30
-        mem_cfg.max_facts = 100
-        mem_cfg.fact_confidence_threshold = 0.7
-        mem_cfg.injection_enabled = True
-        mem_cfg.max_injection_tokens = 2000
-        mem_cfg.token_counting = "tiktoken"
-        mem_cfg.staleness_review_enabled = True
-        mem_cfg.staleness_age_days = 90
-        mem_cfg.staleness_min_candidates = 3
-        mem_cfg.staleness_max_removals_per_cycle = 10
-        mem_cfg.staleness_protected_categories = ["correction"]
-
-        with patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg):
-            result = client.get_memory_config()
-
-        assert result["enabled"] is True
-        assert result["max_facts"] == 100
-        assert result["token_counting"] == "tiktoken"
+        with pytest.raises(AssetCatalogUnavailable, match="global Memory configuration was removed"):
+            client.get_memory_config()
 
     def test_get_memory_status(self, client):
-        mem_cfg = MagicMock()
-        mem_cfg.enabled = True
-        mem_cfg.storage_path = ".deer-flow/memory.json"
-        mem_cfg.debounce_seconds = 30
-        mem_cfg.max_facts = 100
-        mem_cfg.fact_confidence_threshold = 0.7
-        mem_cfg.injection_enabled = True
-        mem_cfg.max_injection_tokens = 2000
-        mem_cfg.token_counting = "tiktoken"
-        mem_cfg.staleness_review_enabled = True
-        mem_cfg.staleness_age_days = 90
-        mem_cfg.staleness_min_candidates = 3
-        mem_cfg.staleness_max_removals_per_cycle = 10
-        mem_cfg.staleness_protected_categories = ["correction"]
-
-        memory_data = {
-            "version": "1.0",
-            "lastUpdated": "",
-            "user": {
-                "workContext": {"summary": "", "updatedAt": ""},
-                "personalContext": {"summary": "", "updatedAt": ""},
-                "topOfMind": {"summary": "", "updatedAt": ""},
-            },
-            "history": {
-                "recentMonths": {"summary": "", "updatedAt": ""},
-                "earlierContext": {"summary": "", "updatedAt": ""},
-                "longTermBackground": {"summary": "", "updatedAt": ""},
-            },
-            "facts": [],
-        }
-
-        with (
-            patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory_data),
-        ):
-            result = client.get_memory_status()
-
-        assert result["config"]["enabled"] is True
-        assert result["config"]["token_counting"] == "tiktoken"
-        assert result["data"]["version"] == "1.0"
+        with pytest.raises(AssetCatalogUnavailable, match="global Memory status was removed"):
+            client.get_memory_status()
 
 
 # ===========================================================================

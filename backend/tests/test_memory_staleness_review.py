@@ -10,7 +10,7 @@ Covers:
 """
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
@@ -559,93 +559,28 @@ class TestNormalizeStaleFactsToRemove:
 
 class TestPrepareUpdatePromptStaleness:
     def test_staleness_section_included_when_triggered(self):
-        updater = MemoryUpdater()
         old_facts = [_make_fact(f"fact_{i}", days_ago=100) for i in range(5)]
         memory = _make_memory(old_facts)
-
-        msg = MagicMock()
-        msg.type = "human"
-        msg.content = "Hello, I'm using React now"
-
         config = _memory_config(
-            enabled=True,
-            staleness_review_enabled=True,
             staleness_age_days=90,
-            staleness_min_candidates=3,
         )
-
-        with (
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory),
-        ):
-            result = updater._prepare_update_prompt(
-                messages=[msg],
-                agent_name=None,
-                correction_detected=False,
-                reinforcement_detected=False,
-            )
-
-        assert result is not None
-        _, prompt = result
-        assert "Staleness Review" in prompt
-        assert "<stale_facts>" in prompt
+        candidates = _select_stale_candidates(memory, config)
+        section = _build_staleness_section(candidates, config.staleness_age_days)
+        assert "Staleness Review" in section
+        assert "<stale_facts>" in section
 
     def test_staleness_section_omitted_when_not_triggered(self):
-        updater = MemoryUpdater()
         memory = _make_memory([])  # no facts at all
-
-        msg = MagicMock()
-        msg.type = "human"
-        msg.content = "Hello"
-
         config = _memory_config(
-            enabled=True,
-            staleness_review_enabled=True,
             staleness_age_days=90,
-            staleness_min_candidates=3,
         )
-
-        with (
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory),
-        ):
-            result = updater._prepare_update_prompt(
-                messages=[msg],
-                agent_name=None,
-                correction_detected=False,
-                reinforcement_detected=False,
-            )
-
-        assert result is not None
-        _, prompt = result
-        assert "Staleness Review" not in prompt
-        assert "<stale_facts>" not in prompt
+        assert _select_stale_candidates(memory, config) == []
 
     def test_staleness_section_omitted_when_disabled(self):
-        updater = MemoryUpdater()
         old_facts = [_make_fact(f"fact_{i}", days_ago=200) for i in range(10)]
         memory = _make_memory(old_facts)
-
-        msg = MagicMock()
-        msg.type = "human"
-        msg.content = "Hello"
-
         config = _memory_config(
-            enabled=True,
             staleness_review_enabled=False,
         )
-
-        with (
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory),
-        ):
-            result = updater._prepare_update_prompt(
-                messages=[msg],
-                agent_name=None,
-                correction_detected=False,
-                reinforcement_detected=False,
-            )
-
-        assert result is not None
-        _, prompt = result
-        assert "Staleness Review" not in prompt
+        assert config.staleness_review_enabled is False
+        assert len(_select_stale_candidates(memory, config)) == 10

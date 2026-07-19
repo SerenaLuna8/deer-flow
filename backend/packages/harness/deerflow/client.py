@@ -316,10 +316,6 @@ class DeerFlowClient:
             "state_schema": ThreadState,
         }
         checkpointer = self._checkpointer
-        if checkpointer is None:
-            from deerflow.runtime.checkpointer import get_checkpointer
-
-            checkpointer = get_checkpointer()
         if checkpointer is not None:
             kwargs["checkpointer"] = checkpointer
 
@@ -467,9 +463,7 @@ class DeerFlowClient:
     def _get_thread_checkpointer(self):
         checkpointer = self._checkpointer
         if checkpointer is None:
-            from deerflow.runtime.checkpointer.provider import get_checkpointer
-
-            checkpointer = get_checkpointer()
+            raise AssetCatalogUnavailable("thread persistence requires an explicitly scoped checkpointer")
         return checkpointer
 
     def get_goal(self, thread_id: str) -> dict:
@@ -1025,26 +1019,16 @@ class DeerFlowClient:
         raise AssetCatalogUnavailable("global Skill listing was removed; use the authenticated project asset API")
 
     def get_memory(self) -> dict:
-        """Get current memory data.
-
-        Returns:
-            Memory data dict (see src/agents/memory/updater.py for structure).
-        """
-        from deerflow.agents.memory.updater import get_memory_data
-
-        return get_memory_data(user_id=get_effective_user_id())
+        """Reject the removed global Memory read surface."""
+        raise AssetCatalogUnavailable("global Memory was removed; use the authenticated project Memory API")
 
     def export_memory(self) -> dict:
-        """Export current memory data for backup or transfer."""
-        from deerflow.agents.memory.updater import get_memory_data
-
-        return get_memory_data(user_id=get_effective_user_id())
+        """Reject the removed global Memory export surface."""
+        raise AssetCatalogUnavailable("global Memory export was removed; use the authenticated project Memory API")
 
     def import_memory(self, memory_data: dict) -> dict:
-        """Import and persist full memory data."""
-        from deerflow.agents.memory.updater import import_memory_data
-
-        return import_memory_data(memory_data, user_id=get_effective_user_id())
+        """Reject the removed global Memory import surface."""
+        raise AssetCatalogUnavailable("global Memory import was removed; use the authenticated project Memory API")
 
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
@@ -1101,32 +1085,20 @@ class DeerFlowClient:
     # ------------------------------------------------------------------
 
     def reload_memory(self) -> dict:
-        """Reload memory data from file, forcing cache invalidation.
-
-        Returns:
-            The reloaded memory data dict.
-        """
-        from deerflow.agents.memory.updater import reload_memory_data
-
-        return reload_memory_data(user_id=get_effective_user_id())
+        """Reject the removed global Memory reload surface."""
+        raise AssetCatalogUnavailable("global Memory reload was removed; use the authenticated project Memory API")
 
     def clear_memory(self) -> dict:
-        """Clear all persisted memory data."""
-        from deerflow.agents.memory.updater import clear_memory_data
-
-        return clear_memory_data(user_id=get_effective_user_id())
+        """Reject the removed global Memory clear surface."""
+        raise AssetCatalogUnavailable("global Memory clear was removed; use the authenticated project Memory API")
 
     def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
-        """Create a single fact manually."""
-        from deerflow.agents.memory.updater import create_memory_fact
-
-        return create_memory_fact(content=content, category=category, confidence=confidence)
+        """Reject the removed global Memory fact-create surface."""
+        raise AssetCatalogUnavailable("global Memory mutation was removed; use the authenticated project Memory API")
 
     def delete_memory_fact(self, fact_id: str) -> dict:
-        """Delete a single fact from memory by fact id."""
-        from deerflow.agents.memory.updater import delete_memory_fact
-
-        return delete_memory_fact(fact_id)
+        """Reject the removed global Memory fact-delete surface."""
+        raise AssetCatalogUnavailable("global Memory mutation was removed; use the authenticated project Memory API")
 
     def update_memory_fact(
         self,
@@ -1135,53 +1107,16 @@ class DeerFlowClient:
         category: str | None = None,
         confidence: float | None = None,
     ) -> dict:
-        """Update a single fact manually, preserving omitted fields."""
-        from deerflow.agents.memory.updater import update_memory_fact
-
-        return update_memory_fact(
-            fact_id=fact_id,
-            content=content,
-            category=category,
-            confidence=confidence,
-        )
+        """Reject the removed global Memory fact-update surface."""
+        raise AssetCatalogUnavailable("global Memory mutation was removed; use the authenticated project Memory API")
 
     def get_memory_config(self) -> dict:
-        """Get memory system configuration.
-
-        Returns:
-            Memory config dict.
-        """
-        from deerflow.config.memory_config import get_memory_config
-
-        config = get_memory_config()
-        return {
-            "enabled": config.enabled,
-            "storage_path": config.storage_path,
-            "debounce_seconds": config.debounce_seconds,
-            "max_facts": config.max_facts,
-            "fact_confidence_threshold": config.fact_confidence_threshold,
-            "injection_enabled": config.injection_enabled,
-            "max_injection_tokens": config.max_injection_tokens,
-            "token_counting": config.token_counting,
-            "guaranteed_categories": config.guaranteed_categories,
-            "guaranteed_token_budget": config.guaranteed_token_budget,
-            "staleness_review_enabled": config.staleness_review_enabled,
-            "staleness_age_days": config.staleness_age_days,
-            "staleness_min_candidates": config.staleness_min_candidates,
-            "staleness_max_removals_per_cycle": config.staleness_max_removals_per_cycle,
-            "staleness_protected_categories": config.staleness_protected_categories,
-        }
+        """Reject the removed global Memory config surface."""
+        raise AssetCatalogUnavailable("global Memory configuration was removed; use project readiness and Memory APIs")
 
     def get_memory_status(self) -> dict:
-        """Get memory status: config + current data.
-
-        Returns:
-            Dict with "config" and "data" keys.
-        """
-        return {
-            "config": self.get_memory_config(),
-            "data": self.get_memory(),
-        }
+        """Reject the removed global Memory status surface."""
+        raise AssetCatalogUnavailable("global Memory status was removed; use project readiness and Memory APIs")
 
     # ------------------------------------------------------------------
     # Public API — file uploads

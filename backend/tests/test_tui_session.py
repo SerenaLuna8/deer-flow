@@ -50,10 +50,23 @@ def test_close_is_a_noop_without_a_loop():
 
 
 def test_close_stops_the_background_loop():
-    from deerflow.tui.persistence import ThreadMetaWriter, _LoopThread
+    from deerflow.tui.persistence import _LoopThread
 
     loop = _LoopThread()
-    session = Session(client=_Client(THREADS), writer=ThreadMetaWriter(loop, None), _loop=loop)
+    session = Session(client=_Client(THREADS), _loop=loop)
     session.close()
     assert session._loop is None
     session.close()  # idempotent
+
+
+class _UnavailableClient:
+    def list_threads(self, limit=10):
+        raise RuntimeError("explicitly scoped checkpointer required")
+
+
+def test_no_scope_session_cannot_read_persisted_threads():
+    session = Session(client=_UnavailableClient())
+    plan = LaunchPlan(mode="tui", continue_recent=True)
+    assert session.resolve_thread(plan) is None
+    assert session.recent_threads() == []
+    assert session.resolve_ref("literal-thread-id") == "literal-thread-id"

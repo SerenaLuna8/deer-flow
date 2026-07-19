@@ -9,8 +9,52 @@ from sqlalchemy import text
 from deerflow.persistence.thread_meta import (
     InvalidMetadataFilterError,
     ThreadMetaRepository,
-    TrustedUnscopedThreadMetaStore,
 )
+from deerflow.private_scope import PrivateResourceScope
+
+
+class _ScopedRepository:
+    """Test helper that freezes the authority supplied to every repository call."""
+
+    def __init__(self, repository, scope, agent_id):
+        self._repository = repository
+        self.scope = scope
+        self.agent_id = agent_id
+
+    async def create(self, thread_id, **kwargs):
+        user_id = kwargs.pop("user_id", self.scope.owner_user_id)
+        if user_id != self.scope.owner_user_id:
+            raise ValueError("explicit scope owner is immutable")
+        return await self._repository.create(
+            thread_id,
+            scope=self.scope,
+            agent_asset_id=self.agent_id,
+            agent_scope="project",
+            **kwargs,
+        )
+
+    async def get(self, thread_id, **kwargs):
+        if kwargs:
+            raise TypeError("owner-only access was removed")
+        return await self._repository.get(thread_id, scope=self.scope)
+
+    async def check_access(self, thread_id):
+        return await self._repository.check_access(thread_id, scope=self.scope)
+
+    async def search(self, **kwargs):
+        return await self._repository.search(scope=self.scope, **kwargs)
+
+    async def update_display_name(self, thread_id, display_name):
+        return await self._repository.update_display_name(thread_id, display_name, scope=self.scope)
+
+    async def update_status(self, thread_id, status):
+        return await self._repository.update_status(thread_id, status, scope=self.scope)
+
+    async def update_metadata(self, thread_id, metadata):
+        return await self._repository.update_metadata(thread_id, metadata, scope=self.scope)
+
+    async def delete(self, thread_id):
+        return await self._repository.delete(thread_id, scope=self.scope)
 
 
 @pytest.fixture
@@ -74,11 +118,14 @@ async def repo(migrated_postgres_database_url):
                     "owner": owners[0],
                 },
             )
-    yield TrustedUnscopedThreadMetaStore(
+    yield _ScopedRepository(
         ThreadMetaRepository(session_factory),
-        create_project_id=project_id,
-        create_agent_asset_id=agent_id,
-        create_agent_scope="project",
+        PrivateResourceScope(
+            project_id=str(project_id),
+            owner_user_id=owners[0],
+            membership_version=1,
+        ),
+        agent_id,
     )
     await close_engine()
 
@@ -102,8 +149,12 @@ class TestThreadMetaRepository:
 
     @pytest.mark.anyio
     async def test_create_with_owner_and_display_name(self, repo):
-        record = await repo.create("t1", user_id="user1", display_name="My Thread")
-        assert record["user_id"] == "user1"
+        record = await repo.create(
+            "t1",
+            user_id=repo.scope.owner_user_id,
+            display_name="My Thread",
+        )
+        assert record["user_id"] == repo.scope.owner_user_id
         assert record["display_name"] == "My Thread"
 
     @pytest.mark.anyio
@@ -116,50 +167,25 @@ class TestThreadMetaRepository:
         assert await repo.get("nonexistent") is None
 
     @pytest.mark.anyio
-    async def test_check_access_no_record_allows(self, repo):
-        assert await repo.check_access("unknown", "user1") is True
+    async def test_check_access_no_record_denies(self, repo):
+        assert await repo.check_access("unknown") is False
 
     @pytest.mark.anyio
-    async def test_check_access_owner_matches(self, repo):
-        await repo.create("t1", user_id="user1")
-        assert await repo.check_access("t1", "user1") is True
+    async def test_check_access_exact_scope_matches(self, repo):
+        await repo.create("t1")
+        assert await repo.check_access("t1") is True
 
     @pytest.mark.anyio
-    async def test_check_access_owner_mismatch(self, repo):
-        await repo.create("t1", user_id="user1")
-        assert await repo.check_access("t1", "user2") is False
+    async def test_owner_only_create_is_rejected(self, repo):
+        with pytest.raises(ValueError, match="immutable"):
+            await repo.create("t1", user_id="other-owner")
 
     @pytest.mark.anyio
-    async def test_final_schema_rejects_ownerless_legacy_create(self, repo):
-        with pytest.raises(ValueError, match="require an owner"):
+    async def test_final_schema_rejects_ownerless_create(self, repo):
+        with pytest.raises(ValueError, match="immutable"):
             await repo.create("t1", user_id=None)
 
     @pytest.mark.anyio
-    async def test_check_access_strict_missing_row_denied(self, repo):
-        """require_existing=True flips the missing-row case to *denied*.
-
-        Closes the delete-idempotence cross-user gap: after a thread is
-        deleted, the row is gone, and the permissive default would let any
-        caller "claim" it as untracked. The strict mode demands a row.
-        """
-        assert await repo.check_access("never-existed", "user1", require_existing=True) is False
-
-    @pytest.mark.anyio
-    async def test_check_access_strict_owner_match_allowed(self, repo):
-        await repo.create("t1", user_id="user1")
-        assert await repo.check_access("t1", "user1", require_existing=True) is True
-
-    @pytest.mark.anyio
-    async def test_check_access_strict_owner_mismatch_denied(self, repo):
-        await repo.create("t1", user_id="user1")
-        assert await repo.check_access("t1", "user2", require_existing=True) is False
-
-    @pytest.mark.anyio
-    async def test_ownerless_legacy_row_cannot_be_created_for_strict_access(self, repo):
-        with pytest.raises(ValueError, match="require an owner"):
-            await repo.create("t1", user_id=None)
-        assert await repo.check_access("t1", "anyone", require_existing=True) is False
-
     @pytest.mark.anyio
     async def test_update_status(self, repo):
         await repo.create("t1")
@@ -197,18 +223,6 @@ class TestThreadMetaRepository:
         await repo.update_metadata("nonexistent", {"k": "v"})  # should not raise
 
     @pytest.mark.anyio
-    async def test_update_owner_with_bypass_moves_row(self, repo):
-        await repo.create("t1", user_id="default", metadata={"source": "channel"})
-        await repo.update_owner("t1", "owner-1", user_id=None)
-
-        owner_row = await repo.get("t1", user_id="owner-1")
-        default_row = await repo.get("t1", user_id="default")
-
-        assert owner_row is not None
-        assert owner_row["user_id"] == "owner-1"
-        assert owner_row["metadata"] == {"source": "channel"}
-        assert default_row is None
-
     # --- search with metadata filter (SQL push-down) ---
 
     @pytest.mark.anyio

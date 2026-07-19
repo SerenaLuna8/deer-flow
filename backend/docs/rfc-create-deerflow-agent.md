@@ -1,4 +1,6 @@
-# RFC: `create_deerflow_agent` — 纯参数的 SDK 工厂 API
+# RFC: `create_deerflow_agent` — 纯参数的 SDK 工厂 API（历史归档）
+
+> 仅供历史参考：本 RFC 记录已退役的全局 runtime 设计。
 
 ## 1. 问题
 

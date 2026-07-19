@@ -175,7 +175,7 @@ SKILLS_PVC_NAME=deer-flow-skills-pvc
 
 ### nginx 配置
 
-nginx 将流量路由到前端或 Gateway。`/api/langgraph/*` 会被重写到 Gateway 的 LangGraph-compatible `/api/*` 路由，因此不需要单独的 LangGraph upstream。
+nginx 将项目 REST 与流式请求路由到 Gateway，其余页面请求路由到前端。Gateway 只暴露最终的 account/project 作用域 API。
 
 ### 认证配置
 

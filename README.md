@@ -1,34 +1,32 @@
 # 🦌 DeerFlow - 2.0
 
-English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md)
-
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 <a href="https://trendshift.io/repositories/14699" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14699" alt="bytedance%2Fdeer-flow | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-> On February 28th, 2026, DeerFlow claimed the 🏆 #1 spot on GitHub Trending following the launch of version 2. Thanks a million to our incredible community — you made this happen! 💪🔥
+> 2026 年 2 月 28 日，DeerFlow 2 发布后登上 GitHub Trending 第 1 名。非常感谢社区的支持，这是大家一起做到的。
 
-DeerFlow (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) is an open-source **super agent harness** that orchestrates **sub-agents**, **memory**, and **sandboxes** to do almost anything — powered by **extensible skills**.
+DeerFlow（**D**eep **E**xploration and **E**fficient **R**esearch **Flow**）是一个开源的 **super agent harness**。它把 **sub-agents**、**memory** 和 **sandbox** 组织在一起，再配合可扩展的 **skills**，让 agent 可以完成几乎任何事情。
 
 https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 > [!NOTE]
-> **DeerFlow 2.0 is a ground-up rewrite.** It shares no code with v1. If you're looking for the original Deep Research framework, it's maintained on the [`1.x` branch](https://github.com/bytedance/deer-flow/tree/main-1.x) — contributions there are still welcome. Active development has moved to 2.0.
+> **DeerFlow 2.0 是一次彻底重写。** 它和 v1 没有共用代码。如果你要找的是最初的 Deep Research 框架，可以前往 [`1.x` 分支](https://github.com/bytedance/deer-flow/tree/main-1.x)。那里仍然欢迎贡献；当前的主要开发已经转向 2.0。
 
-## Official Website
+## 官网
 
-Learn more and see **real demos** on our [**official website**](https://deerflow.tech).
+想了解更多，或者直接看**真实演示**，可以访问[**官网**](https://deerflow.tech)。
 
-## Coding Plan from ByteDance Volcengine
+## 字节跳动火山引擎方舟 Coding Plan
 
-- We strongly recommend using Doubao-Seed-2.0-Code, DeepSeek v3.2 and Kimi 2.5 to run DeerFlow
-- [Learn more](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
-- [中国大陆地区的开发者请点击这里](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+- 我们推荐使用 Doubao-Seed-2.0-Code、DeepSeek v3.2 和 Kimi 2.5 运行 DeerFlow
+- [现在就加入 Coding Plan](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+- [海外地区的开发者请点击这里](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 
 ## InfoQuest
 
-DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus--[InfoQuest (supports free online experience)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[InfoQuest（支持免费在线体验）](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
   <img
@@ -36,100 +34,144 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   />
 </a>
 
----
-
-## Table of Contents
+## 目录
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
-  - [Official Website](#official-website)
-  - [Coding Plan from ByteDance Volcengine](#coding-plan-from-bytedance-volcengine)
+  - [官网](#官网)
+  - [字节跳动火山引擎方舟 Coding Plan](#字节跳动火山引擎方舟-coding-plan)
   - [InfoQuest](#infoquest)
-  - [Table of Contents](#table-of-contents)
-  - [One-Line Agent Setup](#one-line-agent-setup)
-  - [Quick Start](#quick-start)
-    - [Configuration](#configuration)
-    - [Running the Application](#running-the-application)
-      - [Deployment Sizing](#deployment-sizing)
-      - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
-      - [Option 2: Local Development](#option-2-local-development)
-    - [Advanced](#advanced)
-      - [Sandbox Mode](#sandbox-mode)
+  - [目录](#目录)
+  - [一句话交给 Coding Agent 安装](#一句话交给-coding-agent-安装)
+  - [快速开始](#快速开始)
+    - [配置](#配置)
+    - [运行应用](#运行应用)
+      - [部署建议与资源规划](#部署建议与资源规划)
+      - [方式一：Docker（推荐）](#方式一docker推荐)
+      - [方式二：本地开发](#方式二本地开发)
+    - [进阶配置](#进阶配置)
+      - [Sandbox 模式](#sandbox-模式)
       - [MCP Server](#mcp-server)
-      - [IM Channels](#im-channels)
-      - [LangSmith Tracing](#langsmith-tracing)
-      - [Langfuse Tracing](#langfuse-tracing)
-      - [Using Both Providers](#using-both-providers)
-  - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
-  - [Core Features](#core-features)
-    - [Skills \& Tools](#skills--tools)
+      - [IM 渠道](#im-渠道)
+      - [LangSmith 链路追踪](#langsmith-链路追踪)
+  - [从 Deep Research 到 Super Agent Harness](#从-deep-research-到-super-agent-harness)
+  - [核心特性](#核心特性)
+    - [Skills 与 Tools](#skills-与-tools)
     - [Session Goals](#session-goals)
-    - [Manual Context Compaction](#manual-context-compaction)
+    - [手动上下文压缩](#手动上下文压缩)
     - [Sub-Agents](#sub-agents)
-    - [Sandbox \& File System](#sandbox--file-system)
+    - [Sandbox 与文件系统](#sandbox-与文件系统)
     - [Context Engineering](#context-engineering)
-    - [Long-Term Memory](#long-term-memory)
-  - [Recommended Models](#recommended-models)
-  - [Project Automations](#project-automations)
-  - [Documentation](#documentation)
-  - [⚠️ Security Notice](#️-security-notice)
-    - [Improper Deployment May Introduce Security Risks](#improper-deployment-may-introduce-security-risks)
-    - [Security Recommendations](#security-recommendations)
-  - [Contributing](#contributing)
-  - [License](#license)
-  - [Acknowledgments](#acknowledgments)
-    - [Key Contributors](#key-contributors)
+    - [长期记忆](#长期记忆)
+  - [推荐模型](#推荐模型)
+  - [定时任务 (Scheduled Tasks)](#定时任务-scheduled-tasks)
+  - [文档](#文档)
+  - [⚠️ 安全使用](#️-安全使用)
+  - [参与贡献](#参与贡献)
+  - [许可证](#许可证)
+  - [致谢](#致谢)
+    - [核心贡献者](#核心贡献者)
   - [Star History](#star-history)
 
-## One-Line Agent Setup
+## 一句话交给 Coding Agent 安装
 
-If you use Claude Code, Codex, Cursor, Windsurf, or another coding agent, you can hand it the setup instructions in one sentence:
+如果你在用 Claude Code、Codex、Cursor、Windsurf 或其他 coding agent，可以直接把下面这句话发给它：
 
 ```text
-Help me clone DeerFlow if needed, then bootstrap it for local development by following https://raw.githubusercontent.com/bytedance/deer-flow/main/Install.md
+如果还没 clone DeerFlow，就先 clone，然后按照 https://raw.githubusercontent.com/bytedance/deer-flow/main/Install.md 把它的本地开发环境初始化好
 ```
 
-That prompt is intended for coding agents. It tells the agent to clone the repo if needed, choose Docker when available, and stop with the exact next command plus any missing config the user still needs to provide.
+这条提示词是给 coding agent 用的。它会在需要时先 clone 仓库，优先选择 Docker，完成初始化，并在结束时告诉你下一条启动命令，以及还缺哪些配置需要你补充。
 
-## Quick Start
+## 快速开始
 
-### Configuration
+### 配置
 
-1. **Clone the DeerFlow repository**
+1. **克隆 DeerFlow 仓库**
 
    ```bash
    git clone https://github.com/bytedance/deer-flow.git
    cd deer-flow
    ```
 
-2. **Run the setup wizard**
+2. **运行安装向导（推荐）**
 
-   From the project root directory (`deer-flow/`), run:
+   在项目根目录（`deer-flow/`）执行：
 
    ```bash
    make setup
    ```
 
-   This launches an interactive wizard that guides you through choosing an LLM provider, optional web search, and execution/safety preferences such as sandbox mode, bash access, and file-write tools. It generates a minimal `config.yaml` and writes your keys to `.env`. Takes about 2 minutes.
+   这会启动一个交互式向导，引导你选择 LLM provider、可选的 web 搜索工具，以及 sandbox 模式、bash 权限、文件写入等执行/安全偏好。它会生成一份最小化的 `config.yaml`，并把 API key 写入 `.env`，大约 2 分钟完成。
 
-   The wizard also lets you configure an optional web search provider, or skip it for now.
+   随时可以运行 `make doctor` 检查配置和系统环境，并获得可执行的修复建议。
 
-   Run `make doctor` at any time to verify your setup and get actionable fix hints.
-   If you are opening a GitHub issue about a local setup or runtime problem, run
-   `make support-bundle`. The command prints reporter next steps, writes a
-   `*-issue-summary.md` file to paste into the issue, a `*-issue-draft.md` file
-   for AI-assisted issue filing, and an optional evidence zip under
-   `.deer-flow/support-bundles/`. If an AI assistant files the issue, start from
-   the draft and replace every REQUIRED placeholder instead of inventing missing
-   facts. Attach the zip only if a maintainer asks for it, or if the summary
-   alone is not enough. Maintainers and AI triage tools can start with
-   `triage.json`; the bundle includes redacted diagnostics and file manifests
-   only, and does not include `.env`, raw conversation messages, or user file
-   contents.
+   DeerFlow 运行期只使用 PostgreSQL。首次初始化数据库时，需要分别显式设置
+   `POSTGRES_ADMIN_URL`（连接 `postgres` maintenance database，仅用于建库）和
+   `DATABASE_URL`（目标数据库连接），然后执行：
 
-   > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, and more.
+   ```bash
+   make setup-db
+   make check-db
+   make start
+   ```
+
+   `setup-db` 不会创建或修改 role；目标 role 必须已存在。它先初始化 ORM/Alembic，再用同一个
+   显式 `DATABASE_URL` 幂等初始化 LangGraph checkpointer/store 完整 schema。`make check-db` 只读检查 PostgreSQL 版本、
+   Alembic revision、业务表（包括 `projects`、`project_memberships`）以及
+   checkpoint/store 必需表；只到 Alembic head 但缺少其中任一表仍会判定为不健康。
+   命令输出不会显示 username、password 或完整 URL。
+   Gateway、Worker 和 Scheduler 启动只验证已配置的目标数据库，不会自动建库或修复 schema。
+
+   当前 DeerFlow compose stack 不会自动启动 PostgreSQL。本地可单独启动容器，以下值均为
+   占位符，密码中的特殊字符写入 URL 前必须编码：
+
+   ```bash
+   export POSTGRES_PASSWORD='<local-password>'
+   docker run --name deerflow-postgres -d -p 5432:5432 \
+     -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+     -e POSTGRES_DB=postgres postgres:17-alpine
+   docker exec deerflow-postgres psql -U postgres -d postgres \
+     -c "CREATE ROLE deerflow LOGIN PASSWORD '<app-password>'"
+   export POSTGRES_ADMIN_URL='postgresql+asyncpg://postgres:<url-encoded-local-password>@127.0.0.1:5432/postgres'
+   export DATABASE_URL='postgresql+asyncpg://deerflow:<url-encoded-app-password>@127.0.0.1:5432/deerflow'
+   make setup-db
+   make check-db
+   ```
+
+   ### PostgreSQL final baseline（M7）
+
+   DeerFlow 只支持全新 PostgreSQL 数据库。受支持的安装顺序是：创建空数据库 →
+   `make setup-db` → `make start`。`make setup-db` 在空库安装唯一 revision
+   `0001_project_saas_baseline`，再初始化 builtin system asset catalog、LangGraph schema 和
+   default project；`make check-db` 只读验证 revision 与必需表。
+
+   旧 M1–M6 revision、无 Alembic 标记的非空 schema 或含未知 relation 的数据库都会在任何 DDL 前
+   返回 `M7_RECREATE_REQUIRED`。系统不会原地迁移、删除或改写旧数据；请创建新的空数据库。
+   baseline downgrade 永远拒绝，旧 SQLite、shared asset、private-work、Automation、reliability
+   迁移命令已删除。
+
+   ```bash
+   export POSTGRES_ADMIN_URL="postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres"
+   export DATABASE_URL="postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow"
+   make setup-db
+   make check-db
+   make start
+   ```
+
+   如果你要提交本地安装、配置或运行问题，可以执行 `make support-bundle`。
+   命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成
+   `*-issue-summary.md`、面向 AI 辅助提 issue 的 `*-issue-draft.md`，以及可选证据
+   zip。提交 GitHub issue 时，先把 `*-issue-summary.md` 粘贴到 issue 正文；如果由
+   AI 助手代填 issue，就从 `*-issue-draft.md` 开始，并先替换所有 REQUIRED 占位符，
+   不要编造未知事实。只有维护者要求证据包，或摘要不足以诊断时，再附上 zip。维护者
+   或 AI 辅助 triage 可以优先读取 `triage.json`；bundle 只包含脱敏后的诊断信息和
+   文件 manifest，不包含 `.env`、原始对话消息或用户文件内容；提交前仍建议自己快速
+   检查一遍。
+
+   > **进阶 / 手动配置**：如果你更想直接编辑 `config.yaml`，可以改用 `make config` 复制完整的示例模板。完整参考见 `config.example.yaml`，其中包含 CLI-backed provider（Codex CLI、Claude Code OAuth）、OpenRouter、Responses API 等更多配置。
 
    <details>
-   <summary>Manual model configuration examples</summary>
+   <summary>手动模型配置示例</summary>
 
    ```yaml
    models:
@@ -167,13 +209,13 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
              enable_thinking: true
    ```
 
-   OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
+   OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
 
-   To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
+   如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
-   For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
+   对于 vLLM 0.19.0，请使用 `deerflow.models.vllm_provider:VllmChatModel`。对于 Qwen 风格的推理模型，DeerFlow 通过 `extra_body.chat_template_kwargs.enable_thinking` 开关推理，并在多轮 tool-call 对话中保留 vLLM 非标准的 `reasoning` 字段。旧版 `thinking` 配置会自动规范化以保持向后兼容。推理模型可能还需要在启动 vLLM 服务时加上 `--reasoning-parser ...` 参数。如果你的本地 vLLM 部署接受任意非空 API key，可以把 `VLLM_API_KEY` 设为一个占位值。
 
-   CLI-backed provider examples:
+   CLI-backed provider 配置示例：
 
    ```yaml
    models:
@@ -192,16 +234,16 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
        supports_thinking: true
    ```
 
-   - Codex CLI reads `~/.codex/auth.json`
-   - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
-   - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
-   - On macOS, export Claude Code auth explicitly if needed:
+   - Codex CLI 会读取 `~/.codex/auth.json`
+   - Claude Code 支持 `CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_CREDENTIALS_PATH`，或 `~/.claude/.credentials.json`
+   - ACP agent 条目与 model provider 是分开配置的——如果你配置了 `acp_agents.codex`，请把它指向一个 Codex ACP 适配器，例如 `npx -y @zed-industries/codex-acp`
+   - 在 macOS 上，如有需要可显式导出 Claude Code 的认证信息：
 
    ```bash
    eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
    ```
 
-   API keys can also be set manually in `.env` (recommended) or exported in your shell:
+   API key 也可以手动写入 `.env` 文件（推荐）或在 shell 中导出：
 
    ```bash
    OPENAI_API_KEY=your-openai-api-key
@@ -210,207 +252,128 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
    </details>
 
-### Running the Application
+### 运行应用
 
-#### Deployment Sizing
+#### 部署建议与资源规划
 
-Use the table below as a practical starting point when choosing how to run DeerFlow:
+可以先按下面的资源档位来选择 DeerFlow 的运行方式：
 
-| Deployment target | Starting point | Recommended | Notes |
+| 部署场景 | 起步配置 | 推荐配置 | 说明 |
 |---------|-----------|------------|-------|
-| Local evaluation / `make dev` | 4 vCPU, 8 GB RAM, 20 GB free SSD | 8 vCPU, 16 GB RAM | Good for one developer or one light session with hosted model APIs. `2 vCPU / 4 GB` is usually not enough. |
-| Docker development / `make docker-start` | 4 vCPU, 8 GB RAM, 25 GB free SSD | 8 vCPU, 16 GB RAM | Image builds, bind mounts, and sandbox containers need more headroom than pure local dev. |
-| Long-running server / `make up` | 8 vCPU, 16 GB RAM, 40 GB free SSD | 16 vCPU, 32 GB RAM | Preferred for shared use, multi-agent runs, report generation, or heavier sandbox workloads. |
+| 本地体验 / `make dev` | 4 vCPU、8 GB 内存、20 GB SSD 可用空间 | 8 vCPU、16 GB 内存 | 适合单个开发者或单个轻量会话，且模型走外部 API。`2 核 / 4 GB` 通常跑不稳。 |
+| Docker 开发 / `make docker-start` | 4 vCPU、8 GB 内存、25 GB SSD 可用空间 | 8 vCPU、16 GB 内存 | 镜像构建、源码挂载和 sandbox 容器都会比纯本地模式更吃资源。 |
+| 长期运行服务 / `make up` | 8 vCPU、16 GB 内存、40 GB SSD 可用空间 | 16 vCPU、32 GB 内存 | 更适合共享环境、多 agent 任务、报告生成或更重的 sandbox 负载。 |
 
-- These numbers cover DeerFlow itself. If you also host a local LLM, size that service separately.
-- Linux plus Docker is the recommended deployment target for a persistent server. macOS and Windows are best treated as development or evaluation environments.
-- If CPU or memory usage stays pinned, reduce concurrent runs first, then move to the next sizing tier.
+- 上面的配置只覆盖 DeerFlow 本身；如果你还要本机部署本地大模型，请单独为模型服务预留资源。
+- 持续运行的服务更推荐使用 Linux + Docker。macOS 和 Windows 更适合作为开发机或体验环境。
+- 如果 CPU 或内存长期打满，先降低并发会话或重任务数量，再考虑升级到更高一档配置。
 
-#### Option 1: Docker (Recommended)
+#### 方式一：Docker（推荐）
 
-**Development** (hot-reload, source mounts):
-
-```bash
-make docker-init    # Pull sandbox image (only once or when image updates)
-make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
-```
-
-`make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
-
-Docker builds use the upstream `uv` registry by default. If you need faster mirrors in restricted networks, export `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` and `NPM_REGISTRY=https://registry.npmmirror.com` before running `make docker-init` or `make docker-start`.
-
-Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
-
-> [!TIP]
-> On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.
-
-**Production** (builds images locally, mounts runtime config and data):
+**开发模式**（支持热更新，挂载源码）：
 
 ```bash
-make up     # Build images and start all production services
-make down   # Stop and remove containers
+make docker-init    # 拉取 sandbox 镜像（首次运行或镜像更新时执行）
+make docker-start   # 启动服务（会根据 config.yaml 自动判断 sandbox 模式）
 ```
 
-Access: http://localhost:2026
+如果 `config.yaml` 使用的是 provisioner 模式（`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` 且配置了 `provisioner_url`），`make docker-start` 才会启动 `provisioner`。
 
-DeerFlow requires PostgreSQL for persistence. Set `DATABASE_URL` to a
-`postgresql://...` or `postgresql+asyncpg://...` connection URL; the unified
-`database` section supplies the LangGraph checkpointer, LangGraph Store, and
-DeerFlow application data. PostgreSQL drivers are installed by default, and
-the former independent `checkpointer` section is no longer accepted. Runtime
-startup validates the configured database but does not create it; provision the
-target database before starting DeerFlow.
-
-### PostgreSQL final baseline (M7)
-
-DeerFlow supports only a fresh PostgreSQL database. The supported installation sequence is:
-create an empty database → `make setup-db` → `make start`. `make setup-db` installs the sole
-Alembic revision `0001_project_saas_baseline`, then idempotently initializes the builtin system
-asset catalog, LangGraph schema, and default project. `make check-db` performs a read-only check
-of the revision and required relations.
-
-An existing M1–M6 revision, a nonempty schema without `alembic_version`, or a database with an
-unknown relation is never upgraded, cleared, or rewritten automatically. Setup returns
-`M7_RECREATE_REQUIRED` before any DDL; create a new empty database and rerun `make setup-db`.
-Baseline downgrade is always refused, and the old SQLite, shared-asset, private-work, Automation,
-and reliability migration commands have been removed.
+**生产模式**（本地构建镜像，并挂载运行期配置与数据）：
 
 ```bash
-export POSTGRES_ADMIN_URL="postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres"
-export DATABASE_URL="postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow"
-make setup-db
-make check-db
-make start
+make up     # 构建镜像并启动全部生产服务
+make down   # 停止并移除容器
 ```
 
-The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
+> [!NOTE]
+> Gateway、Worker 和可选 Scheduler 是独立进程；nginx 将 `/api/*` 直接转发给 Gateway，Agent graph 只由 Worker 执行。
 
-> [!IMPORTANT]
-> In the final M7 runtime, project-private and Automation Runs are durable jobs consumed by the independent Worker; Gateway only admits and reads them. Start Gateway, Worker, and—when `scheduler.enabled=true`—Scheduler as separate roles. Scheduler owns and verifies one PostgreSQL session advisory lock and only admits due work. Worker persists stream frames before notification, while Gateway SSE replay honors canonical `Last-Event-ID`; the frontend stores and deduplicates cursors per account/project/thread. M7 is awaiting final independent closure review, and M8 release acceptance remains pending.
+访问地址：http://localhost:2026
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
+更完整的 Docker 开发说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-#### Option 2: Local Development
+#### 方式二：本地开发
 
-If you prefer running services locally:
+如果你更希望直接在本地启动各个服务：
 
-Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` reads `config.yaml` from the canonical repository root unless `DEER_FLOW_CONFIG_PATH` points to an explicit file. Runtime state defaults to `.deer-flow` and can be moved with `DEER_FLOW_HOME`. Run `make doctor` to verify configuration, final-schema readiness, and service prerequisites before starting.
-On Windows, run the local development flow from Git Bash. Native `cmd.exe` and PowerShell shells are not supported for the bash-based service scripts, and WSL is not guaranteed because some scripts rely on Git for Windows utilities such as `cygpath`.
+前提：先完成上面的“配置”步骤（`make setup`）。`make dev` 默认只读取 canonical 仓库根目录下的 `config.yaml`；如需使用其他文件，只能通过 `DEER_FLOW_CONFIG_PATH` 显式指定。运行期状态默认写到 `.deer-flow`，可用 `DEER_FLOW_HOME` 覆盖。启动前先运行 `make doctor` 校验配置、final schema readiness 和服务前置条件。
+在 Windows 上，请使用 Git Bash 运行本地开发流程。基于 bash 的服务脚本不支持直接在原生 `cmd.exe` 或 PowerShell 中执行，且 WSL 也不保证可用，因为部分脚本依赖 Git for Windows 的 `cygpath` 等工具。
 
-1. **Check prerequisites**:
+1. **检查依赖环境**：
    ```bash
-   make check  # Verifies Node.js 22+, pnpm, uv, nginx
+   make check  # 校验 Node.js 22+、pnpm、uv、nginx
    ```
 
-2. **Install dependencies**:
+2. **安装依赖**：
    ```bash
-   make install  # Install backend + frontend dependencies + pre-commit hooks
+   make install  # 安装 backend + frontend 依赖
    ```
 
-3. **(Optional) Pre-pull sandbox image**:
+3. **（可选）预拉取 sandbox 镜像**：
    ```bash
-   # Recommended if using Docker/Container-based sandbox
+   # 如果使用 Docker / Container sandbox，建议先执行
    make setup-sandbox
    ```
 
-4. **(Optional) Load sample memory data for local review**:
-   ```bash
-   python scripts/load_memory_sample.py
-   ```
-   This copies the sample fixture into the default local runtime memory file. Project Memory review uses the entered project's `/projects/{project_slug}/memory` page.
-   See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the shortest review flow.
-
-5. **Start services**:
+4. **启动服务**：
    ```bash
    make dev
    ```
 
-6. **Access**: http://localhost:2026
+5. **访问地址**：http://localhost:2026
 
-#### Startup Modes
+### 进阶配置
+#### Sandbox 模式
 
-DeerFlow runs Gateway, Worker, and optional Scheduler as separate roles. Development mode enables hot-reload; production mode uses a pre-built frontend.
+DeerFlow 支持多种 sandbox 执行方式：
+- **本地执行**（直接在宿主机上运行 sandbox 代码）
+- **Docker 执行**（在隔离的 Docker 容器里运行 sandbox 代码）
+- **Docker + Kubernetes 执行**（通过 provisioner 服务在 Kubernetes Pod 中运行 sandbox 代码）
 
-| | **Local Foreground** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
-|---|---|---|---|---|
-| **Dev** | `./scripts/serve.sh --dev`<br/>`make dev` | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon` | `./scripts/docker.sh start`<br/>`make docker-start` | — |
-| **Prod** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | — | `./scripts/deploy.sh`<br/>`make up` |
+Docker 开发时，服务启动行为会遵循 `config.yaml` 里的 sandbox 模式。在 Local / Docker 模式下，不会启动 `provisioner`。
 
-| Action | Local | Docker Dev | Docker Prod |
-|---|---|---|---|
-| **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
-| **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
-
-Nginx forwards `/api/*` directly to Gateway. Agent graph execution remains Worker-only.
-
-#### Docker Production Deployment
-
-`deploy.sh` supports building and starting separately:
-
-```bash
-# One-step (build + start)
-deploy.sh
-
-# Two-step (build once, start later)
-deploy.sh build              # build all images
-deploy.sh start              # start pre-built images
-
-# Stop
-deploy.sh down
-```
-
-### Advanced
-#### Sandbox Mode
-
-DeerFlow supports multiple sandbox execution modes:
-- **Local Execution** (runs sandbox code directly on the host machine)
-- **Docker Execution** (runs sandbox code in isolated Docker containers)
-- **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
-
-For Docker development, service startup follows `config.yaml` sandbox mode. In Local/Docker modes, `provisioner` is not started.
-
-See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
+如果要配置你自己的模式，参见 [Sandbox 配置指南](backend/docs/CONFIGURATION.md#sandbox)。
 
 #### MCP Server
 
-System administrators publish system MCP definitions through `/admin/assets/mcp`, while project
-members manage project MCP definitions and pinned system bindings under
-`/projects/{project_slug}/mcp`. Definitions and immutable versions live in PostgreSQL. Gateway
-admission persists the exact MCP/Credential-grant snapshot for each Run; Worker materializes only
-that snapshot. HTTP/SSE OAuth and stdio transports remain supported, but secrets are stored only as
-encrypted Credential envelopes and never in MCP definitions or browser caches. See the
-[MCP Server Guide](backend/docs/MCP_SERVER.md) for transport details.
+System admin 通过 `/admin/assets/mcp` 发布系统 MCP；项目成员在
+`/projects/{project_slug}/mcp` 管理项目 MCP 和固定的系统 binding。定义与不可变版本存入
+PostgreSQL；Gateway admission 为每个 Run 固定 exact MCP/Credential-grant snapshot，Worker 只
+materialize 该 snapshot。HTTP/SSE OAuth 和 stdio transport 继续支持，但 secret 只存入加密的
+Credential envelope，不进入 MCP 定义或浏览器 cache。详细说明见
+[MCP Server 指南](backend/docs/MCP_SERVER.md)。
 
-#### IM Channels
+#### IM 渠道
 
-DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
+DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
-DeerFlow supports project-bound IM channel connections and reuses the configured outbound `channels.*` transports, so no public IP or provider callback URL is required. Connections and provider availability use `/api/projects/{project_id}/connections*`; bound text runs in that exact PostgreSQL account, project, owner, Agent, and connection scope. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and operational notes.
+DeerFlow 支持 project-bound IM 渠道连接，并复用配置的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。Connections 和 provider availability 使用 `/api/projects/{project_id}/connections*`；绑定后的文本消息只在 PostgreSQL 中精确解析出的 account、project、owner、Agent 和 connection 作用域运行。设置和运维说明参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
 
-| Channel | Transport | Difficulty |
+| 渠道 | 传输方式 | 上手难度 |
 |---------|-----------|------------|
-| Telegram | Bot API (long-polling) | Easy |
-| Slack | Socket Mode | Moderate |
-| Feishu / Lark | WebSocket | Moderate |
-| WeChat | Tencent iLink (long-polling) | Moderate |
-| WeCom | WebSocket | Moderate |
-| DingTalk | Stream Push (WebSocket) | Moderate |
+| Telegram | Bot API（long-polling） | 简单 |
+| Slack | Socket Mode | 中等 |
+| Feishu / Lark | WebSocket | 中等 |
+| WeChat | Tencent iLink（long-polling） | 中等 |
+| 企业微信智能机器人 | WebSocket | 中等 |
+| 钉钉 | Stream Push（WebSocket） | 中等 |
 
-**Configuration in `config.yaml`:**
+**`config.yaml` 中的配置示例：**
 
 ```yaml
 channels:
-  # Auxiliary Gateway command base URL (default: http://localhost:8001/api)
+  # 辅助 Gateway command base URL（默认：http://localhost:8001/api）
   langgraph_url: http://localhost:8001/api
-  # Gateway API URL (default: http://localhost:8001)
+  # Gateway API URL（默认：http://localhost:8001）
   gateway_url: http://localhost:8001
 
   feishu:
     enabled: true
     app_id: $FEISHU_APP_ID
     app_secret: $FEISHU_APP_SECRET
-    # domain: https://open.feishu.cn       # China (default)
-    # domain: https://open.larksuite.com   # International
+    # domain: https://open.feishu.cn       # 国内版（默认）
+    # domain: https://open.larksuite.com   # 国际版
 
   wecom:
     enabled: true
@@ -420,20 +383,20 @@ channels:
   slack:
     enabled: true
     bot_token: $SLACK_BOT_TOKEN     # xoxb-...
-    app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
-    allowed_users: []               # empty = allow all
+    app_token: $SLACK_APP_TOKEN     # xapp-...（Socket Mode）
+    allowed_users: []               # 留空表示允许所有人
 
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # empty = allow all
+    allowed_users: []               # 留空表示允许所有人
 
   wechat:
     enabled: false
     bot_token: $WECHAT_BOT_TOKEN
     ilink_bot_id: $WECHAT_ILINK_BOT_ID
-    qrcode_login_enabled: true      # optional: allow first-time QR bootstrap when bot_token is absent
-    allowed_users: []               # empty = allow all
+    qrcode_login_enabled: true      # 可选：bot_token 缺失时允许首次扫码登录引导
+    allowed_users: []               # 留空表示允许所有人
     polling_timeout: 35
     state_dir: ./.deer-flow/wechat/state
     max_inbound_image_bytes: 20971520
@@ -443,18 +406,17 @@ channels:
 
   dingtalk:
     enabled: true
-    client_id: $DINGTALK_CLIENT_ID             # Client ID of your DingTalk application
-    client_secret: $DINGTALK_CLIENT_SECRET     # Client Secret of your DingTalk application
-    allowed_users: []                          # empty = allow all
-    card_template_id: ""                       # Optional: AI Card template ID for streaming typewriter effect
+    client_id: $DINGTALK_CLIENT_ID             # 钉钉开放平台 ClientId
+    client_secret: $DINGTALK_CLIENT_SECRET     # 钉钉开放平台 ClientSecret
+    allowed_users: []                          # 留空表示允许所有人
+    card_template_id: ""                       # 可选：AI 卡片模板 ID，用于流式打字机效果
 ```
 
-Project-bound IM channel workers resolve the persisted connection row, including its fixed
-Agent version, then admit the exact project-private Run through Gateway's internal admission
-service. Message fields and provider-wide configuration are never project, owner, membership,
-or Agent authority.
+Project-bound IM worker 会从 PostgreSQL connection row 恢复固定 Agent version，再通过 Gateway
+内部 admission service 创建 exact project-private Run。消息字段和 provider-wide 配置都不能作为
+project、owner、membership 或 Agent authority。
 
-Set the corresponding API keys in your `.env` file:
+在 `.env` 里设置对应的 API key：
 
 ```bash
 # Telegram
@@ -472,91 +434,75 @@ FEISHU_APP_SECRET=your_app_secret
 WECHAT_BOT_TOKEN=your_ilink_bot_token
 WECHAT_ILINK_BOT_ID=your_ilink_bot_id
 
-# WeCom
+# 企业微信智能机器人
 WECOM_BOT_ID=your_bot_id
 WECOM_BOT_SECRET=your_bot_secret
 
-# DingTalk
+# 钉钉
 DINGTALK_CLIENT_ID=your_client_id
 DINGTALK_CLIENT_SECRET=your_client_secret
 ```
 
-**Telegram Setup**
+**Telegram 配置**
 
-1. Chat with [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the HTTP API token.
-2. Set `TELEGRAM_BOT_TOKEN` in `.env` and enable the channel in `config.yaml`.
+1. 打开 [@BotFather](https://t.me/BotFather)，发送 `/newbot`，复制生成的 HTTP API token。
+2. 在 `.env` 中设置 `TELEGRAM_BOT_TOKEN`，并在 `config.yaml` 里启用该渠道。
 
-**Slack Setup**
+**Slack 配置**
 
-1. Create a Slack App at [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch.
-2. Under **OAuth & Permissions**, add Bot Token Scopes: `app_mentions:read`, `chat:write`, `im:history`, `im:read`, `im:write`, `files:write`.
-3. Enable **Socket Mode** → generate an App-Level Token (`xapp-…`) with `connections:write` scope.
-4. Under **Event Subscriptions**, subscribe to bot events: `app_mention`, `message.im`.
-5. Set `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in `.env` and enable the channel in `config.yaml`.
+1. 前往 [api.slack.com/apps](https://api.slack.com/apps) 创建 Slack App：Create New App → From scratch。
+2. 在 **OAuth & Permissions** 中添加 Bot Token Scopes：`app_mentions:read`、`chat:write`、`im:history`、`im:read`、`im:write`、`files:write`。
+3. 启用 **Socket Mode**，生成带 `connections:write` 权限的 App-Level Token（`xapp-...`）。
+4. 在 **Event Subscriptions** 中订阅 bot events：`app_mention`、`message.im`。
+5. 在 `.env` 中设置 `SLACK_BOT_TOKEN` 和 `SLACK_APP_TOKEN`，并在 `config.yaml` 中启用该渠道。
 
-**Feishu / Lark Setup**
+**Feishu / Lark 配置**
 
-1. Create an app on [Feishu Open Platform](https://open.feishu.cn/) → enable **Bot** capability.
-2. Add permissions: `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
-3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
-4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
+1. 在 [飞书开放平台](https://open.feishu.cn/) 创建应用，并启用 **Bot** 能力。
+2. 添加权限：`im:message`、`im:message.p2p_msg:readonly`、`im:resource`。
+3. 在 **事件订阅** 中订阅 `im.message.receive_v1`，连接方式选择 **长连接**。
+4. 复制 App ID 和 App Secret，在 `.env` 中设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，并在 `config.yaml` 中启用该渠道。
 
-**WeChat Setup**
+**WeChat 配置**
 
-1. Enable the `wechat` channel in `config.yaml`.
-2. Either set `WECHAT_BOT_TOKEN` in `.env`, or set `qrcode_login_enabled: true` for first-time QR bootstrap.
-3. When `bot_token` is absent and QR bootstrap is enabled, watch backend logs for the QR content returned by iLink and complete the binding flow.
-4. After the QR flow succeeds, DeerFlow persists the acquired token under `state_dir` for later restarts.
-5. For Docker Compose deployments, keep `state_dir` on a persistent volume so the `get_updates_buf` cursor and saved auth state survive restarts.
+1. 在 `config.yaml` 中启用 `wechat` 渠道。
+2. 在 `.env` 中设置 `WECHAT_BOT_TOKEN`，或者把 `qrcode_login_enabled` 设为 `true` 以便首次扫码登录引导。
+3. 当 `bot_token` 缺失且启用了扫码引导时，留意后端日志里 iLink 返回的二维码内容，并完成绑定流程。
+4. 扫码流程成功后，DeerFlow 会把获取到的 token 持久化到 `state_dir`，便于后续重启复用。
+5. Docker Compose 部署时，请把 `state_dir` 放在持久化卷上，这样 `get_updates_buf` 游标和已保存的登录状态才能在重启后保留。
 
-**WeCom Setup**
+**企业微信智能机器人配置**
 
-1. Create a bot on the WeCom AI Bot platform and obtain the `bot_id` and `bot_secret`.
-2. Enable `channels.wecom` in `config.yaml` and fill in `bot_id` / `bot_secret`.
-3. Set `WECOM_BOT_ID` and `WECOM_BOT_SECRET` in `.env`.
-4. Make sure backend dependencies include `wecom-aibot-python-sdk`. The channel uses a WebSocket long connection and does not require a public callback URL.
-5. The current integration supports inbound text, image, and file messages. Final images/files generated by the agent are also sent back to the WeCom conversation.
+1. 在企业微信智能机器人平台创建机器人，获取 `bot_id` 和 `bot_secret`。
+2. 在 `config.yaml` 中启用 `channels.wecom`，并填入 `bot_id` / `bot_secret`。
+3. 在 `.env` 中设置 `WECOM_BOT_ID` 和 `WECOM_BOT_SECRET`。
+4. 安装后端依赖时确保包含 `wecom-aibot-python-sdk`，渠道会通过 WebSocket 长连接接收消息，无需公网回调地址。
+5. 当前支持文本、图片和文件入站消息；agent 生成的最终图片/文件也会回传到企业微信会话中。
 
-**DingTalk Setup**
+**钉钉配置**
 
-1. Create a DingTalk application in the [DingTalk Developer Console](https://open.dingtalk.com/) and enable **Robot** capability.
-2. Set the message receiving mode to **Stream Mode** in the robot configuration page.
-3. Copy the `Client ID` and `Client Secret`, set `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET` in `.env`, and enable the channel in `config.yaml`.
-4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
+1. 在 [钉钉开放平台](https://open.dingtalk.com/) 创建应用，并启用 **机器人** 能力。
+2. 在机器人配置页面设置消息接收模式为 **Stream模式**。
+3. 复制 `Client ID` 和 `Client Secret`，在 `.env` 中设置 `DINGTALK_CLIENT_ID` 和 `DINGTALK_CLIENT_SECRET`，并在 `config.yaml` 中启用该渠道。
+4. *（可选）* 如需开启流式 AI 卡片回复（打字机效果），请在[钉钉卡片平台](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card)创建 **AI 卡片**模板，然后在 `config.yaml` 中将 `card_template_id` 设为该模板 ID。同时需要申请 `Card.Streaming.Write` 和 `Card.Instance.Write` 权限。
 
+**命令**
 
-When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. The read-only `/models` channel command uses `channels.gateway_url`, which must target the Gateway service name (for example `http://gateway:8001`), not `localhost`. Project-bound Run admission is process-local and does not use `channels.langgraph_url`.
+渠道连接完成后，你可以直接在聊天窗口里和 DeerFlow 交互：
 
-**Commands**
-
-Once a channel is connected, you can interact with DeerFlow directly from the chat:
-
-| Command | Description |
+| 命令 | 说明 |
 |---------|-------------|
-| `/models` | List available models |
-| `/help` | Show help |
-| `/<skill-name> <task>` | Activate an enabled skill for one project-scoped turn |
+| `/models` | 列出可用模型 |
+| `/help` | 查看帮助 |
+| `/<skill-name> <task>` | 在项目作用域内激活一个技能执行本轮任务 |
 
-> Messages without a command prefix are treated as regular project chat. Only the commands listed above are accepted; every other slash command returns an unsupported-command response and is never submitted as an ordinary prompt.
+> 没有命令前缀的消息会被当作普通项目聊天处理。已移除的旧命令（`/bootstrap`、`/goal`、`/new`、`/status`、`/memory`）会返回不支持命令的稳定响应，绝不会作为普通 prompt 提交。
 
-#### Request Trace Correlation
+#### LangSmith 链路追踪
 
-Gateway request trace correlation is disabled by default so existing HTTP responses and log formats stay unchanged. To enable it, set:
+DeerFlow 内置了 [LangSmith](https://smith.langchain.com) 集成，用于可观测性。启用后，所有 LLM 调用、agent 运行和工具执行都会被追踪，并在 LangSmith 仪表盘中展示。
 
-```yaml
-logging:
-  enhance:
-    enabled: true
-    format: text
-```
-
-When enabled, every Gateway HTTP response includes `X-Trace-Id`, logs include `trace_id`, and Langfuse traces created by that request include `metadata.deerflow_trace_id` with the same value.
-
-#### LangSmith Tracing
-
-DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.
-
-Add the following to your `.env` file:
+在 `.env` 文件中添加以下配置：
 
 ```bash
 LANGSMITH_TRACING=true
@@ -565,321 +511,181 @@ LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
 LANGSMITH_PROJECT=xxx
 ```
 
-#### Langfuse Tracing
+Docker 部署时，追踪默认关闭。在 `.env` 中设置 `LANGSMITH_TRACING=true` 和 `LANGSMITH_API_KEY` 即可启用。
 
-DeerFlow also supports [Langfuse](https://langfuse.com) observability for LangChain-compatible runs.
+## 从 Deep Research 到 Super Agent Harness
 
-Add the following to your `.env` file:
+DeerFlow 最初是一个 Deep Research 框架，后来社区把它一路推到了更远的地方。上线之后，开发者拿它去做的事情早就不止研究：搭数据流水线、生成演示文稿、快速起 dashboard、自动化内容流程，很多方向一开始连我们自己都没想到。
 
-```bash
-LANGFUSE_TRACING=true
-LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
-LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
-LANGFUSE_BASE_URL=https://cloud.langfuse.com
-```
+这让我们意识到一件事：DeerFlow 不只是一个研究工具。它更像一个 **harness**，一个真正让 agents 把事情做完的运行时基础设施。
 
-If you are using a self-hosted Langfuse instance, set `LANGFUSE_BASE_URL` to your deployment URL.
+所以我们把它从头重做了一遍。
 
-**Trace correlation fields.** Every agent run is annotated with Langfuse's reserved trace attributes so the Sessions and Users pages light up automatically:
+DeerFlow 2.0 不再是一个需要你自己拼装的 framework。它是一个开箱即用、同时又足够可扩展的 super agent harness。基于 LangGraph 和 LangChain 构建，默认就带上了 agent 真正会用到的关键能力：文件系统、memory、skills、sandbox 执行环境，以及为复杂多步骤任务做规划、拉起 sub-agents 的能力。
 
-- `session_id` = LangGraph `thread_id` — groups every trace of the same conversation
-- `user_id` = effective user from `get_effective_user_id()` (falls back to `default` in no-auth mode)
-- `trace_name` = assistant id (defaults to `lead-agent`)
-- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omitted when not set)
-- `metadata.deerflow_trace_id` = DeerFlow request correlation id, matching `X-Trace-Id` when request trace correlation is enabled
+你可以直接拿来用，也可以拆开重组，改成你自己的样子。
 
-Worker injects these fields into `RunnableConfig.metadata` at the `run_agent()` graph invocation root, so any LangChain-compatible callback can read them. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment.
+## 核心特性
 
-#### Using Both Providers
+### Skills 与 Tools
 
-If both LangSmith and Langfuse are enabled, DeerFlow attaches both tracing callbacks and reports the same model activity to both systems.
+Skill 是不可变、带版本的 project 或 system asset。System admin 在
+`/admin/assets/skills` 发布系统 Skill；项目成员在 `/projects/{project_slug}/skills` 创建项目 Skill
+并固定启用的系统版本。创建和发布会先运行 deterministic SkillScan 与 contextual scanner，再把
+version 写入 PostgreSQL。
 
-If a provider is explicitly enabled but missing required credentials, or if its callback fails to initialize, DeerFlow fails fast when tracing is initialized during model creation and the error message names the provider that caused the failure.
+Gateway admission 会为每个 Run 固定 exact Agent、Skill、MCP version。Worker 只把该 admitted
+snapshot 中的 Skill bytes materialize 到 run-owned read-only `/mnt/skills`；运行时服务不会发现或修改
+ambient Skill 目录。`/data-analysis ...` 这类 slash activation 也只能选择 exact snapshot 中启用的 Skill。
 
-For Docker deployments, tracing is disabled by default. Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in your `.env` to enable it.
-
-## From Deep Research to Super Agent Harness
-
-DeerFlow started as a Deep Research framework — and the community ran with it. Since launch, developers have pushed it far beyond research: building data pipelines, generating slide decks, spinning up dashboards, automating content workflows. Things we never anticipated.
-
-That told us something important: DeerFlow wasn't just a research tool. It was a **harness** — a runtime that gives agents the infrastructure to actually get work done.
-
-So we rebuilt it from scratch.
-
-DeerFlow 2.0 is no longer a framework you wire together. It's a super agent harness — batteries included, fully extensible. Built on LangGraph and LangChain, it ships with everything an agent needs out of the box: a filesystem, memory, skills, sandbox-aware execution, and the ability to plan and spawn sub-agents for complex, multi-step tasks.
-
-Use it as-is. Or tear it apart and make it yours.
-
-## Core Features
-
-### Skills & Tools
-
-A Skill is an immutable versioned project or system asset. System administrators publish system
-Skills under `/admin/assets/skills`; project members create project Skills and pin enabled system
-versions under `/projects/{project_slug}/skills`. Creation and publication run the deterministic
-SkillScan plus the contextual scanner before PostgreSQL stores the version.
-
-Gateway admission records the exact Agent, Skill, and MCP versions for every Run. Worker exposes
-only those admitted Skill bytes through a run-owned read-only `/mnt/skills` mount; runtime services
-do not discover or mutate ambient Skill directories. Slash activation such as `/data-analysis ...`
-can select only an enabled Skill from that exact snapshot.
-
-The final toolset combines built-in sandbox tools with the MCP tools fixed in the admitted snapshot.
-Credentials are resolved only from approved same-scope grants and are injected at dispatch without
-entering prompts, API payloads, browser caches, checkpoints, or logs.
+最终 toolset 由内置 sandbox tools 和 admitted snapshot 中固定的 MCP tools 组成。Credential 只从同
+scope 已批准的 grant 解析，并在 dispatch 时注入，不进入 prompt、API payload、browser cache、checkpoint
+或日志。
 
 ### Session Goals
 
-Use `/goal <completion condition>` to attach one active completion condition to the current thread. The goal is thread-scoped state, not a skill activation, so it stays active across turns until DeerFlow determines it has been satisfied or you clear it.
+用 `/goal <完成条件>` 为当前 thread 绑定一个激活态的完成条件。这个 goal 是 thread 维度的状态，而不是技能激活，所以它会跨轮次持续生效，直到 DeerFlow 判定它已被满足、或者你手动清除它。
 
-Supported commands:
+支持的命令：
 
 ```text
 /goal finish the implementation and make all tests pass
-/goal              # show the active goal
-/goal clear        # clear it
+/goal              # 查看当前激活的 goal
+/goal clear        # 清除它
 ```
 
-After each Gateway-backed run, DeerFlow evaluates the visible conversation against the active goal with a non-thinking evaluator model. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the goal is satisfied, DeerFlow clears it automatically and publishes the updated thread state.
+每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容拿去和激活的 goal 比对。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。
 
-The Web UI shows the active goal above the composer, and the same command is available from the TUI. IM channels do not expose `/goal`; project-bound IM runs use ordinary messages or an enabled slash skill.
+Web UI 会在输入框上方展示当前激活的 goal，TUI 也支持同一命令。IM 渠道不再提供 `/goal`；项目绑定的 IM run 使用普通消息或已启用的 slash skill。
 
-### Manual Context Compaction
+### 手动上下文压缩
 
-Use `/compact` in the Web UI composer to summarize older context for the current thread. DeerFlow keeps the full chat visible, but future model calls use the compacted summary plus recent messages. The command is ignored when there is not enough history to compact, and it is blocked while the thread has a run in flight.
+在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
 
 ### Sub-Agents
 
-Complex tasks rarely fit in a single pass. DeerFlow decomposes them.
+复杂任务通常不可能一次完成，DeerFlow 会先拆解，再执行。
 
-The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions. Sub-agents run in parallel when possible, report back structured results, and the lead agent synthesizes everything into a coherent output. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step.
+lead agent 可以按需动态拉起 sub-agents。每个 sub-agent 都有自己独立的上下文、工具和终止条件。只要条件允许，它们就会并行运行，返回结构化结果，最后再由 lead agent 汇总成一份完整输出。
 
-This is how DeerFlow handles tasks that take minutes to hours: a research task might fan out into a dozen sub-agents, each exploring a different angle, then converge into a single report — or a website — or a slide deck with generated visuals. One harness, many hands.
+这也是 DeerFlow 能处理从几分钟到几小时任务的原因。比如一个研究任务，可以拆成十几个 sub-agents，分别探索不同方向，最后合并成一份报告，或者一个网站，或者一套带生成视觉内容的演示文稿。一个 harness，多路并行。
 
-### Sandbox & File System
+### Sandbox 与文件系统
 
-DeerFlow doesn't just *talk* about doing things. It has its own computer.
+DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电脑”。
 
-Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
+每个任务都运行在隔离的 Docker 容器里，里面有完整的文件系统，包括 skills、workspace、uploads、outputs。agent 可以读写和编辑文件，可以执行 bash 命令和代码，也可以查看图片。整个过程都在 sandbox 内完成，可审计、会隔离，不会在不同 session 之间互相污染。
 
-After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes. Large, binary, or sensitive-looking files are shown as metadata only.
+这就是“带工具的聊天机器人”和“真正有执行环境的 agent”之间的差别。
 
-With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log.
-
-This is the difference between a chatbot with tool access and an agent with an actual execution environment.
-
-```
-# Paths inside the sandbox container
+```text
+# sandbox 容器内的路径
 /mnt/user-data/
-├── uploads/          ← your files
-├── workspace/        ← agents' working directory
-└── outputs/          ← final deliverables
+├── uploads/          ← 你的文件
+├── workspace/        ← agents 的工作目录
+└── outputs/          ← 最终交付物
 ```
 
 ### Context Engineering
 
-**Isolated Sub-Agent Context**: Each sub-agent runs in its own isolated context. This means that the sub-agent will not be able to see the context of the main agent or other sub-agents. This is important to ensure that the sub-agent is able to focus on the task at hand and not be distracted by the context of the main agent or other sub-agents.
+**隔离的 Sub-Agent Context**：每个 sub-agent 都在自己独立的上下文里运行。它看不到主 agent 的上下文，也看不到其他 sub-agents 的上下文。这样做的目的很直接，就是让它只聚焦当前任务，不被无关信息干扰。
 
-**Summarization**: Within a session, DeerFlow manages context aggressively — summarizing completed sub-tasks, offloading intermediate results to the filesystem, compressing what's no longer immediately relevant. This lets it stay sharp across long, multi-step tasks without blowing the context window.
+**摘要压缩**：在单个 session 内，DeerFlow 会比较积极地管理上下文，包括总结已完成的子任务、把中间结果转存到文件系统、压缩暂时不重要的信息。这样在长链路、多步骤任务里，它也能保持聚焦，而不会轻易把上下文窗口打爆。
 
-**Strict Tool-Call Recovery**: When a provider or middleware interrupts a tool-call loop, DeerFlow now strips provider-level raw tool-call metadata on forced-stop assistant messages and injects placeholder tool results for dangling calls before the next model invocation. This keeps OpenAI-compatible reasoning models that strictly validate `tool_call_id` sequences from failing with malformed history errors.
+### 长期记忆
 
-### Long-Term Memory
+大多数 agents 会在对话结束后把一切都忘掉，DeerFlow 不一样。
 
-Most agents forget everything the moment a conversation ends. DeerFlow remembers.
+跨 session 使用时，DeerFlow 会逐步积累关于你的持久 memory，包括你的个人偏好、知识背景，以及长期沉淀下来的工作习惯。你用得越多，它越了解你的写作风格、技术栈和重复出现的工作流。memory 保存在本地，控制权也始终在你手里。
 
-Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. Memory is stored locally and stays under your control.
+## 推荐模型
 
-Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
+DeerFlow 对模型没有强绑定，只要实现了 OpenAI 兼容 API 的 LLM，理论上都可以接入。不过在下面这些能力上表现更强的模型，通常会更适合 DeerFlow：
 
-## Recommended Models
+- **长上下文窗口**（100k+ tokens），适合深度研究和多步骤任务
+- **推理能力**，适合自适应规划和复杂拆解
+- **多模态输入**，适合理解图片和视频
+- **稳定的 tool use 能力**，适合可靠的函数调用和结构化输出
 
-DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-compatible API. That said, it performs best with models that support:
+## 定时任务 (Scheduled Tasks)
 
-- **Long context windows** (100k+ tokens) for deep research and multi-step tasks
-- **Reasoning capabilities** for adaptive planning and complex decomposition
-- **Multimodal inputs** for image understanding and video comprehension
-- **Strong tool-use** for reliable function calling and structured outputs
+M5 在 `/projects/{project_slug}/automations` 提供项目 Automation。
+每个 definition 和 occurrence 都按认证账号与当前项目双重隔离。具备服务端下发能力的
+Admin、Editor 和 Runner 可以创建、编辑、暂停、恢复、手动触发、查看和删除自己的
+Automation；Viewer 只能查看自己的 definition 和运行历史。
 
-## Project Automations
+项目 Automation 支持 `once` 和五字段 `cron`，固定使用 `skip` overlap policy，并可选择
+复用私有 thread 或每次创建新的私有 thread。自动和手动触发都会先持久化唯一 occurrence，
+再进入正常的项目私有 run admission。run 一旦 admitted，进程崩溃后只会记录并协调终态，
+不会自动重放可能已经发生的副作用。
 
-M5 adds project Automation at
-`/projects/{project_slug}/automations`. Each definition and occurrence is private to
-the authenticated account and entered project. Admins, Editors, and Runners with the
-server-issued capability can create, edit, pause, resume, manually trigger, inspect,
-and delete their own Automations. Viewers can only inspect their own definitions and
-run history.
+当前限制：
 
-Project Automation supports `once` and five-field `cron` schedules, a fixed `skip`
-overlap policy, and either a reused private thread or a fresh private thread per run.
-Every automatic or manual trigger atomically commits its durable occurrence, private
-Run/snapshot, and `automation_run` job. The independent Worker consumes that job;
-Worker startup and enabled Scheduler startup reconcile terminal state only and never
-replay or interrupt an active admitted Run.
+- 暂时还没有可在对话中创建任务的 `schedule_task` 工具
+- 没有纯文本通知任务
+- 没有渠道或 GitHub 分发目标
+- 第一版没有 `interval` 调度类型
 
-Current limits:
+通过 `config.yaml -> scheduler.enabled` 开启后台轮询。M6 由独立 Scheduler 持有并持续验证
+PostgreSQL session ownership lock；Gateway 不再持有 poller。关闭轮询不影响项目 API 和手动触发，
+手动触发仍使用同一 occurrence/Run/job 原子 admission。独立 Worker、持久化 SSE、通用 jobs/retries、
+配额、审计和通用备份恢复已在 M6 完成。
 
-- No conversation-created `schedule_task` tool yet
-- No text-only notification jobs
-- No channel or GitHub dispatch targets
-- No `interval` schedule type in this first cut
+项目 API 位于 `/api/projects/{project_id}/automations`。M7 当前是等待最终独立分支审查的关闭候选；
+M8 完整发布验收仍未完成，因此当前不能作为完整可发布的多用户 SaaS。
 
-Enable background polling with `config.yaml -> scheduler.enabled` and run the backend
-Scheduler role with `cd backend && make scheduler`. It—not Gateway—holds the PostgreSQL
-scheduler ownership lock and only admits jobs. Disabling polling leaves the project API
-and manual trigger available; manual trigger uses the same atomic occurrence/Run/job
-path. The project-scoped Automation API is the sole public Automation surface, while the existing `scheduled_tasks` and
-`scheduled_task_runs` table names stay as private persistence details. PostgreSQL durable
-stream writing/reading, terminal uniqueness, Gateway SSE reconnect,
-frontend cursor/dedupe, and the atomic project quota core are implemented. Member, storage,
-concurrent-Run, and actual MCP-dispatch quota enforcement are also wired across Gateway,
-Worker, and Scheduler with stable 429/`Retry-After` responses. Tasks 16–17 add operator-only
-encrypted PostgreSQL backup, journal-first purge, restore, and drill commands. Set a distinct 32-byte
-base64 `DEER_FLOW_BACKUP_KEY`, `DATABASE_URL`, and the existing
-`DEER_FLOW_AUDIT_ACTIVE_KEY_ID` / `DEER_FLOW_AUDIT_KEYRING_JSON` audit environment, then
-write only to an external secure directory (never this repository):
+## 文档
 
-```bash
-make backup-db ARGS="--output /secure/backups"
-```
+- [贡献指南](CONTRIBUTING.md) - 开发环境搭建与协作流程
+- [配置指南](backend/docs/CONFIGURATION.md) - 安装与配置说明
+- [架构概览](backend/CLAUDE.md) - 技术架构说明
+- [后端架构](backend/README.md) - 后端架构与 API 参考
 
-The command exports one read-only repeatable-read PostgreSQL snapshot, derives a privacy-safe
-source identity from PostgreSQL system/database authority, and binds that same snapshot to
-fixed `pg_dump --format=custom --no-owner --no-acl --snapshot=...` argv. The database role
-must be allowed to read `pg_control_system()`; otherwise backup fails closed. Connection
-credentials use a temporary `0600` libpq passfile, never process argv, and reach `pg_dump` only
-through an inherited `/dev/fd/N` descriptor; mutable absolute passfile paths are never handed to
-the child. The file is removed before publication through a retained fd-relative directory handle.
-Every archive-path ancestor is opened with no-follow directory semantics, writer work is settled
-before cancellation cleanup, and transient identity-check/unlink/directory-fsync failures retain
-passfile ownership for safe cleanup retry. Passfile ownership begins with the pinned parent, so
-open or later write/fsync/lseek/validation failure cannot bypass that cleanup. When
-`AUTH_JWT_SECRET` is absent, key separation reads the existing
-`DEER_FLOW_HOME/.jwt_secret` without creating or rotating it; missing, unsafe, or unreadable Auth
-material fails closed. Backup first requires the exact M7 root-object inventory, baseline revision,
-and canonical catalog digest, then verifies the same catalog inside the exported snapshot. Archive
-schema version 7 records that fixed revision and digest, the `pg_dump` version, non-empty byte/table
-counts, and a proven contiguous tombstone cursor. It uses per-archive keys
-with counter nonces, no-clobber publication, and a bounded authenticated plaintext spool. The
-chunk AAD binds archive version, revision, digest, source identity, and chunk index, so re-signing
-changed manifest schema fields cannot authenticate unchanged ciphertext. A fully authenticated
-pre-M7 archive returns `UNSUPPORTED_ARCHIVE_SCHEMA` and is never compatibility-restored. The
-format permits at most 65,536 chunks of at most 1 MiB (64 GiB plaintext) and a 16 MiB manifest;
-writer and reader enforce the same limits. A failed or uncommitted audit removes the archive,
-while the successful audit commit is the durable operation commit point: later cancellation or
-engine disposal cannot delete the valid audited archive. Output remains limited to archive ID,
-archive schema version, schema revision/digest, chunk count, and a truncated checksum.
+## ⚠️ 安全使用
 
-M7 does not upgrade an existing M1–M6 database in place. Provision a new empty database and run `make setup-db`; any old revision or unknown nonempty schema fails before DDL with `M7_RECREATE_REQUIRED`.
-Local launch starts Gateway and Worker separately and starts Scheduler only when
-`scheduler.enabled=true`; Docker uses the same roles and Scheduler profile. System-admin readiness
-returns only aggregate role/fleet/ownership state and never PIDs, lock keys, URLs, or tokens.
+### 不恰当的部署可能导致安全风险
 
-Retention purge additionally requires a separate base64 32-byte
-`DEER_FLOW_RECOVERY_JOURNAL_KEY` and an operator-owned journal outside this repository. Each
-encrypted, hash-chained tombstone is fsynced before physical deletion. File and project candidates
-must pass the exact 30-day retention recheck. The recovery-only account workflow requires every
-membership to be inactive and expired, deletes only the owner's private data in the exact retained
-project set, and preserves the User row plus governance, job, audit, and recovery evidence. An
-authenticated journal header binds the PostgreSQL installation identity; the singleton database
-anchor stores its journal ID, committed sequence, and complete envelope-head digest. Purge compares
-the full database prefix with that anchor and updates both in one transaction after journal fsync.
+DeerFlow 具备**系统指令执行、资源操作、业务逻辑调用**等关键高权限能力，默认设计为**部署在本地可信环境（仅本机 127.0.0.1 回环访问）**。若您将 agent 部署至不可信局域网、公网云服务器等可被多终端访问的网络环境，且未采取严格的安全防护措施，可能导致安全风险，例如：
 
-Restore only targets a nonexistent, distinct database named
-`deerflow_restore_<pid>_<32hex>`. It authenticates and validates the M7 archive before any target
-resolution or creation, requires the source to remain exact M7, restores it, replays the journal
-without sequence gaps, runs the exact M7 schema verifier, and writes a restore proof bound to the frozen journal ID,
-final sequence, and head digest. Restore holds the same PostgreSQL advisory authority as purge from
-source-anchor verification through replay, probes, proof, and sensitive workspace cleanup, so a
-concurrent tombstone cannot be omitted. The authenticated dump, passfile, and owned workspace are
-identity-checked, removed, and directory-fsynced before proof; cleanup failure drops the invocation's
-new target and cannot return verified. Unknown workspace files are never adopted or removed. Source
-authority release is explicit and cancellation-settled: cancellation during unlock is rethrown only
-after reliable release, then the invocation-owned target is removed rather than returned as verified.
-The drill drops its generated target only after the same `Restorer` instance hands off an unforgeable
-verified ownership token; pre-create failure, a pre-existing target, or a forged result cannot trigger
-DROP. Restore never changes
-`DATABASE_URL`, starts services, overwrites a database, or cuts traffic. For example:
+- **未授权的非法调用**：agent 功能被未授权的第三方、公网恶意扫描程序探测到，进而发起批量非法调用请求，执行系统命令、文件读写等高危操作，可能导致安全后果。
+- **合规与法律风险**：若 agent 被非法调用用于实施网络攻击、信息窃取等违法违规行为，可能产生法律责任与合规风险。
 
-```bash
-make restore-db ARGS="--archive /secure/backups/<archive> --target-url postgresql://operator@db/deerflow_restore_1234_0123456789abcdef0123456789abcdef --journal /secure/recovery/tombstones.jsonl --execute"
-make drill-restore ARGS="--archive /secure/backups/<archive> --journal /secure/recovery/tombstones.jsonl"
-```
+### 安全使用建议
 
-The complete operator sequence and failure decisions are in the
-[M6 backup and recovery runbook](docs/operations/m6-backup-recovery.md). The drill uses one generated restore database and removes only that database after verification.
-Command output contains only public proof metadata; operators must verify the proof before a
-separate, manual traffic switch.
+**注意：建议您将 DeerFlow 部署在本地可信的网络环境下。** 若您有跨设备、跨网络的部署需求，必须加入严格的安全措施。例如，采取如下手段：
 
-The project-scoped backend API is available at
-`/api/projects/{project_id}/automations`. It provides strict create, list, read,
-update, pause, resume, delete, manual-trigger, run-history, thread-filter, and
-readiness endpoints. Manual trigger requires a UUID `Idempotency-Key`; disabling
-background polling does not disable manual runs. M7 is a closure candidate awaiting
-the final independent branch review. M8 full release acceptance remains pending, so
-DeerFlow is not yet a complete releasable multi-user SaaS.
+- **设置访问 IP 白名单**：使用 `iptables`，或部署硬件防火墙 / 带访问控制（ACL）功能的交换机等，**配置规则设置 IP 白名单**，拒绝其他所有 IP 进行访问。
+- **前置身份验证**：配置反向代理（nginx 等），并**开启高强度的前置身份验证功能**，禁止无任何身份验证的访问。
+- **网络隔离**：若有可能，建议将 agent 和可信设备划分到**同一个专用 VLAN**，与其他网络设备做隔离。
+- **持续关注项目更新**：请持续关注 DeerFlow 项目的安全功能更新。
 
-## Documentation
+## 参与贡献
 
-- [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow
-- [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration instructions
-- [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
-- [Backend Architecture](backend/README.md) - Backend architecture and API reference
+欢迎参与贡献。开发环境、工作流和相关规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## ⚠️ Security Notice
+目前回归测试已经覆盖 Docker sandbox 模式识别，以及 `backend/tests/` 中 provisioner kubeconfig-path 处理相关测试。
 
-### Improper Deployment May Introduce Security Risks
+## 许可证
 
-DeerFlow has key high-privilege capabilities including **system command execution, resource operations, and business logic invocation**, and is designed by default to be **deployed in a local trusted environment (accessible only via the 127.0.0.1 loopback interface)**. If you deploy the agent in untrusted environments — such as LAN networks, public cloud servers, or other multi-endpoint accessible environments — without strict security measures, it may introduce security risks, including:
+本项目采用 [MIT License](./LICENSE) 开源发布。
 
-- **Unauthorized illegal invocation**: Agent functionality could be discovered by unauthorized third parties or malicious internet scanners, triggering bulk unauthorized requests that execute high-risk operations such as system commands and file read/write, potentially causing serious security consequences.
-- **Compliance and legal risks**: If the agent is illegally invoked to conduct cyberattacks, data theft, or other illegal activities, it may result in legal liability and compliance risks.
+## 致谢
 
-### Security Recommendations
+DeerFlow 建立在开源社区大量优秀工作的基础上。所有让 DeerFlow 成为可能的项目和贡献者，我们都心怀感谢。毫不夸张地说，我们是站在巨人的肩膀上继续往前走。
 
-**Note: We strongly recommend deploying DeerFlow in a local trusted network environment.** If you need cross-device or cross-network deployment, you must implement strict security measures, such as:
+特别感谢以下项目带来的关键支持：
 
-- **IP allowlist**: Use `iptables`, or deploy hardware firewalls / switches with Access Control Lists (ACL), to **configure IP allowlist rules** and deny access from all other IP addresses.
-- **Authentication gateway**: Configure a reverse proxy (e.g., nginx) and **enable strong pre-authentication**, blocking any unauthenticated access.
-- **Network isolation**: Where possible, place the agent and trusted devices in the **same dedicated VLAN**, isolated from other network devices.
-- **Stay updated**: Continue to follow DeerFlow's security feature updates.
+- **[LangChain](https://github.com/langchain-ai/langchain)**：它们提供的优秀框架支撑了我们的 LLM 交互与 chains，让整体集成和能力编排顺畅可用。
+- **[LangGraph](https://github.com/langchain-ai/langgraph)**：它们在多 agent 编排上的创新方式，是 DeerFlow 复杂工作流得以成立的重要基础。
 
-## Contributing
+这些项目体现了开源协作真正的力量，我们也很高兴能继续建立在这些基础之上。
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
+### 核心贡献者
 
-Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
-Backend blocking-IO diagnostics are available from the repository root with
-`make detect-blocking-io`: it statically scans backend business code for
-blocking IO that may run on the backend event loop, prints a concise summary,
-and writes complete JSON findings to `.deer-flow/blocking-io-findings.json`.
-The JSON includes compact review records with `priority`, `location`,
-`blocking_call`, `event_loop_exposure`, `reason`, and `code`.
-Gateway artifact serving now forces active web content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
-
-## License
-
-This project is open source and available under the [MIT License](./LICENSE).
-
-## Acknowledgments
-
-DeerFlow is built upon the incredible work of the open-source community. We are deeply grateful to all the projects and contributors whose efforts have made DeerFlow possible. Truly, we stand on the shoulders of giants.
-
-We would like to extend our sincere appreciation to the following projects for their invaluable contributions:
-
-- **[LangChain](https://github.com/langchain-ai/langchain)**: Their exceptional framework powers our LLM interactions and chains, enabling seamless integration and functionality.
-- **[LangGraph](https://github.com/langchain-ai/langgraph)**: Their innovative approach to multi-agent orchestration has been instrumental in enabling DeerFlow's sophisticated workflows.
-
-These projects exemplify the transformative power of open-source collaboration, and we are proud to build upon their foundations.
-
-### Key Contributors
-
-A heartfelt thank you goes out to the core authors of `DeerFlow`, whose vision, passion, and dedication have brought this project to life:
+感谢 `DeerFlow` 的核心作者，是他们的判断、投入和持续推进，才让这个项目真正落地：
 
 - **[Daniel Walnut](https://github.com/hetaoBackend/)**
 - **[Henry Li](https://github.com/magiccube/)**
-
-Your unwavering commitment and expertise have been the driving force behind DeerFlow's success. We are honored to have you at the helm of this journey.
 
 ## Star History
 

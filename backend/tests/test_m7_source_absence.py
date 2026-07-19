@@ -81,6 +81,7 @@ BANNED_PRODUCTION_PATHS = (
     "backend/packages/harness/deerflow/persistence/migrations/versions/0013_project_automation_finalize.py",
     "backend/packages/harness/deerflow/persistence/migrations/versions/0014_project_reliability_expand.py",
     "backend/packages/harness/deerflow/persistence/migrations/versions/0015_project_reliability_finalize.py",
+    "backend/packages/harness/deerflow/persistence/thread_meta/memory.py",
     "backend/packages/harness/deerflow/runtime/events/store/memory.py",
     "backend/packages/harness/deerflow/runtime/runs/store/memory.py",
     "backend/packages/harness/deerflow/runtime/stream_bridge",
@@ -96,6 +97,7 @@ BANNED_PRODUCTION_PATHS = (
     "backend/scripts/migrate_sqlite_to_postgres.py",
     "backend/scripts/migrate_user_isolation.py",
     "backend/scripts/sqlite_inventory.py",
+    "scripts/load_memory_sample.py",
 )
 
 BANNED_ROUTE_LITERALS = frozenset(
@@ -135,6 +137,16 @@ BANNED_IMPORT_PREFIXES = (
 )
 BANNED_RUNTIME_SYMBOLS = frozenset({"setup_agent", "update_agent"})
 
+BANNED_LEGACY_SYMBOLS_BY_PATH = {
+    "backend/packages/harness/deerflow/agents/memory/queue.py": frozenset({"ConversationContext", "MemoryUpdateQueue", "get_memory_queue", "reset_memory_queue"}),
+    "backend/packages/harness/deerflow/agents/memory/storage.py": frozenset({"FileMemoryStorage", "MemoryStorage", "get_memory_storage"}),
+    "backend/packages/harness/deerflow/config/paths.py": frozenset({"memory_file", "agent_memory_file", "user_memory_file", "user_agent_memory_file"}),
+    "backend/packages/harness/deerflow/persistence/thread_meta/base.py": frozenset({"TrustedUnscopedThreadMetaStore"}),
+    "backend/packages/harness/deerflow/persistence/thread_meta/__init__.py": frozenset({"make_thread_store"}),
+    "backend/app/gateway/authz.py": frozenset({"require_permission"}),
+    "backend/app/gateway/deps.py": frozenset({"get_checkpointer", "get_store", "get_thread_store"}),
+}
+
 M7_CHANGED_MARKDOWN_DOCS = (
     "AGENTS.md",
     "backend/AGENTS.md",
@@ -148,13 +160,46 @@ M7_CHANGED_MARKDOWN_DOCS = (
     "docs/superpowers/plans/2026-07-18-project-legacy-cleanup-m7.md",
 )
 
-ACTIVE_OPERATIONAL_DOCS = (
-    "AGENTS.md",
-    "backend/AGENTS.md",
-    "frontend/AGENTS.md",
-    "README.md",
-    "README_zh.md",
-    "docs/operations/m6-backup-recovery.md",
+HISTORICAL_MARKDOWN_PREFIXES = (
+    "docs/superpowers/plans/",
+    "docs/superpowers/specs/",
+    "frontend/public/demo/threads/",
+    "frontend/src/content/en/posts/",
+    "frontend/src/content/zh/posts/",
+)
+HISTORICAL_MARKDOWN_PATHS = frozenset(
+    {
+        "backend/docs/AUTH_DESIGN.md",
+        "backend/docs/AUTH_TEST_PLAN.md",
+        "backend/docs/AUTH_UPGRADE.md",
+        "backend/docs/MEMORY_SETTINGS_REVIEW.md",
+        "backend/docs/rfc-create-deerflow-agent.md",
+    }
+)
+
+ACTIVE_ROOT_MARKDOWN = frozenset(
+    {
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "Install.md",
+        "README.md",
+        "RELEASING.md",
+        "SECURITY.md",
+        "backend/AGENTS.md",
+        "backend/CONTRIBUTING.md",
+        "backend/README.md",
+        "frontend/AGENTS.md",
+        "frontend/README.md",
+        "frontend/about.md",
+    }
+)
+ACTIVE_MARKDOWN_PREFIXES = (
+    "backend/docs/",
+    "deploy/",
+    "docker/",
+    "docs/",
+    "frontend/src/content/",
 )
 
 CONFIG_TOMBSTONES = frozenset(
@@ -209,6 +254,22 @@ def _production_files() -> tuple[Path, ...]:
     nginx_root = REPO_ROOT / "docker" / "nginx"
     nginx_files = (path for path in nginx_root.rglob("*") if path.is_file() and path.suffix == ".conf")
     return tuple(sorted((*backend_files, *frontend_files, *nginx_files)))
+
+
+def _active_markdown_docs(repo_root: Path) -> tuple[Path, ...]:
+    documents: list[Path] = []
+    for path in repo_root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in {".md", ".mdx"}:
+            continue
+        relative = path.relative_to(repo_root).as_posix()
+        if relative not in ACTIVE_ROOT_MARKDOWN and not any(relative.startswith(prefix) for prefix in ACTIVE_MARKDOWN_PREFIXES):
+            continue
+        if relative in HISTORICAL_MARKDOWN_PATHS or any(relative.startswith(prefix) for prefix in HISTORICAL_MARKDOWN_PREFIXES):
+            continue
+        if any(part in {".git", ".next", "node_modules", ".venv"} for part in path.relative_to(repo_root).parts):
+            continue
+        documents.append(path)
+    return tuple(sorted(documents))
 
 
 def _python_imports(path: Path) -> set[str]:
@@ -319,6 +380,14 @@ def _markdown_link_findings(documents: tuple[Path, ...], *, repo_root: Path) -> 
                 decoded_path = unquote(parsed.path)
                 if not decoded_path:
                     continue
+                content_match = re.fullmatch(r"frontend/src/content/(?P<language>[^/]+)/index\.mdx", relative_document)
+                if content_match is not None and decoded_path.startswith("./docs/"):
+                    route = decoded_path.removeprefix("./docs/").rstrip("/")
+                    content_root = repo_root / "frontend" / "src" / "content" / content_match.group("language")
+                    route_candidates = (content_root / f"{route}.mdx", content_root / route / "index.mdx")
+                    if not any(candidate.is_file() for candidate in route_candidates):
+                        findings.append(f"{relative_document}:{line_number}:{raw_target}")
+                    continue
                 if not (document.parent / decoded_path).exists():
                     findings.append(f"{relative_document}:{line_number}:{raw_target}")
     return findings
@@ -329,6 +398,8 @@ _ACTIVE_DOC_RESIDUE_PATTERNS = (
     re.compile(r"\bmigrate_user_isolation\.py\b"),
     *(re.compile(re.escape(route)) for route in sorted(BANNED_ROUTE_LITERALS)),
     re.compile(r"\bextensions_config(?:\.example)?\.json\b"),
+    re.compile(r"\bmemory\.json\b"),
+    re.compile(r"\bstorage_(?:path|class)\b"),
     re.compile(r"\b(?:agents_api|stream_bridge)\b"),
     re.compile(r"\bcutover\b", re.IGNORECASE),
     re.compile(r"\b6/8\b"),
@@ -416,6 +487,17 @@ def test_python_production_sources_have_no_legacy_imports() -> None:
         for imported in _python_imports(path):
             if imported.startswith(BANNED_IMPORT_PREFIXES):
                 findings.append(f"{path.relative_to(REPO_ROOT)}:{imported}")
+    assert findings == []
+
+
+def test_production_sources_have_no_fixed_legacy_symbols() -> None:
+    findings: list[str] = []
+    for relative, banned_symbols in BANNED_LEGACY_SYMBOLS_BY_PATH.items():
+        path = REPO_ROOT / relative
+        if not path.is_file():
+            continue
+        for symbol in sorted(banned_symbols & _python_symbols(path)):
+            findings.append(f"{relative}:{symbol}")
     assert findings == []
 
 
@@ -606,6 +688,16 @@ def test_markdown_link_gate_mutation_accepts_relative_target_and_ignores_remote_
     assert _markdown_link_findings((document,), repo_root=tmp_path) == []
 
 
+def test_markdown_link_gate_resolves_frontend_docs_routes_to_language_content(tmp_path: Path) -> None:
+    document = tmp_path / "frontend" / "src" / "content" / "en" / "index.mdx"
+    target = document.parent / "application" / "index.mdx"
+    target.parent.mkdir(parents=True)
+    document.write_text("[Application](./docs/application)\n[Missing](./docs/missing)\n", encoding="utf-8")
+    target.write_text("# Application\n", encoding="utf-8")
+
+    assert _markdown_link_findings((document,), repo_root=tmp_path) == ["frontend/src/content/en/index.mdx:2:./docs/missing"]
+
+
 def test_active_doc_gate_mutation_rejects_removed_command_and_global_api(tmp_path: Path) -> None:
     document = tmp_path / "README.md"
     document.write_text(
@@ -619,14 +711,36 @@ def test_active_doc_gate_mutation_rejects_removed_command_and_global_api(tmp_pat
     ]
 
 
-def test_all_m7_changed_markdown_links_resolve() -> None:
-    documents = tuple(REPO_ROOT / relative for relative in M7_CHANGED_MARKDOWN_DOCS)
+def test_all_active_markdown_links_resolve() -> None:
+    documents = _active_markdown_docs(REPO_ROOT)
     assert _markdown_link_findings(documents, repo_root=REPO_ROOT) == []
 
 
-def test_active_operational_docs_describe_only_final_m7_surfaces() -> None:
-    documents = tuple(REPO_ROOT / relative for relative in ACTIVE_OPERATIONAL_DOCS)
+def test_all_active_docs_describe_only_final_m7_surfaces() -> None:
+    documents = _active_markdown_docs(REPO_ROOT)
     assert _active_doc_residue_findings(documents, repo_root=REPO_ROOT) == []
+
+
+def test_active_doc_inventory_mutation_scans_new_docs_and_whitelists_history_exactly(tmp_path: Path) -> None:
+    active = tmp_path / "backend" / "docs" / "new-guide.md"
+    active.parent.mkdir(parents=True)
+    active.write_text("Call `/api/threads`.\n", encoding="utf-8")
+    historical = tmp_path / "docs" / "superpowers" / "specs" / "old.md"
+    historical.parent.mkdir(parents=True)
+    historical.write_text("Call `/api/threads`.\n", encoding="utf-8")
+    near_miss = tmp_path / "docs" / "superpowers" / "specs-current" / "guide.md"
+    near_miss.parent.mkdir(parents=True)
+    near_miss.write_text("Call `/api/threads`.\n", encoding="utf-8")
+
+    documents = _active_markdown_docs(tmp_path)
+    assert {path.relative_to(tmp_path).as_posix() for path in documents} == {
+        "backend/docs/new-guide.md",
+        "docs/superpowers/specs-current/guide.md",
+    }
+    assert _active_doc_residue_findings(documents, repo_root=tmp_path) == [
+        "backend/docs/new-guide.md:1:/api/threads",
+        "docs/superpowers/specs-current/guide.md:1:/api/threads",
+    ]
 
 
 @pytest.mark.parametrize(

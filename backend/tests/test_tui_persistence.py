@@ -1,68 +1,93 @@
-"""Tests for the shared-persistence writer (thread_meta visibility).
+"""Tests for explicitly project-scoped TUI Thread metadata persistence."""
 
-Uses the in-memory ThreadMetaStore so no SQL engine is required, but exercises
-the real async store + background-loop wiring used by the TUI.
-"""
+import uuid
 
 import pytest
-from langgraph.store.memory import InMemoryStore
 
-from deerflow.persistence.thread_meta import MemoryThreadMetaStore, make_thread_store
+from deerflow.private_scope import PrivateResourceScope
 from deerflow.tui.persistence import ThreadMetaWriter, _LoopThread
 
 
+class _Store:
+    def __init__(self) -> None:
+        self.rows: dict[str, dict] = {}
+        self.calls: list[tuple[str, PrivateResourceScope]] = []
+
+    async def get(self, thread_id: str, *, scope: PrivateResourceScope):
+        self.calls.append(("get", scope))
+        return self.rows.get(thread_id)
+
+    async def create(self, thread_id: str, **kwargs):
+        scope = kwargs["scope"]
+        self.calls.append(("create", scope))
+        self.rows[thread_id] = {
+            "thread_id": thread_id,
+            "display_name": None,
+            "scope": scope,
+            "agent_asset_id": kwargs["agent_asset_id"],
+            "agent_scope": kwargs["agent_scope"],
+        }
+        return self.rows[thread_id]
+
+    async def update_display_name(
+        self,
+        thread_id: str,
+        title: str,
+        *,
+        scope: PrivateResourceScope,
+    ) -> None:
+        self.calls.append(("update_display_name", scope))
+        self.rows[thread_id]["display_name"] = title
+
+
 @pytest.fixture
-def writer_store_loop():
+def scoped_writer():
     loop = _LoopThread()
-    store = MemoryThreadMetaStore(InMemoryStore())
-    writer = ThreadMetaWriter(loop, store)
+    store = _Store()
+    scope = PrivateResourceScope(
+        project_id=str(uuid.uuid4()),
+        owner_user_id=str(uuid.uuid4()),
+        membership_version=1,
+    )
+    agent_asset_id = uuid.uuid4()
+    writer = ThreadMetaWriter(
+        loop,
+        store,
+        scope=scope,
+        agent_asset_id=agent_asset_id,
+        agent_scope="project",
+    )
     try:
-        yield writer, store, loop
+        yield writer, store, scope, agent_asset_id
     finally:
         loop.close()
 
 
-def test_writer_is_enabled_with_a_store(writer_store_loop):
-    writer, _store, _loop = writer_store_loop
+def test_writer_rejects_missing_project_authority() -> None:
+    loop = _LoopThread()
+    try:
+        with pytest.raises(TypeError, match="PrivateResourceScope"):
+            ThreadMetaWriter(
+                loop,
+                _Store(),
+                scope=None,
+                agent_asset_id=uuid.uuid4(),
+                agent_scope="project",
+            )
+    finally:
+        loop.close()
+
+
+def test_explicit_scope_create_and_title_use_same_authority(scoped_writer) -> None:
+    writer, store, scope, agent_asset_id = scoped_writer
+    writer.ensure_created("th-1", assistant_id="lead-agent")
+    writer.ensure_created("th-1")
+    writer.set_title("th-1", "Project-scoped title")
+
     assert writer.enabled is True
-    assert writer.user_id == "default"
-
-
-def test_ensure_created_writes_row_owned_by_default_user(writer_store_loop):
-    writer, store, loop = writer_store_loop
-    writer.ensure_created("th-1", assistant_id="lead-agent", metadata={"source": "tui"})
-    rows = loop.run(store.search(user_id="default"))
-    assert "th-1" in [r["thread_id"] for r in rows]
-
-
-def test_ensure_created_is_idempotent(writer_store_loop):
-    writer, store, loop = writer_store_loop
-    writer.ensure_created("th-1")
-    writer.ensure_created("th-1")
-    rows = loop.run(store.search(user_id="default"))
-    assert sum(1 for r in rows if r["thread_id"] == "th-1") == 1
-
-
-def test_set_title_updates_display_name(writer_store_loop):
-    writer, store, loop = writer_store_loop
-    writer.ensure_created("th-1")
-    writer.set_title("th-1", "Refactor the bridge")
-    row = loop.run(store.get("th-1", user_id="default"))
-    assert row["display_name"] == "Refactor the bridge"
-
-
-def test_disabled_writer_is_a_silent_noop():
-    loop = _LoopThread()
-    try:
-        writer = ThreadMetaWriter(loop, None)
-        assert writer.enabled is False
-        # Must not raise even though there is no store.
-        writer.ensure_created("x", assistant_id="lead-agent")
-        writer.set_title("x", "title")
-    finally:
-        loop.close()
-
-
-def test_make_thread_store_rejects_missing_postgres_session_factory() -> None:
-    with pytest.raises(TypeError, match="session factory"):
-        make_thread_store(None)
+    assert writer.user_id == scope.owner_user_id
+    assert store.rows["th-1"]["display_name"] == "Project-scoped title"
+    assert store.rows["th-1"]["scope"] == scope
+    assert store.rows["th-1"]["agent_asset_id"] == agent_asset_id
+    assert {call_scope for _, call_scope in store.calls} == {scope}
+    assert [name for name, _ in store.calls].count("create") == 1

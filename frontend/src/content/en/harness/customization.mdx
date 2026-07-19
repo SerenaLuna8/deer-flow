@@ -95,31 +95,9 @@ sandbox:
   use: mypackage.sandbox:MyCustomSandboxProvider
 ```
 
-## Custom memory storage
+## Project Memory integration
 
-Replace the file-based memory with any persistent store by implementing `MemoryStorage`:
-
-```python
-from deerflow.agents.memory.storage import MemoryStorage
-from typing import Any
-
-class RedisMemoryStorage(MemoryStorage):
-    def load(self, agent_name: str | None = None) -> dict[str, Any]:
-        ...
-
-    def reload(self, agent_name: str | None = None) -> dict[str, Any]:
-        ...
-
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
-        ...
-```
-
-Configure it in `config.yaml`:
-
-```yaml
-memory:
-  storage_class: mypackage.storage:RedisMemoryStorage
-```
+Memory is a project-private PostgreSQL resource. Extend surrounding product behavior through the project Memory API and admitted private-run hooks while preserving the exact account, project, owner and namespace scope. The final runtime does not load global or filesystem Memory adapters.
 
 ## Custom skills
 

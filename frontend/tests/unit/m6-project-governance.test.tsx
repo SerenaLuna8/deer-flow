@@ -17,6 +17,7 @@ import {
 import {
   projectUsageQueryKey,
   projectUsageQueryOptions,
+  readProjectGovernanceResponse,
   usageResponseSchema,
   type ProjectUsage,
 } from "@/core/project-governance/usage";
@@ -131,6 +132,29 @@ function renderWithLocale(
 }
 
 describe("M6 project governance", () => {
+  test("strictly rejects the retired reliability cutover error", async () => {
+    const response = new Response(
+      JSON.stringify({
+        code: "RELIABILITY_CUTOVER",
+        message: "retired server state",
+        request_id: "req-retired",
+      }),
+      { status: 503, headers: { "Content-Type": "application/json" } },
+    );
+
+    const error: unknown = await readProjectGovernanceResponse(
+      response,
+      usageResponseSchema,
+    ).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toEqual(
+      expect.objectContaining({ status: 503, code: "INVALID_RESPONSE" }),
+    );
+  });
+
   test("keeps every query key under its exact account and project prefix", () => {
     const scope = { accountId: ACCOUNT_A, projectId: PROJECT_A };
     expect(

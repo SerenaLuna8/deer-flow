@@ -163,21 +163,12 @@ For persistent dependencies, build an image that extends the default `all-in-one
 
 See [Building a Custom AIO Sandbox Image](../../backend/docs/CONFIGURATION.md#building-a-custom-aio-sandbox-image) for the runtime contract and a minimal Dockerfile example.
 
-### PVC User-Data Upgrade Note
+### Project user-data PVC
 
-Older provisioner versions mounted PVC user-data from `threads/{thread_id}/user-data`. The user-scoped layout mounts from `deer-flow/users/{user_id}/threads/{thread_id}/user-data`.
-
-If an existing deployment already has PVC-backed user-data under the legacy layout, migrate the DeerFlow data directory before relying on the new PVC subPath. Mount the same PVC path that the gateway uses as its DeerFlow base directory, then run the existing user-isolation migration script:
-
-```bash
-cd backend
-PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
-PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
-```
-
-This moves legacy `threads/{thread_id}/user-data` data under `users/<target-user-id>/threads/{thread_id}/user-data`, which matches the new provisioner PVC subPath when the gateway base directory is mounted at `deer-flow/` on the PVC. Use `default` as the target user only when the legacy data should remain in the default no-auth user namespace. Run the migration while no gateway or sandbox Pods are writing to those paths.
-
-When skills are materialized per thread on the same PVC, set `SKILLS_PVC_NAME` to that PVC and configure `SKILLS_PVC_SUBPATH_TEMPLATE=deer-flow/users/{user_id}/threads/{thread_id}/skills`. Leaving the template empty preserves the legacy behavior of mounting the skills PVC root at `/mnt/skills`.
+Provisioner mounts only the server-issued project/owner/thread sandbox subpath.
+Do not derive PVC paths from client input or a default user. Existing pre-project
+deployments must be upgraded through the supported release backup/new-database
+restore workflow before using the M7 chart.
 
 ### Important: K8S_API_SERVER Override
 

@@ -44,7 +44,7 @@ The DeerFlow App runs behind a single nginx reverse proxy:
 └──────────────────┘       └──────────────────────┘
 ```
 
-- **nginx**: routes requests — `/api/*` and `/api/langgraph/*` to Gateway, and everything else to the frontend.
+- **nginx**: routes project REST and streaming requests to Gateway, and page requests to the frontend.
 - **Frontend** (Next.js + React): the browser UI. Communicates with Gateway.
 - **Gateway** (FastAPI): handles API operations and the embedded LangGraph-compatible runtime for thread state, agent execution, and streaming.
 

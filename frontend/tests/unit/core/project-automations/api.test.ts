@@ -214,4 +214,28 @@ describe("project automation API", () => {
     mockedFetch.mockRejectedValueOnce(aborted);
     await expect(listAutomations(SCOPE)).rejects.toBe(aborted);
   });
+
+  test("strictly rejects retired migration and cutover error codes", async () => {
+    for (const code of [
+      "AUTOMATION_MIGRATION_REQUIRED",
+      "AUTOMATION_CUTOVER",
+    ]) {
+      mockedFetch.mockResolvedValueOnce(
+        jsonResponse(
+          {
+            detail: {
+              code,
+              message: "retired server state",
+              request_id: "req-retired",
+            },
+          },
+          503,
+        ),
+      );
+      await expect(listAutomations(SCOPE)).rejects.toMatchObject({
+        status: 503,
+        code: "AUTOMATION_ERROR_RESPONSE_INVALID",
+      });
+    }
+  });
 });

@@ -231,9 +231,7 @@ def test_build_acp_section_uses_explicit_config_without_global_read(
     assert "/mnt/acp-workspace/" in section
 
 
-def test_get_memory_context_uses_explicit_config_without_global_read(
-    monkeypatch,
-) -> None:
+def test_get_memory_context_fails_closed_without_project_scope(monkeypatch) -> None:
     config = SimpleNamespace(
         memory=SimpleNamespace(
             enabled=True,
@@ -242,56 +240,17 @@ def test_get_memory_context_uses_explicit_config_without_global_read(
             token_counting="tiktoken",
         )
     )
-    captured: dict[str, object] = {}
 
     def fail_get_memory_config():
         raise AssertionError("explicit app_config must not read ambient config")
-
-    def fake_get_memory_data(agent_name=None, *, user_id=None):
-        captured["agent_name"] = agent_name
-        captured["user_id"] = user_id
-        return {"facts": []}
-
-    def fake_format_memory_for_injection(
-        memory_data,
-        *,
-        max_tokens,
-        use_tiktoken=True,
-        **_kwargs,
-    ):
-        captured["memory_data"] = memory_data
-        captured["max_tokens"] = max_tokens
-        captured["use_tiktoken"] = use_tiktoken
-        return "remember this"
 
     monkeypatch.setattr(
         "deerflow.config.memory_config.get_memory_config",
         fail_get_memory_config,
     )
-    monkeypatch.setattr(
-        "deerflow.runtime.user_context.get_effective_user_id",
-        lambda: "user-1",
-    )
-    monkeypatch.setattr(
-        "deerflow.agents.memory.get_memory_data",
-        fake_get_memory_data,
-    )
-    monkeypatch.setattr(
-        "deerflow.agents.memory.format_memory_for_injection",
-        fake_format_memory_for_injection,
-    )
-
     context = prompt_module._get_memory_context("agent-a", app_config=config)
 
-    assert "<memory>" in context
-    assert "remember this" in context
-    assert captured == {
-        "agent_name": "agent-a",
-        "user_id": "user-1",
-        "memory_data": {"facts": []},
-        "max_tokens": 1234,
-        "use_tiktoken": True,
-    }
+    assert context == ""
 
 
 def test_warm_enabled_skills_cache_logs_on_timeout(monkeypatch, caplog) -> None:

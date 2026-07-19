@@ -1,7 +1,6 @@
 """Centralized accessors for singleton objects stored on ``app.state``.
 
-**Getters** (used by routers): raise 503 when a required dependency is
-missing, except ``get_store`` which returns ``None``.
+Router getters raise 503 when a required dependency is missing.
 
 ``AppConfig`` is intentionally *not* cached on ``app.state``. Routers resolve
 it through :func:`deerflow.config.app_config.get_app_config`,
@@ -24,7 +23,6 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from langgraph.types import Checkpointer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.automations.error_mapping import automation_http_exception
@@ -49,7 +47,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sql import SQLUserRepository
-    from deerflow.persistence.thread_meta.base import ThreadMetaStore
 
 
 T = TypeVar("T")
@@ -367,33 +364,6 @@ def get_operational_audit_sink(request: Request):
             detail="Operational audit service not available",
         )
     return value
-
-
-def get_checkpointer(request: Request) -> Checkpointer:
-    """Return the legacy raw saver without exposing it to project modules."""
-
-    raw = getattr(request.app.state, "_raw_checkpointer", None)
-    if raw is None:
-        # Compatibility for isolated legacy router tests and external FastAPI
-        # embeddings that predate the private app-state name. Production
-        # lifespan only installs ``_raw_checkpointer``.
-        raw = getattr(request.app.state, "checkpointer", None)
-    if raw is None:
-        raise HTTPException(status_code=503, detail="Checkpointer not available")
-    return cast(Checkpointer, raw)
-
-
-def get_store(request: Request):
-    """Return the global store (may be ``None`` if not configured)."""
-    return getattr(request.app.state, "store", None)
-
-
-def get_thread_store(request: Request) -> ThreadMetaStore:
-    """Return the thread metadata store (SQL or memory-backed)."""
-    val = getattr(request.app.state, "thread_store", None)
-    if val is None:
-        raise HTTPException(status_code=503, detail="Thread metadata store not available")
-    return val
 
 
 def get_project_checkpointer(request: Request, context: PrivateWorkContext):

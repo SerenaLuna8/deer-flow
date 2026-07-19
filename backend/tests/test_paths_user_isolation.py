@@ -105,21 +105,6 @@ class TestUserDir:
         assert arbitrary_16_hex.exists()
 
 
-class TestUserMemoryFile:
-    def test_user_memory_file(self, paths: Paths):
-        assert paths.user_memory_file("bob") == paths.base_dir / "users" / "bob" / "memory.json"
-
-
-class TestUserAgentMemoryFile:
-    def test_user_agent_memory_file(self, paths: Paths):
-        expected = paths.base_dir / "users" / "bob" / "agents" / "myagent" / "memory.json"
-        assert paths.user_agent_memory_file("bob", "myagent") == expected
-
-    def test_user_agent_memory_file_lowercases_name(self, paths: Paths):
-        expected = paths.base_dir / "users" / "bob" / "agents" / "myagent" / "memory.json"
-        assert paths.user_agent_memory_file("bob", "MyAgent") == expected
-
-
 class TestUserAgentDir:
     def test_user_agents_dir(self, paths: Paths):
         assert paths.user_agents_dir("alice") == paths.base_dir / "users" / "alice" / "agents"

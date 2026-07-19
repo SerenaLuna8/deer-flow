@@ -109,7 +109,6 @@ const serverErrorSchema = z
       "RELIABILITY_NOT_FOUND",
       "RELIABILITY_CONFLICT",
       "RELIABILITY_INVALID",
-      "RELIABILITY_CUTOVER",
       "DATABASE_UNAVAILABLE",
     ]),
     message: z.string().min(1),
@@ -124,7 +123,6 @@ const SAFE_MESSAGES: Record<ServerErrorCode, string> = {
   RELIABILITY_NOT_FOUND: "Project governance data was not found.",
   RELIABILITY_CONFLICT: "Project governance data changed. Refresh and retry.",
   RELIABILITY_INVALID: "Project governance request is invalid.",
-  RELIABILITY_CUTOVER: "Project governance is not ready.",
   DATABASE_UNAVAILABLE: "Project governance is temporarily unavailable.",
 };
 

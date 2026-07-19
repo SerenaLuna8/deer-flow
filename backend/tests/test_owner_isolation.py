@@ -1,7 +1,7 @@
 """Cross-owner isolation tests for final-schema private work.
 
 Every product-path call carries an issued ``project_id + owner_user_id`` scope.
-The only unscoped read is exercised through the named trusted migration adapter.
+No unscoped read or mutation path exists.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from support.m4_private_threads import seed_m4_thread_database
 
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.persistence.run import RunRepository
-from deerflow.persistence.thread_meta import ThreadMetaRepository, TrustedUnscopedThreadMetaStore
+from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.runtime.events.store.db import DbRunEventStore
 
 
@@ -221,18 +221,5 @@ async def test_product_repositories_without_scope_fail_closed(migrated_postgres_
         assert await run_repo.list_by_thread("t-alpha") == []
         assert await event_store.list_messages("t-alpha") == []
         assert await feedback_repo.get("anything") is None
-    finally:
-        await seed.engine.dispose()
-
-
-@pytest.mark.anyio
-@pytest.mark.no_auto_user
-async def test_trusted_unscoped_adapter_is_explicit(migrated_postgres_database_url):
-    """Cutover code can scan all rows only through the named trusted adapter."""
-    seed = await _seed_private_data(migrated_postgres_database_url)
-    try:
-        trusted = TrustedUnscopedThreadMetaStore(ThreadMetaRepository(seed.factory))
-        rows = await trusted.search(user_id=None)
-        assert {row["thread_id"] for row in rows} == {"t-alpha", "t-beta"}
     finally:
         await seed.engine.dispose()

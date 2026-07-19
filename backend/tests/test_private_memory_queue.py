@@ -11,7 +11,6 @@ from sqlalchemy import text
 from support.m4_private_threads import seed_m4_thread_database
 
 from deerflow.agents.memory.queue import (
-    MemoryUpdateQueue,
     ProjectMemoryMembershipRevalidator,
     ProjectMemoryUpdateQueue,
 )
@@ -255,18 +254,14 @@ async def test_memory_middleware_enqueues_private_runtime_on_project_queue(monke
     assert tuple(message.type for message in call["messages"]) == ("human", "ai")
 
 
-def test_legacy_memory_queue_api_remains_available() -> None:
-    assert MemoryUpdateQueue().pending_count == 0
+def test_memory_config_rejects_removed_filesystem_storage_options() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        MemoryConfig(storage_path="memory.json")
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        MemoryConfig(storage_class="example.LegacyStorage")
 
 
-def test_sync_private_middleware_never_falls_back_to_legacy_file_queue(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    legacy_queue = MagicMock()
-    monkeypatch.setattr(
-        "deerflow.agents.middlewares.memory_middleware.get_memory_queue",
-        lambda: legacy_queue,
-    )
+def test_sync_memory_middleware_fails_closed_without_project_authority() -> None:
     middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
 
     assert (
@@ -281,13 +276,29 @@ def test_sync_private_middleware_never_falls_back_to_legacy_file_queue(
                 context={
                     "thread_id": "thread-a",
                     "run_id": "run-a",
-                    "private_scope": _scope("project-a", "owner-a"),
                 }
             ),
         )
         is None
     )
-    legacy_queue.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_memory_middleware_fails_closed_without_project_authority() -> None:
+    middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
+
+    assert (
+        await middleware.aafter_agent(
+            {
+                "messages": [
+                    HumanMessage(content="Remember this."),
+                    AIMessage(content="Okay."),
+                ]
+            },
+            Runtime(context={"thread_id": "thread-a", "run_id": "run-a"}),
+        )
+        is None
+    )
 
 
 @pytest.mark.postgres
@@ -322,14 +333,9 @@ def test_private_summarization_hook_uses_project_queue_not_legacy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     private_queue = MagicMock()
-    legacy_queue = MagicMock()
     monkeypatch.setattr(
         "deerflow.agents.memory.summarization_hook.get_project_memory_queue",
         lambda: private_queue,
-    )
-    monkeypatch.setattr(
-        "deerflow.agents.memory.summarization_hook.get_memory_queue",
-        lambda: legacy_queue,
     )
     scope = _scope("project-a", "owner-a")
 
@@ -352,10 +358,34 @@ def test_private_summarization_hook_uses_project_queue_not_legacy(
         )
     )
 
-    legacy_queue.add_nowait.assert_not_called()
     private_queue.enqueue.assert_called_once()
     call = private_queue.enqueue.call_args.kwargs
     assert call["scope"] == scope
     assert call["thread_id"] == "thread-a"
     assert call["run_id"] == "run-a"
     assert call["namespace"] == "agent:researcher"
+
+
+def test_summarization_hook_fails_closed_without_project_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_queue = MagicMock()
+    monkeypatch.setattr(
+        "deerflow.agents.memory.summarization_hook.get_project_memory_queue",
+        lambda: private_queue,
+    )
+
+    memory_flush_hook(
+        SummarizationEvent(
+            messages_to_summarize=(
+                HumanMessage(content="Remember global context."),
+                AIMessage(content="Okay."),
+            ),
+            preserved_messages=(),
+            thread_id="thread-a",
+            agent_name=None,
+            runtime=SimpleNamespace(context={"thread_id": "thread-a", "run_id": "run-a"}),
+        )
+    )
+
+    private_queue.enqueue.assert_not_called()

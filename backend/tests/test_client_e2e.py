@@ -615,37 +615,24 @@ class TestConfigManagement:
 
 
 class TestMemoryAccess:
-    """Memory system queries through real code paths."""
+    """The embedded client fails closed for removed global Memory surfaces."""
 
-    def test_get_memory_returns_dict(self, e2e_env):
-        """get_memory() returns a dict (may be empty initial state)."""
+    def test_get_memory_is_removed(self, e2e_env):
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        result = c.get_memory()
-        assert isinstance(result, dict)
+        with pytest.raises(AssetCatalogUnavailable, match="global Memory was removed"):
+            c.get_memory()
 
-    def test_reload_memory_returns_dict(self, e2e_env):
-        """reload_memory() forces reload and returns a dict."""
+    def test_reload_memory_is_removed(self, e2e_env):
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        result = c.reload_memory()
-        assert isinstance(result, dict)
+        with pytest.raises(AssetCatalogUnavailable, match="global Memory reload was removed"):
+            c.reload_memory()
 
-    def test_get_memory_config_fields(self, e2e_env):
-        """get_memory_config() returns expected config fields."""
+    def test_get_memory_config_is_removed(self, e2e_env):
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        result = c.get_memory_config()
-        assert "enabled" in result
-        assert "storage_path" in result
-        assert "debounce_seconds" in result
-        assert "max_facts" in result
-        assert "fact_confidence_threshold" in result
-        assert "injection_enabled" in result
-        assert "max_injection_tokens" in result
+        with pytest.raises(AssetCatalogUnavailable, match="global Memory configuration was removed"):
+            c.get_memory_config()
 
-    def test_get_memory_status_combines_config_and_data(self, e2e_env):
-        """get_memory_status() returns both 'config' and 'data' keys."""
+    def test_get_memory_status_is_removed(self, e2e_env):
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        result = c.get_memory_status()
-        assert "config" in result
-        assert "data" in result
-        assert "enabled" in result["config"]
-        assert isinstance(result["data"], dict)
+        with pytest.raises(AssetCatalogUnavailable, match="global Memory status was removed"):
+            c.get_memory_status()

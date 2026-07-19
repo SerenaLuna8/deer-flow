@@ -42,7 +42,6 @@ const SAFE_MESSAGES: Record<ServerErrorCode, string> = {
   RELIABILITY_NOT_FOUND: "Operations data was not found.",
   RELIABILITY_CONFLICT: "Operations data changed. Refresh and retry.",
   RELIABILITY_INVALID: "Operations request is invalid.",
-  RELIABILITY_CUTOVER: "Operations data is not ready.",
   DATABASE_UNAVAILABLE: "Operations data is temporarily unavailable.",
 };
 

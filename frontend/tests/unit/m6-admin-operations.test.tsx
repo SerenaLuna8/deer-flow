@@ -70,6 +70,7 @@ import {
   adminJobPageSchema,
   adminProjectPageSchema,
   operationsOverviewSchema,
+  operationsServerErrorSchema,
   type AdminAuditPage,
   type AdminJobPage,
   type AdminProjectPage,
@@ -203,6 +204,16 @@ function response(body: unknown, status = 200): Response {
 }
 
 describe("M6 system operations console", () => {
+  test("strictly rejects the retired reliability cutover error", () => {
+    expect(
+      operationsServerErrorSchema.safeParse({
+        code: "RELIABILITY_CUTOVER",
+        message: "retired server state",
+        request_id: "req-retired",
+      }).success,
+    ).toBe(false);
+  });
+
   test("keeps every query and mutation key under the exact authenticated account", () => {
     expect(adminOperationsRoot(ACCOUNT_A)).toEqual([
       "account",

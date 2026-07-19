@@ -598,49 +598,8 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 
 
 def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
-    """Get memory context for injection into system prompt.
-
-    Args:
-        agent_name: If provided, loads per-agent memory. If None, loads global memory.
-        app_config: Explicit application config. When provided, memory options
-            are read from this value instead of the global config singleton.
-
-    Returns:
-        Formatted memory context string wrapped in XML tags, or empty string if disabled.
-    """
-    try:
-        from deerflow.agents.memory import format_memory_for_injection, get_memory_data
-        from deerflow.runtime.user_context import get_effective_user_id
-
-        if app_config is None:
-            from deerflow.config.memory_config import get_memory_config
-
-            config = get_memory_config()
-        else:
-            config = app_config.memory
-
-        if not config.enabled or not config.injection_enabled:
-            return ""
-
-        memory_data = get_memory_data(agent_name, user_id=get_effective_user_id())
-        memory_content = format_memory_for_injection(
-            memory_data,
-            max_tokens=config.max_injection_tokens,
-            use_tiktoken=(config.token_counting == "tiktoken"),
-            guaranteed_categories=getattr(config, "guaranteed_categories", None),
-            guaranteed_token_budget=getattr(config, "guaranteed_token_budget", 500),
-        )
-
-        if not memory_content.strip():
-            return ""
-
-        return f"""<memory>
-{memory_content}
-</memory>
-"""
-    except Exception:
-        logger.exception("Failed to load memory context")
-        return ""
+    """Fail closed when no authenticated project Memory scope is available."""
+    return ""
 
 
 def _render_skills_prompt_section(

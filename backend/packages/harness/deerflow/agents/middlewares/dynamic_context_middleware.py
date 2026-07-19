@@ -304,12 +304,9 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
-        runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
-        if "private_scope" in runtime_context:
-            # Project Memory requires async PostgreSQL access. The synchronous
-            # compatibility hook must never fall back to legacy file storage.
-            return self._inject(state, memory_block_override=None)
-        return self._inject(state)
+        # Project Memory requires async PostgreSQL access. The synchronous hook
+        # always injects only framework-owned context and never global Memory.
+        return self._inject(state, memory_block_override=None)
 
     def _resolve_project_memory_dependencies(
         self,

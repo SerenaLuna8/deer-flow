@@ -94,13 +94,11 @@ class Paths:
 
     Directory layout (host side):
         {base_dir}/
-        ├── memory.json
         ├── USER.md          <-- global user profile (injected into all agents)
         ├── agents/
         │   └── {agent_name}/
         │       ├── config.yaml
-        │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
-        │       └── memory.json
+        │       └── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
         └── threads/
             └── {thread_id}/
                 └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
@@ -150,11 +148,6 @@ class Paths:
         return _default_local_base_dir()
 
     @property
-    def memory_file(self) -> Path:
-        """Path to the persisted memory file: `{base_dir}/memory.json`."""
-        return self.base_dir / "memory.json"
-
-    @property
     def user_md_file(self) -> Path:
         """Path to the global user profile file: `{base_dir}/USER.md`."""
         return self.base_dir / "USER.md"
@@ -171,10 +164,6 @@ class Paths:
     def agent_dir(self, name: str) -> Path:
         """Legacy per-agent directory (no user isolation): `{base_dir}/agents/{name}/`."""
         return self.agents_dir / name.lower()
-
-    def agent_memory_file(self, name: str) -> Path:
-        """Legacy per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
-        return self.agent_dir(name) / "memory.json"
 
     def user_dir(self, user_id: str) -> Path:
         """Directory for a specific user: `{base_dir}/users/{user_id}/`."""
@@ -206,10 +195,6 @@ class Paths:
             logger.exception("Failed to migrate legacy unsafe-id user directory")
         return safe_user_id
 
-    def user_memory_file(self, user_id: str) -> Path:
-        """Per-user memory file: `{base_dir}/users/{user_id}/memory.json`."""
-        return self.user_dir(user_id) / "memory.json"
-
     def user_agents_dir(self, user_id: str) -> Path:
         """Per-user root for that user's custom agents: `{base_dir}/users/{user_id}/agents/`."""
         return self.user_dir(user_id) / "agents"
@@ -217,10 +202,6 @@ class Paths:
     def user_agent_dir(self, user_id: str, agent_name: str) -> Path:
         """Per-user per-agent directory: `{base_dir}/users/{user_id}/agents/{name}/`."""
         return self.user_agents_dir(user_id) / agent_name.lower()
-
-    def user_agent_memory_file(self, user_id: str, agent_name: str) -> Path:
-        """Per-user per-agent memory: `{base_dir}/users/{user_id}/agents/{name}/memory.json`."""
-        return self.user_agent_dir(user_id, agent_name) / "memory.json"
 
     def user_skills_dir(self, user_id: str) -> Path:
         """Per-user root for that user's custom skills: `{base_dir}/users/{user_id}/skills/`."""

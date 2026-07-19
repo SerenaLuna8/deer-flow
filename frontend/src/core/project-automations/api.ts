@@ -35,8 +35,6 @@ const serverErrorCodeSchema = z.enum([
   "AUTOMATION_VERSION_CONFLICT",
   "AUTOMATION_ACTIVE_RUN",
   "AUTOMATION_ONCE_EXPIRED",
-  "AUTOMATION_MIGRATION_REQUIRED",
-  "AUTOMATION_CUTOVER",
   "AUTOMATION_CONCURRENCY_LIMIT",
   "AUTOMATION_UNAVAILABLE",
 ]);
@@ -64,9 +62,6 @@ const SAFE_SERVER_MESSAGES: Record<
   AUTOMATION_VERSION_CONFLICT: "Automation version conflict.",
   AUTOMATION_ACTIVE_RUN: "Automation has an active run.",
   AUTOMATION_ONCE_EXPIRED: "Automation one-time schedule has expired.",
-  AUTOMATION_MIGRATION_REQUIRED:
-    "Automation migration is required before legacy changes.",
-  AUTOMATION_CUTOVER: "Automation cutover is not complete.",
   AUTOMATION_CONCURRENCY_LIMIT: "Automation concurrency limit was reached.",
   AUTOMATION_UNAVAILABLE: "Automation is temporarily unavailable.",
 };

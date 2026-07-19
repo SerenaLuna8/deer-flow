@@ -1,107 +1,66 @@
-# M7 Task 11 closure candidate report
+# M7 Task 11 independent-review repair report
 
 - Branch: `codex/m7-legacy-cleanup`
-- Task 11 base: `e01f9b81`
-- Full M7 base: `70a36a5c`
-- Candidate status: implementation and mandatory gates complete; final independent review pending
-- M8 status: pending; no release-ready claim
+- Implementation base: `70a36a5c`
+- Reviewed candidate: `fd2550f49240029ae6897252b83ca603e529cc6a`
+- Exact independent-review range: `00f7ae3ca0a15e069a03fd19bc009ca0c53d1b2a..fd2550f49240029ae6897252b83ca603e529cc6a`
+- Review verdict: `0 Critical / 4 Important / 1 Minor`
+- Current status: all four Important findings repaired and full gates rerun; repair commit pending
+- M7/M8 status: this repair does not mark M7 complete, does not change the milestone ledger, and does not start M8
 
-## Scope
+## Review repairs
 
-- Synchronized root/backend/frontend AGENTS, English/Chinese README, CHANGELOG,
-  master design, M7 design/plan, and M7 backup/recovery runbook with the final
-  fresh-install/project/admin/Gateway/Worker/Scheduler/version-7 recovery model.
-- The three obsolete staged-operation runbooks were already absent at Task 11 base
-  `e01f9b81`; `docs/operations/` contains only the M7 backup/recovery runbook.
-- Extended `backend/tests/test_m7_source_absence.py` with relative Markdown link
-  verification and active operational documentation residue checks. External URLs,
-  site-absolute paths, and document-local anchors are deliberately ignored.
-- Recorded Tasks 1–10 implementation commits, reviewed ranges, and per-task verdicts
-  in the M7 design. The Task 11/full-branch verdict, `Completed` state, and master
-  7/8 ledger are intentionally reserved for the final independent reviewer and parent.
+1. **I1 — global/filesystem Memory removal**
+   - Deleted `MemoryStorage`, `FileMemoryStorage`, global Memory queue/singletons, global updater CRUD, filesystem Memory path helpers, sample loader, config fields and Helm values.
+   - Sync/unscoped middleware and prompt paths fail closed; project PostgreSQL Memory storage, queue and updater remain.
+   - Embedded client global Memory methods now reject with `AssetCatalogUnavailable` and point to authenticated project APIs.
+2. **I2 — TUI/Thread/Gateway compatibility removal**
+   - Removed in-memory ThreadMeta implementation, trusted unscoped adapter, Gateway authz compatibility module and dependency getters.
+   - SQL ThreadMeta and TUI metadata writes require exact `PrivateResourceScope`; embedded client Thread operations require an explicit checkpointer and never fall back to the global provider.
+3. **I3 — retired frontend error codes**
+   - Removed Automation/reliability cutover codes and added strict response rejection tests.
+4. **I4 — active documentation inventory and link gate**
+   - Active inventory covers root docs, backend docs, deploy/docker/docs and frontend content; history exclusions are exact paths/prefixes.
+   - Every local link and frontend docs route resolves to a real file; final result is `110 active / 0 broken links / 0 legacy residues`.
+   - Root now contains one Chinese `README.md`; root translation README files were deleted and active references removed.
+5. **M1 — review range reporting**
+   - This report records the exact full range above rather than a shortened or candidate-only range.
 
 ## TDD evidence
 
 ### RED
 
-```text
-UV_CACHE_DIR=/private/tmp/m7-task11-uv-cache uv run pytest tests/test_m7_source_absence.py -q
-5 failed, 26 passed
-```
+- Combined review-repair source tests: `5 failed / 38 passed / 1 skipped` before implementation.
+- Frontend retired-code tests: `3 failed / 23 passed` before implementation.
+- Documentation inventory: `49 broken links / 212 legacy residues`, later reduced through incremental checkpoints before GREEN.
 
-The new mutation tests failed because `_markdown_link_findings` and
-`_active_doc_residue_findings` did not exist. After the smallest helper implementation,
-the two repository-level contracts remained red with two broken local image links and
-48 active-document residue findings, demonstrating that the gates detected real drift.
+### Affected GREEN
 
-### GREEN checkpoint
+- I1 focused backend: `122 passed / 3 skipped`.
+- I2 focused backend: `55 passed / 50 PostgreSQL-dependent skipped` before the real PostgreSQL gate.
+- I3 focused frontend: `26 passed / 0 skipped`.
+- I4 source/docs gate: `34 passed`; inventory `110 active / 0 links / 0 residues`.
+- Old full-suite assertions updated to the final fail-closed contract: `259 passed / 11 skipped` focused.
 
-```text
-UV_CACHE_DIR=/private/tmp/m7-task11-uv-cache uv run pytest tests/test_m7_source_absence.py -q
-31 passed in 2.57s
-```
+## Full verification after repair
 
-The mutation tests, production source absence, relative Markdown links, and active-doc
-final-surface checks all passed at this checkpoint.
+- Fixed 22-file M1–M7 PostgreSQL gate: `282 passed / 0 skipped` in 115.05 seconds.
+- Backend full suite: `6677 passed / 936 skipped / 0 failed` in 89.21 seconds.
+- Backend blocking-I/O: `27 passed`.
+- Ruff: `1037 files already formatted`; `All checks passed!`.
+- Frontend unit: 122 files, `891 passed / 0 skipped / 0 failed`.
+- Frontend `pnpm check`: PASS.
+- Frontend production Playwright: `14 passed`; static Playwright: `2 passed`.
+- Production and static builds: PASS, each generating 80 pages.
+- Fresh `0001_project_saas_baseline` setup plus `make check-db`: healthy, exact head.
+- `make doctor`: Ready with two expected optional warnings; `make help`: PASS.
+- Support bundle: `triage.json` status `ok`, doctor included, redacted secret fields true, and zero matches for the dummy key, PostgreSQL URL or removed Memory/config/API surfaces.
+- `git diff --check`: PASS.
 
-The final post-format/post-documentation rerun also passed:
+The first PostgreSQL command used an incorrect explicit `postgresql+psycopg` driver and therefore produced isolated-database setup errors. The release probe and full gate were rerun with the contract URL `postgresql://...`, which the test helper converts to asyncpg; both passed. This was an execution-environment error, not a product failure.
 
-```text
-31 passed in 2.34s
-1 file already formatted
-All checks passed!
-```
+Cleanup completed: the disposable database was dropped, PostgreSQL stopped, port 55448 closed, and the exact temporary cluster, ignored config/env files and support artifacts were removed.
 
-## Final verification evidence
+## Handoff
 
-All results below come from fresh Task 11 commands against the candidate diff.
-
-- Fixed 22-file PostgreSQL gate: `279 passed`, `0 skipped`, `0 failed` in
-  109.51 seconds. It used a disposable cluster on `127.0.0.1:55447` and only
-  generated `deerflow_test_*` / `deerflow_restore_*` databases.
-- Backend full suite: `6854 passed`, `944 skipped`, `0 failed` in 92.20 seconds.
-  PostgreSQL-only tests are intentionally skipped here and are covered with zero
-  skips by the fixed gate above.
-- Backend blocking-I/O: `27 passed` in 10.86 seconds.
-- Ruff: `1047 files already formatted`; `All checks passed!`.
-- Frontend unit: 122 files, `888 passed`, `0 skipped`, `0 failed`.
-- Frontend `pnpm check` and Prettier check: PASS.
-- Frontend M7 production Playwright: `14 passed`; static Playwright: `2 passed`.
-- `BUILD_MODE=production pnpm build` and `BUILD_MODE=static pnpm build`: PASS,
-  each generating all 80 pages.
-- Fresh database path: `make setup-db` installed only
-  `0001_project_saas_baseline`; `make check-db` reported healthy and exact head.
-- `make doctor`: Ready with two expected optional warnings after supplying a
-  temporary, ignored default configuration, a non-networked dummy model key, and
-  the disposable M7 database. `make help`: PASS.
-- Support bundle: nine expected files; `triage.json` status `ok`; doctor embedded
-  successfully; raw env/thread/user files absent; secret fields redacted. A unique
-  secret probe, PostgreSQL URLs, removed extension config, removed root/config path
-  overrides, and removed migration commands had zero bundle matches.
-- Markdown/source consistency: final source/link/active-doc gate `31 passed`;
-  specified active-doc legacy residue search had zero matches; `git diff --check`
-  passed; `.superpowers/sdd/progress.md` remained untouched.
-
-Two environment/test classifications were kept visible rather than treated as
-product failures:
-
-- The first sandboxed PostgreSQL invocation could not connect to the local test
-  port and produced 160 setup errors before isolated database creation. The
-  unchanged authorized command passed all 279 tests with zero skips.
-- The first production Playwright run had one existing Automation dialog timeout
-  (`13 passed`, `1 failed`). The isolated case passed, then the unchanged full
-  14-test gate passed. Task 11 changed no frontend production source.
-
-Resource cleanup completed: the disposable cluster contained zero remaining test
-or restore databases before shutdown, port `55447` was closed, its exact temporary
-directory and support-bundle artifacts were removed, and the temporary ignored
-`.env`, `frontend/.env`, and `config.yaml` files were deleted.
-
-## Review handoff
-
-The independent reviewer must compare `70a36a5c..candidate HEAD` against the M7
-design and implementation plan, then explicitly inspect deleted-surface absence,
-project/owner authority, system-admin redaction, Gateway/Worker/Scheduler boundaries,
-baseline equality, old-database fail-before-DDL, recovery invariants, frontend static
-no-network behavior, and this documentation/link gate. No final M7 status or 7/8 ledger
-entry is valid before that verdict and all required repairs are verified.
+The repair commit must include no change to `.superpowers/sdd/progress.md`, no `Completed` M7 status, no 7/8 ledger entry and no M8 work. Parent should use the repair commit as the next review candidate and retain the exact reviewed range recorded above as the source independent-review range.

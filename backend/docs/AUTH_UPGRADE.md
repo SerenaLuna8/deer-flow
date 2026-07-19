@@ -1,4 +1,6 @@
-# Authentication Upgrade Guide
+# Authentication Upgrade Guide (Historical Archive)
+
+> This M2-era migration record is retained for history only. It does not describe current M7 runtime, configuration, or operations.
 
 DeerFlow 内置了认证模块。本文档面向从无认证版本升级的用户。
 

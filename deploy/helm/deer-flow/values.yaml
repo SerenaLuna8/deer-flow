@@ -255,7 +255,6 @@ config: |
     type: redis
 
   memory:
-    storage_path: memory.json
 
   # -- Tools configuration. The agent gets NO tools unless they're listed here
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The file/bash

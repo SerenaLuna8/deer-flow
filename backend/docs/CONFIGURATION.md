@@ -17,13 +17,11 @@ Run `make config-upgrade` to merge new fields into your config.
 
 ## Configuration Sections
 
-### Extensions
+### Project assets
 
-MCP servers and skill enabled states live in `extensions_config.json`, separate
-from `config.yaml`. Use `mcpServers.<server>.routing` to add soft MCP tool
-preference hints for requests that should prefer a specific MCP server or tool.
-See [MCP Server Configuration](MCP_SERVER.md#routing-hints) for the schema,
-example, and soft-vs-hard routing boundary.
+Agent, Skill and MCP definitions are versioned PostgreSQL assets. System admins
+publish system assets and project members manage project assets through the
+authenticated UI/API. `config.yaml` controls process/runtime settings only.
 
 ### Models
 

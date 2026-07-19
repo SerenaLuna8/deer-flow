@@ -92,31 +92,9 @@ sandbox:
   use: mypackage.sandbox:MyCustomSandboxProvider
 ```
 
-## 自定义记忆存储
+## 项目 Memory 集成
 
-通过实现 `MemoryStorage` 将基于文件的记忆替换为任何持久化存储：
-
-```python
-from deerflow.agents.memory.storage import MemoryStorage
-from typing import Any
-
-class RedisMemoryStorage(MemoryStorage):
-    def load(self, agent_name: str | None = None) -> dict[str, Any]:
-        ...
-
-    def reload(self, agent_name: str | None = None) -> dict[str, Any]:
-        ...
-
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
-        ...
-```
-
-在 `config.yaml` 中配置：
-
-```yaml
-memory:
-  storage_class: mypackage.storage:RedisMemoryStorage
-```
+Memory 是项目私有的 PostgreSQL 资源。扩展其外围产品行为时，应使用项目 Memory API 和 admitted private-run hook，并始终保留精确的 account、project、owner、namespace scope。最终运行时不加载全局或文件 Memory adapter。
 
 ## 自定义技能
 
