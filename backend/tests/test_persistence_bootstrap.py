@@ -10,7 +10,7 @@ from deerflow.persistence import bootstrap
 @pytest.mark.asyncio
 async def test_classify_database_accepts_only_truly_empty_schema(monkeypatch) -> None:
     connection = AsyncMock()
-    monkeypatch.setattr(bootstrap, "list_user_relations", AsyncMock(return_value=frozenset()))
+    monkeypatch.setattr(bootstrap, "inventory_user_schema_objects", AsyncMock(return_value=frozenset()))
 
     assert await bootstrap.classify_database(connection) == "empty"
     connection.scalar.assert_not_awaited()
@@ -22,33 +22,37 @@ async def test_classify_database_accepts_exact_m7_schema(monkeypatch) -> None:
     connection.scalar.return_value = bootstrap.M7_FINAL_SCHEMA_REVISION
     monkeypatch.setattr(
         bootstrap,
-        "list_user_relations",
-        AsyncMock(return_value=bootstrap._FINAL_APP_TABLES | {"alembic_version"}),
+        "inventory_user_schema_objects",
+        AsyncMock(return_value=frozenset(f"relation:r:{name}" for name in bootstrap._FINAL_APP_TABLES | {"alembic_version"})),
     )
+    monkeypatch.setattr(bootstrap, "verify_m7_catalog", AsyncMock(return_value=True))
 
     assert await bootstrap.classify_database(connection) == "m7"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "relations,revision",
+    "objects,revision",
     [
-        ({"alembic_version"}, "0015_project_reliability_finalize"),
-        ({"unknown_table"}, None),
-        (bootstrap._FINAL_APP_TABLES | {"alembic_version", "unknown_table"}, bootstrap.M7_FINAL_SCHEMA_REVISION),
+        ({"relation:r:alembic_version"}, "0015_project_reliability_finalize"),
+        ({"relation:r:unknown_table"}, None),
+        (
+            {f"relation:r:{name}" for name in bootstrap._FINAL_APP_TABLES | {"alembic_version"}} | {"relation:r:unknown_table"},
+            bootstrap.M7_FINAL_SCHEMA_REVISION,
+        ),
     ],
 )
 async def test_classify_database_rejects_old_or_unknown_nonempty_schema_before_mutation(
     monkeypatch,
-    relations: set[str] | frozenset[str],
+    objects: set[str] | frozenset[str],
     revision: str | None,
 ) -> None:
     connection = AsyncMock()
     connection.scalar.return_value = revision
     monkeypatch.setattr(
         bootstrap,
-        "list_user_relations",
-        AsyncMock(return_value=frozenset(relations)),
+        "inventory_user_schema_objects",
+        AsyncMock(return_value=frozenset(objects)),
     )
 
     with pytest.raises(bootstrap.M7RecreateRequired) as captured:

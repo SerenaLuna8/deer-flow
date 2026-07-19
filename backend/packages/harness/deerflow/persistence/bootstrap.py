@@ -16,7 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from sqlalchemy.pool import NullPool
 
 import deerflow.persistence.models  # noqa: F401 -- populate final metadata
-from deerflow.persistence.base import Base
+from deerflow.persistence.final_schema_contract import (
+    FINAL_APP_TABLES,
+    LANGGRAPH_TABLES,
+    inventory_is_m7_allowed,
+    inventory_user_schema_objects,
+    verify_m7_catalog,
+)
 
 M7_FINAL_SCHEMA_REVISION = "0001_project_saas_baseline"
 
@@ -25,17 +31,8 @@ _HEAD_REVISION: str | None = None
 _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
 _PG_LOCK_POLL_SECONDS = 0.1
 
-_LANGGRAPH_TABLES = frozenset(
-    {
-        "checkpoint_blobs",
-        "checkpoint_migrations",
-        "checkpoint_writes",
-        "checkpoints",
-        "store",
-        "store_migrations",
-    }
-)
-_FINAL_APP_TABLES = frozenset(Base.metadata.tables)
+_LANGGRAPH_TABLES = LANGGRAPH_TABLES
+_FINAL_APP_TABLES = FINAL_APP_TABLES
 _FINAL_ALLOWED_RELATIONS = _FINAL_APP_TABLES | _LANGGRAPH_TABLES | {"alembic_version"}
 
 
@@ -92,14 +89,14 @@ async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
 async def classify_database(connection: AsyncConnection) -> Literal["empty", "m7"]:
     """Classify without mutation before Alembic or seed code can run."""
 
-    relations = await list_user_relations(connection)
-    if not relations:
+    objects = await inventory_user_schema_objects(connection)
+    if not objects:
         return "empty"
-    if "alembic_version" not in relations:
+    if not inventory_is_m7_allowed(objects) or "relation:r:alembic_version" not in objects:
         raise M7RecreateRequired()
 
     revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-    if revision == M7_FINAL_SCHEMA_REVISION and _FINAL_APP_TABLES <= relations and not (relations - _FINAL_ALLOWED_RELATIONS):
+    if revision == M7_FINAL_SCHEMA_REVISION and await verify_m7_catalog(connection):
         return "m7"
     raise M7RecreateRequired()
 

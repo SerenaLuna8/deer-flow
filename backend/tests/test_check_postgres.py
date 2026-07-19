@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -26,17 +27,37 @@ def test_required_tables_exactly_cover_final_application_and_langgraph_schema() 
     } & set(check_postgres.REQUIRED_TABLES)
 
 
-def _connection(*, revision: str | None = "0001_project_saas_baseline", present_tables=None):
+def _connection(
+    *,
+    revision: str | None = "0001_project_saas_baseline",
+    present_tables=None,
+):
     connection = AsyncMock()
-    connection.fetchval.side_effect = ["PostgreSQL 17.5", revision]
-    connection.fetch.return_value = [{"table_name": table} for table in (present_tables or check_postgres.REQUIRED_TABLES)]
+    connection.scalar.side_effect = ["PostgreSQL 17.5", revision is not None] + ([revision] if revision is not None else [])
+    rows = MagicMock()
+    rows.scalars.return_value = present_tables if present_tables is not None else check_postgres.REQUIRED_TABLES
+    connection.execute.return_value = rows
     return connection
+
+
+class _Engine:
+    def __init__(self, connection=None, *, error: Exception | None = None) -> None:
+        self.connection = connection
+        self.error = error
+        self.dispose = AsyncMock()
+
+    @asynccontextmanager
+    async def connect(self):
+        if self.error is not None:
+            raise self.error
+        yield self.connection
 
 
 @pytest.mark.asyncio
 async def test_check_is_read_only_parameterized_and_healthy(monkeypatch) -> None:
     connection = _connection()
-    monkeypatch.setattr(check_postgres.asyncpg, "connect", AsyncMock(return_value=connection))
+    monkeypatch.setattr(check_postgres, "create_async_engine", lambda *_args, **_kwargs: _Engine(connection))
+    monkeypatch.setattr(check_postgres, "classify_database", AsyncMock(return_value="m7"))
     monkeypatch.setattr(check_postgres, "get_head_revision", lambda: "0001_project_saas_baseline")
 
     result = await check_postgres.check_postgres("postgresql://owner:p%40ss@127.0.0.1:5432/deerflow_test_1_abc")
@@ -44,20 +65,23 @@ async def test_check_is_read_only_parameterized_and_healthy(monkeypatch) -> None
     assert result.healthy is True
     assert result.revision_matches is True
     assert result.missing_tables == ()
-    sql, tables = connection.fetch.await_args.args
-    assert "information_schema.tables" in sql
-    assert "$1::text[]" in sql
-    assert set(tables) == set(check_postgres.REQUIRED_TABLES)
-    assert all(not call.args[0].lstrip().upper().startswith(("CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE")) for call in connection.method_calls if call.args and isinstance(call.args[0], str))
+    sql, parameters = connection.execute.await_args.args
+    assert "information_schema.tables" in str(sql)
+    assert "CAST(:required_tables AS text[])" in str(sql)
+    assert set(parameters["required_tables"]) == set(check_postgres.REQUIRED_TABLES)
+    statements = [str(call.args[0]).lstrip().upper() for call in connection.method_calls if call.args]
+    assert all(not statement.startswith(("CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE")) for statement in statements)
 
 
 @pytest.mark.asyncio
 async def test_check_distinguishes_missing_revision_and_tables(monkeypatch) -> None:
-    connection = _connection(present_tables={"users"})
-    missing_relation = RuntimeError("alembic_version missing")
-    missing_relation.sqlstate = "42P01"
-    connection.fetchval.side_effect = ["PostgreSQL 17.5", missing_relation]
-    monkeypatch.setattr(check_postgres.asyncpg, "connect", AsyncMock(return_value=connection))
+    connection = _connection(revision=None, present_tables={"users"})
+    monkeypatch.setattr(check_postgres, "create_async_engine", lambda *_args, **_kwargs: _Engine(connection))
+    monkeypatch.setattr(
+        check_postgres,
+        "classify_database",
+        AsyncMock(side_effect=check_postgres.M7RecreateRequired()),
+    )
     monkeypatch.setattr(check_postgres, "get_head_revision", lambda: "0001_project_saas_baseline")
 
     result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
@@ -76,7 +100,12 @@ async def test_check_is_unhealthy_for_old_revision_or_missing_final_table(monkey
         revision="0015_project_reliability_finalize",
         present_tables=set(check_postgres.REQUIRED_TABLES) - {"projects"},
     )
-    monkeypatch.setattr(check_postgres.asyncpg, "connect", AsyncMock(return_value=connection))
+    monkeypatch.setattr(check_postgres, "create_async_engine", lambda *_args, **_kwargs: _Engine(connection))
+    monkeypatch.setattr(
+        check_postgres,
+        "classify_database",
+        AsyncMock(side_effect=check_postgres.M7RecreateRequired()),
+    )
     monkeypatch.setattr(check_postgres, "get_head_revision", lambda: "0001_project_saas_baseline")
 
     result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
@@ -89,8 +118,12 @@ async def test_check_is_unhealthy_for_old_revision_or_missing_final_table(monkey
 
 @pytest.mark.asyncio
 async def test_check_connection_failure_is_sanitized(monkeypatch) -> None:
-    connect = AsyncMock(side_effect=RuntimeError("cannot connect postgresql://owner:database-secret@localhost/deerflow_test_1_abc"))
-    monkeypatch.setattr(check_postgres.asyncpg, "connect", connect)
+    error = RuntimeError("cannot connect postgresql://owner:database-secret@localhost/deerflow_test_1_abc")
+    monkeypatch.setattr(
+        check_postgres,
+        "create_async_engine",
+        lambda *_args, **_kwargs: _Engine(error=error),
+    )
 
     result = await check_postgres.check_postgres("postgresql://owner:database-secret@localhost/deerflow_test_1_abc")
 

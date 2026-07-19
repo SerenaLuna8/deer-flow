@@ -49,12 +49,12 @@ Final evidence:
 
 | Gate | Result |
 | --- | --- |
-| M1-M7 real PostgreSQL release gate | 137 passed, 0 skipped |
-| M7 final baseline plus bootstrap concurrency | 15 passed |
+| M1-M7 real PostgreSQL release gate | 150 passed, 0 skipped |
+| M7 final baseline/default/setup/check/bootstrap bounded group | 87 passed, 0 skipped |
 | Focused setup/check/bootstrap/doctor/autogen/scaffold tests | 168 passed; 5 environment-conditioned PostgreSQL skips in this non-PG invocation |
 | Builtin catalog real PostgreSQL tests | 39 passed |
 | M4/M5 retained runtime integration tests | 16 passed |
-| Ruff format check | 1,046 files already formatted |
+| Ruff format check | 1,048 files already formatted |
 | Ruff lint | All checks passed |
 | Full backend collection | Completed with 0 collection errors |
 | `git diff --check` | Clean |
@@ -63,6 +63,46 @@ The M7 PostgreSQL tests cover empty install, old/unknown schema rejection with
 unchanged catalog digest, concurrent bootstrap, one forward-only head, final
 catalog equality against SQLAlchemy metadata, required functions/triggers, and
 builtin catalog idempotency.
+
+## First bounded review repair
+
+The first independent review froze four Important findings. This repair stays
+inside that checklist and does not enter Task 9.
+
+- Truly-empty classification now inventories non-extension-owned PostgreSQL
+  root objects, including relations, owned sequences/indexes, routines,
+  standalone types, collations, conversions, operators/opclasses/opfamilies,
+  text-search objects, statistics, rules, policies, and triggers. A database
+  containing only a user sequence, function, or enum is rejected before
+  Alembic. Extension-owned objects remain allowed; a real `hstore` bootstrap
+  regression proves that boundary.
+- `bootstrap_schema`, setup, and `check-db` now share one read-only canonical
+  M7 catalog verifier. Its six audited categories cover 52 relations, 613
+  columns, 382 constraints, 161 indexes, 10 functions, and 67 triggers. The
+  column contract includes type/null/default/identity/generated/collation;
+  constraints and indexes use canonical PostgreSQL definitions; functions and
+  triggers include full bodies and event identity. LangGraph tables and their
+  owned sequences/indexes are the only explicit non-app domain.
+- RED evidence was 8 expected real-PostgreSQL failures: three object-only
+  schemas and five representative final-schema drifts. The first GREEN rerun
+  was 8 passed. The final suite additionally covers a missing trigger and
+  extension ownership.
+- The baseline test now compares native `pg_catalog` rows against a second
+  random database built independently with `Base.metadata.create_all()`; it
+  does not call the production verifier. Dedicated behavior tests cover stream
+  late/duplicate terminal rejection, append-only usage/dead-job/audit/
+  tombstone/restore-proof rows, updated-at behavior, and shared asset version/
+  binding invariants. Function bodies and trigger event/function identities
+  are checked independently so same-name empty replacements cannot pass.
+- The retained final-runtime portion of the removed default-project test was
+  restored as `test_default_project_final_runtime.py`: 8 tests cover
+  NO_USERS/WAITING/CREATED/EXISTING and concurrency, quota rollback, unique
+  admin selection, slug/partial conflict, and database-error sanitization.
+
+Fresh repair evidence is 150 passed/0 skipped for the fixed 16-file release
+gate, 87 passed/0 skipped for the bounded baseline/default/setup/check/
+bootstrap group, full collection with zero errors, Ruff format/lint clean, and
+`git diff --check` clean.
 
 ## Residue audit
 
@@ -86,8 +126,12 @@ instance on `127.0.0.1:55437`. A final catalog query returned no remaining
 `deerflow_test_*` or `deerflow_autogen_*` databases. No database on the normal
 PostgreSQL port was accessed.
 
+The repair-only canonical-signature database
+`deerflow_test_99999_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` was also dropped. The
+same final catalog query remained empty after the repair gates.
+
 ## Handoff
 
-Task 8 is implementation-complete and ready for independent review. Task 9 has
-not started, and milestone progress must remain unchanged until the independent
-review is accepted.
+Task 8 plus the first bounded repair is ready for independent rereview. Task 9
+has not started, and milestone progress must remain unchanged until the
+independent review is accepted.

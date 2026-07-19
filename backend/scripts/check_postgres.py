@@ -8,14 +8,17 @@ import os
 import sys
 from dataclasses import dataclass
 
-import asyncpg
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
-from deerflow.persistence.bootstrap import _get_head_revision
+from deerflow.config.database_config import DatabaseConfig
+from deerflow.persistence.bootstrap import M7RecreateRequired, _get_head_revision, classify_database
 
 try:
-    from scripts.setup_postgres import _asyncpg_url, parse_target
+    from scripts.setup_postgres import parse_target
 except ModuleNotFoundError:  # Direct ``python scripts/check_postgres.py`` execution.
-    from setup_postgres import _asyncpg_url, parse_target
+    from setup_postgres import parse_target
 
 REQUIRED_TABLES: tuple[str, ...] = (
     "agent_version_mcp_refs",
@@ -78,8 +81,6 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "worker_nodes",
 )
 
-_UNDEFINED_TABLE_SQLSTATE = "42P01"
-
 
 @dataclass(frozen=True)
 class PostgresCheckResult:
@@ -107,32 +108,40 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
     """只读检查连接、PostgreSQL 版本、current/head revision 与必需表。"""
     target = parse_target(database_url)
     head = get_head_revision()
-    connection = None
+    engine = create_async_engine(
+        DatabaseConfig(url=database_url).sqlalchemy_url,
+        poolclass=NullPool,
+    )
     try:
-        connection = await asyncpg.connect(_asyncpg_url(database_url))
-        server_version = await connection.fetchval("SELECT version()")
-        try:
-            current_revision = await connection.fetchval("SELECT version_num FROM alembic_version")
-        except Exception as exc:
-            if getattr(exc, "sqlstate", None) != _UNDEFINED_TABLE_SQLSTATE:
-                raise
-            current_revision = None
-        rows = await connection.fetch(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ANY($1::text[])",
-            list(REQUIRED_TABLES),
-        )
-        present = {row["table_name"] for row in rows}
-        missing_tables = tuple(sorted(set(REQUIRED_TABLES) - present))
-        return PostgresCheckResult(
-            host=target.host,
-            port=target.port,
-            database=target.database,
-            server_version=str(server_version),
-            current_revision=current_revision,
-            head_revision=head,
-            revision_matches=current_revision == head,
-            missing_tables=missing_tables,
-        )
+        async with engine.connect() as connection:
+            server_version = await connection.scalar(text("SELECT version()"))
+            has_revision_table = await connection.scalar(text("SELECT to_regclass('alembic_version') IS NOT NULL"))
+            current_revision = await connection.scalar(text("SELECT version_num FROM alembic_version")) if has_revision_table else None
+            rows = await connection.execute(
+                text(
+                    """SELECT table_name FROM information_schema.tables
+                    WHERE table_schema=current_schema()
+                      AND table_name=ANY(CAST(:required_tables AS text[]))"""
+                ),
+                {"required_tables": list(REQUIRED_TABLES)},
+            )
+            present = set(rows.scalars())
+            missing_tables = tuple(sorted(set(REQUIRED_TABLES) - present))
+            try:
+                final_schema = await classify_database(connection) == "m7"
+            except M7RecreateRequired:
+                final_schema = False
+            return PostgresCheckResult(
+                host=target.host,
+                port=target.port,
+                database=target.database,
+                server_version=str(server_version),
+                current_revision=current_revision,
+                head_revision=head,
+                revision_matches=current_revision == head,
+                missing_tables=missing_tables,
+                error="" if final_schema else "M7_RECREATE_REQUIRED: schema catalog does not match the final M7 baseline",
+            )
     except Exception:
         return PostgresCheckResult(
             host=target.host,
@@ -143,11 +152,10 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
             error="无法连接或读取 PostgreSQL；请检查 DATABASE_URL、数据库状态和访问权限",
         )
     finally:
-        if connection is not None:
-            try:
-                await connection.close()
-            except Exception:
-                pass
+        try:
+            await engine.dispose()
+        except Exception:
+            pass
 
 
 def run_check(database_url: str) -> PostgresCheckResult:

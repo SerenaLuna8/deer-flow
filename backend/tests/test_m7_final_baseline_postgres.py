@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import uuid
 from pathlib import Path
 
 import pytest
-from sqlalchemy import UniqueConstraint, text
-from sqlalchemy import inspect as sa_inspect
+from postgres_utils import temporary_postgres_database
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from support.m4_private_threads import seed_m4_thread_database
 
 import deerflow.persistence.models  # noqa: F401
 from app.final_schema import M7_FINAL_SCHEMA_REVISION
+from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
+from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.base import Base
+from scripts.check_postgres import check_postgres
+from scripts.setup_postgres import PostgresSetupError, _bootstrap_existing
 
 LEGACY_RELATIONS = {
     "automation_cutover_state",
@@ -47,6 +54,27 @@ REQUIRED_TRIGGERS = {
     "trg_run_events_stream_terminal",
     "trg_scheduled_tasks_updated_at",
 }
+EXPECTED_FUNCTION_FRAGMENTS = {
+    "bump_asset_catalog_generation": "generation = asset_catalog_state.generation + 1",
+    "enforce_scheduled_task_agent_project": "project Agent must belong to the scheduled task project",
+    "enforce_shared_asset_version_state_transition": "invalid shared asset version workflow transition",
+    "enforce_stream_terminal_invariant": "stream event cannot follow terminal event",
+    "ensure_system_binding_published_version": "system binding requires published version",
+    "prevent_bound_published_version_downgrade": "bound published version cannot change workflow status",
+    "prevent_published_version_child_mutation": "published version child rows are immutable",
+    "prevent_shared_asset_version_payload_update": "shared asset version payload is immutable",
+    "reject_m7_append_only_mutation": "M7 append-only rows cannot be updated or deleted",
+    "set_m7_updated_at": "NEW.updated_at := now()",
+}
+EXPECTED_TRIGGER_IDENTITIES = {
+    "trg_audit_logs_append_only": ("audit_logs", "reject_m7_append_only_mutation", 27),
+    "trg_dead_jobs_append_only": ("dead_jobs", "reject_m7_append_only_mutation", 27),
+    "trg_deletion_tombstones_append_only": ("deletion_tombstones", "reject_m7_append_only_mutation", 27),
+    "trg_project_usage_ledger_append_only": ("project_usage_ledger", "reject_m7_append_only_mutation", 27),
+    "trg_restore_proofs_append_only": ("restore_proofs", "reject_m7_append_only_mutation", 27),
+    "trg_run_events_stream_terminal": ("run_events", "enforce_stream_terminal_invariant", 7),
+    "trg_scheduled_tasks_updated_at": ("scheduled_tasks", "set_m7_updated_at", 19),
+}
 
 
 def _versions_dir() -> Path:
@@ -76,12 +104,99 @@ def _schema_digest_sql() -> str:
             FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid
             JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = current_schema()
+            UNION ALL
+            SELECT 'f:' || p.proname || ':' || pg_get_function_identity_arguments(p.oid) || ':' || pg_get_functiondef(p.oid)
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = current_schema()
+            UNION ALL
+            SELECT 't:' || t.typname || ':' || t.typtype || ':' ||
+                   COALESCE(array_to_string(ARRAY(
+                       SELECT e.enumlabel FROM pg_enum e
+                       WHERE e.enumtypid=t.oid ORDER BY e.enumsortorder
+                   ), ','), '')
+            FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+            LEFT JOIN pg_class c ON c.oid = t.typrelid
+            WHERE n.nspname = current_schema()
+              AND t.typelem = 0
+              AND (t.typrelid = 0 OR c.relkind = 'c')
         ) catalog
     """
 
 
 async def _schema_digest(connection: AsyncConnection) -> str:
     return str(await connection.scalar(text(_schema_digest_sql())))
+
+
+async def _table_row_counts(connection: AsyncConnection) -> tuple[tuple[str, int], ...]:
+    tables = tuple(
+        (
+            await connection.execute(
+                text(
+                    """SELECT c.relname FROM pg_class c
+                    JOIN pg_namespace n ON n.oid=c.relnamespace
+                    WHERE n.nspname=current_schema() AND c.relkind IN ('r','p')
+                    ORDER BY c.relname"""
+                )
+            )
+        ).scalars()
+    )
+    counts = []
+    for table_name in tables:
+        assert str(table_name).replace("_", "").isalnum()
+        counts.append((str(table_name), int(await connection.scalar(text(f'SELECT count(*) FROM "{table_name}"')) or 0)))
+    return tuple(counts)
+
+
+async def _native_relational_catalog(
+    connection: AsyncConnection,
+) -> dict[str, tuple[tuple[object, ...], ...]]:
+    """Independent pg_catalog snapshot; intentionally does not use the production verifier."""
+
+    tables = sorted(Base.metadata.tables)
+    queries = {
+        "relations": """
+            SELECT c.relname,c.relkind::text,c.relpersistence::text,
+                   c.relrowsecurity,c.relforcerowsecurity,COALESCE(pg_get_partkeydef(c.oid),'')
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname=current_schema() AND c.relname=ANY(CAST(:tables AS text[]))
+            ORDER BY c.relname
+        """,
+        "columns": """
+            SELECT c.relname,a.attnum,a.attname,format_type(a.atttypid,a.atttypmod),
+                   a.attnotnull,a.attidentity::text,a.attgenerated::text,
+                   COALESCE(coll.collname,''),
+                   COALESCE(regexp_replace(pg_get_expr(ad.adbin,ad.adrelid,true),'\\s+',' ','g'),'')
+            FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            LEFT JOIN pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum
+            LEFT JOIN pg_collation coll ON coll.oid=a.attcollation
+            WHERE n.nspname=current_schema() AND c.relname=ANY(CAST(:tables AS text[]))
+              AND a.attnum>0 AND NOT a.attisdropped
+            ORDER BY c.relname,a.attnum
+        """,
+        "constraints": """
+            SELECT c.relname,con.conname,con.contype::text,con.condeferrable,
+                   con.condeferred,con.convalidated,
+                   regexp_replace(pg_get_constraintdef(con.oid,true),'\\s+',' ','g')
+            FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname=current_schema() AND c.relname=ANY(CAST(:tables AS text[]))
+            ORDER BY c.relname,con.conname
+        """,
+        "indexes": """
+            SELECT c.relname,i.relname,x.indisunique,x.indisprimary,x.indisvalid,x.indisready,
+                   regexp_replace(pg_get_indexdef(i.oid,0,true),'\\s+',' ','g')
+            FROM pg_index x JOIN pg_class c ON c.oid=x.indrelid
+            JOIN pg_class i ON i.oid=x.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname=current_schema() AND c.relname=ANY(CAST(:tables AS text[]))
+            ORDER BY c.relname,i.relname
+        """,
+    }
+    snapshot = {}
+    for category, query in queries.items():
+        result = await connection.execute(text(query), {"tables": tables})
+        snapshot[category] = tuple(tuple(row) for row in result)
+    return snapshot
 
 
 def test_m7_has_one_forward_only_revision() -> None:
@@ -164,6 +279,128 @@ async def test_unknown_nonempty_schema_is_rejected_before_any_ddl(postgres_datab
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("object_kind", "create_sql"),
+    [
+        ("sequence", "CREATE SEQUENCE reviewer_only_sequence"),
+        (
+            "function",
+            "CREATE FUNCTION reviewer_only_function() RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT 7'",
+        ),
+        ("type", "CREATE TYPE reviewer_only_type AS ENUM ('alpha', 'beta')"),
+    ],
+)
+async def test_user_schema_object_only_database_is_rejected_without_mutation(
+    postgres_database_url: str,
+    object_kind: str,
+    create_sql: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(create_sql))
+        async with engine.connect() as connection:
+            before_catalog = await _schema_digest(connection)
+            before_rows = await _table_row_counts(connection)
+
+        with pytest.raises(bootstrap_module.M7RecreateRequired) as captured:
+            await bootstrap_module.bootstrap_schema(engine)
+        assert captured.value.code == "M7_RECREATE_REQUIRED"
+
+        async with engine.connect() as connection:
+            assert await _schema_digest(connection) == before_catalog, object_kind
+            assert await _table_row_counts(connection) == before_rows, object_kind
+            assert await connection.scalar(text("SELECT to_regclass('alembic_version')")) is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_extension_owned_schema_objects_are_allowed_during_empty_bootstrap(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("CREATE EXTENSION hstore WITH SCHEMA public"))
+
+        await bootstrap_module.bootstrap_schema(engine)
+
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == M7_FINAL_SCHEMA_REVISION
+            assert await connection.scalar(text("SELECT extname FROM pg_extension WHERE extname='hstore'")) == "hstore"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("drift_kind", "mutation_sql"),
+    [
+        (
+            "trigger-missing",
+            ("DROP TRIGGER trg_run_events_stream_terminal ON run_events",),
+        ),
+        (
+            "trigger-body",
+            (
+                "DROP TRIGGER trg_run_events_stream_terminal ON run_events",
+                "CREATE TRIGGER trg_run_events_stream_terminal BEFORE INSERT ON run_events FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
+            ),
+        ),
+        ("column-nullability", ("ALTER TABLE jobs ALTER COLUMN max_attempts DROP NOT NULL",)),
+        ("column-default", ("ALTER TABLE jobs ALTER COLUMN attempt_count SET DEFAULT 7",)),
+        (
+            "check-definition",
+            (
+                "ALTER TABLE jobs DROP CONSTRAINT ck_jobs_attempts",
+                "ALTER TABLE jobs ADD CONSTRAINT ck_jobs_attempts CHECK (attempt_count >= -1 AND max_attempts >= 1)",
+            ),
+        ),
+        (
+            "index-predicate",
+            (
+                "DROP INDEX ix_jobs_active_lease",
+                "CREATE INDEX ix_jobs_active_lease ON jobs (lease_expires_at, id) WHERE status = 'running'",
+            ),
+        ),
+    ],
+)
+async def test_final_schema_drift_fails_closed_across_all_entrypoints(
+    postgres_database_url: str,
+    drift_kind: str,
+    mutation_sql: tuple[str, ...],
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_module.bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            for statement in mutation_sql:
+                await connection.execute(text(statement))
+        async with engine.connect() as connection:
+            before_catalog = await _schema_digest(connection)
+            before_rows = await _table_row_counts(connection)
+            with pytest.raises(bootstrap_module.M7RecreateRequired):
+                await bootstrap_module.classify_database(connection)
+
+        with pytest.raises(bootstrap_module.M7RecreateRequired):
+            await bootstrap_module.bootstrap_schema(engine)
+        with pytest.raises(PostgresSetupError, match="M7_RECREATE_REQUIRED"):
+            await _bootstrap_existing(postgres_database_url)
+        check = await check_postgres(postgres_database_url)
+        assert check.healthy is False
+
+        async with engine.connect() as connection:
+            assert await _schema_digest(connection) == before_catalog, drift_kind
+            assert await _table_row_counts(connection) == before_rows, drift_kind
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_concurrent_empty_setup_converges(postgres_database_url: str) -> None:
     engines = [create_async_engine(postgres_database_url) for _ in range(2)]
     try:
@@ -176,78 +413,29 @@ async def test_concurrent_empty_setup_converges(postgres_database_url: str) -> N
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_baseline_matches_final_metadata_catalog(postgres_database_url: str) -> None:
-    engine = create_async_engine(postgres_database_url)
+async def test_baseline_matches_independent_metadata_database_catalog(
+    postgres_database_url: str,
+    postgres_admin_url: str,
+) -> None:
+    baseline_engine = create_async_engine(postgres_database_url)
     try:
-        await bootstrap_module.bootstrap_schema(engine)
-        async with engine.connect() as connection:
+        await bootstrap_module.bootstrap_schema(baseline_engine)
+        async with baseline_engine.connect() as connection:
+            baseline_catalog = await _native_relational_catalog(connection)
 
-            def inspect_catalog(sync_connection):
-                inspector = sa_inspect(sync_connection)
-                tables = set(inspector.get_table_names()) - {"alembic_version"}
-                columns = {table: {column["name"] for column in inspector.get_columns(table)} for table in tables}
-                indexes = {table: {(index["name"], bool(index["unique"]), tuple(index.get("column_names") or ())) for index in inspector.get_indexes(table) if not index.get("duplicates_constraint")} for table in tables}
-                unique_constraints = {table: {(item["name"], tuple(item.get("column_names") or ())) for item in inspector.get_unique_constraints(table)} for table in tables}
-                checks = {table: {item["name"] for item in inspector.get_check_constraints(table)} for table in tables}
-                foreign_keys = {
-                    table: {
-                        (
-                            tuple(item["constrained_columns"]),
-                            item["referred_table"],
-                            tuple(item["referred_columns"]),
-                            (item.get("options") or {}).get("ondelete"),
-                        )
-                        for item in inspector.get_foreign_keys(table)
-                    }
-                    for table in tables
-                }
-                return tables, columns, indexes, unique_constraints, checks, foreign_keys
+        async with temporary_postgres_database(postgres_admin_url) as metadata_url:
+            metadata_engine = create_async_engine(metadata_url)
+            try:
+                async with metadata_engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+                async with metadata_engine.connect() as connection:
+                    metadata_catalog = await _native_relational_catalog(connection)
+            finally:
+                await metadata_engine.dispose()
 
-            tables, columns, indexes, unique_constraints, checks, foreign_keys = await connection.run_sync(inspect_catalog)
-
-        expected_tables = set(Base.metadata.tables)
-        assert tables == expected_tables
-        assert columns == {name: set(table.c.keys()) for name, table in Base.metadata.tables.items()}
-        for name, table in Base.metadata.tables.items():
-            actual_indexes = {index_name: (unique, column_names) for index_name, unique, column_names in indexes[name]}
-            expected_indexes = {index.name: index for index in table.indexes}
-            assert set(actual_indexes) == set(expected_indexes)
-            for index_name, expected_index in expected_indexes.items():
-                actual_unique, actual_columns = actual_indexes[index_name]
-                assert actual_unique is bool(expected_index.unique)
-                assert len(actual_columns) == len(expected_index.expressions)
-                for actual_column, expected_expression in zip(actual_columns, expected_index.expressions, strict=True):
-                    if expected_expression.__class__.__name__ == "Column":
-                        assert actual_column == expected_expression.name
-                    else:
-                        underlying_column = getattr(expected_expression, "element", None)
-                        if underlying_column is not None and underlying_column.__class__.__name__ == "Column":
-                            assert actual_column == underlying_column.name
-                        else:
-                            assert actual_column is None
-            expected_unique_constraints = {
-                (
-                    constraint.name or f"{name}_{'_'.join(column.name for column in constraint.columns)}_key",
-                    tuple(column.name for column in constraint.columns),
-                )
-                for constraint in table.constraints
-                if isinstance(constraint, UniqueConstraint)
-            }
-            assert unique_constraints[name] == expected_unique_constraints
-            expected_checks = {constraint.name for constraint in table.constraints if constraint.__class__.__name__ == "CheckConstraint"}
-            assert checks[name] == expected_checks
-            expected_foreign_keys = {
-                (
-                    tuple(element.parent.name for element in constraint.elements),
-                    constraint.elements[0].column.table.name,
-                    tuple(element.column.name for element in constraint.elements),
-                    constraint.ondelete,
-                )
-                for constraint in table.foreign_key_constraints
-            }
-            assert foreign_keys[name] == expected_foreign_keys
+        assert baseline_catalog == metadata_catalog
     finally:
-        await engine.dispose()
+        await baseline_engine.dispose()
 
 
 @pytest.mark.postgres
@@ -257,23 +445,295 @@ async def test_baseline_installs_required_functions_and_triggers(postgres_databa
     try:
         await bootstrap_module.bootstrap_schema(engine)
         async with engine.connect() as connection:
-            functions = set(
-                (
-                    await connection.execute(
-                        text("SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema() AND p.proname = ANY(:names)"),
-                        {"names": sorted(REQUIRED_FUNCTIONS)},
-                    )
-                ).scalars()
-            )
-            triggers = set(
-                (
-                    await connection.execute(
-                        text("SELECT tgname FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND NOT t.tgisinternal AND tgname = ANY(:names)"),
-                        {"names": sorted(REQUIRED_TRIGGERS)},
-                    )
-                ).scalars()
-            )
-        assert functions == REQUIRED_FUNCTIONS
-        assert triggers == REQUIRED_TRIGGERS
+            function_rows = (
+                await connection.execute(
+                    text(
+                        """SELECT p.proname,pg_get_functiondef(p.oid)
+                        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                        WHERE n.nspname=current_schema()
+                          AND p.proname=ANY(CAST(:names AS text[]))"""
+                    ),
+                    {"names": sorted(REQUIRED_FUNCTIONS)},
+                )
+            ).all()
+            trigger_rows = (
+                await connection.execute(
+                    text(
+                        """SELECT t.tgname,c.relname,p.proname,t.tgtype,
+                                  pg_get_triggerdef(t.oid,true)
+                        FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+                        JOIN pg_namespace n ON n.oid=c.relnamespace
+                        JOIN pg_proc p ON p.oid=t.tgfoid
+                        WHERE n.nspname=current_schema() AND NOT t.tgisinternal
+                          AND t.tgname=ANY(CAST(:names AS text[]))"""
+                    ),
+                    {"names": sorted(REQUIRED_TRIGGERS)},
+                )
+            ).all()
+        functions = {name: definition for name, definition in function_rows}
+        assert set(functions) == REQUIRED_FUNCTIONS
+        for function_name, fragment in EXPECTED_FUNCTION_FRAGMENTS.items():
+            assert fragment in functions[function_name]
+            assert f"FUNCTION public.{function_name}()" in functions[function_name]
+
+        triggers = {name: (table, function, event_bits, definition) for name, table, function, event_bits, definition in trigger_rows}
+        assert set(triggers) == REQUIRED_TRIGGERS
+        for trigger_name, identity in EXPECTED_TRIGGER_IDENTITIES.items():
+            table, function, event_bits, definition = triggers[trigger_name]
+            assert (table, function, event_bits) == identity
+            assert f"TRIGGER {trigger_name}" in definition
+            assert f"ON {table}" in definition
+            assert f"EXECUTE FUNCTION {function}()" in definition
     finally:
         await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_stream_terminal_trigger_rejects_late_and_duplicate_terminal_events(
+    postgres_database_url: str,
+) -> None:
+    bootstrap_engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_module.bootstrap_schema(bootstrap_engine)
+    finally:
+        await bootstrap_engine.dispose()
+    seed = await seed_m4_thread_database(postgres_database_url)
+    thread_id = f"m7-terminal-{uuid.uuid4()}"
+    run_id = str(uuid.uuid4())
+    try:
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+            await PrivateRunRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                request=PrivateRunCreate(run_id=run_id),
+            )
+            await session.execute(
+                text(
+                    """INSERT INTO thread_event_sequences
+                    (project_id,owner_user_id,thread_id,high_watermark)
+                    VALUES (:project,:owner,:thread,0)"""
+                ),
+                {
+                    "project": seed.owner_a.project_id,
+                    "owner": str(seed.owner_a.user_id),
+                    "thread": thread_id,
+                },
+            )
+
+        async def insert_event(seq: int, event_type: str) -> None:
+            async with seed.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """INSERT INTO run_events
+                        (thread_id,run_id,owner_user_id,event_type,category,content,
+                         event_metadata,seq,created_at,project_id)
+                        VALUES (:thread,:run,:owner,:event,'stream','',
+                                '{}'::json,:seq,now(),:project)"""
+                    ),
+                    {
+                        "thread": thread_id,
+                        "run": run_id,
+                        "owner": str(seed.owner_a.user_id),
+                        "event": event_type,
+                        "seq": seq,
+                        "project": seed.owner_a.project_id,
+                    },
+                )
+
+        await insert_event(1, "stream.frame")
+        await insert_event(2, "stream.end")
+        with pytest.raises(DBAPIError):
+            await insert_event(3, "stream.frame")
+        with pytest.raises(DBAPIError):
+            await insert_event(4, "stream.end")
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_append_only_audit_ledger_tombstone_and_restore_proof_reject_mutation(
+    postgres_database_url: str,
+) -> None:
+    bootstrap_engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_module.bootstrap_schema(bootstrap_engine)
+    finally:
+        await bootstrap_engine.dispose()
+    seed = await seed_m4_thread_database(postgres_database_url)
+    try:
+        dead_job_id = uuid.uuid4()
+        async with seed.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO project_usage_ledger
+                    (id,project_id,dimension,delta,bucket,source_kind,source_ref_key_id,
+                     source_ref_hmac,idempotency_key,occurred_at)
+                    VALUES (:id,:project,'storage_bytes',1,'lifetime','file','test',
+                            :digest,:digest,now())"""
+                ),
+                {"id": uuid.uuid4(), "project": seed.owner_a.project_id, "digest": "1" * 64},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO audit_logs
+                    (id,actor_process,action,target_kind,target_ref_key_id,target_ref_hmac,
+                     outcome,metadata_json)
+                    VALUES (:id,'worker','test.action','test','test',:digest,'success','{}'::json)"""
+                ),
+                {"id": uuid.uuid4(), "digest": "2" * 64},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO jobs
+                    (id,job_type,project_id,idempotency_key,max_attempts)
+                    VALUES (:id,'retention_purge',:project,:key,3)"""
+                ),
+                {
+                    "id": dead_job_id,
+                    "project": seed.owner_a.project_id,
+                    "key": "a" * 64,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO dead_jobs
+                    (job_id,project_id,job_type,attempt_count,retry_safety,public_error_code)
+                    VALUES (:id,:project,'retention_purge',1,'safe','TEST_DEAD')"""
+                ),
+                {"id": dead_job_id, "project": seed.owner_a.project_id},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO deletion_tombstones
+                    (journal_sequence,ciphertext_digest,record_digest,resource_kind,
+                     resource_ref_key_id,resource_ref_hmac)
+                    VALUES (1,:cipher,:record,'file','test',:ref)"""
+                ),
+                {"cipher": "3" * 64, "record": "4" * 64, "ref": "5" * 64},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO restore_proofs
+                    (id,archive_id,archive_digest,target_database_ref_key_id,
+                     target_database_ref_hmac,schema_revision,archive_tombstone_sequence,
+                     replayed_through_sequence,journal_id,final_journal_head_digest)
+                    VALUES (:id,:archive,:digest,'test',:ref,:revision,0,0,:journal,:head)"""
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "archive": uuid.uuid4(),
+                    "digest": "6" * 64,
+                    "ref": "7" * 64,
+                    "revision": M7_FINAL_SCHEMA_REVISION,
+                    "journal": uuid.uuid4(),
+                    "head": "8" * 64,
+                },
+            )
+
+        mutations = {
+            "project_usage_ledger": "delta=2",
+            "audit_logs": "outcome='rejected'",
+            "dead_jobs": "public_error_code='MUTATED'",
+            "deletion_tombstones": "purge_status='purged'",
+            "restore_proofs": "probes_complete=true",
+        }
+        for table_name, assignment in mutations.items():
+            with pytest.raises(DBAPIError):
+                async with seed.engine.begin() as connection:
+                    await connection.execute(text(f"UPDATE {table_name} SET {assignment}"))
+            with pytest.raises(DBAPIError):
+                async with seed.engine.begin() as connection:
+                    await connection.execute(text(f"DELETE FROM {table_name}"))
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_updated_at_and_shared_asset_version_invariants_are_enforced(
+    postgres_database_url: str,
+) -> None:
+    bootstrap_engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_module.bootstrap_schema(bootstrap_engine)
+    finally:
+        await bootstrap_engine.dispose()
+    seed = await seed_m4_thread_database(postgres_database_url)
+    try:
+        async with seed.engine.connect() as connection:
+            before = await connection.scalar(
+                text("SELECT updated_at FROM projects WHERE id=:id"),
+                {"id": seed.owner_a.project_id},
+            )
+        await asyncio.sleep(0.01)
+        async with seed.engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE projects SET display_name='Updated' WHERE id=:id"),
+                {"id": seed.owner_a.project_id},
+            )
+        async with seed.engine.connect() as connection:
+            after = await connection.scalar(
+                text("SELECT updated_at FROM projects WHERE id=:id"),
+                {"id": seed.owner_a.project_id},
+            )
+        assert before is not None and after is not None and after > before
+
+        with pytest.raises(DBAPIError):
+            async with seed.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """UPDATE agent_versions SET description='mutated'
+                        WHERE id=(SELECT current_published_version_id FROM agents WHERE id=:agent)"""
+                    ),
+                    {"agent": seed.system_agent_id},
+                )
+        with pytest.raises(DBAPIError):
+            async with seed.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """UPDATE agent_versions SET workflow_status='draft'
+                        WHERE id=(SELECT current_published_version_id FROM agents WHERE id=:agent)"""
+                    ),
+                    {"agent": seed.system_agent_id},
+                )
+
+        draft_version = uuid.uuid4()
+        async with seed.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO agent_versions
+                    (id,agent_id,version_number,workflow_status,description,soul,model_ref,
+                     tool_groups,payload_checksum,created_by_user_id)
+                    VALUES (:id,:agent,2,'draft','','draft','test-model','[]'::jsonb,
+                            :checksum,:owner)"""
+                ),
+                {
+                    "id": draft_version,
+                    "agent": seed.system_agent_id,
+                    "checksum": "9" * 64,
+                    "owner": str(seed.owner_a.user_id),
+                },
+            )
+        with pytest.raises(DBAPIError):
+            async with seed.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """UPDATE project_system_agent_bindings
+                        SET agent_version_id=:draft
+                        WHERE project_id=:project AND system_agent_id=:agent"""
+                    ),
+                    {
+                        "draft": draft_version,
+                        "project": seed.owner_a.project_id,
+                        "agent": seed.system_agent_id,
+                    },
+                )
+    finally:
+        await seed.engine.dispose()
