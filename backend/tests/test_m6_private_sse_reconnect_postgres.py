@@ -25,7 +25,7 @@ from app.reliability.error_mapping import (
     reliability_http_exception_handler,
 )
 from deerflow.runtime.events.models import StreamFrame
-from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+from deerflow.runtime.events.stream import PostgresStreamBridge
 
 
 def _sse_data_payloads(transcript: str) -> list[object]:

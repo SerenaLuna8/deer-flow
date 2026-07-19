@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 from app.channels.base import Channel
 from app.channels.manager import DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
 from app.channels.message_bus import MessageBus
-from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore
 
 logger = logging.getLogger(__name__)
@@ -59,11 +58,6 @@ def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, 
     if env_value:
         return env_value
     return default
-
-
-def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], app_config: AppConfig) -> None:
-    connection_config = getattr(app_config, "channel_connections", None)
-    merge_runtime_channel_configs(channels_config, connection_config)
 
 
 def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
@@ -201,7 +195,6 @@ class ChannelService:
         extra = app_config.model_extra or {}
         if "channels" in extra:
             channels_config = dict(extra["channels"] or {})
-        _merge_channel_connection_runtime_config(channels_config, app_config)
         connection_config = getattr(app_config, "channel_connections", None)
         connection_repo = _make_connection_repo(connection_config)
         return cls(
@@ -305,9 +298,6 @@ class ChannelService:
         Uses ``get_app_config()`` which detects file changes via config
         signature, so edits to ``config.yaml`` are picked up without a process
         restart.
-        The UI runtime-config overlay applied at startup is re-applied here
-        so a file-driven reload neither drops credentials entered from the
-        browser nor resurrects a channel disconnected from it.
         Falls back to the cached ``self._config`` when config loading fails.
         """
         try:
@@ -316,7 +306,6 @@ class ChannelService:
             app_config = get_app_config()
             extra = app_config.model_extra or {}
             channels_config = dict(extra.get("channels") or {})
-            _merge_channel_connection_runtime_config(channels_config, app_config)
             channel_config = channels_config.get(name)
             if isinstance(channel_config, dict):
                 # Update the cached config so get_status() stays consistent.

@@ -962,22 +962,10 @@ def test_apply_cwd_prefix_quotes_path_with_spaces() -> None:
     assert result == "cd '/tmp/my workspace/t1' && echo hello"
 
 
-def test_validate_local_bash_command_paths_rejects_ambient_mcp_filesystem_paths() -> None:
-    """An extensions file cannot grant the sandbox host filesystem access."""
-    from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
-
-    mock_config = ExtensionsConfig(
-        mcp_servers={
-            "filesystem": McpServerConfig(
-                enabled=True,
-                command="npx",
-                args=["-y", "@modelcontextprotocol/server-filesystem", "/mnt/d/workspace"],
-            )
-        }
-    )
-    with patch("deerflow.config.extensions_config.get_extensions_config", return_value=mock_config):
-        with pytest.raises(PermissionError, match="Unsafe absolute paths"):
-            validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
+def test_validate_local_bash_command_paths_rejects_ambient_filesystem_paths() -> None:
+    """No ambient configuration may grant sandbox host filesystem access."""
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
 
 
 # ---------- Custom mount path tests ----------

@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from support.memory_event_store import MemoryRunEventStore
 
 from deerflow.config.paths import Paths
-from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.runtime.user_context import get_effective_user_id

@@ -15,9 +15,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
+from support.memory_run_store import MemoryRunStore
 
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 def test_database_config_has_no_runtime_compatibility_aliases() -> None:
@@ -148,7 +148,7 @@ class TestDatabaseConfig:
     def test_example_config_uses_postgres_only_contract(self):
         config_example = Path(__file__).resolve().parents[2] / "config.example.yaml"
         text = config_example.read_text()
-        database_section = text[text.index("# Database\n") : text.index("# Run Events Configuration")]
+        database_section = text[text.index("# Database\n") : text.index("# Scheduled Tasks Configuration")]
 
         assert "url: $DATABASE_URL" in database_section
         assert "pool_size: 5" in database_section

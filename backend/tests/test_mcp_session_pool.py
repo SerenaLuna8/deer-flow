@@ -932,7 +932,7 @@ async def test_http_transport_tools_not_pooled():
     }
 
     with (
-        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools._load_admitted_mcp_config", return_value=(extensions_config, {})),
         patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
@@ -973,7 +973,7 @@ async def test_non_stdio_tool_call_timeout_warns_that_it_is_ignored(caplog):
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
-    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.mcp.config import McpServerConfig
     from deerflow.mcp.tools import get_mcp_tools
 
     class Args(BaseModel):
@@ -1002,7 +1002,7 @@ async def test_non_stdio_tool_call_timeout_warns_that_it_is_ignored(caplog):
     }
 
     with (
-        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools._load_admitted_mcp_config", return_value=(extensions_config, {})),
         patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
@@ -1035,7 +1035,7 @@ async def test_stdio_tool_call_timeout_does_not_raise_typeerror():
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
-    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.mcp.config import McpServerConfig
     from deerflow.mcp.tools import get_mcp_tools
 
     class Args(BaseModel):
@@ -1074,7 +1074,7 @@ async def test_stdio_tool_call_timeout_does_not_raise_typeerror():
     }
 
     with (
-        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools._load_admitted_mcp_config", return_value=(extensions_config, {})),
         patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
@@ -1739,7 +1739,7 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
         raise AssertionError(f"unexpected server_name: {server_name}")
 
     with (
-        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools._load_admitted_mcp_config", return_value=(extensions_config, {})),
         patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),

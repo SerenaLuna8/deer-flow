@@ -88,8 +88,6 @@ def test_appconfig_descriptions_retain_original_field_documentation():
         "logging": "Structured logging and request trace correlation settings.",
         "database": "PostgreSQL connection",
         "sandbox": "Sandbox provider",
-        "run_events": "memory for dev",
-        "stream_bridge": "Stream bridge",
         "channel_connections": "IM channel connection",
         "worker": "independent Worker",
         "quotas": "project quota",

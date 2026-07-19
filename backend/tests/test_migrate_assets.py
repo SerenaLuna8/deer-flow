@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import uuid
 from pathlib import Path
@@ -8,23 +7,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.shared_assets.keyring import CredentialKeyring
 from scripts.migrate_assets import (
     AssetMigrationError,
     InventoryItem,
     MigrationCursor,
     OwnerMap,
     SourceLayout,
-    _mcp_parts,
     _stored_agent_payload,
     _stored_mcp_definition,
     build_inventory,
     build_migration_parser,
     create_secure_backup,
-    render_inventory,
     resolve_data_root,
-    resolve_extensions_config_path,
-    restore_secure_backup,
     validate_executable_inventory,
 )
 
@@ -34,32 +28,13 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def test_inventory_is_redacted_and_marks_legacy_shared_owner_unresolved(tmp_path: Path) -> None:
+def test_inventory_marks_legacy_shared_owner_unresolved(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     data = tmp_path / "data"
     _write(repo / "skills/public/demo/SKILL.md", "---\nname: demo\ndescription: demo\n---\nbody\n")
     _write(data / "skills/custom/private/SKILL.md", "---\nname: private\n---\nprivate\n")
-    _write(
-        repo / "extensions_config.json",
-        json.dumps(
-            {
-                "mcpServers": {
-                    "private-api": {
-                        "type": "http",
-                        "url": "https://example.invalid/mcp",
-                        "headers": {"Authorization": "plain-token"},
-                    }
-                }
-            }
-        ),
-    )
-
     inventory = build_inventory(SourceLayout(repo_root=repo, data_root=data), OwnerMap({}))
-    output = render_inventory(inventory)
 
-    assert "plain-token" not in output
-    assert "Authorization" not in output
-    assert "https://example.invalid/mcp" not in output
     assert any(item.status == "unresolved_owner" for item in inventory)
     with pytest.raises(AssetMigrationError, match="unresolved_owner"):
         validate_executable_inventory(inventory)
@@ -202,39 +177,6 @@ def test_default_runtime_home_and_repo_default_agent_are_discovered(
     assert {file.archive_path for file in default_agent.files} == {"config.yaml", "SOUL.md"}
 
 
-def test_extensions_backup_is_authenticated_encrypted_deduplicated_and_exactly_restorable(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    raw = json.dumps(
-        {
-            "mcpServers": {
-                "first": {"type": "http", "url": "https://example.invalid/a", "headers": {"Authorization": "plain-token"}},
-                "second": {"type": "http", "url": "https://example.invalid/b", "headers": {"Authorization": "other-token"}},
-            }
-        },
-        separators=(",", ":"),
-    )
-    _write(repo / "extensions_config.json", raw)
-    keyring = CredentialKeyring(active_key_id="backup-key", _keys={"backup-key": b"b" * 32})
-    inventory = build_inventory(
-        SourceLayout(repo_root=repo, data_root=tmp_path / "data"),
-        OwnerMap({}, system_actor=str(uuid.uuid4())),
-    )
-
-    backup = create_secure_backup(inventory, tmp_path / "migrations", keyring=keyring, run_id=uuid.uuid4())
-
-    assert len(backup.files) == 1  # one shared extensions source, not one plaintext copy per MCP
-    assert all(b"plain-token" not in path.read_bytes() and b"other-token" not in path.read_bytes() for path in backup.run_dir.rglob("*") if path.is_file())
-    ledger_text = backup.ledger_path.read_text(encoding="utf-8")
-    assert "plain-token" not in ledger_text
-    assert "other-token" not in ledger_text
-    assert "nonce" not in ledger_text
-    assert "ciphertext" not in ledger_text
-    ledger = json.loads(ledger_text)
-    assert ledger[0]["archive_path"] == "extensions_config.json"
-    assert ledger[0]["checksum"] == __import__("hashlib").sha256(raw.encode()).hexdigest()
-    assert list(restore_secure_backup(backup, keyring).values()) == [raw.encode()]
-
-
 def test_source_and_backup_parent_symlinks_cannot_bypass_nofollow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -305,42 +247,6 @@ def test_agent_skills_omitted_or_null_mean_all_enabled_but_empty_means_none(tmp_
     assert by_slug["omitted"].payload["skill_slugs"] is None
     assert by_slug["null"].payload["skill_slugs"] is None
     assert by_slug["empty"].payload["skill_slugs"] == []
-
-
-def test_canonical_extensions_path_and_mcp_config_semantics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = tmp_path / "repo"
-    configured = repo / "operator-extensions.json"
-    _write(configured, "{}")
-    monkeypatch.chdir(repo)
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(configured))
-    assert resolve_extensions_config_path(repo) == configured
-
-    definition, secrets, enabled = _mcp_parts(
-        {
-            "enabled": False,
-            "transport": "http",
-            "url": "https://example.invalid/mcp",
-            "tool_call_timeout": None,
-            "oauth": {
-                "enabled": True,
-                "token_url": "https://example.invalid/token",
-                "grant_type": "refresh_token",
-                "client_id": "client-id",
-                "client_secret": "client-secret",
-                "refresh_token": "refresh-token",
-                "scope": "read",
-                "custom_metadata": "kept",
-            },
-        }
-    )
-
-    assert enabled is False
-    assert definition.transport == "http"
-    assert definition.timeout_seconds == 30
-    assert definition.oauth["client_id"] == "client-id"
-    assert definition.oauth["custom_metadata"] == "kept"
-    assert "client_secret" not in definition.oauth and "refresh_token" not in definition.oauth
-    assert secrets["oauth"] == {"client_secret": "client-secret", "refresh_token": "refresh-token"}
 
 
 def test_stored_agent_and_mcp_payloads_are_canonically_reconstructed() -> None:

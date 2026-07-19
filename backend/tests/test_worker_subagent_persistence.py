@@ -159,7 +159,7 @@ async def test_roundtrip_step_is_listable_but_not_in_message_feed():
     # End-to-end against the real in-memory store: a persisted subagent step is
     # retrievable via list_events (fetch-on-expand) yet never leaks into the
     # thread message feed (list_messages), which filters category == "message".
-    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from support.memory_event_store import MemoryRunEventStore
 
     store = MemoryRunEventStore()
     buffer = _SubagentEventBuffer(store, "thread_1", "run_1")

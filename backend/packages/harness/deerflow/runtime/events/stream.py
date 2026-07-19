@@ -23,13 +23,13 @@ from deerflow.runtime.events.models import (
     StreamWriteAuthorityRequired,
 )
 from deerflow.runtime.events.store.db import DbRunEventStore
-from deerflow.runtime.private_scope import PrivateResourceScope
-from deerflow.runtime.stream_bridge.base import (
+from deerflow.runtime.events.stream_base import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
     StreamBridge,
     StreamEvent,
 )
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 logger = logging.getLogger(__name__)
 _CANONICAL_CURSOR = re.compile(r"0|[1-9][0-9]*")

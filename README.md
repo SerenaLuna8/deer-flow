@@ -419,9 +419,9 @@ make migrate-assets ARGS="--dry-run --actor-user-id <system-admin-uuid> --owner-
 make migrate-assets ARGS="--execute --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
 ```
 
-来源包含项目根 `config.yaml` 对应的默认 Agent、repo system Agent、`skills/public`、canonical
-`extensions_config.json`/`mcp_config.json`，以及 `.deer-flow`（或 `DEER_FLOW_HOME`）下的用户
-Agent/Skill。`owner-map.json` 的 `default_projects` 必须显式映射 user UUID 到其 active default
+来源包含项目根 `config.yaml` 对应的默认 Agent、repo system Agent、`skills/public`，以及
+`.deer-flow`（或 `DEER_FLOW_HOME`）下的用户 Agent/Skill。MCP 只从 PostgreSQL asset catalog
+创建和管理，不再扫描本地 JSON。`owner-map.json` 的 `default_projects` 必须显式映射 user UUID 到其 active default
 project UUID；legacy shared custom 来源还必须设置 `legacy_shared_owner`，不得自动归入 system 或
 任意项目。`system_actor` 可写在 map 中，也可用 `--actor-user-id` 覆盖。
 

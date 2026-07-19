@@ -2,8 +2,8 @@
 
 import pytest
 
-from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.mcp.client import build_server_params, build_servers_config
+from deerflow.mcp.config import ExtensionsConfig, McpServerConfig
 
 
 def test_build_server_params_stdio_success():
@@ -22,26 +22,6 @@ def test_build_server_params_stdio_success():
         "args": ["-y", "my-mcp-server"],
         "env": {"API_KEY": "secret"},
     }
-
-
-def test_extensions_config_resolves_env_variables_inside_nested_collections(monkeypatch):
-    monkeypatch.setenv("MCP_TOKEN", "secret")
-    monkeypatch.delenv("MISSING_TOKEN", raising=False)
-    raw_config = {
-        "args": ["--token", "$MCP_TOKEN", {"nested": ["$MCP_TOKEN", "$MISSING_TOKEN"]}],
-        "tuple_args": ("$MCP_TOKEN", "$MISSING_TOKEN"),
-        "env": {"API_KEY": "$MCP_TOKEN"},
-        "enabled": True,
-        "timeout": 30,
-    }
-
-    resolved = ExtensionsConfig.resolve_env_variables(raw_config)
-
-    assert resolved["args"] == ["--token", "secret", {"nested": ["secret", ""]}]
-    assert resolved["tuple_args"] == ("secret", "")
-    assert resolved["env"] == {"API_KEY": "secret"}
-    assert resolved["enabled"] is True
-    assert resolved["timeout"] == 30
 
 
 def test_build_server_params_stdio_requires_command():
@@ -124,7 +104,6 @@ def test_build_servers_config_returns_empty_when_no_enabled_servers():
             "disabled-a": McpServerConfig(enabled=False, type="stdio", command="echo"),
             "disabled-b": McpServerConfig(enabled=False, type="http", url="https://example.com"),
         },
-        skills={},
     )
 
     assert build_servers_config(extensions) == {}
@@ -137,7 +116,6 @@ def test_build_servers_config_skips_invalid_server_and_keeps_valid_ones():
             "invalid-stdio": McpServerConfig(enabled=True, type="stdio", command=None),
             "disabled-http": McpServerConfig(enabled=False, type="http", url="https://disabled.example.com"),
         },
-        skills={},
     )
 
     result = build_servers_config(extensions)

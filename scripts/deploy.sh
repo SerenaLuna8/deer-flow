@@ -116,26 +116,6 @@ else
     echo -e "${GREEN}✓ config.yaml: $DEER_FLOW_CONFIG_PATH${NC}"
 fi
 
-# ── extensions_config.json ───────────────────────────────────────────────────
-
-if [ -z "$DEER_FLOW_EXTENSIONS_CONFIG_PATH" ]; then
-    export DEER_FLOW_EXTENSIONS_CONFIG_PATH="$REPO_ROOT/extensions_config.json"
-fi
-
-if [ ! -f "$DEER_FLOW_EXTENSIONS_CONFIG_PATH" ]; then
-    if [ -f "$REPO_ROOT/extensions_config.json" ]; then
-        cp "$REPO_ROOT/extensions_config.json" "$DEER_FLOW_EXTENSIONS_CONFIG_PATH"
-        echo -e "${GREEN}✓ Seeded extensions_config.json → $DEER_FLOW_EXTENSIONS_CONFIG_PATH${NC}"
-    else
-        # Create a minimal empty config so the gateway doesn't fail on startup
-        echo '{"mcpServers":{},"skills":{}}' > "$DEER_FLOW_EXTENSIONS_CONFIG_PATH"
-        echo -e "${YELLOW}⚠ extensions_config.json not found, created empty config at $DEER_FLOW_EXTENSIONS_CONFIG_PATH${NC}"
-    fi
-else
-    echo -e "${GREEN}✓ extensions_config.json: $DEER_FLOW_EXTENSIONS_CONFIG_PATH${NC}"
-fi
-
-
 # ── BETTER_AUTH_SECRET ───────────────────────────────────────────────────────
 # Required by Next.js in production. Generated once and persisted so auth
 # sessions survive container restarts.
@@ -203,7 +183,7 @@ fi
 # ── UV_EXTRAS auto-detection ─────────────────────────────────────────────────
 # The production Dockerfile accepts UV_EXTRAS as a single build-arg token and
 # adds the --extra prefix itself. Convert the detector's uv flag string
-# ("--extra redis --extra discord") to a comma-joined name token.
+# ("--extra ollama --extra discord") to a comma-joined name token.
 
 if [ "$CMD" != "down" ] && [ -z "$UV_EXTRAS" ]; then
     _detect_python=""
@@ -294,7 +274,6 @@ if [ "$CMD" = "down" ]; then
     # warning about unset variables that appear in volume specs.
     export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$REPO_ROOT/backend/.deer-flow}"
     export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
-    export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
     export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
     export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
     export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
@@ -338,7 +317,7 @@ echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 
 echo -e "${BLUE}Runtime: Gateway admission API + independent Worker execution${NC}"
 
-services="redis frontend gateway worker nginx"
+services="frontend gateway worker nginx"
 
 scheduler_enabled="$(detect_scheduler_enabled)"
 if [ "$scheduler_enabled" = "true" ]; then

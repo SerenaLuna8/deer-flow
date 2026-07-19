@@ -27,15 +27,14 @@ def isolated_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("UV_EXTRAS", raising=False)
     monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
-    monkeypatch.delenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", raising=False)
     return tmp_path
 
 
 def test_parse_env_extras_supports_comma_and_whitespace():
     assert detect.parse_env_extras("ollama") == ["ollama"]
-    assert detect.parse_env_extras("ollama,redis") == ["ollama", "redis"]
-    assert detect.parse_env_extras("ollama redis") == ["ollama", "redis"]
-    assert detect.parse_env_extras(" ollama ,  redis ,") == ["ollama", "redis"]
+    assert detect.parse_env_extras("ollama,discord") == ["ollama", "discord"]
+    assert detect.parse_env_extras("ollama discord") == ["ollama", "discord"]
+    assert detect.parse_env_extras(" ollama ,  discord ,") == ["ollama", "discord"]
     assert detect.parse_env_extras("") == []
 
 
@@ -77,7 +76,7 @@ def test_parse_env_extras_rejects_leading_digits_and_punctuation():
 def test_format_flags_emits_one_flag_per_extra():
     assert detect.format_flags([]) == ""
     assert detect.format_flags(["ollama"]) == "--extra ollama"
-    assert detect.format_flags(["ollama", "redis"]) == "--extra ollama --extra redis"
+    assert detect.format_flags(["ollama", "discord"]) == "--extra ollama --extra discord"
 
 
 def test_strip_comment_preserves_quoted_hash():
@@ -148,10 +147,10 @@ def test_detect_from_config_sqlite_returns_no_extras(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
-def test_detect_from_config_redis_via_stream_bridge(tmp_path):
+def test_detect_from_config_ignores_removed_stream_bridge(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("stream_bridge:\n  type: redis\n  redis_url: redis://localhost:6379/0\n")
-    assert detect.detect_from_config(cfg) == ["redis"]
+    assert detect.detect_from_config(cfg) == []
 
 
 def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
@@ -160,11 +159,10 @@ def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
-def test_detect_from_config_only_detects_redis_for_database_config(tmp_path):
+def test_detect_from_config_ignores_removed_stream_bridge_with_database(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("database:\n  backend: postgres\nstream_bridge:\n  type: redis\n")
-    # Sorted unique extras across all detectors.
-    assert detect.detect_from_config(cfg) == ["redis"]
+    assert detect.detect_from_config(cfg) == []
 
 
 def test_detect_from_config_ignores_both_database_sections(tmp_path):
@@ -191,15 +189,15 @@ def test_resolve_extras_env_supports_multiple(isolated_cwd, monkeypatch):
     assert detect.resolve_extras() == ["ollama", "discord"]
 
 
-def test_resolve_extras_detects_redis_url_env_without_config(isolated_cwd, monkeypatch):
+def test_resolve_extras_ignores_removed_redis_url_env(isolated_cwd, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
-    assert detect.resolve_extras() == ["redis"]
+    assert detect.resolve_extras() == []
 
 
-def test_resolve_extras_combines_uv_extras_with_redis_url_env(isolated_cwd, monkeypatch):
+def test_resolve_extras_does_not_combine_removed_redis_url_env(isolated_cwd, monkeypatch):
     monkeypatch.setenv("UV_EXTRAS", "ollama")
     monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
-    assert detect.resolve_extras() == ["ollama", "redis"]
+    assert detect.resolve_extras() == ["ollama"]
 
 
 def test_resolve_extras_falls_back_to_config(isolated_cwd):

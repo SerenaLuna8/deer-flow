@@ -209,7 +209,7 @@ async def test_shutdown_preserves_status_of_run_completed_during_drain():
     """A run that finishes (e.g. success) during the drain window must keep its
     real terminal status — shutdown must not blanket-overwrite it to
     ``interrupted`` in memory or in the store (Copilot review on PR #3381)."""
-    from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from support.memory_run_store import MemoryRunStore
 
     store = MemoryRunStore()
     rm = RunManager(store=store)
@@ -249,7 +249,7 @@ async def test_shutdown_surfaces_failed_interrupted_persist(caplog):
     PR #3381)."""
     import logging
 
-    from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from support.memory_run_store import MemoryRunStore
 
     class _FailingStore(MemoryRunStore):
         async def update_status(self, *args, **kwargs):

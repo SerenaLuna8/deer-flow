@@ -19,7 +19,7 @@ from deerflow.runtime.events.models import (
     StreamWriteAuthorizationRevoked,
 )
 from deerflow.runtime.events.store.db import DbRunEventStore
-from deerflow.runtime.stream_bridge.postgres import (
+from deerflow.runtime.events.stream import (
     PostgresStreamBridge,
     StreamClosed,
     StreamCursorOutOfRange,

@@ -74,11 +74,11 @@ from deerflow.runtime.events.models import (
     StreamCursorOutOfRange,
 )
 from deerflow.runtime.events.store import RunEventStore
-from deerflow.runtime.runs.store import RunStore
-from deerflow.runtime.stream_bridge.postgres import (
+from deerflow.runtime.events.stream import (
     PostgresStreamBridge,
     parse_stream_cursor,
 )
+from deerflow.runtime.runs.store import RunStore
 from deerflow.utils.time import coerce_iso
 
 router = APIRouter(

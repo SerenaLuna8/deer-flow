@@ -1,8 +1,7 @@
-"""Abstract stream bridge protocol.
+"""Final project-scoped durable stream protocol.
 
-StreamBridge decouples agent workers (producers) from SSE endpoints
-(consumers), aligning with LangGraph Platform's Queue + StreamManager
-architecture.
+The protocol is colocated with durable PostgreSQL run events. There is no
+independent memory/Redis stream authority.
 """
 
 from __future__ import annotations

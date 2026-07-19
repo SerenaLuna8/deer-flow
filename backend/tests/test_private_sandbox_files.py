@@ -568,7 +568,8 @@ async def test_worker_private_recorder_uses_committed_result_without_host_scan(
 ) -> None:
     from unittest.mock import AsyncMock
 
-    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from support.memory_event_store import MemoryRunEventStore
+
     from deerflow.runtime.runs import worker as worker_module
     from deerflow.runtime.runs.manager import RunManager
     from deerflow.runtime.runs.worker import RunContext, run_agent
@@ -653,7 +654,8 @@ async def test_worker_private_recorder_uses_committed_result_without_host_scan(
 async def test_worker_private_recorder_does_not_publish_empty_available_event() -> None:
     from unittest.mock import AsyncMock
 
-    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from support.memory_event_store import MemoryRunEventStore
+
     from deerflow.runtime.runs.manager import RunManager
     from deerflow.runtime.runs.worker import RunContext, run_agent
     from deerflow.workspace_changes.api import get_workspace_changes_response

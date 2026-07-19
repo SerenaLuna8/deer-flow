@@ -933,7 +933,7 @@ class RunAgentPrivateExecutor:
                 checkpointer=checkpointer,
                 store=self._store,
                 event_store=self._event_store,
-                run_events_config=self._app_config.run_events,
+                run_events_config=None,
                 thread_store=None,
                 app_config=self._app_config,
                 private_scope=execution.context.resource_scope,

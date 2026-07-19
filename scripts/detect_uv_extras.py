@@ -3,14 +3,12 @@
 
 Order of resolution:
 1. `UV_EXTRAS` env var. Comma- or whitespace-separated names so multiple
-   extras can be layered (e.g. ``UV_EXTRAS=ollama,redis``). The same
+   extras can be layered (e.g. ``UV_EXTRAS=ollama,discord``). The same
    parsing semantics apply in the Docker dev container via
    ``docker/dev-entrypoint.sh`` and in the production Docker image build via
    ``backend/Dockerfile``.
 2. Auto-detection from config.yaml — currently maps:
-   - stream_bridge.type == redis         -> redis
-3. Runtime environment toggles that enable optional backends:
-   - DEER_FLOW_STREAM_BRIDGE_REDIS_URL   -> redis
+   - channels.discord.enabled == true -> discord
 
 Each extra name is validated against ``^[A-Za-z][A-Za-z0-9_-]*$`` (the same
 shape uv enforces for `[project.optional-dependencies]` keys). Anything else
@@ -18,7 +16,7 @@ is dropped with a stderr warning so a stray shell metacharacter in `.env`
 cannot reach the `uv sync` invocation downstream.
 
 Output: space-separated `--extra <name>` flags ready for splat into
-`uv sync`, e.g. `--extra redis`. Empty output means "no extras".
+`uv sync`, e.g. `--extra discord`. Empty output means "no extras".
 
 Intentionally implemented with the standard library only: this script must run
 *before* `uv sync` has populated the venv, so it cannot depend on PyYAML.
@@ -230,17 +228,15 @@ def detect_from_config(path: Path) -> list[str]:
         return []
     lines = text.splitlines()
     extras: set[str] = set()
-    if (section_value(lines, "stream_bridge", "type") or "").lower() == "redis":
-        extras.add("redis")
-    if (nested_section_value(lines, "channels.discord", "enabled") or "").lower() == "true":
+    if (
+        nested_section_value(lines, "channels.discord", "enabled") or ""
+    ).lower() == "true":
         extras.add("discord")
     return sorted(extras)
 
 
 def detect_from_runtime_env() -> list[str]:
     extras: set[str] = set()
-    if os.environ.get("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "").strip():
-        extras.add("redis")
     return sorted(extras)
 
 

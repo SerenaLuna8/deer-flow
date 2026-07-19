@@ -194,24 +194,16 @@ def test_create_support_bundle_masks_hardcoded_env_secret(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "config.yaml").write_text(
-        "config_version: 5\nmodels:\n  - name: default\n",
-        encoding="utf-8",
-    )
-    (project_root / "extensions_config.json").write_text(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "supabase": {
-                        "command": "npx",
-                        "env": {
-                            "SUPABASE_SERVICE_ROLE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.leak.sig",
-                            "R2_ACCESS_KEY": "0123456789abcdef0123456789abcdef",
-                            "PROJECT_REF": "$SUPABASE_PROJECT_REF",
-                        },
-                    }
-                }
-            }
-        ),
+        """config_version: 5
+models:
+  - name: default
+tools:
+  - name: supabase
+    env:
+      SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.leak.sig
+      R2_ACCESS_KEY: 0123456789abcdef0123456789abcdef
+      PROJECT_REF: $SUPABASE_PROJECT_REF
+""",
         encoding="utf-8",
     )
 
@@ -226,8 +218,8 @@ def test_create_support_bundle_masks_hardcoded_env_secret(tmp_path):
     assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.leak.sig" not in all_text
     assert "0123456789abcdef" not in all_text
 
-    extensions_summary = json.loads(_zip_text(output_path, "extensions-summary.json"))
-    env = extensions_summary["mcpServers"]["supabase"]["env"]
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    env = config_summary["tools"][0]["env"]
     assert env["SUPABASE_SERVICE_ROLE_KEY"] == "<redacted>"
     assert env["R2_ACCESS_KEY"] == "<redacted>"
     assert env["PROJECT_REF"] == "$SUPABASE_PROJECT_REF"
@@ -255,27 +247,6 @@ channels:
 """,
         encoding="utf-8",
     )
-    (project_root / "extensions_config.json").write_text(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "private": {
-                        "command": "node",
-                        "env": {
-                            "PRIVATE_TOKEN": "mcp-secret",
-                        },
-                    }
-                },
-                "skills": {
-                    "public:research": {
-                        "enabled": True,
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
     output_path = tmp_path / "support.zip"
     bundle_path = support_bundle.create_support_bundle(
         project_root=project_root,
@@ -292,7 +263,6 @@ channels:
         "manifest.json",
         "environment.json",
         "config-summary.json",
-        "extensions-summary.json",
         "git.json",
     }.issubset(names)
 
@@ -300,7 +270,6 @@ channels:
     assert "sk-live-secret" not in all_text
     assert "brave-secret" not in all_text
     assert "xoxb-secret" not in all_text
-    assert "mcp-secret" not in all_text
 
     config_summary = json.loads(_zip_text(bundle_path, "config-summary.json"))
     assert config_summary["models"][0]["api_key"] == "<redacted>"
@@ -381,9 +350,7 @@ def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatc
     assert triage["signals"]["node_version_too_old"] is True
     assert triage["signals"]["doctor_failed"] is True
     assert triage["signals"]["dirty_worktree"] is True
-    assert triage["signals"]["extensions_config_missing"] is True
     assert "doctor_included" not in triage["active_signals"]
-    assert "extensions_config_missing" not in triage["active_signals"]
     assert triage["versions"]["python"] == "3.12.11"
     assert triage["versions"]["node"] == "v20.19.5"
     assert triage["doctor"]["errors"] == 2
@@ -466,7 +433,7 @@ def test_triage_flags_config_parse_errors(tmp_path):
     assert "config_error" in triage["active_signals"]
 
 
-def test_triage_flags_extensions_parse_errors(tmp_path):
+def test_support_bundle_ignores_removed_extensions_file(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "config.yaml").write_text(
@@ -483,10 +450,10 @@ def test_triage_flags_extensions_parse_errors(tmp_path):
     )
 
     triage = json.loads(_zip_text(output_path, "triage.json"))
-    assert triage["signals"]["extensions_config_error"] is True
-    assert triage["status"] == "needs_user_setup"
-    assert "extensions_config_error" in triage["active_signals"]
-    assert any("extensions_config.json" in step for step in triage["maintainer_next_steps"])
+    assert "extensions_config_error" not in triage["signals"]
+    assert "extensions_config_missing" not in triage["signals"]
+    with zipfile.ZipFile(output_path) as zf:
+        assert "extensions-summary.json" not in zf.namelist()
 
 
 def test_thread_summary_lists_files_without_file_contents(tmp_path):

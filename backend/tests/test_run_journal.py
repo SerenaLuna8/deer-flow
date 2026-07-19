@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from support.memory_event_store import MemoryRunEventStore
 
-from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
 
 

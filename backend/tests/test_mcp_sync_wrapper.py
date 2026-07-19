@@ -35,7 +35,7 @@ def test_mcp_tool_sync_wrapper_generation():
 
     with (
         patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
-        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
+        patch("deerflow.mcp.tools._load_admitted_mcp_config", return_value=(MagicMock(), {})),
         patch("deerflow.mcp.tools.build_servers_config", return_value={"test-server": {}}),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
     ):
@@ -79,7 +79,7 @@ def test_mcp_tool_loading_skips_failed_server():
 
     with (
         patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
-        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=MagicMock(model_extra={})),
+        patch("deerflow.mcp.tools._load_admitted_mcp_config", return_value=(MagicMock(), {})),
         patch("deerflow.mcp.tools.build_servers_config", return_value={"good-server": {}, "bad-server": {}}),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),

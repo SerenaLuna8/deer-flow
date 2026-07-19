@@ -47,7 +47,7 @@ from app.reliability.workers import WorkerRegistry
 from app.worker.service import JobLeaseAuthority
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.jobs.sql import JobRepository, JobTerminalEvent
-from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+from deerflow.runtime.events.stream import PostgresStreamBridge
 
 
 def _source_ref(payload: bytes) -> QuotaSourceRef:

@@ -31,7 +31,7 @@ def main() -> int:
     parser.add_argument("--cors", default="http://localhost:3000")
     args = parser.parse_args()
 
-    from _replay_fixture import REPLAY_MODEL_BLOCK, build_config_yaml, prepare_hermetic_extras
+    from _replay_fixture import REPLAY_MODEL_BLOCK, build_config_yaml, prepare_hermetic_skills, replay_worker
 
     home = Path(tempfile.mkdtemp(prefix="replay-gw-"))
     cfg = home / "config.yaml"
@@ -41,7 +41,7 @@ def main() -> int:
     # DEER_FLOW_HOME can't leak in and shift prompt-affecting paths/skills.
     os.environ["DEER_FLOW_HOME"] = str(home)
     os.environ["DEER_FLOW_CONFIG_PATH"] = str(cfg)
-    os.environ["DEER_FLOW_EXTENSIONS_CONFIG_PATH"] = str(prepare_hermetic_extras(home))
+    prepare_hermetic_skills(home)
     os.environ["DEERFLOW_REPLAY_FIXTURE"] = args.fixture
     os.environ.setdefault("AUTH_JWT_SECRET", "ci-replay-secret")
     os.environ["GATEWAY_CORS_ORIGINS"] = args.cors
@@ -65,7 +65,8 @@ def main() -> int:
         print("[replay-gw] test-only seed router mounted at /api/test-only/seed-runs", flush=True)
 
     print(f"[replay-gw] config={cfg} fixture={args.fixture} cors={args.cors} port={args.port}", flush=True)
-    uvicorn.run(target, host="127.0.0.1", port=args.port, log_level="warning")
+    with replay_worker():
+        uvicorn.run(target, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
 
 

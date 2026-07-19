@@ -1439,14 +1439,6 @@ memory:
     - correction
 
 # ============================================================================
-# Custom Agent Management API
-# ============================================================================
-# Controls whether the HTTP gateway exposes custom-agent SOUL/USER.md management.
-# Keep this disabled unless the gateway is behind a trusted authenticated admin boundary.
-agents_api:
-  enabled: false
-
-# ============================================================================
 # Skill Self-Evolution Configuration
 # ============================================================================
 # Allow the agent to autonomously create and improve skills in skills/custom/.
@@ -1466,24 +1458,6 @@ database:
   max_overflow: 10
   pool_timeout_seconds: 30
   statement_timeout_seconds: 30
-
-# ============================================================================
-# Run Events Configuration
-# ============================================================================
-# Storage backend for run events (messages + execution traces).
-#
-# backend: memory  -- No persistence, data lost on restart (default)
-# backend: db      -- SQL database via ORM, full query capability (production)
-# backend: jsonl   -- Append-only JSONL files (lightweight single-node persistence)
-#
-# run_events:
-#   backend: memory
-#   max_trace_content: 10240    # Truncation threshold for trace content (db backend, bytes)
-#   track_token_usage: true     # Accumulate token counts to RunRow
-run_events:
-  backend: memory
-  max_trace_content: 10240
-  track_token_usage: true
 
 # ============================================================================
 # Scheduled Tasks Configuration
@@ -1568,42 +1542,6 @@ recovery:
   retention_days: 30
 
 # ============================================================================
-# Stream Bridge Configuration
-# ============================================================================
-# The stream bridge carries live agent events from gateway workers to SSE
-# clients. Docker Compose sets DEER_FLOW_STREAM_BRIDGE_REDIS_URL automatically,
-# so Docker deployments use Redis Streams even if this section is omitted.
-#
-# The redis bridge requires the optional `redis` extra. It is auto-detected from
-# this section on `make dev`, and always installed in the Docker image. To install
-# it manually: cd backend && uv sync --all-packages --extra redis
-#
-# stream_bridge:
-#   type: memory                 # single-process only
-#   queue_maxsize: 256
-#
-# stream_bridge:
-#   type: redis                  # recommended for Docker / multi-worker gateway
-#   redis_url: redis://redis:6379/0
-#   queue_maxsize: 256           # events retained per run (redis stream MAXLEN)
-#   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
-#                                # Refreshed on each publish/publish_end; set 0
-#                                # to disable. This is not a run timeout.
-#   recovered_stream_cleanup_delay_seconds: 60  # seconds to wait after
-#                                # publishing END for a recovered orphan run
-#                                # before deleting the stream key.
-#   max_connections: 100         # optional pool ceiling. Each live SSE client
-#                                # holds one connection blocked in XREAD ... BLOCK
-#                                # for up to heartbeat_interval (15s), so hundreds
-#                                # of concurrent clients open hundreds of
-#                                # connections. Unset = redis-py default (unbounded).
-#
-# NOTE: the redis bridge is fail-hard in v1. Redis.from_url is lazy, so a down
-# Redis does not block gateway startup, but the first publish/xread raises. A
-# mid-run Redis outage fails the active run — there is no automatic retry/backoff
-# or fallback to the in-memory bridge. Run Redis with HA / a restart policy.
-
-# ============================================================================
 # User-Owned IM Channel Connections
 # ============================================================================
 # Lets logged-in users connect their own IM accounts from the DeerFlow frontend
@@ -1612,7 +1550,7 @@ recovery:
 # Security notes:
 # - No public IP, OAuth callback URL, or provider webhook is required.
 # - Provider bot/app credentials stay under `channels.*`.
-# - `channel_connections` stores per-user bindings and one-time connect codes.
+# - Project connection bindings and OAuth state are stored in PostgreSQL.
 # - Telegram uses a deep link when `bot_username` is configured.
 # - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
 #   through the already-running bot/app.

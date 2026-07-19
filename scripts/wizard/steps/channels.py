@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from wizard.ui import ask_multi_choice, print_header, print_info, print_success
 
-
 CHANNEL_CONNECTION_OPTIONS: tuple[tuple[str, str, str], ...] = (
     ("telegram", "Telegram", "direct messages through your DeerFlow bot"),
     ("slack", "Slack", "workspace messages and mentions"),
@@ -25,11 +24,18 @@ class ChannelConnectionsStepResult:
 
 def run_channels_step(step_label: str = "Step 4/5") -> ChannelConnectionsStepResult:
     print_header(f"{step_label} · IM Channels (optional)")
-    print_info("Choose which IM channels should appear in the DeerFlow sidebar and Settings.")
-    print_info("Credentials can be entered later from the browser with Connect or Modify.")
+    print_info(
+        "Choose which IM channels should appear in the DeerFlow sidebar and Settings."
+    )
+    print_info(
+        "Credentials can be entered later from the browser with Connect or Modify."
+    )
     print()
 
-    options = [f"{display_name}  —  {description}" for _, display_name, description in CHANNEL_CONNECTION_OPTIONS]
+    options = [
+        f"{display_name}  —  {description}"
+        for _, display_name, description in CHANNEL_CONNECTION_OPTIONS
+    ]
     selected = ask_multi_choice(
         "Enable channels (comma-separated numbers, 'all', or Enter for none)",
         options,

@@ -35,7 +35,7 @@ from deerflow.persistence.jobs.sql import EnqueueJob, JobRepository, JobScope
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.events.models import StreamFrame
-from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+from deerflow.runtime.events.stream import PostgresStreamBridge
 
 _PROCESS_TIMEOUT = 30.0
 
@@ -102,7 +102,6 @@ def _child_environment(
     environment.update(
         {
             "DEER_FLOW_CONFIG_PATH": str(config),
-            "DEER_FLOW_EXTENSIONS_CONFIG_PATH": str(Path(__file__).resolve().parents[2] / "extensions_config.example.json"),
             "DEER_FLOW_HOME": str(tmp_path / "home"),
             "PYTHONPATH": os.pathsep.join(
                 filter(

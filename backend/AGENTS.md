@@ -21,7 +21,6 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 deer-flow/
 ├── Makefile                    # Root commands (check, install, dev, stop)
 ├── config.yaml                 # Main application configuration
-├── extensions_config.json      # MCP servers and skills configuration
 ├── backend/                    # Backend application (this directory)
 │   ├── Makefile               # Backend-only commands (dev, gateway, lint)
 │   ├── langgraph.json         # LangGraph Studio graph configuration
@@ -276,7 +275,7 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `gateway_platform_runtime(app, startup_config)`. Agent execution belongs to the independent Worker, which loads its own process configuration; Gateway no longer embeds an agent runtime.
 
-Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig`, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `database`, `run_events`, `stream_bridge`, `sandbox`, `log_level`, `logging`, `channels`, `channel_connections`, `scheduler`, `worker`, `quotas`, and `recovery`. Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`.
+Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig`, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `database`, `sandbox`, `log_level`, `logging`, `channels`, `channel_connections`, `scheduler`, `worker`, `quotas`, and `recovery`. Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`.
 
 **Persistence configuration**: the unified `database.url` setting is
 PostgreSQL-only and supplies the Gateway's LangGraph checkpointer, LangGraph
@@ -289,28 +288,15 @@ PostgreSQL-only; startup probes the configured database and never creates it.
 Configuration priority:
 1. Explicit `config_path` argument
 2. `DEER_FLOW_CONFIG_PATH` environment variable
-3. `config.yaml` in current directory (backend/)
-4. `config.yaml` in parent directory (project root - **recommended location**)
+3. `config.yaml` at the repository root
 
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
-**Legacy extensions tombstone** (`extensions_config.json`):
-
-M7 Task 2 no longer loads Agent/Skill/MCP runtime authority from this file. The model remains
-temporarily for later configuration cleanup, but Gateway/Worker/Scheduler startup, prompt
-construction, MCP loading, and sandbox mounts must not read assets from it.
-
 Docker development mounts the project directory at `/app/project` and points
-`DEER_FLOW_CONFIG_PATH` / `DEER_FLOW_EXTENSIONS_CONFIG_PATH` into that directory.
+`DEER_FLOW_CONFIG_PATH` into that directory.
 Keep mutable config files behind a directory bind mount: single-file bind mounts
 can become stale or inaccessible when a host editor replaces a file on save.
-
-Configuration priority:
-1. Explicit `config_path` argument
-2. `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable
-3. `extensions_config.json` in current directory (backend/)
-4. `extensions_config.json` in parent directory (project root - **recommended location**)
 
 ### Gateway API (`app/gateway/`)
 
@@ -447,10 +433,10 @@ Additional providers also live here (`boxlite`, `brave`, `browserless`, `crawl4a
 
 - Uses `langchain-mcp-adapters` `MultiServerMCPClient` for multi-server management
 - **Lazy initialization**: Tools loaded on first use via `get_cached_mcp_tools()`
-- **Cache invalidation**: Detects config file changes via mtime comparison
+- **Run snapshot**: MCP definitions are immutable PostgreSQL asset snapshots admitted by Gateway and materialized by Worker
 - **Transports**: stdio (command-based), SSE, HTTP
 - **OAuth (HTTP/SSE)**: Supports token endpoint flows (`client_credentials`, `refresh_token`) with automatic token refresh + Authorization header injection
-- **Routing hints**: `extensions_config.json -> mcpServers.<server>.routing` and
+- **Routing hints**: admitted MCP server and tool `routing` metadata
   `tools.<original_tool_name>.routing` are soft preference metadata. The effective
   routing is resolved while `mcp/tools.py::get_mcp_tools()` still has both
   `source_name` and the original MCP tool name, then stored on `tool.metadata`
@@ -460,13 +446,13 @@ Additional providers also live here (`boxlite`, `brave`, `browserless`, `crawl4a
   add a parallel routing middleware for PR1-style preference hints.
 - **Stdio file outputs**: Persistent stdio sessions are scoped by `user_id:thread_id`. For stdio transports only, DeerFlow pins the subprocess default `cwd` to the thread workspace and `TMPDIR`/`TMP`/`TEMP` to `workspace/.mcp/tmp/`, unless the operator explicitly configured `cwd` or temp env values. SSE/HTTP transports skip this filesystem prep entirely.
 - **Stdio path translation**: MCP-returned local file references are not copied. If a `ResourceLink` or conservative free-text path resolves to an existing file inside the thread's mounted user-data tree, it is translated deterministically to `/mnt/user-data/...`; paths outside that tree remain unchanged.
-- **Runtime authority**: project Run assets come from exact PostgreSQL snapshots admitted by Gateway and materialized only by the independent Worker; `extensions_config.json` is not runtime asset authority.
+- **Runtime authority**: project Run assets come from exact PostgreSQL snapshots admitted by Gateway and materialized only by the independent Worker.
 
 ### Skills System (`packages/harness/deerflow/skills/`)
 
 - **Location**: `deer-flow/skills/{public,custom}/`
 - **Format**: Directory with `SKILL.md` (YAML frontmatter: name, description, license, allowed-tools, required-secrets)
-- **Loading**: `load_skills()` recursively scans `skills/{public,custom}` for `SKILL.md`, parses metadata, and reads enabled state from extensions_config.json
+- **Loading**: Worker materializes admitted PostgreSQL Skill snapshots for the Run; repository-owned `skills/public` remains an explicit bootstrap/migration source only
 - **Read-only Web preview content**: Admin-only `GET /api/skills/content/{name}` resolves only a `Skill` visible through the current user's storage, validates that `Skill.skill_file` is an allowed regular `SKILL.md`, and offloads discovery, path checks, and the filesystem read with `asyncio.to_thread`. The existing list response, `GET /api/skills/{name}` metadata response, and embedded `DeerFlowClient` skill contracts remain unchanged.
 - **Injection (legacy / default)**: Enabled skills are listed in the agent system prompt with full metadata and container paths (`<available_skills>` block). Controlled by `skills.deferred_discovery: false` (default).
 - **Deferred discovery** (`skills.deferred_discovery: true`): Skills are listed by name only in a compact `<skill_index>` block, keeping the system prompt prefix-cache friendly. The agent calls the `describe_skill` tool at runtime to fetch full metadata for skills it wants to use, then loads the SKILL.md via `read_file`. Two new modules support this path:
@@ -908,7 +894,7 @@ underscore/dash、是否带 dash、分离 value 或 assignment form 都在 stora
 allowlist，`--port 8080` 与 OAuth protocol field-name metadata 也继续合法。credential slot payload
 schema 中的 secret 名称是 grant contract，
 不是 secret value，不能套用 definition key denylist。这些检查稳定 422，异常、repr 与日志不包含
-命中的值或完整敏感 URL；绝不写回全局 `extensions_config.json`。项目无 slot MCP 允许 Admin/Editor
+命中的值或完整敏感 URL；项目无 slot MCP 允许 Admin/Editor
 直接发布；credential MCP 必须先进入 `pending_approval`，再由项目 Admin 或 system override
 批准；system MCP 可由 system admin 从 draft 直接完成同一事务。审批锁序固定为
 `project -> MCP asset -> MCP version/slot -> all logical credentials -> all credential versions -> grant`：
@@ -1314,18 +1300,11 @@ Returns `{}` when Langfuse is not in the enabled providers — LangSmith-only de
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens, staleness_review_enabled, staleness_age_days, staleness_min_candidates, staleness_max_removals_per_cycle, staleness_protected_categories)
 - `scheduler` - Independent project Automation Scheduler policy (`enabled`, `poll_interval_seconds`, `max_concurrent_runs`, `min_once_delay_seconds`); restart-required. `lease_seconds` remains accepted only for M5 configuration/migration compatibility and is not used by the M6 Scheduler; durable execution leases come from `worker.*`, and singleton polling comes from the Scheduler's PostgreSQL session advisory lock rather than Gateway worker count.
 
-**`extensions_config.json`**:
-- `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools.
-- `tool_search.auto_promote_top_k` - Global MCP routing auto-promote breadth. Default `3`, clamped to `1..5`; applies only when `tool_search.enabled=true` and only to policy-filtered deferred MCP tools with `routing.mode="prefer"` and non-empty keywords.
-- `skills` - Map of skill name → state (enabled)
-
-Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` methods.
-
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
 `DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
 
-**Architecture**: Imports the same `deerflow` modules that Gateway API uses. Shares the same config files and data directories. No FastAPI dependency.
+**Architecture**: Imports the same `deerflow` modules that Gateway API uses. Shares `config.yaml` and data directories. No FastAPI dependency.
 
 **Agent Conversation**:
 - `chat(message, thread_id)` — synchronous, accumulates streaming deltas per message-id and returns the final AI text

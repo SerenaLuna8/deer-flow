@@ -10,8 +10,7 @@ change at runtime.
 
 The registry covers two kinds of entries:
 
-- Top-level ``AppConfig`` fields (``database``,
-  ``run_events``, ``stream_bridge``, ``sandbox``, ``log_level``). For
+- Top-level ``AppConfig`` fields (``database``, ``sandbox``, ``log_level``). For
   these, :func:`format_field_description` produces the standardised
   ``"startup-only: ..."`` prefix that the matching Pydantic
   ``Field(description=...)`` carries, so the boundary surfaces in IDE
@@ -44,8 +43,6 @@ STARTUP_ONLY_PREFIX = "startup-only:"
 #: which subsystem to restart.
 STARTUP_ONLY_FIELDS: dict[str, str] = {
     "database": ("The PostgreSQL engine and checkpointer bind database.url and their connection pools once during langgraph_runtime() startup; they are not rebuilt on config.yaml edits."),
-    "run_events": ("make_run_event_store() picks the memory- vs SQL-backed implementation at startup and is frozen onto app.state.run_events_config to stay paired with the underlying event store."),
-    "stream_bridge": ("make_stream_bridge() constructs the stream-bridge singleton once during startup."),
     "sandbox": ("get_sandbox_provider() caches the provider singleton (``_default_sandbox_provider``); a different ``sandbox.use`` class path only takes effect on next process start."),
     "log_level": (
         "apply_logging_level() runs only during app.py startup; it sets the deerflow/app logger levels and may lower root handler thresholds so configured messages can propagate. A freshly reloaded AppConfig does not retrigger it."
@@ -61,7 +58,8 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     # config.yaml edits.
     "channels": ("start_channel_service() is invoked once during startup; the live IM channel clients (Feishu, Slack, Telegram, DingTalk) are not rebuilt when channels.* changes."),
     "channel_connections": (
-        "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; channel_connections.* edits need a restart."
+        "start_channel_service() wires the final project-connection repository and channel workers once at startup, and the project-connections "
+        "router caches the merged provider config on app.state; channel_connections.* edits need a restart."
     ),
     "scheduler": (
         "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "

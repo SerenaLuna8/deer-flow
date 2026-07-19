@@ -75,7 +75,6 @@ def test_compose_resolves_host_worker_override_identically_in_command_and_enviro
         {
             "GATEWAY_WORKERS": "8",
             "DEER_FLOW_CONFIG_PATH": "/tmp/config.yaml",
-            "DEER_FLOW_EXTENSIONS_CONFIG_PATH": "/tmp/extensions.json",
             "DEER_FLOW_HOME": "/tmp/deer-flow-home",
             "DEER_FLOW_REPO_ROOT": "/tmp/deer-flow-repo",
         }

@@ -15,12 +15,11 @@ from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
 from deerflow.assets.catalog import AssetCatalogUnavailable
-from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.mcp.client import build_servers_config
+from deerflow.mcp.config import ExtensionsConfig, McpOAuthConfig, resolve_effective_mcp_routing
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
-from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
@@ -609,7 +608,7 @@ def _merge_catalog_mcp_secrets(
 
 
 def _catalog_oauth_configs(
-    extensions_config: ExtensionsConfig,
+    runtime_mcp_config: ExtensionsConfig,
     secrets_by_server: Mapping[str, Mapping[str, Mapping[str, object]]],
 ) -> dict[str, McpOAuthConfig]:
     oauth_configs: dict[str, McpOAuthConfig] = {}
@@ -624,7 +623,7 @@ def _catalog_oauth_configs(
             raw_oauth.update({str(key): value for key, value in values.items()})
         if not raw_oauth:
             continue
-        server = extensions_config.mcp_servers.get(server_name)
+        server = runtime_mcp_config.mcp_servers.get(server_name)
         if server is None or server.type not in {"http", "sse"} or server.oauth is None:
             raise AssetCatalogUnavailable("system MCP OAuth credential is invalid for transport")
         try:
@@ -634,7 +633,7 @@ def _catalog_oauth_configs(
     return oauth_configs
 
 
-async def _load_runtime_extensions_config(
+async def _load_admitted_mcp_config(
     asset_context: object | None,
 ) -> tuple[ExtensionsConfig, dict[str, Mapping[str, Mapping[str, object]]]]:
     raise AssetCatalogUnavailable("global MCP discovery was removed; use the admitted run MCP snapshot")
@@ -657,8 +656,8 @@ async def get_mcp_tools(*, asset_context: object | None = None) -> list[BaseTool
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
 
-    extensions_config, secrets_by_server = await _load_runtime_extensions_config(asset_context)
-    servers_config = build_servers_config(extensions_config)
+    runtime_mcp_config, secrets_by_server = await _load_admitted_mcp_config(asset_context)
+    servers_config = build_servers_config(runtime_mcp_config)
 
     if not servers_config:
         logger.info("No enabled MCP servers configured")
@@ -668,10 +667,9 @@ async def get_mcp_tools(*, asset_context: object | None = None) -> list[BaseTool
         # Create the multi-server MCP client
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
 
-        # File-backed OAuth may use the regular ExtensionsConfig path. Catalog
-        # plaintext never enters ExtensionsConfig: a local token manager below
-        # converts it to legal Authorization headers immediately before client construction.
-        initial_oauth_headers = {} if secrets_by_server else await get_initial_oauth_headers(extensions_config)
+        # Snapshot plaintext never enters the typed server definition; a local
+        # token manager converts admitted material to Authorization headers.
+        initial_oauth_headers = {} if secrets_by_server else await get_initial_oauth_headers(runtime_mcp_config)
         for server_name, auth_header in initial_oauth_headers.items():
             if server_name not in servers_config:
                 continue
@@ -681,33 +679,9 @@ async def get_mcp_tools(*, asset_context: object | None = None) -> list[BaseTool
                 servers_config[server_name]["headers"] = existing_headers
 
         tool_interceptors: list[Any] = []
-        oauth_interceptor = None if secrets_by_server else build_oauth_tool_interceptor(extensions_config)
+        oauth_interceptor = None if secrets_by_server else build_oauth_tool_interceptor(runtime_mcp_config)
         if oauth_interceptor is not None:
             tool_interceptors.append(oauth_interceptor)
-
-        # Load custom interceptors declared in extensions_config.json
-        # Format: "mcpInterceptors": ["pkg.module:builder_func", ...]
-        raw_interceptor_paths = (extensions_config.model_extra or {}).get("mcpInterceptors")
-        if isinstance(raw_interceptor_paths, str):
-            raw_interceptor_paths = [raw_interceptor_paths]
-        elif not isinstance(raw_interceptor_paths, list):
-            if raw_interceptor_paths is not None:
-                logger.warning(f"mcpInterceptors must be a list of strings, got {type(raw_interceptor_paths).__name__}; skipping")
-            raw_interceptor_paths = []
-        for interceptor_path in raw_interceptor_paths:
-            try:
-                builder = resolve_variable(interceptor_path)
-                interceptor = builder()
-                if callable(interceptor):
-                    tool_interceptors.append(interceptor)
-                    logger.info(f"Loaded MCP interceptor: {interceptor_path}")
-                elif interceptor is not None:
-                    logger.warning(f"Builder {interceptor_path} returned non-callable {type(interceptor).__name__}; skipping")
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load MCP interceptor {interceptor_path}: {e}",
-                    exc_info=True,
-                )
 
         for server_name, materialized in secrets_by_server.items():
             if server_name not in servers_config:
@@ -717,7 +691,7 @@ async def get_mcp_tools(*, asset_context: object | None = None) -> list[BaseTool
                 materialized,
             )
 
-        catalog_oauth = _catalog_oauth_configs(extensions_config, secrets_by_server)
+        catalog_oauth = _catalog_oauth_configs(runtime_mcp_config, secrets_by_server)
         if catalog_oauth:
             token_manager = OAuthTokenManager(catalog_oauth)
             for server_name in token_manager.oauth_server_names():
@@ -773,7 +747,7 @@ async def get_mcp_tools(*, asset_context: object | None = None) -> list[BaseTool
         # behavior of leaving unprefixed tools unwrapped.
         for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
             transport = servers_config[source_name].get("transport", "stdio")
-            server_cfg = extensions_config.mcp_servers.get(source_name)
+            server_cfg = runtime_mcp_config.mcp_servers.get(source_name)
             for tool in server_tools:
                 tag_mcp_tool(tool)
                 prefix = f"{source_name}_"

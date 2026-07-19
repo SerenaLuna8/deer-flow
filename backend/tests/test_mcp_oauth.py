@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.mcp.config import ExtensionsConfig
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
 
 
@@ -71,7 +71,7 @@ def test_oauth_token_manager_fetches_and_caches_token(monkeypatch):
         }
     )
 
-    manager = OAuthTokenManager.from_extensions_config(config)
+    manager = OAuthTokenManager.from_runtime_config(config)
 
     first = asyncio.run(manager.get_authorization_header("secure-http"))
     second = asyncio.run(manager.get_authorization_header("secure-http"))

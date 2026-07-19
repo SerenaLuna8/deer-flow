@@ -43,7 +43,6 @@ from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime.events.store.base import RunEventStore
-from deerflow.runtime.runs.store.base import RunStore
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 logger = logging.getLogger(__name__)
@@ -260,14 +259,10 @@ async def gateway_platform_runtime(
         )
         app.state.automation_scheduler_enabled = effective_scheduler_config.enabled
 
-        run_events_config = getattr(config, "run_events", None)
         from deerflow.runtime.events.store.db import DbRunEventStore
 
-        app.state.private_run_event_store = DbRunEventStore(
-            sf,
-            max_trace_content=getattr(run_events_config, "max_trace_content", 10240),
-        )
-        from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+        app.state.private_run_event_store = DbRunEventStore(sf)
+        from deerflow.runtime.events.stream import PostgresStreamBridge
 
         app.state.private_stream_bridge = PostgresStreamBridge(sf)
         yield
@@ -291,15 +286,12 @@ def _require(attr: str, label: str) -> Callable[[Request], T]:
     return dep
 
 
-get_stream_bridge: Callable[[Request], object] = _require("stream_bridge", "Stream bridge")
 get_run_manager: Callable[[Request], object] = _require("run_manager", "Run manager")
-get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_private_run_event_store: Callable[[Request], RunEventStore] = _require(
     "private_run_event_store",
     "Private run event store",
 )
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
-get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 
 
 def get_private_work_cutover_guard(request: Request) -> PrivateWorkCutoverGuard:

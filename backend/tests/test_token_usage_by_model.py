@@ -22,11 +22,11 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from support.memory_event_store import MemoryRunEventStore
+from support.memory_run_store import MemoryRunStore
 
 from deerflow.persistence.run import RunRepository
-from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
-from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 # ---------------------------------------------------------------------------
 # Test doubles

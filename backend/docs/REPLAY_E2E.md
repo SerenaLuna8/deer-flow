@@ -14,11 +14,11 @@ so contract drift turns the build red instead.
 ## The two layers
 
 - **Layer 1 — backend golden** (`tests/test_replay_golden.py`): replays a fixture
-  through the real FastAPI gateway with `ReplayChatModel` and asserts the streamed
-  SSE event sequence equals a committed golden. Fast, no browser. Guards protocol
-  *shape*.
+  through the real FastAPI Gateway and independent Worker with `ReplayChatModel`,
+  then asserts the streamed SSE event sequence equals a committed golden. Fast,
+  no browser. Guards protocol *shape*.
 - **Layer 2 — full-stack render** (`frontend/tests/e2e-real-backend/`): real
-  Next.js + real gateway (replay model) + Chromium; asserts the replayed
+  Next.js + real Gateway + real Worker (replay model) + Chromium; asserts the replayed
   auto-title and a follow-up suggestion render in the browser. Guards semantic
   *render*. (Complementary to Layer 1 — neither subsumes the other.)
 
@@ -64,8 +64,8 @@ prompt. The conversation flow (user input → tool calls → results → answer)
 stable contract that identifies a recorded turn. The caller still stays in the
 key so two different model users with identical conversation text do not compete
 for the same replay bucket. (This mirrors how open-design's mock picker keys on
-the user prompt, not the system internals.) Combined with pinning skills +
-extensions empty and disabling memory/summarization
+the user prompt, not the system internals.) Combined with an empty admitted
+Skill/MCP dependency set and disabling memory/summarization
 (`tests/_replay_fixture.py::build_config_yaml`), a fixture replays the same across
 machines, days, prompt edits, and CI. Replaying needs **no API key**.
 

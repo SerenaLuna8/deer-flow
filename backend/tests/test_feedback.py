@@ -265,7 +265,7 @@ class TestFollowUpAssociation:
     @pytest.mark.anyio
     async def test_run_records_follow_up_via_memory_store(self):
         """MemoryRunStore stores follow_up_to_run_id in kwargs."""
-        from deerflow.runtime.runs.store.memory import MemoryRunStore
+        from support.memory_run_store import MemoryRunStore
 
         store = MemoryRunStore()
         await store.put("r1", thread_id="t1", status="success")
@@ -278,7 +278,7 @@ class TestFollowUpAssociation:
     @pytest.mark.anyio
     async def test_human_message_has_follow_up_metadata(self):
         """human_message event metadata includes follow_up_to_run_id."""
-        from deerflow.runtime.events.store.memory import MemoryRunEventStore
+        from support.memory_event_store import MemoryRunEventStore
 
         event_store = MemoryRunEventStore()
         await event_store.put(
@@ -295,7 +295,7 @@ class TestFollowUpAssociation:
     @pytest.mark.anyio
     async def test_follow_up_auto_detection_logic(self):
         """Simulate the auto-detection: latest successful run becomes follow_up_to."""
-        from deerflow.runtime.runs.store.memory import MemoryRunStore
+        from support.memory_run_store import MemoryRunStore
 
         store = MemoryRunStore()
         await store.put("r1", thread_id="t1", status="success")

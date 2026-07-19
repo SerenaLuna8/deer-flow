@@ -20,16 +20,12 @@ models:
     base_url: $OPENAI_API_BASE
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-agents_api:
-  enabled: true
 title:
   enabled: false
 memory:
   enabled: false
 database:
   url: $POSTGRES_RUNTIME_TEST_URL
-run_events:
-  backend: memory
 """
 
 
@@ -46,9 +42,6 @@ def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mig
     staged_config.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(staged_config))
 
-    staged_extensions_config = tmp_path / "extensions_config.json"
-    staged_extensions_config.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(staged_extensions_config))
     return home
 
 
@@ -57,10 +50,10 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The Gateway app/lifespan path reads process-wide caches before wiring
     request-scoped dependencies. These E2E tests stage a temporary
-    ``config.yaml``/``extensions_config.json`` and ``DEER_FLOW_HOME``, so the
+    ``config.yaml`` and ``DEER_FLOW_HOME``, so the
     caches below must be reset before app creation:
 
-    - app_config / extensions_config: parsed config file caches.
+    - app_config: parsed config file cache.
     - paths: ``DEER_FLOW_HOME``-derived filesystem paths.
     - persistence.engine: SQLAlchemy engine/session factory for PostgreSQL.
     - app.gateway.deps: cached local auth provider/repository.
@@ -72,7 +65,6 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
 
     from app.gateway import deps as deps_module
     from deerflow.config import app_config as app_config_module
-    from deerflow.config import extensions_config as extensions_config_module
     from deerflow.config import paths as paths_module
     from deerflow.persistence import engine as engine_module
 
@@ -81,7 +73,6 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
         (app_config_module, "_app_config_path", None),
         (app_config_module, "_app_config_mtime", None),
         (app_config_module, "_app_config_is_custom", False),
-        (extensions_config_module, "_extensions_config", None),
         (paths_module, "_paths_singleton", None),
         (paths_module, "_paths", None),
         (engine_module, "_engine", None),
@@ -104,10 +95,8 @@ def _preserve_process_config_singletons(monkeypatch: pytest.MonkeyPatch) -> None
 
     from deerflow.config import (
         acp_config,
-        agents_api_config,
         guardrails_config,
         memory_config,
-        stream_bridge_config,
         subagents_config,
         summarization_config,
         title_config,
@@ -118,11 +107,9 @@ def _preserve_process_config_singletons(monkeypatch: pytest.MonkeyPatch) -> None
         (title_config, "_title_config"),
         (summarization_config, "_summarization_config"),
         (memory_config, "_memory_config"),
-        (agents_api_config, "_agents_api_config"),
         (subagents_config, "_subagents_config"),
         (tool_search_config, "_tool_search_config"),
         (guardrails_config, "_guardrails_config"),
-        (stream_bridge_config, "_stream_bridge_config"),
         (acp_config, "_acp_agents"),
     ):
         monkeypatch.setattr(module, attr, getattr(module, attr), raising=False)

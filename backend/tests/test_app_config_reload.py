@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from collections import UserDict
 from collections.abc import Iterator, Mapping
@@ -12,11 +11,9 @@ from pydantic import ValidationError
 
 import deerflow.config.app_config as app_config_module
 from deerflow.config.acp_config import load_acp_config_from_dict
-from deerflow.config.agents_api_config import get_agents_api_config, load_agents_api_config_from_dict
 from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config
 from deerflow.config.guardrails_config import get_guardrails_config, load_guardrails_config_from_dict
 from deerflow.config.memory_config import get_memory_config, load_memory_config_from_dict
-from deerflow.config.stream_bridge_config import get_stream_bridge_config, load_stream_bridge_config_from_dict
 from deerflow.config.subagents_config import get_subagents_app_config, load_subagents_config_from_dict
 from deerflow.config.summarization_config import get_summarization_config, load_summarization_config_from_dict
 from deerflow.config.title_config import get_title_config, load_title_config_from_dict
@@ -43,11 +40,9 @@ def _reset_config_singletons() -> None:
     load_title_config_from_dict({})
     load_summarization_config_from_dict({})
     load_memory_config_from_dict({})
-    load_agents_api_config_from_dict({})
     load_subagents_config_from_dict({})
     load_tool_search_config_from_dict({})
     load_guardrails_config_from_dict({})
-    load_stream_bridge_config_from_dict(None)
     load_acp_config_from_dict({})
     reset_checkpointer()
     reset_store()
@@ -73,30 +68,6 @@ def _write_config(path: Path, *, model_name: str, supports_thinking: bool) -> No
     )
 
 
-def _write_config_with_agents_api(
-    path: Path,
-    *,
-    model_name: str,
-    supports_thinking: bool,
-    agents_api: dict | None = None,
-) -> None:
-    config = {
-        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-        "models": [
-            {
-                "name": model_name,
-                "use": "langchain_openai:ChatOpenAI",
-                "model": "gpt-test",
-                "supports_thinking": supports_thinking,
-            }
-        ],
-    }
-    if agents_api is not None:
-        config["agents_api"] = agents_api
-
-    path.write_text(yaml.safe_dump(config), encoding="utf-8")
-
-
 def _write_config_with_sections(path: Path, sections: dict | None = None) -> None:
     config = {
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
@@ -112,10 +83,6 @@ def _write_config_with_sections(path: Path, sections: dict | None = None) -> Non
         config.update(sections)
 
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
-
-
-def _write_extensions_config(path: Path) -> None:
-    path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
 
 
 @pytest.mark.parametrize("mapping_type", [UserDict, _ConfigMapping])
@@ -134,11 +101,8 @@ def test_app_config_rejects_checkpointer_from_any_mapping(mapping_type):
 
 def test_app_config_defaults_missing_database_url_from_environment(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     _write_config(config_path, model_name="first-model", supports_thinking=False)
 
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
     monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/deerflow")
 
     config = AppConfig.from_file(str(config_path))
@@ -148,8 +112,6 @@ def test_app_config_defaults_missing_database_url_from_environment(tmp_path, mon
 
 def test_app_config_defaults_empty_database_url_from_environment(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     config_path.write_text(
         yaml.safe_dump(
             {
@@ -160,7 +122,6 @@ def test_app_config_defaults_empty_database_url_from_environment(tmp_path, monke
         encoding="utf-8",
     )
 
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
     monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/deerflow")
 
     config = AppConfig.from_file(str(config_path))
@@ -176,8 +137,6 @@ def test_app_config_coerces_commented_out_list_sections(tmp_path, monkeypatch):
     ``Input should be a valid list``.
     """
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     config_path.write_text(
         yaml.safe_dump(
             {
@@ -189,7 +148,6 @@ def test_app_config_coerces_commented_out_list_sections(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
 
     config = AppConfig.from_file(str(config_path))
 
@@ -206,8 +164,6 @@ def test_app_config_coerces_commented_out_object_sections(tmp_path, monkeypatch)
     their defaults instead of raising ``Input should be a valid dictionary``.
     """
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     config_path.write_text(
         yaml.safe_dump(
             {
@@ -216,12 +172,10 @@ def test_app_config_coerces_commented_out_object_sections(tmp_path, monkeypatch)
                 "summarization": None,
                 "guardrails": None,
                 "tool_output": None,
-                "run_events": None,
             }
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
 
     config = AppConfig.from_file(str(config_path))
 
@@ -231,7 +185,6 @@ def test_app_config_coerces_commented_out_object_sections(tmp_path, monkeypatch)
     assert type(config.summarization).__name__ == "SummarizationConfig"
     assert type(config.guardrails).__name__ == "GuardrailsConfig"
     assert type(config.tool_output).__name__ == "ToolOutputConfig"
-    assert type(config.run_events).__name__ == "RunEventsConfig"
 
 
 def test_app_config_null_required_section_still_errors(tmp_path, monkeypatch):
@@ -242,10 +195,7 @@ def test_app_config_null_required_section_still_errors(tmp_path, monkeypatch):
     ``_drop_null_config_sections``), unlike the optional object sections above.
     """
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     config_path.write_text(yaml.safe_dump({"sandbox": None}), encoding="utf-8")
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
 
     with pytest.raises(ValidationError):
         AppConfig.from_file(str(config_path))
@@ -253,8 +203,6 @@ def test_app_config_null_required_section_still_errors(tmp_path, monkeypatch):
 
 def test_app_config_warns_when_no_models_configured(tmp_path, monkeypatch, caplog):
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     config_path.write_text(
         yaml.safe_dump(
             {
@@ -264,7 +212,6 @@ def test_app_config_warns_when_no_models_configured(tmp_path, monkeypatch, caplo
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
 
     with caplog.at_level("WARNING", logger="deerflow.config.app_config"):
         AppConfig.from_file(str(config_path))
@@ -274,12 +221,9 @@ def test_app_config_warns_when_no_models_configured(tmp_path, monkeypatch, caplo
 
 def test_get_app_config_reloads_when_file_changes(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     _write_config(config_path, model_name="first-model", supports_thinking=False)
 
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
     reset_app_config()
 
     try:
@@ -299,12 +243,9 @@ def test_get_app_config_reloads_when_file_changes(tmp_path, monkeypatch):
 
 def test_get_app_config_reloads_when_content_digest_changes_without_metadata(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     _write_config(config_path, model_name="model-a", supports_thinking=False)
 
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
     _reset_config_singletons()
 
     try:
@@ -339,12 +280,9 @@ def test_get_app_config_reloads_when_content_digest_changes_without_metadata(tmp
 def test_get_app_config_reloads_when_config_path_changes(tmp_path, monkeypatch):
     config_a = tmp_path / "config-a.yaml"
     config_b = tmp_path / "config-b.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     _write_config(config_a, model_name="model-a", supports_thinking=False)
     _write_config(config_b, model_name="model-b", supports_thinking=True)
 
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_a))
     reset_app_config()
 
@@ -360,45 +298,8 @@ def test_get_app_config_reloads_when_config_path_changes(tmp_path, monkeypatch):
         reset_app_config()
 
 
-def test_get_app_config_resets_agents_api_config_when_section_removed(tmp_path, monkeypatch):
-    config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
-    _write_config_with_agents_api(
-        config_path,
-        model_name="first-model",
-        supports_thinking=False,
-        agents_api={"enabled": True},
-    )
-
-    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
-    reset_app_config()
-
-    try:
-        initial = get_app_config()
-        assert initial.models[0].name == "first-model"
-        assert get_agents_api_config().enabled is True
-
-        _write_config_with_agents_api(
-            config_path,
-            model_name="first-model",
-            supports_thinking=False,
-        )
-        next_mtime = config_path.stat().st_mtime + 5
-        os.utime(config_path, (next_mtime, next_mtime))
-
-        reloaded = get_app_config()
-        assert reloaded is not initial
-        assert get_agents_api_config().enabled is False
-    finally:
-        reset_app_config()
-
-
 def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     _write_config_with_sections(
         config_path,
         {
@@ -408,12 +309,10 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
             "subagents": {"timeout_seconds": 42, "agents": {"reviewer": {"max_turns": 2}}},
             "tool_search": {"enabled": True},
             "guardrails": {"enabled": True, "fail_closed": False},
-            "stream_bridge": {"type": "memory", "queue_maxsize": 12},
         },
     )
 
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
     reset_app_config()
 
     try:
@@ -424,7 +323,6 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
         assert get_subagents_app_config().timeout_seconds == 42
         assert get_tool_search_config().enabled is True
         assert get_guardrails_config().enabled is True
-        assert get_stream_bridge_config() is not None
 
         _write_config_with_sections(config_path)
         next_mtime = config_path.stat().st_mtime + 5
@@ -437,22 +335,18 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
         assert get_subagents_app_config().timeout_seconds == 1800
         assert get_tool_search_config().enabled is False
         assert get_guardrails_config().enabled is False
-        assert get_stream_bridge_config() is None
     finally:
         _reset_config_singletons()
 
 
 def test_get_app_config_rejects_removed_checkpointer_section(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     _write_config_with_sections(
         config_path,
         {"checkpointer": {"type": "postgres", "connection_string": "postgresql://localhost/other"}},
     )
 
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
     reset_app_config()
 
     try:
@@ -464,8 +358,6 @@ def test_get_app_config_rejects_removed_checkpointer_section(tmp_path, monkeypat
 
 def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    _write_extensions_config(extensions_path)
     _write_config_with_sections(
         config_path,
         {
@@ -475,7 +367,6 @@ def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(
     )
 
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
     _reset_config_singletons()
 
     try:

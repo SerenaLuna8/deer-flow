@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
+from deerflow.mcp.config import ExtensionsConfig, McpOAuthConfig
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +31,9 @@ class OAuthTokenManager:
         self._locks: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name in oauth_by_server}
 
     @classmethod
-    def from_extensions_config(cls, extensions_config: ExtensionsConfig) -> OAuthTokenManager:
+    def from_runtime_config(cls, runtime_mcp_config: ExtensionsConfig) -> OAuthTokenManager:
         oauth_by_server: dict[str, McpOAuthConfig] = {}
-        for server_name, server_config in extensions_config.get_enabled_mcp_servers().items():
+        for server_name, server_config in runtime_mcp_config.get_enabled_mcp_servers().items():
             if server_config.oauth and server_config.oauth.enabled:
                 oauth_by_server[server_name] = server_config.oauth
         return cls(oauth_by_server)
@@ -119,9 +119,9 @@ class OAuthTokenManager:
         return _OAuthToken(access_token=access_token, token_type=token_type, expires_at=expires_at)
 
 
-def build_oauth_tool_interceptor(extensions_config: ExtensionsConfig) -> Any | None:
+def build_oauth_tool_interceptor(runtime_mcp_config: ExtensionsConfig) -> Any | None:
     """Build a tool interceptor that injects OAuth Authorization headers."""
-    token_manager = OAuthTokenManager.from_extensions_config(extensions_config)
+    token_manager = OAuthTokenManager.from_runtime_config(runtime_mcp_config)
     if not token_manager.has_oauth_servers():
         return None
 
@@ -137,9 +137,9 @@ def build_oauth_tool_interceptor(extensions_config: ExtensionsConfig) -> Any | N
     return oauth_interceptor
 
 
-async def get_initial_oauth_headers(extensions_config: ExtensionsConfig) -> dict[str, str]:
+async def get_initial_oauth_headers(runtime_mcp_config: ExtensionsConfig) -> dict[str, str]:
     """Get initial OAuth Authorization headers for MCP server connections."""
-    token_manager = OAuthTokenManager.from_extensions_config(extensions_config)
+    token_manager = OAuthTokenManager.from_runtime_config(runtime_mcp_config)
     if not token_manager.has_oauth_servers():
         return {}
 

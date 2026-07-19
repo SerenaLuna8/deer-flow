@@ -370,13 +370,9 @@ Follow this skill before choosing a general workflow. Load supporting resources 
     def _load_skill_registry_by_path(self) -> dict[str, Skill] | None:
         """Load the live skill registry keyed by normalized container file path.
 
-        Reloaded every call on purpose (not cached): load_skills re-reads the
-        enabled state from extensions_config so an operator disabling a skill
-        revokes its secret binding on the very next model call. A cache keyed on
-        file mtimes would miss enable/disable toggles (which do not touch
-        SKILL.md) and keep injecting after a disable — trading the
-        immediate-revocation security property for speed. The cost is gated: the
-        only caller runs this only when the caller supplied secrets.
+        Reloaded every call on purpose (not cached) so the admitted run-local
+        Skill registry remains the only source used for secret binding. The cost
+        is gated: the only caller runs this when the caller supplied secrets.
 
         Paths are normalized so a non-canonical ``container_path`` config (e.g. a
         trailing slash) still matches the canonical path captured in

@@ -30,6 +30,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
 from deerflow.file_authority import RunFileAuthority
+from deerflow.runtime.events.stream_base import StreamBridge
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -50,7 +51,6 @@ from deerflow.runtime.goal import (
     write_thread_goal,
 )
 from deerflow.runtime.serialization import serialize
-from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user, get_effective_user_id
 from deerflow.sandbox.sandbox import (
     AUTHORIZATION_REVOKED_REASON,

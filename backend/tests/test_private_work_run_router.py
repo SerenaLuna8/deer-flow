@@ -31,7 +31,7 @@ from app.reliability.error_mapping import (
 )
 from app.reliability.errors import ReliabilityQuotaExceeded
 from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
-from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+from deerflow.runtime.events.stream import PostgresStreamBridge
 
 
 @pytest_asyncio.fixture()

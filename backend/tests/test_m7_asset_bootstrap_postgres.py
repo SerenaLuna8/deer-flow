@@ -651,13 +651,13 @@ def test_legacy_skill_storage_and_installer_imports_are_absent() -> None:
     ["app.gateway.app", "app.worker.app", "app.scheduler.app"],
 )
 def test_process_module_import_does_not_read_legacy_asset_sources(monkeypatch, module_name: str) -> None:
-    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.config import ExtensionsConfig
     from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("legacy asset source was read during process startup import")
 
-    monkeypatch.setattr(ExtensionsConfig, "from_file", forbidden)
+    monkeypatch.setattr(ExtensionsConfig, "from_file", forbidden, raising=False)
     monkeypatch.setattr(LocalSkillStorage, "load_skills", forbidden)
     module = importlib.import_module(module_name)
     importlib.reload(module)

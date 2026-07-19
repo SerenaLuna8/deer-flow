@@ -50,8 +50,6 @@ def test_backend_dockerfile_expands_multiple_uv_extras(tmp_path):
     assert capture.read_text(encoding="utf-8").splitlines() == [
         "sync",
         "--extra",
-        "redis",
-        "--extra",
         "discord",
         "--extra",
         "ollama",
@@ -134,7 +132,6 @@ def test_deploy_build_auto_detects_discord_extra(tmp_path):
         "database:\n  backend: postgres\nchannels:\n  discord:\n    enabled: true\n",
         encoding="utf-8",
     )
-    (worktree / "extensions_config.json").write_text('{"mcpServers":{},"skills":{}}\n', encoding="utf-8")
 
     capture = tmp_path / "uv_extras.txt"
     bin_dir = tmp_path / "bin"
@@ -173,7 +170,6 @@ def test_deploy_uses_dotenv_without_sourcing_shell_syntax(tmp_path):
         "database:\n  backend: postgres\n",
         encoding="utf-8",
     )
-    (worktree / "extensions_config.json").write_text('{"mcpServers":{},"skills":{}}\n', encoding="utf-8")
     marker = tmp_path / "sourced-marker"
     (worktree / ".env").write_text(
         f"DATABASE_URL=postgresql://user:pass@localhost/db?sslmode=require&application_name=deer\nUNSAFE=$(touch {shlex.quote(str(marker))})\nUV_EXTRAS=discord\n",
@@ -213,17 +209,16 @@ def test_deploy_uses_dotenv_without_sourcing_shell_syntax(tmp_path):
     assert str(worktree / ".env") in args
 
 
-def test_deploy_build_auto_detects_redis_extra_with_python_fallback(tmp_path):
+def test_deploy_build_auto_detects_discord_extra_with_python_fallback(tmp_path):
     """Production deploy hosts may have python but no runnable python3."""
     worktree = tmp_path / "repo"
     shutil.copytree(REPO_ROOT / "scripts", worktree / "scripts")
     shutil.copytree(REPO_ROOT / "docker", worktree / "docker")
     (worktree / "backend").mkdir()
     (worktree / "config.yaml").write_text(
-        "stream_bridge:\n  type: redis\n",
+        "channels:\n  discord:\n    enabled: true\n",
         encoding="utf-8",
     )
-    (worktree / "extensions_config.json").write_text('{"mcpServers":{},"skills":{}}\n', encoding="utf-8")
 
     capture = tmp_path / "uv_extras.txt"
     bin_dir = tmp_path / "bin"
@@ -258,4 +253,4 @@ def test_deploy_build_auto_detects_redis_extra_with_python_fallback(tmp_path):
         capture_output=True,
     )
 
-    assert capture.read_text(encoding="utf-8") == "redis"
+    assert capture.read_text(encoding="utf-8") == "discord"

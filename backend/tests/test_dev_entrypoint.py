@@ -74,21 +74,21 @@ def test_removed_postgres_extra_is_rejected():
 
 
 def test_multi_extra_comma_separated():
-    proc = _run("ollama,redis")
+    proc = _run("ollama,discord")
     assert proc.returncode == 0
-    assert proc.stdout.strip() == "--extra ollama --extra redis"
+    assert proc.stdout.strip() == "--extra ollama --extra discord"
 
 
 def test_multi_extra_whitespace_separated():
-    proc = _run("ollama redis")
+    proc = _run("ollama discord")
     assert proc.returncode == 0
-    assert proc.stdout.strip() == "--extra ollama --extra redis"
+    assert proc.stdout.strip() == "--extra ollama --extra discord"
 
 
 def test_multi_extra_mixed_separators():
-    proc = _run(" ollama ,  redis ,")
+    proc = _run(" ollama ,  discord ,")
     assert proc.returncode == 0
-    assert proc.stdout.strip() == "--extra ollama --extra redis"
+    assert proc.stdout.strip() == "--extra ollama --extra discord"
 
 
 def test_empty_string_yields_empty_flags():

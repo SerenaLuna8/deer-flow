@@ -28,7 +28,7 @@ from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.runtime import make_store
 from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 from deerflow.runtime.events.store.db import DbRunEventStore
-from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+from deerflow.runtime.events.stream import PostgresStreamBridge
 
 WORKER_VERSION = "m6"
 
@@ -108,10 +108,7 @@ async def run_worker(
                 bridge=bridge,
                 project_checkpointer=project_checkpointer,
                 store=store,
-                event_store=DbRunEventStore(
-                    session_factory,
-                    max_trace_content=config.run_events.max_trace_content,
-                ),
+                event_store=DbRunEventStore(session_factory),
                 quota=quota_enforcer,
             )
             private_run_handler = PrivateRunJobHandler(

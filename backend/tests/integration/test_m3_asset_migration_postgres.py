@@ -8,17 +8,11 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.shared_assets.credential_closure import McpCredentialClosureTarget, lock_mcp_credential_closures
-from app.shared_assets.keyring import CredentialKeyring
-from app.shared_assets.models import AssetScope
 from deerflow.persistence.shared_assets import (
     AgentRow,
     AgentVersionRow,
     AgentVersionSkillRefRow,
     AssetCatalogStateRow,
-    CredentialEnvelopeRow,
-    CredentialGrantRow,
-    McpCredentialSlotRow,
     McpServerRow,
     McpServerVersionRow,
     SkillRow,
@@ -32,7 +26,6 @@ from scripts.migrate_assets import (
     OwnerMap,
     SourceLayout,
     build_inventory,
-    render_inventory,
 )
 
 
@@ -89,7 +82,7 @@ async def test_migration_is_idempotent_and_checksum_change_creates_version(
         versions = int((await session.execute(select(func.count()).select_from(SkillVersionRow).where(SkillVersionRow.skill_id == skill.id))).scalar_one())
         marker = await session.get(AssetCatalogStateRow, 1)
         assert versions == 2
-        assert marker is not None and marker.cutover_at is not None
+        assert marker is not None and marker.generation >= 1
         assert skill.current_published_version_id is not None
     await engine.dispose()
 
@@ -211,104 +204,6 @@ async def test_all_visible_agent_dependencies_fail_ambiguity_before_any_asset_wr
 
 
 @pytest.mark.asyncio
-async def test_system_agent_mcp_skill_and_secret_migrate_as_one_validated_catalog(
-    migrated_postgres_database_url: str,
-    tmp_path: Path,
-) -> None:
-    engine = create_async_engine(migrated_postgres_database_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    actor_id = str(uuid.uuid4())
-    repo = tmp_path / "repo"
-    skill = repo / "skills/public/demo/SKILL.md"
-    skill.parent.mkdir(parents=True)
-    skill.write_text("---\nname: demo\ndescription: demo\n---\nbody\n", encoding="utf-8")
-    extensions = repo / "extensions_config.json"
-    extensions.write_text(
-        """{"mcpServers":{"demo-mcp":{"type":"http","url":"https://example.invalid/mcp","headers":{"Authorization":"plain-token"}}}}""",
-        encoding="utf-8",
-    )
-    agent_dir = repo / "agents/research"
-    agent_dir.mkdir(parents=True)
-    (agent_dir / "config.yaml").write_text(
-        "name: Research\ndescription: demo\nmodel: default\nskills: [demo]\nmcp_servers: [demo-mcp]\n",
-        encoding="utf-8",
-    )
-    (agent_dir / "SOUL.md").write_text("Research safely.", encoding="utf-8")
-    async with engine.begin() as connection:
-        await connection.execute(
-            text(
-                """INSERT INTO users (id,email,system_role,created_at,needs_setup,token_version)
-                VALUES (:id,:email,'system_admin',:now,false,0)"""
-            ),
-            {"id": actor_id, "email": f"catalog-{actor_id}@example.com", "now": datetime.now(UTC)},
-        )
-    inventory = build_inventory(
-        SourceLayout(repo_root=repo, data_root=tmp_path / "data"),
-        OwnerMap({}, system_actor=actor_id),
-    )
-    assert {item.kind for item in inventory} == {"agent", "skill", "mcp"}
-    assert "plain-token" not in render_inventory(inventory)
-    runner = AssetMigrationRunner(
-        factory,
-        backup_root=tmp_path / "migrations",
-        keyring=CredentialKeyring(active_key_id="m3", _keys={"m3": b"k" * 32}),
-    )
-
-    first = await runner.run(inventory, execute=True)
-    second = await runner.run(inventory, execute=True)
-
-    assert first.created_versions == 4
-    assert second.created_versions == 0
-    assert second.noop_versions == 3
-    async with factory() as session:
-        async with session.begin():
-            mcp = (await session.execute(select(McpServerRow).where(McpServerRow.source_key == "system-mcp:demo-mcp"))).scalar_one()
-            assert mcp.current_published_version_id is not None
-            slot = (
-                await session.execute(
-                    select(McpCredentialSlotRow).where(
-                        McpCredentialSlotRow.mcp_server_version_id == mcp.current_published_version_id,
-                        McpCredentialSlotRow.name == "legacy-secrets",
-                        McpCredentialSlotRow.required.is_(True),
-                    )
-                )
-            ).scalar_one()
-            grant = (
-                await session.execute(
-                    select(CredentialGrantRow).where(
-                        CredentialGrantRow.mcp_server_version_id == mcp.current_published_version_id,
-                        CredentialGrantRow.credential_slot_id == slot.id,
-                        CredentialGrantRow.status == "active",
-                    )
-                )
-            ).scalar_one()
-            envelope = (
-                await session.execute(
-                    select(CredentialEnvelopeRow).where(
-                        CredentialEnvelopeRow.credential_version_id == grant.credential_version_id,
-                        CredentialEnvelopeRow.is_active.is_(True),
-                    )
-                )
-            ).scalar_one()
-            assert envelope.credential_version_id == grant.credential_version_id
-            closures = await lock_mcp_credential_closures(
-                session,
-                (
-                    McpCredentialClosureTarget(
-                        mcp.current_published_version_id,
-                        AssetScope.SYSTEM,
-                        None,
-                    ),
-                ),
-                load_envelopes=True,
-            )
-            closure = closures[mcp.current_published_version_id]
-            assert closure.grants == (grant,)
-            assert closure.materials[0].slot.name == "legacy-secrets"
-    await engine.dispose()
-
-
-@pytest.mark.asyncio
 async def test_identical_agent_source_reuses_frozen_dependency_versions(
     migrated_postgres_database_url: str,
     tmp_path: Path,
@@ -378,7 +273,7 @@ async def test_identical_agent_source_reuses_frozen_dependency_versions(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failed_probe", ["counts", "checksums", "dependencies", "decrypt"])
-async def test_cutover_requires_every_validation_probe(
+async def test_migration_requires_every_validation_probe(
     migrated_postgres_database_url: str,
     tmp_path: Path,
     failed_probe: str,
@@ -430,7 +325,4 @@ async def test_cutover_requires_every_validation_probe(
 
     assert failed_probe in calls
 
-    async with factory() as session:
-        marker = await session.get(AssetCatalogStateRow, 1)
-        assert marker is None or marker.cutover_at is None
     await engine.dispose()

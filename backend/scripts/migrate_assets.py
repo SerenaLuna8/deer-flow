@@ -38,7 +38,6 @@ from app.shared_assets.models import AgentPayload, AssetScope, SkillArchiveFile
 from app.shared_assets.skill_service import _analyze_skill_files
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
@@ -104,7 +103,6 @@ def build_migration_parser() -> argparse.ArgumentParser:
 class SourceLayout:
     repo_root: Path
     data_root: Path
-    extensions_config_path: Path | None = None
 
 
 def resolve_data_root(repo_root: Path, explicit: Path | None) -> Path:
@@ -115,26 +113,6 @@ def resolve_data_root(repo_root: Path, explicit: Path | None) -> Path:
     if configured := os.environ.get("DEER_FLOW_HOME"):
         return Path(configured).absolute()
     return (repo_root / ".deer-flow").absolute()
-
-
-def resolve_extensions_config_path(repo_root: Path) -> Path | None:
-    """Use the canonical ExtensionsConfig resolution, then explicit repo fallbacks."""
-
-    try:
-        resolved = ExtensionsConfig.resolve_config_path()
-    except FileNotFoundError:
-        raise AssetMigrationError("extensions config path is unavailable") from None
-    if resolved is not None:
-        return resolved.absolute()
-    for candidate in (
-        repo_root / "extensions_config.json",
-        repo_root / "mcp_config.json",
-        repo_root / "backend/extensions_config.json",
-        repo_root / "backend/mcp_config.json",
-    ):
-        if candidate.is_file():
-            return candidate.absolute()
-    return None
 
 
 @dataclass(frozen=True)
@@ -480,9 +458,6 @@ def _write_migration_status(backup: BackupResult, payload: Mapping[str, object])
     )
 
 
-_OAUTH_SECRET_FIELDS = frozenset({"client_secret", "refresh_token"})
-
-
 def _stored_agent_payload(
     version: AgentVersionRow,
     skill_version_ids: Sequence[uuid.UUID],
@@ -524,63 +499,6 @@ def _stored_mcp_definition(
             for slot in slots
         ),
     )
-
-
-def _mcp_parts(raw: Mapping[str, object]) -> tuple[McpDefinition, dict[str, object], bool]:
-    try:
-        config = McpServerConfig.model_validate(dict(raw))
-        env = dict(config.env)
-        headers = dict(config.headers)
-        oauth_raw = config.oauth.model_dump(exclude_none=True) if config.oauth is not None else {}
-        oauth = {key: value for key, value in oauth_raw.items() if key not in _OAUTH_SECRET_FIELDS}
-        oauth_secrets = {key: value for key, value in oauth_raw.items() if key in _OAUTH_SECRET_FIELDS}
-        secret_payload: dict[str, object] = {}
-        schema: dict[str, tuple[str, ...]] = {}
-        if env:
-            secret_payload["env"] = env
-            schema["env"] = tuple(sorted(env))
-        if headers:
-            secret_payload["headers"] = headers
-            schema["headers"] = tuple(sorted(headers))
-        if oauth_secrets:
-            secret_payload["oauth"] = oauth_secrets
-            schema["oauth"] = tuple(sorted(oauth_secrets))
-        slots = (
-            (
-                McpCredentialSlot(
-                    name="legacy-secrets",
-                    purpose="legacy MCP credential material",
-                    payload_schema=schema,
-                    required=True,
-                ),
-            )
-            if schema
-            else ()
-        )
-        timeout = config.tool_call_timeout
-        if timeout is None:
-            timeout = 30
-        if isinstance(timeout, float) and timeout.is_integer():
-            timeout = int(timeout)
-        if not isinstance(timeout, int):
-            raise ValueError
-        definition = McpDefinition(
-            description=config.description,
-            transport=config.type,
-            command=config.command,
-            args=tuple(config.args),
-            url=config.url,
-            env={},
-            headers={},
-            oauth=oauth,
-            routing=config.routing.model_dump(mode="json"),
-            tool_overrides={name: value.model_dump(mode="json") for name, value in config.tools.items()},
-            timeout_seconds=timeout,
-            credential_slots=slots,
-        )
-        return definition, secret_payload, config.enabled
-    except Exception:
-        raise AssetMigrationError("MCP source validation failed") from None
 
 
 def build_inventory(layout: SourceLayout, owners: OwnerMap) -> tuple[InventoryItem, ...]:
@@ -750,45 +668,6 @@ def build_inventory(layout: SourceLayout, owners: OwnerMap) -> tuple[InventoryIt
             if agent.is_dir() and not agent.name.startswith("."):
                 add_agent(agent, f"system-agent:{agent.name}", "system", owners.system_actor or "", None, "ready", "repo-system-agent")
     add_default_agent()
-    extensions = layout.extensions_config_path
-    if extensions is None:
-        for candidate in (layout.repo_root / "extensions_config.json", layout.repo_root / "mcp_config.json"):
-            if candidate.is_file():
-                extensions = candidate
-                break
-    if extensions is not None and extensions.is_file():
-        content = _read_regular_file(extensions)
-        try:
-            raw = json.loads(content.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError):
-            raise AssetMigrationError("MCP source validation failed") from None
-        if not isinstance(raw, dict) or not isinstance(raw.get("mcpServers", {}), dict):
-            raise AssetMigrationError("MCP source validation failed")
-        for slug, definition in sorted(raw.get("mcpServers", {}).items()):
-            if not isinstance(definition, dict):
-                raise AssetMigrationError("MCP source validation failed")
-            safe_definition, secret_payload, enabled = _mcp_parts(definition)
-            item_file = InventoryFile(extensions, extensions.name, content, hashlib.sha256(content).hexdigest())
-            items.append(
-                InventoryItem(
-                    item_id=uuid.uuid5(uuid.NAMESPACE_URL, f"system-mcp:{slug}"),
-                    kind="mcp",
-                    source_key=f"system-mcp:{slug}",
-                    source_label="extensions-mcp",
-                    slug=slug,
-                    display_name=slug,
-                    scope="system",
-                    project_id=None,
-                    owner_user_id=owners.system_actor or "",
-                    checksum=McpService._checksum(safe_definition),
-                    files=(item_file,),
-                    payload={
-                        "definition": safe_definition,
-                        "secret_payload": secret_payload,
-                        "asset_status": "active" if enabled else "suspended",
-                    },
-                )
-            )
     return tuple(sorted(items, key=lambda item: (item.kind, item.source_key)))
 
 
@@ -1705,7 +1584,7 @@ class AssetMigrationRunner:
         if result is not True:
             raise AssetMigrationError(f"{name} validation failed")
 
-    async def _validate_and_cutover(self, inventory: Sequence[InventoryItem]) -> None:
+    async def _validate_catalog(self, inventory: Sequence[InventoryItem]) -> None:
         defaults = MigrationValidationProbes(
             counts=self._default_counts_probe,
             checksums=self._default_checksums_probe,
@@ -1722,10 +1601,7 @@ class AssetMigrationRunner:
                     await session.flush()
                 for name in ("counts", "checksums", "dependencies", "decrypt"):
                     await self._call_probe(name, getattr(probes, name), session, inventory)
-                now = datetime.now(UTC)
-                if state.cutover_at is None:
-                    state.cutover_at = now
-                    state.updated_at = now
+                state.updated_at = datetime.now(UTC)
 
     async def run(
         self,
@@ -1757,7 +1633,7 @@ class AssetMigrationRunner:
             positions = [index for index, item in enumerate(full_snapshot) if item.item_id == resume_cursor.item_id]
             snapshot = full_snapshot[positions[0] + 1 :]
         if not snapshot:
-            await self._validate_and_cutover(full_snapshot)
+            await self._validate_catalog(full_snapshot)
             return MigrationResult(resume_cursor=resume_cursor)
         backup = create_secure_backup(snapshot, self.backup_root, keyring=self.keyring)
         created = 0
@@ -1779,7 +1655,7 @@ class AssetMigrationRunner:
                                 raise AssetMigrationError("unsupported migration asset kind")
                             created += item_created
                             noop += item_noop
-            await self._validate_and_cutover(full_snapshot)
+            await self._validate_catalog(full_snapshot)
         except Exception:
             _write_migration_status(
                 backup,
@@ -1869,7 +1745,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             SourceLayout(
                 repo_root,
                 data_root,
-                resolve_extensions_config_path(repo_root),
             ),
             owners,
         )

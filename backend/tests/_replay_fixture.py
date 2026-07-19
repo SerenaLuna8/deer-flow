@@ -12,7 +12,13 @@ construction; only the ``models[].use`` block differs (real model vs
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 # mode -> (thinking_enabled, is_plan_mode, subagent_enabled). Mirrors the
@@ -54,8 +60,7 @@ def build_config_yaml(*, model_block: str, home: Path) -> str:
     - sandbox / tool_groups / tools — fixed here
     - skills — pointed at an empty ``<home>/skills`` so filesystem skills (incl.
       gitignored custom skills present only on a dev box) never leak into the
-      prompt. Pair with an empty ``extensions_config.json`` (no MCP) via
-      :func:`prepare_hermetic_extras`.
+      prompt. Project MCP assets are absent from the admitted test Run.
     - memory / summarization — disabled (background, non-deterministic timing)
     """
     return f"""\
@@ -89,25 +94,76 @@ memory:
   injection_enabled: false
 summarization:
   enabled: false
-agents_api:
-  enabled: true
 database:
   url: $DATABASE_URL
 """
 
 
-def prepare_hermetic_extras(home: Path) -> Path:
-    """Create the empty skills tree + an empty extensions_config.json so the
-    system prompt has no environment-dependent skills/MCP content.
-
-    Returns the extensions-config path; the caller must point
-    ``DEER_FLOW_EXTENSIONS_CONFIG_PATH`` at it. Call before starting the gateway.
-    """
+def prepare_hermetic_skills(home: Path) -> None:
+    """Create an empty skills tree so the prompt has no host-dependent skills."""
     (home / "skills" / "public").mkdir(parents=True, exist_ok=True)
     (home / "skills" / "custom").mkdir(parents=True, exist_ok=True)
-    extensions = home / "extensions_config.json"
-    extensions.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
-    return extensions
+
+
+@contextmanager
+def replay_worker() -> Iterator[None]:
+    """Run the real independent Worker and wait for durable readiness."""
+    backend_root = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    python_paths = (
+        str(backend_root),
+        str(backend_root / "tests"),
+        str(backend_root / "packages" / "harness"),
+        environment.get("PYTHONPATH", ""),
+    )
+    environment["PYTHONPATH"] = os.pathsep.join(path for path in python_paths if path)
+    process = subprocess.Popen(
+        [sys.executable, "-m", "app.worker.app"],
+        cwd=backend_root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        database_url = environment["DATABASE_URL"].replace(
+            "postgresql+asyncpg://",
+            "postgresql://",
+            1,
+        )
+        import psycopg
+
+        deadline = time.monotonic() + 20
+        while True:
+            if process.poll() is not None:
+                output = process.stdout.read() if process.stdout is not None else ""
+                raise RuntimeError(f"replay Worker exited before readiness: {output[-2000:]}")
+            with psycopg.connect(database_url) as connection:
+                ready = connection.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM worker_nodes
+                        WHERE draining IS FALSE
+                          AND heartbeat_at >= now() - interval '10 seconds'
+                          AND capabilities_json::jsonb @> '["private_run"]'::jsonb
+                    )
+                    """
+                ).fetchone()[0]
+            if ready:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError("replay Worker did not publish readiness")
+            time.sleep(0.05)
+        yield
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def sse_event_shapes(resp) -> list[dict]:
@@ -132,6 +188,11 @@ def sse_event_shapes(resp) -> list[dict]:
 
 
 def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
+    with replay_worker():
+        return _drive_gateway(app, prompt=prompt, context=context)
+
+
+def _drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
     """Register -> create project Agent/thread -> stream a private run.
 
     This is the final M4 project-private wire path, driven in-process via
@@ -205,7 +266,6 @@ def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
             "input": {"messages": [{"role": "user", "content": prompt}]},
             "config": {"recursion_limit": 50},
             "context": context,
-            "stream_mode": ["values"],
         }
         with client.stream(
             "POST",

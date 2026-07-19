@@ -172,7 +172,9 @@
     },
     {
       "event": "end",
-      "keys": null
+      "keys": [
+        "status"
+      ]
     }
   ]
 }

@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from deerflow.runtime.events.models import StreamFrame
+from deerflow.runtime.events.stream import PostgresStreamBridge
 from deerflow.runtime.private_scope import PrivateResourceScope
-from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
 
 _PROCESS_TIMEOUT = 60.0
 
@@ -57,7 +57,6 @@ def _gateway_environment(tmp_path: Path, database_url: str) -> dict[str, str]:
     environment.update(
         {
             "DEER_FLOW_CONFIG_PATH": str(config),
-            "DEER_FLOW_EXTENSIONS_CONFIG_PATH": str(Path(__file__).resolve().parents[2] / "extensions_config.example.json"),
             "DEER_FLOW_HOME": str(tmp_path / "gateway-home"),
             "GATEWAY_WORKERS": "1",
             "AUTH_JWT_SECRET": "m6-release-gateway-process-secret",

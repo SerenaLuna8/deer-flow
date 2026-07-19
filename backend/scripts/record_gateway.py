@@ -101,7 +101,7 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("", encoding="utf-8")  # fresh capture per recording run
 
-    from _replay_fixture import build_config_yaml, prepare_hermetic_extras, real_model_block
+    from _replay_fixture import build_config_yaml, prepare_hermetic_skills, real_model_block, replay_worker
 
     home = Path(tempfile.mkdtemp(prefix="record-gw-"))
     cfg = home / "config.yaml"
@@ -110,7 +110,7 @@ def main() -> int:
     # DEER_FLOW_HOME can't leak in and shift prompt-affecting paths/skills.
     os.environ["DEER_FLOW_HOME"] = str(home)
     os.environ["DEER_FLOW_CONFIG_PATH"] = str(cfg)
-    os.environ["DEER_FLOW_EXTENSIONS_CONFIG_PATH"] = str(prepare_hermetic_extras(home))
+    prepare_hermetic_skills(home)
     os.environ.setdefault("AUTH_JWT_SECRET", "record-secret")
     os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (str(_BACKEND), str(_BACKEND / "tests"), os.environ.get("PYTHONPATH", "")) if p)
 
@@ -119,7 +119,8 @@ def main() -> int:
     import uvicorn
 
     print(f"[record-gw] model={model} out={out} port={port}", flush=True)
-    uvicorn.run("app.gateway.app:app", host="127.0.0.1", port=port, log_level="warning")
+    with replay_worker():
+        uvicorn.run("app.gateway.app:app", host="127.0.0.1", port=port, log_level="warning")
     return 0
 
 

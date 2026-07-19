@@ -83,15 +83,6 @@ def fake_translator(text: str, target_lang: str) -> str:
 
 
 def _patch_mcp_pipeline(monkeypatch: pytest.MonkeyPatch, mcp_tools: list) -> None:
-    from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
-
-    real_ext = ExtensionsConfig(
-        mcpServers={"fake-server": McpServerConfig(type="stdio", command="echo", enabled=True)},
-    )
-    monkeypatch.setattr(
-        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-        classmethod(lambda cls: real_ext),
-    )
     monkeypatch.setattr("deerflow.mcp.cache.get_cached_mcp_tools", lambda: list(mcp_tools))
 
 

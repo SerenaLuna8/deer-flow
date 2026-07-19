@@ -42,7 +42,6 @@ execution remains Worker-only. See
 deer-flow/
 ├── Makefile                        # Root orchestration: drives the full stack (dev/start/stop, docker, setup)
 ├── config.example.yaml             # Template → copy to config.yaml (gitignored) at repo root
-├── extensions_config.example.json  # Legacy compatibility template; not runtime asset authority in M7
 ├── backend/                        # Python backend — see backend/AGENTS.md
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
@@ -57,10 +56,8 @@ deer-flow/
 ```
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`.
-M7 Task 2 makes PostgreSQL the only Agent/Skill/MCP authority; the legacy
-`extensions_config.json` template remains temporarily for later configuration cleanup but
-is not loaded for runtime assets and has no Gateway mutation API. Config schema and
-resolution order are documented in
+M7 makes PostgreSQL the only Agent/Skill/MCP authority and removes the legacy
+extensions/MCP JSON configuration surface. Config schema and resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
 
 Persistence configuration is PostgreSQL-only: `database.url` resolves from

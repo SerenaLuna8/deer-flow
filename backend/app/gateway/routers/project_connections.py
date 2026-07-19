@@ -6,11 +6,6 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from app.channels.runtime_config_store import (
-    ChannelRuntimeConfigStore,
-    apply_runtime_connection_config,
-    merge_runtime_channel_configs,
-)
 from app.gateway.channel_schemas import (
     PROJECT_CONNECTION_PROVIDER_META,
     PROJECT_CONNECTION_RUNTIME_REQUIREMENTS,
@@ -57,25 +52,12 @@ def _service(request: Request) -> ProjectConnectionService:
     return service
 
 
-async def _runtime_store(request: Request) -> ChannelRuntimeConfigStore:
-    store = getattr(request.app.state, "channel_runtime_config_store", None)
-    if isinstance(store, ChannelRuntimeConfigStore):
-        return store
-    store = await asyncio.to_thread(ChannelRuntimeConfigStore)
-    request.app.state.channel_runtime_config_store = store
-    return store
-
-
 async def _provider_config(request: Request) -> tuple[ChannelConnectionsConfig, dict[str, object]]:
     configured = getattr(request.app.state, "channel_connections_config", None)
     app_config = None
     if not isinstance(configured, ChannelConnectionsConfig):
         app_config = await asyncio.to_thread(get_app_config)
         configured = app_config.channel_connections
-    configured = apply_runtime_connection_config(
-        configured,
-        store=await _runtime_store(request),
-    )
     request.app.state.channel_connections_config = configured
 
     channels = getattr(request.app.state, "channels_config", None)
@@ -84,11 +66,6 @@ async def _provider_config(request: Request) -> tuple[ChannelConnectionsConfig, 
         extra = app_config.model_extra or {}
         raw_channels = extra.get("channels")
         channels = dict(raw_channels) if isinstance(raw_channels, dict) else {}
-        merge_runtime_channel_configs(
-            channels,
-            configured,
-            store=await _runtime_store(request),
-        )
         request.app.state.channels_config = channels
     return configured, channels
 

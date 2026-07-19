@@ -11,11 +11,11 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from support.m4_private_threads import seed_m4_thread_database
+from support.memory_event_store import MemoryRunEventStore
 
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.runtime.events.store.db import DbRunEventStore
-from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 _DATABASE_URL: str | None = None
@@ -652,67 +652,13 @@ class TestDbRunEventStore:
         await close_engine()
 
 
-# -- Factory tests --
+# -- Final export contract --
 
 
-class TestMakeRunEventStore:
-    """Tests for the make_run_event_store factory function."""
+def test_run_event_store_factory_is_removed() -> None:
+    import deerflow.runtime.events.store as store_module
 
-    @pytest.mark.anyio
-    async def test_memory_backend_default(self):
-        from deerflow.runtime.events.store import make_run_event_store
-
-        store = make_run_event_store(None)
-        assert type(store).__name__ == "MemoryRunEventStore"
-
-    @pytest.mark.anyio
-    async def test_memory_backend_explicit(self):
-        from unittest.mock import MagicMock
-
-        from deerflow.runtime.events.store import make_run_event_store
-
-        config = MagicMock()
-        config.backend = "memory"
-        store = make_run_event_store(config)
-        assert type(store).__name__ == "MemoryRunEventStore"
-
-    @pytest.mark.anyio
-    async def test_db_backend_with_engine(self, _postgres_database):
-        from unittest.mock import MagicMock
-
-        from deerflow.persistence.engine import close_engine
-        from deerflow.runtime.events.store import make_run_event_store
-
-        await _init_db()
-
-        config = MagicMock()
-        config.backend = "db"
-        config.max_trace_content = 10240
-        store = make_run_event_store(config)
-        assert type(store).__name__ == "DbRunEventStore"
-        await close_engine()
-
-    @pytest.mark.anyio
-    async def test_jsonl_backend(self):
-        from unittest.mock import MagicMock
-
-        from deerflow.runtime.events.store import make_run_event_store
-
-        config = MagicMock()
-        config.backend = "jsonl"
-        store = make_run_event_store(config)
-        assert type(store).__name__ == "JsonlRunEventStore"
-
-    @pytest.mark.anyio
-    async def test_unknown_backend_raises(self):
-        from unittest.mock import MagicMock
-
-        from deerflow.runtime.events.store import make_run_event_store
-
-        config = MagicMock()
-        config.backend = "redis"
-        with pytest.raises(ValueError, match="Unknown"):
-            make_run_event_store(config)
+    assert not hasattr(store_module, "make_run_event_store")
 
 
 # -- JSONL-specific tests --

@@ -402,8 +402,8 @@ class PrivateAgentRuntime:
         try:
             from langchain_mcp_adapters.client import MultiServerMCPClient
 
-            from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
             from deerflow.mcp.client import build_servers_config
+            from deerflow.mcp.config import ExtensionsConfig, McpServerConfig
             from deerflow.mcp.tools import _catalog_mcp_definition, _merge_catalog_mcp_secrets
 
             server_name = f"project_{version_id.hex[:16]}"

@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.config.acp_config import ACPAgentConfig
-from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, set_extensions_config
 from deerflow.tools.builtins.invoke_acp_agent_tool import (
     _build_acp_mcp_servers,
     _build_mcp_servers,
@@ -18,24 +17,10 @@ from deerflow.tools.tools import get_available_tools
 
 
 def test_build_mcp_servers_rejects_ambient_extensions_config():
-    set_extensions_config(
-        ExtensionsConfig(
-            mcp_servers={"stale": McpServerConfig(enabled=True, type="stdio", command="echo")},
-            skills={},
-        )
-    )
-
     assert _build_mcp_servers() == {}
 
 
 def test_build_acp_mcp_servers_rejects_ambient_extensions_config():
-    set_extensions_config(
-        ExtensionsConfig(
-            mcp_servers={"stale": McpServerConfig(enabled=True, type="stdio", command="echo")},
-            skills={},
-        )
-    )
-
     assert _build_acp_mcp_servers() == []
 
 
@@ -138,16 +123,6 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
-
-    monkeypatch.setattr(
-        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-        classmethod(
-            lambda cls: ExtensionsConfig(
-                mcp_servers={"github": McpServerConfig(enabled=True, type="stdio", command="npx", args=["github-mcp"])},
-                skills={},
-            )
-        ),
-    )
 
     captured: dict[str, object] = {}
 
@@ -268,11 +243,6 @@ async def test_invoke_acp_agent_uses_per_thread_workspace_when_thread_id_in_conf
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
     monkeypatch.setattr(uc_module, "get_effective_user_id", lambda: None)
 
-    monkeypatch.setattr(
-        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
-    )
-
     captured: dict[str, object] = {}
 
     class DummyClient:
@@ -360,10 +330,6 @@ async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
-    monkeypatch.setattr(
-        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
-    )
     monkeypatch.setenv("TEST_OPENAI_KEY", "sk-from-env")
 
     captured: dict[str, object] = {}
@@ -541,11 +507,6 @@ async def test_invoke_acp_agent_passes_none_env_when_not_configured(monkeypatch,
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
-    monkeypatch.setattr(
-        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
-    )
-
     captured: dict[str, object] = {}
 
     class DummyClient:
@@ -639,11 +600,6 @@ def test_get_available_tools_includes_invoke_acp_agent_when_agents_configured(mo
         get_model_config=lambda name: None,
     )
     monkeypatch.setattr("deerflow.tools.tools.get_app_config", lambda: fake_config)
-    monkeypatch.setattr(
-        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
-    )
-
     tools = get_available_tools(include_mcp=True, subagent_enabled=False)
     assert "invoke_acp_agent" in [tool.name for tool in tools]
 
@@ -656,10 +612,6 @@ def test_get_available_tools_sync_invoke_acp_agent_preserves_thread_workspace(mo
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
     monkeypatch.setattr(uc_module, "get_effective_user_id", lambda: None)
-    monkeypatch.setattr(
-        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
-    )
     monkeypatch.setattr("deerflow.tools.tools.is_host_bash_allowed", lambda config=None: True)
 
     captured: dict[str, object] = {}

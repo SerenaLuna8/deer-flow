@@ -50,7 +50,7 @@ def test_docker_dev_mounts_mutable_configs_through_project_directory():
     assert not re.search(r"^\s*-\s*[^\n#]*config\.yaml\s*:\s*[^\n#]*$", compose, re.M)
     assert not re.search(r"^\s*-\s*[^\n#]*extensions_config\.json\s*:\s*[^\n#]*$", compose, re.M)
     assert "DEER_FLOW_CONFIG_PATH=/app/project/config.yaml" in compose
-    assert "DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/project/extensions_config.json" in compose
+    assert "DEER_FLOW_EXTENSIONS_CONFIG_PATH" not in compose
 
 
 def test_local_dev_gateway_reload_excludes_runtime_state_with_absolute_dirs():

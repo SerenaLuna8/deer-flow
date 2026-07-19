@@ -1,8 +1,7 @@
 """Tests for paginated list_messages_by_run across all RunEventStore backends."""
 
 import pytest
-
-from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from support.memory_event_store import MemoryRunEventStore
 
 
 @pytest.fixture

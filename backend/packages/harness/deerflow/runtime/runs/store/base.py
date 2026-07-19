@@ -1,7 +1,7 @@
 """Abstract interface for run metadata storage.
 
 RunManager depends on this interface. Implementations:
-- MemoryRunStore: in-memory test double
+- RunRepository: PostgreSQL implementation
 - Future: RunRepository backed by SQLAlchemy ORM
 
 All methods accept an optional user_id for user isolation.

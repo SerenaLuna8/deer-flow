@@ -32,7 +32,7 @@ from deerflow.config import get_app_config
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence import get_session_factory
 from deerflow.persistence.jobs.sql import JobRepository
-from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+from deerflow.runtime.events.stream import PostgresStreamBridge
 
 
 def _append_barrier(path: Path, payload: dict[str, object]) -> None:

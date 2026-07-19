@@ -205,7 +205,7 @@ start() {
 
     sandbox_mode="$(detect_sandbox_mode)"
 
-    services="redis frontend gateway worker nginx"
+    services="frontend gateway worker nginx"
     if [ "$(detect_scheduler_enabled)" = "true" ]; then
         COMPOSE_CMD="$COMPOSE_CMD --profile scheduler"
         services="$services scheduler"
@@ -269,18 +269,6 @@ start() {
         fi
     fi
 
-    # Ensure extensions_config.json exists as a file before mounting.
-    # Docker creates a directory when bind-mounting a non-existent host path.
-    if [ ! -f "$PROJECT_ROOT/extensions_config.json" ]; then
-        if [ -f "$PROJECT_ROOT/extensions_config.example.json" ]; then
-            cp "$PROJECT_ROOT/extensions_config.example.json" "$PROJECT_ROOT/extensions_config.json"
-            echo -e "${BLUE}Created extensions_config.json from example${NC}"
-        else
-            echo "{}" > "$PROJECT_ROOT/extensions_config.json"
-            echo -e "${BLUE}Created empty extensions_config.json${NC}"
-        fi
-    fi
-
     load_proxy_env_from_dotenv
 
     echo "Building and starting containers..."
@@ -316,10 +304,6 @@ logs() {
             service="nginx"
             echo -e "${BLUE}Viewing nginx logs...${NC}"
             ;;
-        --redis)
-            service="redis"
-            echo -e "${BLUE}Viewing redis logs...${NC}"
-            ;;
         --provisioner)
             service="provisioner"
             echo -e "${BLUE}Viewing provisioner logs...${NC}"
@@ -329,7 +313,7 @@ logs() {
             ;;
         *)
             echo -e "${YELLOW}Unknown option: $1${NC}"
-            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--redis|--provisioner]"
+            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--provisioner]"
             exit 1
             ;;
     esac
@@ -381,7 +365,6 @@ help() {
     echo "                  --frontend   View frontend logs only"
     echo "                  --gateway    View gateway logs only"
     echo "                  --nginx      View nginx logs only"
-    echo "                  --redis      View redis logs only"
     echo "                  --provisioner View provisioner logs only"
     echo "  stop          - Stop Docker development services"
     echo "  help          - Show this help message"

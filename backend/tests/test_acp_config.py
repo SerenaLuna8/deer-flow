@@ -1,7 +1,5 @@
 """Unit tests for ACP agent configuration."""
 
-import json
-
 import pytest
 import yaml
 from pydantic import ValidationError
@@ -123,8 +121,6 @@ def test_get_acp_agents_returns_empty_by_default():
 
 def test_app_config_reload_without_acp_agents_clears_previous_state(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    extensions_path = tmp_path / "extensions_config.json"
-    extensions_path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
 
     config_with_acp = {
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
@@ -153,8 +149,6 @@ def test_app_config_reload_without_acp_agents_clears_previous_state(tmp_path, mo
             }
         ],
     }
-
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
 
     config_path.write_text(yaml.safe_dump(config_with_acp), encoding="utf-8")
     AppConfig.from_file(str(config_path))

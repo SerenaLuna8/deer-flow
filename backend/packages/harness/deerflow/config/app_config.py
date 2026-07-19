@@ -11,11 +11,9 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
-from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.auth_config import AuthAppConfig
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -25,15 +23,12 @@ from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.recovery_config import RecoveryConfig
 from deerflow.config.reload_boundary import format_field_description
-from deerflow.config.run_events_config import RunEventsConfig
-from deerflow.config.runtime_paths import existing_project_file
 from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skill_scan_config import SkillScanConfig
 from deerflow.config.skills_config import SkillsConfig
-from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
 from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
@@ -49,6 +44,21 @@ from deerflow.config.worker_config import WorkerConfig
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+LEGACY_CONFIG_TOMBSTONES = frozenset(
+    {
+        "agents_api",
+        "run_events",
+        "stream_bridge",
+        "extensions",
+        "extensions_config",
+        "mcp_config",
+        "mcp_config_path",
+        "legacy_run_store",
+        "legacy_event_store",
+    }
+)
 
 
 class CircuitBreakerConfig(BaseModel):
@@ -85,13 +95,6 @@ def is_trace_correlation_enabled(config: Any) -> bool:
     logging_config = getattr(config, "logging", None)
     enhance = getattr(logging_config, "enhance", None)
     return bool(getattr(enhance, "enabled", False))
-
-
-def _legacy_config_candidates() -> tuple[Path, ...]:
-    """Return source-tree config.yaml locations for monorepo compatibility."""
-    backend_dir = Path(__file__).resolve().parents[4]
-    repo_root = backend_dir.parent
-    return (backend_dir / "config.yaml", repo_root / "config.yaml")
 
 
 def logging_level_from_config(name: str | None) -> int:
@@ -154,13 +157,11 @@ class AppConfig(BaseModel):
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
     skill_scan: SkillScanConfig = Field(default_factory=SkillScanConfig, description="Native deterministic skill safety scanning configuration")
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig, description="Agent-managed skill evolution configuration")
-    extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
     tool_output: ToolOutputConfig = Field(default_factory=ToolOutputConfig, description="Tool output budget protection configuration")
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
-    agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
@@ -185,13 +186,6 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "database",
             field_doc="PostgreSQL connection shared by LangGraph persistence and DeerFlow application data.",
-        ),
-    )
-    run_events: RunEventsConfig = Field(
-        default_factory=RunEventsConfig,
-        description=format_field_description(
-            "run_events",
-            field_doc="Run-event store backend (memory for dev, db for production queries, jsonl for lightweight single-node persistence).",
         ),
     )
     scheduler: SchedulerConfig = Field(
@@ -222,14 +216,6 @@ class AppConfig(BaseModel):
             field_doc="Local paths and limits used by backup and recovery services.",
         ),
     )
-    stream_bridge: StreamBridgeConfig | None = Field(
-        default=None,
-        description=format_field_description(
-            "stream_bridge",
-            field_doc="Stream bridge connecting agent workers to SSE endpoints.",
-        ),
-    )
-
     # Name -> config lookup tables, (re)built after validation by
     # ``_build_name_indexes``. They make ``get_model_config`` / ``get_tool_config``
     # / ``get_tool_group_config`` O(1) instead of an O(n) ``next(...)`` scan per
@@ -237,6 +223,15 @@ class AppConfig(BaseModel):
     _models_by_name: dict[str, ModelConfig] = PrivateAttr(default_factory=dict)
     _tools_by_name: dict[str, ToolConfig] = PrivateAttr(default_factory=dict)
     _tool_groups_by_name: dict[str, ToolGroupConfig] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_legacy_config(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            removed = sorted(LEGACY_CONFIG_TOMBSTONES.intersection(value))
+            if removed:
+                raise ValueError(f"LEGACY_CONFIG_REMOVED: {','.join(removed)}")
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -260,7 +255,7 @@ class AppConfig(BaseModel):
             copied_data = dict(data)
             if "checkpointer" in copied_data:
                 raise ValueError("the independent checkpointer configuration has been removed; configure database.url instead")
-            return {key: value for key, value in copied_data.items() if value is not None}
+            return {key: value for key, value in copied_data.items() if value is not None or key in LEGACY_CONFIG_TOMBSTONES}
         return data
 
     @classmethod
@@ -270,8 +265,7 @@ class AppConfig(BaseModel):
         Priority:
         1. If provided `config_path` argument, use it.
         2. If provided `DEER_FLOW_CONFIG_PATH` environment variable, use it.
-        3. Otherwise, search the caller project root.
-        4. Finally, search legacy backend/repository-root defaults for monorepo compatibility.
+        3. Otherwise, use ``config.yaml`` at the DeerFlow repository root.
         """
         if config_path:
             path = Path(config_path)
@@ -283,15 +277,10 @@ class AppConfig(BaseModel):
             if not Path.exists(path):
                 raise FileNotFoundError(f"Config file specified by environment variable `DEER_FLOW_CONFIG_PATH` not found at {path}")
             return path
-        else:
-            project_config = existing_project_file(("config.yaml",))
-            if project_config is not None:
-                return project_config
-
-            for path in _legacy_config_candidates():
-                if path.exists():
-                    return path
-            raise FileNotFoundError("`config.yaml` file not found in the project root or legacy backend/repository root locations")
+        path = REPO_ROOT / "config.yaml"
+        if path.exists():
+            return path
+        raise FileNotFoundError(f"`config.yaml` file not found at the repository root: {path}")
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> Self:
@@ -317,10 +306,6 @@ class AppConfig(BaseModel):
         if "circuit_breaker" in config_data:
             config_data["circuit_breaker"] = config_data["circuit_breaker"]
 
-        # Asset authority is PostgreSQL-only. Keep the typed tombstone empty
-        # until the remaining non-asset extension fields are removed in M7.
-        config_data["extensions"] = ExtensionsConfig().model_dump()
-
         result = cls.model_validate(config_data)
         if not result.models:
             logger.warning(
@@ -345,11 +330,9 @@ class AppConfig(BaseModel):
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
         load_memory_config_from_dict(config.memory.model_dump())
-        load_agents_api_config_from_dict(config.agents_api.model_dump())
         load_subagents_config_from_dict(config.subagents.model_dump())
         load_tool_search_config_from_dict(config.tool_search.model_dump())
         load_guardrails_config_from_dict(config.guardrails.model_dump())
-        load_stream_bridge_config_from_dict(config.stream_bridge.model_dump() if config.stream_bridge is not None else None)
         load_acp_config_from_dict({name: agent.model_dump() for name, agent in acp_agents.items()})
 
     @classmethod

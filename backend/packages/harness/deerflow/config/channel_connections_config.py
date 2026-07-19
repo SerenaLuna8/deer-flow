@@ -1,4 +1,4 @@
-"""Configuration for user-owned IM channel connections."""
+"""Provider enablement for final project-scoped IM connections."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class BindingCodeChannelConnectionConfig(BaseModel):
 
 
 class ChannelConnectionsConfig(BaseModel):
-    """Top-level config for browser-connectable IM channels."""
+    """Top-level provider availability for project connection APIs."""
 
     enabled: bool = False
     slack: SlackChannelConnectionConfig = Field(default_factory=SlackChannelConnectionConfig)

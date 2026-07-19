@@ -7,8 +7,7 @@ the limit) so pagination stays correct.
 """
 
 import pytest
-
-from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from support.memory_event_store import MemoryRunEventStore
 
 
 async def _seed_two_tasks(store, *, scope=None):

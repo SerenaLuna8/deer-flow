@@ -372,7 +372,7 @@ fi
 # present on PATH but not executable from Bash.
 DETECT_PYTHON="$(_pick_python || true)"
 
-# Resolve existing optional extras (for example ollama, redis, or discord) from
+# Resolve existing optional extras (for example ollama or discord) from
 # UV_EXTRAS or config.yaml so that
 # `uv sync` does not wipe out optional dependencies on every restart. See
 # scripts/detect_uv_extras.py and Issue #2754 for context. The detector

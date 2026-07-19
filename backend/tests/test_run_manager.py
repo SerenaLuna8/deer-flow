@@ -7,10 +7,10 @@ from typing import Any
 
 import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
+from support.memory_run_store import MemoryRunStore
 
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus
 from deerflow.runtime.runs.manager import ConflictError, PersistenceRetryPolicy
-from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 

@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 
 import pytest
-from _replay_fixture import REPLAY_MODEL_BLOCK, build_config_yaml, drive_gateway, prepare_hermetic_extras
+from _replay_fixture import REPLAY_MODEL_BLOCK, build_config_yaml, drive_gateway, prepare_hermetic_skills
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "replay"
 
@@ -59,7 +59,7 @@ def test_replay_write_read_file_ultra_matches_golden(tmp_path: Path, monkeypatch
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(build_config_yaml(model_block=REPLAY_MODEL_BLOCK, home=home), encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(prepare_hermetic_extras(home)))
+    prepare_hermetic_skills(home)
 
     _reset_process_singletons(monkeypatch)
     from deerflow.config import app_config as app_config_module

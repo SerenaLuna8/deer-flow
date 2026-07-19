@@ -8,7 +8,7 @@ import pytest
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.mcp.config import ExtensionsConfig
 from deerflow.tools.mcp_metadata import MCP_TOOL_METADATA_KEY, MCP_TOOL_ROUTING_METADATA_KEY, get_mcp_routing, tag_mcp_routing, tag_mcp_tool
 
 
@@ -104,7 +104,7 @@ async def test_get_mcp_tools_tags_effective_routing_metadata(transport: str):
     )
 
     with (
-        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools._load_admitted_mcp_config", return_value=(extensions_config, {})),
         patch(
             "deerflow.mcp.tools.build_servers_config",
             return_value={"postgres": {"transport": transport, "url": "http://localhost:8000/mcp", "command": "npx"}},

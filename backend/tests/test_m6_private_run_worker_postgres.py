@@ -42,7 +42,7 @@ from deerflow.runtime.events.models import (
     StreamWriteAuthorityRequired,
     StreamWriteLeaseLost,
 )
-from deerflow.runtime.stream_bridge.postgres import PostgresStreamBridge
+from deerflow.runtime.events.stream import PostgresStreamBridge
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 
