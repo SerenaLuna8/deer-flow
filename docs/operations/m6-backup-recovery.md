@@ -86,8 +86,10 @@ source/journal authority, creates the target, runs `pg_restore --exit-on-error -
 M7 exact-schema probes, removes sensitive workspace files by captured identity, and only
 then writes a restore proof bound to archive schema version and digest, source,
 journal ID, final sequence, and final head digest. PostgreSQL constraints require
-the M7 version/revision and a lower-hex digest; the authenticated restore path
-persists the exact canonical digest. It never changes `DATABASE_URL`, starts an
+the exact M7 version, revision, and canonical digest. Catalog hashing breaks the
+digest self-reference only for the complete correct constraint containing the
+current digest; replacing it with another valid lower-hex value remains visible
+as schema drift. It never changes `DATABASE_URL`, starts an
 application process, overwrites a database, or switches traffic.
 
 After a verified result, independently inspect the public proof and run

@@ -7,6 +7,7 @@ from sqlalchemy import CHAR, BigInteger, Boolean, CheckConstraint, DateTime, Ind
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
+from deerflow.persistence.final_schema_digest import M7_CANONICAL_SCHEMA_DIGEST
 
 
 def _now() -> datetime:
@@ -73,7 +74,7 @@ class RestoreProofRow(Base):
             name="ck_restore_proofs_sequences",
         ),
         CheckConstraint(
-            "archive_schema_version = 7 AND schema_revision = '0001_project_saas_baseline' AND schema_digest ~ '^[0-9a-f]{64}$'",
+            f"archive_schema_version = 7 AND schema_revision = '0001_project_saas_baseline' AND schema_digest = '{M7_CANONICAL_SCHEMA_DIGEST}'",
             name="ck_restore_proofs_archive_schema",
         ),
         Index("ix_restore_proofs_archive", "archive_id", restored_at.desc()),

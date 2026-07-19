@@ -467,7 +467,7 @@ def upgrade() -> None:
         sa.Column("probes_complete", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("restored_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.CheckConstraint(
-            "archive_schema_version = 7 AND schema_revision = '0001_project_saas_baseline' AND schema_digest ~ '^[0-9a-f]{64}$'",
+            "archive_schema_version = 7 AND schema_revision = '0001_project_saas_baseline' AND schema_digest = '75a88f91b80d3043c94c669e44b84975ad4e2bf5fa532ed45c8936de723244f5'",
             name="ck_restore_proofs_archive_schema",
         ),
         sa.CheckConstraint("archive_tombstone_sequence >= 0 AND replayed_through_sequence >= archive_tombstone_sequence", name="ck_restore_proofs_sequences"),

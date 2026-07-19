@@ -48,19 +48,44 @@ The first bounded repair review addressed exactly four frozen findings:
   chunk bounds, and mutation are rejected. The combined I2/I3 RED set was eight
   failures and is now eight passes.
 - **I4 — proof propagation:** `restore_proofs` now persists non-null archive
-  schema version and canonical digest. The static baseline constrains the exact
-  M7 version/revision and a lower-hex digest; append-only triggers protect both
-  fields. The two real-PostgreSQL RED cases are GREEN, including a live restore
-  ORM read and invalid-insert/update rejection.
+  schema version and canonical digest. Append-only triggers protect both fields.
+  The two real-PostgreSQL RED cases are GREEN, including a live restore ORM read
+  and invalid-insert/update rejection.
 
 The repair changed the canonical baseline signature intentionally. An
 independent metadata database read confirmed 615 columns with digest
 `8bb79d7b08cd7404a9e459a42ebb56471d57888310c965f143d40cd553ecd5b4`
-and 383 constraints with digest
-`94879d7adbea1e3c59b9847a8d9982ed6681b36ecb416879c75b49a114ad82e9`;
+and 383 constraints with the first-review digest recorded at that checkpoint;
 all other signature dimensions remain unchanged. A direct catalog audit also
 confirmed `archive_schema_version smallint NOT NULL`, `schema_digest char(64)
-NOT NULL`, and the exact M7 proof constraint.
+NOT NULL`, and the initial version/revision/lower-hex proof constraint. The
+second review below supersedes that constraint.
+
+## Second bounded repair review
+
+The sole follow-up Important found that the proof constraint accepted any
+lowercase 64-hex digest. A real PostgreSQL RED inserted version `7`, revision
+`0001_project_saas_baseline`, and `f` repeated 64 times without error. The
+static baseline and ORM constraint now require the one canonical digest
+exactly, so that insert is rejected by PostgreSQL.
+
+The digest's constraint literal would otherwise make the catalog signature
+self-referential. The release signature therefore normalizes exactly one full
+constraint rendering containing the current canonical digest to the fixed
+`__M7_CANONICAL_SCHEMA_DIGEST__` placeholder. It never replaces arbitrary
+64-hex text: changing only the constraint literal to another valid digest makes
+all final-schema entry points fail closed without mutating that database.
+
+Two-stage generation converged independently:
+
+- placeholder-normalized constraints: count `383`, digest
+  `41ad7d27b84de8b3818c9753386561ba321e7909812078fccea8e6a11def2508`;
+- final schema digest:
+  `75a88f91b80d3043c94c669e44b84975ad4e2bf5fa532ed45c8936de723244f5`.
+
+A second fresh static-baseline database produced those same values, and the
+import-time invariant plus unit test require the exported canonical digest to
+equal the hash of `FINAL_M7_CATALOG_SIGNATURE`.
 
 ## Restore-stable catalog contract
 
@@ -84,17 +109,18 @@ The shared Task 8/Task 9 verifier normalizes only a complete array of string lit
 
 ## Verification evidence
 
-- Final Task 8 plus repaired Task 9 PostgreSQL regression: `50 passed` (`26` + `24`).
+- Final Task 8 plus repaired Task 9 PostgreSQL regression: `51 passed` (`26` + `25`).
 - Fixed 16-file project-foundation PostgreSQL release gate: `157 passed`, `0 skipped`.
-- Recovery gate (`test_m7_backup_restore_postgres.py`, backup archive, restore PostgreSQL, restore safety, retention purge, tombstone journal): `144 passed`, zero skips.
+- Recovery gate (`test_m7_backup_restore_postgres.py`, backup archive, restore PostgreSQL, restore safety, retention purge, tombstone journal): `145 passed`, zero skips.
 - Fresh standalone blocking-I/O gate: `4 passed`.
-- Focused live backup/restore proof plus successful random drill: `2 passed`.
-- Ruff format check: `9 files already formatted`.
+- Focused live restore proof: `1 passed`.
+- Ruff format check: `6 files already formatted`.
 - Ruff lint: `All checks passed!`.
-- Full backend collection: `7785 tests collected`, zero collection errors.
+- Full backend collection: `7786 tests collected`, zero collection errors.
 - Production residue scan for `PRE_M6`, `pre[_-]cutover`, revision `0013`, and revision `0015`: no matches.
 - `git diff --check`: clean.
 - Isolated repair PostgreSQL cleanup: no `deerflow_test_*`/`deerflow_restore_*`/`deerflow_autogen_*` databases remained; the port-55440 cluster was stopped, its exact temporary data directory and diagnostic file were removed, and `pg_isready` returned `no response`.
+- Second-review PostgreSQL cleanup: the only explicit two-stage generation database was dropped after all random fixtures had self-cleaned; the port-55441 cluster was stopped, its exact temporary directory was removed, and `pg_isready` returned `no response`.
 
 ## Documentation
 

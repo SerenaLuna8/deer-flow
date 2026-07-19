@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 import deerflow.persistence.models  # noqa: F401 -- populate final metadata
 from deerflow.persistence.base import Base
+from deerflow.persistence.final_schema_digest import M7_CANONICAL_SCHEMA_DIGEST
 
 FINAL_APP_TABLES = frozenset(Base.metadata.tables)
 LANGGRAPH_TABLES = frozenset(
@@ -86,7 +87,7 @@ FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
     "constraints": CatalogInvariant(
         count=383,
-        digest="94879d7adbea1e3c59b9847a8d9982ed6681b36ecb416879c75b49a114ad82e9",
+        digest="41ad7d27b84de8b3818c9753386561ba321e7909812078fccea8e6a11def2508",
     ),
     "indexes": CatalogInvariant(
         count=161,
@@ -115,10 +116,13 @@ def _catalog_signature_digest(signature: dict[str, CatalogInvariant]) -> str:
     ).hexdigest()
 
 
-M7_CANONICAL_SCHEMA_DIGEST = _catalog_signature_digest(FINAL_M7_CATALOG_SIGNATURE)
+if M7_CANONICAL_SCHEMA_DIGEST != _catalog_signature_digest(FINAL_M7_CATALOG_SIGNATURE):  # pragma: no cover - import-time release invariant
+    raise RuntimeError("M7 canonical schema digest does not match its catalog signature")
 
 
 _VARCHAR_TEXT_ARRAY = re.compile(r"ARRAY\[(?P<body>(?:'(?:''|[^'])*'::character varying(?:::text)?(?:,\s*)?)+)\](?:::text\[\])?")
+_M7_SCHEMA_DIGEST_PLACEHOLDER = "__M7_CANONICAL_SCHEMA_DIGEST__"
+_M7_RESTORE_PROOF_CONSTRAINT = "CHECK (archive_schema_version = 7 AND schema_revision::text = '0001_project_saas_baseline'::text AND schema_digest = '{schema_digest}'::bpchar)"
 
 
 _CATALOG_QUERIES = {
@@ -211,6 +215,10 @@ def _rows_digest(rows: tuple[tuple[object, ...], ...]) -> str:
 def _normalize_catalog_value(value: object) -> object:
     if not isinstance(value, str):
         return value
+
+    canonical_restore_proof_constraint = _M7_RESTORE_PROOF_CONSTRAINT.format(schema_digest=M7_CANONICAL_SCHEMA_DIGEST)
+    if value == canonical_restore_proof_constraint:
+        value = _M7_RESTORE_PROOF_CONSTRAINT.format(schema_digest=_M7_SCHEMA_DIGEST_PLACEHOLDER)
 
     # pg_dump renders text-array ANY expressions with a cast on each element,
     # while direct baseline DDL retains one cast on the array. PostgreSQL stores

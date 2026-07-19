@@ -765,6 +765,7 @@ async def test_stream_terminal_trigger_rejects_late_and_duplicate_terminal_event
 @pytest.mark.asyncio
 async def test_append_only_audit_ledger_tombstone_and_restore_proof_reject_mutation(
     postgres_database_url: str,
+    postgres_admin_url: str,
 ) -> None:
     bootstrap_engine = create_async_engine(postgres_database_url)
     try:
@@ -847,7 +848,7 @@ async def test_append_only_audit_ledger_tombstone_and_restore_proof_reject_mutat
 
         for archive_schema_version, schema_digest in (
             (6, M7_CANONICAL_SCHEMA_DIGEST),
-            (7, "not-a-canonical-digest"),
+            (7, "f" * 64),
         ):
             with pytest.raises(DBAPIError):
                 async with seed.engine.begin() as connection:
@@ -890,8 +891,29 @@ async def test_append_only_audit_ledger_tombstone_and_restore_proof_reject_mutat
             with pytest.raises(DBAPIError):
                 async with seed.engine.begin() as connection:
                     await connection.execute(text(f"DELETE FROM {table_name}"))
+
     finally:
         await seed.engine.dispose()
+
+    wrong_digest = "f" * 64
+    assert wrong_digest != M7_CANONICAL_SCHEMA_DIGEST
+    async with temporary_postgres_database(postgres_admin_url) as drift_url:
+        drift_engine = create_async_engine(drift_url)
+        try:
+            await bootstrap_module.bootstrap_schema(drift_engine)
+            async with drift_engine.begin() as connection:
+                await connection.execute(text("ALTER TABLE restore_proofs DROP CONSTRAINT ck_restore_proofs_archive_schema"))
+                await connection.execute(
+                    text(f"ALTER TABLE restore_proofs ADD CONSTRAINT ck_restore_proofs_archive_schema CHECK (archive_schema_version = 7 AND schema_revision = '0001_project_saas_baseline' AND schema_digest = '{wrong_digest}')")
+                )
+            async with drift_engine.connect() as connection:
+                before_catalog = await _schema_digest(connection)
+                before_rows = await _table_row_counts(connection)
+
+            result = await _entrypoint_refusal_result(drift_engine, drift_url)
+            assert result == (True, True, True, True, before_catalog, before_rows)
+        finally:
+            await drift_engine.dispose()
 
 
 @pytest.mark.postgres

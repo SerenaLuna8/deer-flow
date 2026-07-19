@@ -234,6 +234,20 @@ def test_catalog_digest_normalizes_only_pg_restore_equivalent_casts() -> None:
     assert schema_contract._rows_digest(source) == schema_contract._rows_digest(restored)
 
 
+def test_catalog_digest_placeholder_only_normalizes_current_restore_proof_digest() -> None:
+    canonical = f"CHECK (archive_schema_version = 7 AND schema_revision::text = '0001_project_saas_baseline'::text AND schema_digest = '{schema_contract.M7_CANONICAL_SCHEMA_DIGEST}'::bpchar)"
+    placeholder = canonical.replace(
+        schema_contract.M7_CANONICAL_SCHEMA_DIGEST,
+        "__M7_CANONICAL_SCHEMA_DIGEST__",
+    )
+    wrong = canonical.replace(schema_contract.M7_CANONICAL_SCHEMA_DIGEST, "f" * 64)
+
+    assert schema_contract.M7_CANONICAL_SCHEMA_DIGEST != "f" * 64
+    assert schema_contract._rows_digest(((canonical,),)) == schema_contract._rows_digest(((placeholder,),))
+    assert schema_contract._rows_digest(((wrong,),)) != schema_contract._rows_digest(((canonical,),))
+    assert schema_contract.M7_CANONICAL_SCHEMA_DIGEST == schema_contract._catalog_signature_digest(schema_contract.FINAL_M7_CATALOG_SIGNATURE)
+
+
 @pytest.mark.parametrize(
     "near_miss",
     (
