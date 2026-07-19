@@ -31,12 +31,14 @@ export function SidecarTrigger() {
     // id and this trigger unmounts (self-heals) instead of opening a dead
     // thread (#3555).
     setIsReconciling(true);
+    const identity = sidecar.captureIdentity();
     try {
       const restoredThreadId = await sidecar.restoreSidecarThread({
         force: true,
+        identity,
       });
-      if (restoredThreadId) {
-        sidecar.openSidecar();
+      if (restoredThreadId && sidecar.isIdentityCurrent(identity)) {
+        sidecar.openSidecar(identity);
       }
     } finally {
       setIsReconciling(false);

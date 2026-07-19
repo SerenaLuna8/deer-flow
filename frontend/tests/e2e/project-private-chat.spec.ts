@@ -7,12 +7,14 @@ import { handleRunStream, mockLangGraphAPI } from "./utils/mock-api";
 const ACCOUNT_ID = "90000000-0000-4000-8000-000000000001";
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const THREAD_ID = "20000000-0000-4000-8000-000000000001";
+const SECOND_THREAD_ID = "20000000-0000-4000-8000-000000000002";
 const MISSING_THREAD_ID = "20000000-0000-4000-8000-000000000099";
 const AGENT_ID = "30000000-0000-4000-8000-000000000001";
 const PROJECT_FILE_ID = "40000000-0000-4000-8000-000000000001";
 const PROJECT_SKILL_FILE_ID = "40000000-0000-4000-8000-000000000003";
 const PROJECT_SKILL_ID = "50000000-0000-4000-8000-000000000001";
 const SIDECAR_THREAD_ID = "60000000-0000-4000-8000-000000000001";
+const SECOND_SIDECAR_THREAD_ID = "60000000-0000-4000-8000-000000000002";
 const WRITE_ARTIFACT_PATH = "/mnt/user-data/outputs/project-report.md";
 const PRESENTED_ARTIFACT_PATH = "/mnt/user-data/outputs/presented-report.md";
 const PRESENTED_SKILL_PATH = "/mnt/user-data/outputs/reviewer.skill";
@@ -497,6 +499,9 @@ async function mockProjectSidecar(
 }
 
 async function selectProjectMessageText(page: Page, text: string) {
+  await expect(
+    page.getByTestId("main-message-list").getByText(text),
+  ).toBeVisible();
   await page.evaluate((targetText) => {
     const root = document.querySelector('[data-testid="main-message-list"]');
     const walker = document.createTreeWalker(
@@ -533,6 +538,256 @@ async function openProjectSidecarDraft(page: Page, text: string) {
     .getByRole("button", { name: /ask in side chat/i })
     .click();
   await expect(page.getByTestId("sidecar-panel")).toBeVisible();
+}
+
+function deferredGate() {
+  let release!: () => void;
+  let markStarted!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  return { promise, release, started, markStarted };
+}
+
+type SidecarRaceOptions = {
+  initialSidecars?: Record<string, string>;
+  createGate?: ReturnType<typeof deferredGate>;
+  restoreGate?: ReturnType<typeof deferredGate>;
+  deleteGate?: ReturnType<typeof deferredGate>;
+};
+
+async function mockProjectSidecarRaces(
+  page: Page,
+  options: SidecarRaceOptions = {},
+) {
+  const sidecars = new Map(Object.entries(options.initialSidecars ?? {}));
+  const sidecarParents = new Map(
+    [...sidecars.entries()].map(([parentId, sidecarId]) => [
+      sidecarId,
+      parentId,
+    ]),
+  );
+  const createBodies: Array<Record<string, unknown>> = [];
+  const runBodies: Array<{ threadId: string; body: unknown }> = [];
+  const globalRequests: string[] = [];
+  let createCount = 0;
+  let restoreCount = 0;
+  let deleteCount = 0;
+
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (
+      path === "/api/threads" ||
+      path.startsWith("/api/threads/") ||
+      path.startsWith("/api/langgraph/threads") ||
+      path.startsWith("/api/langgraph/runs")
+    ) {
+      globalRequests.push(`${request.method()} ${path}`);
+    }
+  });
+
+  const parentThread = (threadId: string) => ({
+    ...privateThread,
+    thread_id: threadId,
+    display_name:
+      threadId === THREAD_ID ? "Owner research" : "Second project thread",
+  });
+  const sidecarThread = (threadId: string, parentId: string) => ({
+    thread_id: threadId,
+    agent_asset_id: AGENT_ID,
+    agent_scope: "project",
+    display_name: "Project side chat",
+    status: "idle",
+    metadata: {
+      created_at: "2026-07-15T00:00:00Z",
+      updated_at: "2026-07-15T02:00:00Z",
+      deerflow_sidecar: true,
+      parent_thread_id: parentId,
+      sidecar_context_type: "referenced_message",
+      sidecar_context_label: "Selected assistant text #1",
+      sidecar_context_count: 1,
+      referenced_message_id: `source-${parentId}`,
+      referenced_message_ids: [`source-${parentId}`],
+      referenced_message_role: "assistant",
+      referenced_message_roles: ["assistant"],
+    },
+    version: 1,
+  });
+  const state = (messages: unknown[]) => ({
+    values: { title: "Project thread", messages, artifacts: [], todos: [] },
+    next: [],
+    metadata: {},
+    checkpoint: {},
+    checkpoint_id: null,
+    parent_checkpoint_id: null,
+    created_at: "2026-07-15T02:00:00Z",
+    tasks: [],
+  });
+
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/private-work/**`,
+    async (route) => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname;
+
+      if (request.method() === "POST" && path.endsWith("/threads/search")) {
+        restoreCount += 1;
+        if (restoreCount === 1 && options.restoreGate) {
+          options.restoreGate.markStarted();
+          await options.restoreGate.promise;
+        }
+        return json(route, {
+          items: [
+            ...[...sidecars.entries()].map(([parentId, sidecarId]) =>
+              sidecarThread(sidecarId, parentId),
+            ),
+            parentThread(THREAD_ID),
+            parentThread(SECOND_THREAD_ID),
+          ],
+        });
+      }
+
+      if (request.method() === "POST" && path.endsWith("/threads")) {
+        const body = request.postDataJSON() as Record<string, unknown>;
+        createBodies.push(body);
+        createCount += 1;
+        if (createCount === 1 && options.createGate) {
+          options.createGate.markStarted();
+          await options.createGate.promise;
+        }
+        const threadId = String(body.thread_id);
+        const metadata = body.metadata as Record<string, unknown>;
+        const parentId = String(metadata.parent_thread_id);
+        sidecars.set(parentId, threadId);
+        sidecarParents.set(threadId, parentId);
+        return json(route, {
+          ...sidecarThread(threadId, parentId),
+          metadata: {
+            ...sidecarThread(threadId, parentId).metadata,
+            ...metadata,
+          },
+        });
+      }
+
+      for (const parentId of [THREAD_ID, SECOND_THREAD_ID]) {
+        if (path.endsWith(`/threads/${parentId}`)) {
+          return json(route, parentThread(parentId));
+        }
+        if (path.endsWith(`/threads/${parentId}/state`)) {
+          return json(
+            route,
+            state([
+              {
+                type: "ai",
+                id: `source-${parentId}`,
+                content:
+                  parentId === THREAD_ID
+                    ? "First parent race source."
+                    : "Second parent race source.",
+              },
+            ]),
+          );
+        }
+        if (path.endsWith(`/threads/${parentId}/token-usage`)) {
+          return json(route, {
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_tokens: 0,
+          });
+        }
+        if (path.endsWith(`/threads/${parentId}/uploads`)) {
+          return json(route, []);
+        }
+        if (path.endsWith(`/threads/${parentId}/runs`)) {
+          return json(route, []);
+        }
+      }
+
+      const sidecarEntry = [...sidecarParents.entries()].find(([threadId]) =>
+        path.includes(`/threads/${threadId}`),
+      );
+      if (!sidecarEntry) return route.fallback();
+      const [sidecarId, parentId] = sidecarEntry;
+
+      if (path.endsWith(`/threads/${sidecarId}/state`)) {
+        return json(route, state([]));
+      }
+      if (path.endsWith(`/threads/${sidecarId}/token-usage`)) {
+        return json(route, {
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          total_tokens: 0,
+        });
+      }
+      if (path.endsWith(`/threads/${sidecarId}/uploads/limits`)) {
+        return json(route, {
+          max_files: 10,
+          max_file_size: 50 * 1024 * 1024,
+          max_total_size: 100 * 1024 * 1024,
+        });
+      }
+      if (path.endsWith(`/threads/${sidecarId}/uploads`)) {
+        return json(route, []);
+      }
+      if (path.endsWith(`/threads/${sidecarId}/runs/stream`)) {
+        const body = request.postDataJSON();
+        runBodies.push({ threadId: sidecarId, body });
+        return handleRunStream(route);
+      }
+      if (/\/threads\/[^/]+\/runs(?:\?|$)/u.test(request.url())) {
+        return json(route, []);
+      }
+      if (path.endsWith(`/threads/${sidecarId}`)) {
+        if (request.method() === "DELETE") {
+          deleteCount += 1;
+          if (deleteCount === 1 && options.deleteGate) {
+            options.deleteGate.markStarted();
+            await options.deleteGate.promise;
+          }
+          sidecars.delete(parentId);
+          sidecarParents.delete(sidecarId);
+          return route.fulfill({ status: 204 });
+        }
+        return json(route, sidecarThread(sidecarId, parentId));
+      }
+      return json(route, { detail: "not found" }, 404);
+    },
+  );
+
+  return { createBodies, runBodies, globalRequests };
+}
+
+async function switchProjectParent(page: Page, threadId: string) {
+  const statePath = `/api/projects/${PROJECT_ID}/private-work/threads/${threadId}/state`;
+  const stateResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET" && url.pathname === statePath;
+  });
+  await page.evaluate(async (nextThreadId) => {
+    const appRouter = (
+      window as Window & {
+        next?: { router?: { push: (href: string) => Promise<void> } };
+      }
+    ).next?.router;
+    if (!appRouter) {
+      throw new Error("Next app router is unavailable");
+    }
+    await appRouter.push(`/projects/research-lab/chats/${nextThreadId}`);
+  }, threadId);
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/research-lab/chats/${threadId}$`, "u"),
+  );
+  await stateResponse;
+  await expect(
+    page.getByText(
+      threadId === THREAD_ID
+        ? "First parent race source."
+        : "Second parent race source.",
+    ),
+  ).toBeVisible();
 }
 
 test.beforeEach(async ({ page }) => {
@@ -878,6 +1133,146 @@ test("project side chat keeps its delete dialog locked while scoped delete is in
   releaseDelete();
   await expect(dialogTitle).toBeHidden();
   await expect(page.getByTestId("sidecar-panel")).toBeHidden();
+});
+
+test("project side chat drops a deferred create and queued send after parent switch", async ({
+  page,
+}) => {
+  const createGate = deferredGate();
+  await mockPrivateWork(page);
+  const race = await mockProjectSidecarRaces(page, { createGate });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await openProjectSidecarDraft(page, "First parent race source.");
+  const sidecarInput = page.getByPlaceholder(/deeper follow-up/i);
+  await sidecarInput.fill("Old parent queued message");
+  await sidecarInput.press("Enter");
+  await createGate.started;
+
+  await switchProjectParent(page, SECOND_THREAD_ID);
+  createGate.release();
+  await page.waitForTimeout(350);
+
+  expect(race.runBodies).toEqual([]);
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeHidden();
+
+  await openProjectSidecarDraft(page, "Second parent race source.");
+  await page
+    .getByPlaceholder(/deeper follow-up/i)
+    .fill("New parent normal message");
+  await page.getByPlaceholder(/deeper follow-up/i).press("Enter");
+  await expect.poll(() => race.runBodies).toHaveLength(1);
+  expect(race.runBodies[0]?.threadId).not.toBe(
+    String(race.createBodies[0]?.thread_id),
+  );
+  expect(JSON.stringify(race.runBodies[0]?.body)).toContain(
+    "New parent normal message",
+  );
+  expect(JSON.stringify(race.runBodies)).not.toContain(
+    "Old parent queued message",
+  );
+  expect(race.globalRequests).toEqual([]);
+});
+
+test("project side chat invalidates a deferred create when its draft closes", async ({
+  page,
+}) => {
+  const createGate = deferredGate();
+  await mockPrivateWork(page);
+  const race = await mockProjectSidecarRaces(page, { createGate });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await openProjectSidecarDraft(page, "First parent race source.");
+  await page
+    .getByPlaceholder(/deeper follow-up/i)
+    .fill("Closed create message");
+  await page.getByPlaceholder(/deeper follow-up/i).press("Enter");
+  await createGate.started;
+  await page.getByTestId("sidecar-close-button").click();
+  createGate.release();
+  await page.waitForTimeout(350);
+
+  expect(race.runBodies).toEqual([]);
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeHidden();
+
+  await openProjectSidecarDraft(page, "First parent race source.");
+  await page
+    .getByPlaceholder(/deeper follow-up/i)
+    .fill("Fresh generation after create close");
+  await page.getByPlaceholder(/deeper follow-up/i).press("Enter");
+  await expect.poll(() => race.runBodies).toHaveLength(1);
+  expect(JSON.stringify(race.runBodies[0]?.body)).toContain(
+    "Fresh generation after create close",
+  );
+  expect(JSON.stringify(race.runBodies)).not.toContain("Closed create message");
+});
+
+test("project side chat invalidates a deferred restore when its draft closes", async ({
+  page,
+}) => {
+  const restoreGate = deferredGate();
+  await mockPrivateWork(page);
+  const race = await mockProjectSidecarRaces(page, {
+    initialSidecars: { [THREAD_ID]: SIDECAR_THREAD_ID },
+    restoreGate,
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await restoreGate.started;
+  await openProjectSidecarDraft(page, "First parent race source.");
+  await page
+    .getByPlaceholder(/deeper follow-up/i)
+    .fill("Closed restore message");
+  await page.getByPlaceholder(/deeper follow-up/i).press("Enter");
+  await page.getByTestId("sidecar-close-button").click();
+  restoreGate.release();
+  await page.waitForTimeout(350);
+
+  expect(race.runBodies).toEqual([]);
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeHidden();
+
+  await openProjectSidecarDraft(page, "First parent race source.");
+  await page
+    .getByPlaceholder(/deeper follow-up/i)
+    .fill("Fresh generation after restore close");
+  await page.getByPlaceholder(/deeper follow-up/i).press("Enter");
+  await expect.poll(() => race.runBodies).toHaveLength(1);
+  expect(JSON.stringify(race.runBodies[0]?.body)).toContain(
+    "Fresh generation after restore close",
+  );
+  expect(JSON.stringify(race.runBodies)).not.toContain(
+    "Closed restore message",
+  );
+});
+
+test("project side chat keeps the new parent identity after an old delete completes", async ({
+  page,
+}) => {
+  const deleteGate = deferredGate();
+  await mockPrivateWork(page);
+  const race = await mockProjectSidecarRaces(page, {
+    initialSidecars: {
+      [THREAD_ID]: SIDECAR_THREAD_ID,
+      [SECOND_THREAD_ID]: SECOND_SIDECAR_THREAD_ID,
+    },
+    deleteGate,
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible();
+  await page.getByTestId("sidecar-header-trigger").click();
+  await page.getByTestId("sidecar-delete-button").click();
+  await page.getByTestId("sidecar-delete-confirm-button").click();
+  await deleteGate.started;
+
+  await switchProjectParent(page, SECOND_THREAD_ID);
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible();
+  deleteGate.release();
+
+  await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible();
+  await page.getByTestId("sidecar-header-trigger").click();
+  await expect(page.getByTestId("sidecar-panel")).toBeVisible();
+  expect(race.globalRequests).toEqual([]);
 });
 
 test("project history renders Mermaid and stopped subtask state", async ({

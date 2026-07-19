@@ -80,7 +80,11 @@ function OptionalSidecarProvider({
   ...props
 }: React.ComponentProps<typeof SidecarProvider> & { enabled: boolean }) {
   if (!enabled) return children;
-  return <SidecarProvider {...props}>{children}</SidecarProvider>;
+  return (
+    <SidecarProvider key={props.parentThreadId} {...props}>
+      {children}
+    </SidecarProvider>
+  );
 }
 
 export function ScopedChatPage({

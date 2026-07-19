@@ -213,3 +213,59 @@ production legacy route/global client residue: zero matches
 
 Task 7 was not started, and `.superpowers/sdd/progress.md` remains unchanged by
 this second repair.
+
+## Third independent-review repair
+
+The third review of `bd01006f` found one Important race in the project Sidecar:
+create/restore completion and the queued first submit were not owned by one
+immutable parent identity. Because a closing panel remains mounted briefly, an
+old request could adopt its thread or clear/send work after a parent switch,
+draft close, or delete transition.
+
+### RED evidence and fix
+
+- Four deferred Playwright cases were added for create-then-parent-switch,
+  create-then-close, restore-then-close, and delete-then-parent-switch. They
+  also specify that the fresh parent/generation can restore or create and send
+  normally, with no global route, duplicate send, or trigger/cache pollution.
+- The pure identity state-machine unit was written before its implementation.
+  Its RED was the TypeScript error `TS2307: Cannot find module
+  '@/core/sidecar/identity'`.
+- Sidecar now owns an immutable `{parentThreadId, generation}` identity.
+  Parent switch, close, and delete/reset advance the generation; deferred
+  restore/create adoption and delete clearing succeed only for the exact
+  current identity. The provider is additionally keyed by parent thread.
+- A queued first submit records both identity and sidecar thread ID. It sends
+  only when that identity is still current, the visible sidecar ID matches,
+  and the stream is bound to the same thread; stale work is fail-closed and
+  dropped. A fresh identity retains the normal restore/create/send path.
+
+### Fresh third-repair evidence
+
+The pure state-machine harness exercised all four identity decisions, and the
+fresh third-repair matrix passed:
+
+```text
+sidecar identity state machine: 4 assertions passed
+full Rstest: 122 files, 887 passed, 0 skipped
+deferred Sidecar race Playwright: 4 passed
+full default Playwright: 78 passed
+static artifact/browser Playwright: 2 passed
+pnpm exec tsc --noEmit: passed
+pnpm check: ESLint and TypeScript passed
+pnpm format: passed
+BUILD_MODE=production pnpm build: 80/80 pages
+BUILD_MODE=static SKIP_ENV_VALIDATION=1 pnpm build: 80/80 pages
+git diff --check: passed
+production legacy route/global client residue: zero matches
+```
+
+The first default Playwright run passed 77 of 78 tests and exposed one existing
+project Automation parallel-run fluctuation outside this Sidecar diff. That
+exact Automation case passed 1/1 in isolation, and the immediate full default
+rerun passed 78/78. The deferred Sidecar race gate passed 4/4 before the full
+runs, so all four new identity transitions and the existing Sidecar coverage
+are exercised by fresh browser evidence.
+
+Task 7 was not started, and `.superpowers/sdd/progress.md` remains unchanged by
+this third repair.

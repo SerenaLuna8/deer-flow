@@ -66,6 +66,9 @@ import {
   buildReferenceMessageMetadata,
   buildSidecarContextPrompt,
   buildSidecarThreadMetadata,
+  consumeSidecarQueue,
+  type SidecarIdentity,
+  type SidecarQueuedValue,
 } from "@/core/sidecar";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import {
@@ -161,10 +164,10 @@ export function SidecarPanel({ className }: { className?: string }) {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const { mutateAsync: deleteThread, isPending: isDeleting } =
     useDeleteThread();
-  const [queuedSubmit, setQueuedSubmit] = useState<{
+  const [queuedSubmit, setQueuedSubmit] = useState<SidecarQueuedValue<{
     message: PromptInputMessage;
     references: SidecarReference[];
-  } | null>(null);
+  }> | null>(null);
   const { data: uploadLimits } = useUploadLimits(
     sidecar.sidecarThreadId ?? sidecar.parentThreadId,
   );
@@ -193,9 +196,6 @@ export function SidecarPanel({ className }: { className?: string }) {
     threadId: sidecar.sidecarThreadId ?? undefined,
     displayThreadId: sidecar.sidecarThreadId ?? undefined,
     context: sidecar.context,
-    onStart: (createdThreadId) => {
-      sidecar.setSidecarThreadId(createdThreadId);
-    },
   });
 
   const referenceCountLabel = useMemo(() => {
@@ -328,14 +328,19 @@ export function SidecarPanel({ className }: { className?: string }) {
   );
 
   const ensureSidecarThread = useCallback(
-    async (references: SidecarReference[]) => {
+    async (
+      identity: SidecarIdentity,
+      references: SidecarReference[],
+    ): Promise<string | null> => {
+      if (!sidecar.isIdentityCurrent(identity)) return null;
       if (sidecar.sidecarThreadId) {
         return sidecar.sidecarThreadId;
       }
-      const restoredThreadId = await sidecar.restoreSidecarThread();
+      const restoredThreadId = await sidecar.restoreSidecarThread({ identity });
       if (restoredThreadId) {
         return restoredThreadId;
       }
+      if (!sidecar.isIdentityCurrent(identity)) return null;
       if (references.length === 0) {
         throw new Error(t.sidecar.noContext);
       }
@@ -347,8 +352,9 @@ export function SidecarPanel({ className }: { className?: string }) {
           throw new Error("Project side conversation scope is unavailable.");
         }
         const parent = await privateWork.client.threads.get(
-          sidecar.parentThreadId,
+          identity.parentThreadId,
         );
+        if (!sidecar.isIdentityCurrent(identity)) return null;
         const agentAssetId = parent.metadata?.agent_asset_id;
         const agentScope = parent.metadata?.agent_scope;
         if (
@@ -362,12 +368,13 @@ export function SidecarPanel({ className }: { className?: string }) {
           agentAssetId,
           agentScope,
           metadata: buildSidecarThreadMetadata(
-            sidecar.parentThreadId,
+            identity.parentThreadId,
             contexts,
           ),
         });
-        sidecar.setSidecarThreadId(created.thread_id);
-        return created.thread_id;
+        return sidecar.adoptSidecarThread(identity, created.thread_id)
+          ? created.thread_id
+          : null;
       } finally {
         setCreatingThread(false);
       }
@@ -445,19 +452,24 @@ export function SidecarPanel({ className }: { className?: string }) {
   );
 
   useEffect(() => {
-    if (
-      !queuedSubmit ||
-      !sidecar.sidecarThreadId ||
-      boundThreadId !== sidecar.sidecarThreadId ||
-      thread.isLoading
-    ) {
+    const decision = consumeSidecarQueue({
+      currentIdentity: sidecar.identity,
+      queued: queuedSubmit,
+      sidecarThreadId: sidecar.sidecarThreadId,
+      boundThreadId,
+    });
+    if (decision.action === "drop") {
+      setQueuedSubmit(null);
+      return;
+    }
+    if (decision.action === "wait" || thread.isLoading) {
       return;
     }
 
-    const nextSubmit = queuedSubmit;
+    const nextSubmit = decision.value;
     setQueuedSubmit(null);
     void submitToSidecarThread(
-      sidecar.sidecarThreadId,
+      boundThreadId!,
       nextSubmit.message,
       nextSubmit.references,
       // Clear references only once the send genuinely proceeds; a send dropped
@@ -496,10 +508,21 @@ export function SidecarPanel({ className }: { className?: string }) {
       }
 
       const pendingReferences = [...sidecar.activeReferences];
+      const operationIdentity = sidecar.captureIdentity();
       try {
         if (!sidecar.sidecarThreadId) {
-          await ensureSidecarThread(pendingReferences);
-          setQueuedSubmit({ message, references: pendingReferences });
+          const threadId = await ensureSidecarThread(
+            operationIdentity,
+            pendingReferences,
+          );
+          if (!threadId || !sidecar.isIdentityCurrent(operationIdentity)) {
+            return;
+          }
+          setQueuedSubmit({
+            identity: operationIdentity,
+            threadId,
+            value: { message, references: pendingReferences },
+          });
           return;
         }
 
@@ -531,13 +554,14 @@ export function SidecarPanel({ className }: { className?: string }) {
   );
 
   const discardDraftAndClose = useCallback(() => {
-    sidecar.clearActiveReferences();
-    sidecar.setSidecarThreadId(null);
-    sidecar.close();
+    const identity = sidecar.captureIdentity();
+    sidecar.resetSidecar(identity);
+    setQueuedSubmit(null);
   }, [sidecar]);
 
   const handleDelete = useCallback(async () => {
     const threadId = sidecar.sidecarThreadId;
+    const deleteIdentity = sidecar.captureIdentity();
     // Guard: the trash button only opens this dialog once a thread exists, so a
     // missing id here means the draft was cleared underneath us — just close.
     if (!threadId) {
@@ -547,7 +571,8 @@ export function SidecarPanel({ className }: { className?: string }) {
     }
     try {
       await deleteThread({ threadId });
-      discardDraftAndClose();
+      sidecar.resetSidecar(deleteIdentity);
+      setQueuedSubmit(null);
       setDeleteDialogOpen(false);
       toast.success(t.sidecar.deleteSuccess);
     } catch (error) {
@@ -558,7 +583,7 @@ export function SidecarPanel({ className }: { className?: string }) {
   }, [
     deleteThread,
     discardDraftAndClose,
-    sidecar.sidecarThreadId,
+    sidecar,
     t.sidecar.deleteFailed,
     t.sidecar.deleteSuccess,
   ]);
