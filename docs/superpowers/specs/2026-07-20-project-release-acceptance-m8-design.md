@@ -1,7 +1,7 @@
 # M8 项目优先 SaaS 宿主机发布验收设计
 
 - 日期：2026-07-20
-- 状态：设计已确认，待实施计划
+- 状态：设计已确认，实施计划已完成
 - 前置里程碑：M1–M7 已完成
 - 发布目标：宿主机部署
 - 认证浏览器：桌面版 Chromium
@@ -25,7 +25,8 @@ Docker Compose、Kubernetes、Helm、Firefox、Safari/WebKit 或第三方模型�
 3. 唯一认证安装和启动路径是：新 PostgreSQL 数据库 → `make setup-db` → `make start`。
 4. Docker Compose、Kubernetes 和 Helm 不参与 M8 实现、演练或阻断门禁，必须标记为未认证部署方式。
 5. 桌面版 Chromium 是 V1 唯一认证浏览器；Firefox 和 Safari/WebKit 明确为未认证。
-6. 本机真实模型门禁固定使用 DeepSeek `deepseek-v4-pro`，不扩展为多供应商兼容矩阵。
+6. 本机真实模型门禁固定使用 `ModelConfig.model == "deepseek-v4-pro"` 的 DeepSeek 配置；逻辑
+   `ModelConfig.name` 可以不同，不扩展为多供应商兼容矩阵。
 7. 真实模型门禁必须覆盖一次真实对话、持久化流式输出和至少一次真实工具调用。
 8. `DEEPSEEK_API_KEY` 只从本机环境或现有 gitignored secret source 读取，不进入代码、YAML、测试参数、
    命令输出、日志、证据、文档或 Git。
@@ -47,9 +48,9 @@ Docker Compose、Kubernetes、Helm、Firefox、Safari/WebKit 或第三方模型�
 21. 证据不得包含 prompt、message、Memory、Run output、用户私有文件名/路径、宿主机敏感绝对路径、附件、
     artifact、credential、数据库 URL、资源 UUID、账户 UUID、原始错误或模型响应正文。
 22. M8 不自动 bump version、创建 Git tag、push、发布镜像、发布 Helm chart 或创建 GitHub Release。
-23. 独立审查采用同一入口的两次 fresh 运行：第一次生成 candidate-ready 证据供审查；0/0/0 报告绑定
-    精确提交后，第二次携带该报告重跑全部 stage 并生成 final-pass 证据。任何代码或 stage manifest 变化都
-    使旧报告失效。
+23. 每个被认证的精确提交都采用同一入口的一对 fresh 运行：第一次生成 candidate-ready 证据供审查；
+    0/0/0 报告绑定精确提交后，第二次携带该报告重跑全部 stage 并生成 final-pass 证据。任何代码、文档或
+    stage manifest 变化都使旧报告失效；关闭状态文档形成新提交时，该关闭提交必须重新执行同一对运行。
 
 ## 3. 目标与非目标
 
@@ -127,8 +128,8 @@ revalidation 和回切。完整运行通过后冻结精确提交，独立审查 
 - invocation-owned database、process、port 和 temporary-path ledger。
 
 完整入口要求显式 `M8_LIVE_ACCEPTANCE=1`，避免普通 `make test` 意外调用付费模型或执行灾备。缺少该开关、
-`DEEPSEEK_API_KEY`、exact `deepseek-v4-pro` model configuration、数据库管理权限或 Chromium 时必须在创建
-数据库和启动进程前失败，并只返回缺失项名称。
+`DEEPSEEK_API_KEY`、能够唯一解析到 `ModelConfig.model == "deepseek-v4-pro"` 的 DeepSeek 配置、数据库管理
+权限或 Chromium 时必须在创建数据库和启动进程前失败，并只返回缺失项名称。
 
 当前用户配置必须升级到 repository current config version 且可被 final M7 schema 加载。已删除字段、旧
 revision、未知非空数据库或不安全 runtime role 都必须在任何验收副作用前失败。
@@ -138,6 +139,10 @@ revision、未知非空数据库或不安全 runtime role 都必须在任何验�
 review range 和 0/0/0 verdict。随后设置 `M8_REVIEW_REPORT` 再次执行同一 `make release-acceptance`；预检先
 验证报告、当前提交和 manifest 完全匹配，然后从 fresh state 重跑全部 stage。只有第二次运行成功才能产生
 `final_pass`。存在 finding、提交变化、报告字段缺失或 digest 不匹配时都必须拒绝 final run。
+
+首次 final-pass 允许维护者把 active status 和 closure summary 更新为 M8 完成；该文档提交会改变 Git identity，
+因此旧 final-pass 不能证明新的 HEAD。关闭提交必须再次生成 candidate-ready、接受覆盖完整范围的新 0/0/0
+报告，并从 fresh state 生成最终 final-pass。最终运行后不得再修改 tracked file。
 
 ## 6. 完整隔离矩阵
 
@@ -300,7 +305,8 @@ redaction policy。包含模型正文、私有名称、token、cookie 或 URL qu
 
 ### 9.3 DeepSeek 实时闭环
 
-live case 使用 exact `deepseek-v4-pro` logical model configuration，并完成：
+live case 选择唯一一个 `ModelConfig.model == "deepseek-v4-pro"` 的 DeepSeek 配置，并把它的逻辑
+`ModelConfig.name` 固定到测试 Agent snapshot，再完成：
 
 1. 从 Chromium 在 project Thread 提交一个不含真实隐私数据的固定 synthetic prompt；
 2. Gateway admission 后由 Worker 执行，浏览器收到多个持久化 stream frame；
@@ -308,7 +314,8 @@ live case 使用 exact `deepseek-v4-pro` logical model configuration，并完成
 4. Run 产生唯一 terminal outcome，刷新页面和 Gateway restart 后仍可续传/读取；
 5. 另一 account/project/owner 不能读取该 Thread、Run、frame 或 tool result。
 
-验收只记录 provider、logical model、HTTP/run outcome、frame count、tool-call count、cursor 和耗时的脱敏摘要。
+验收只记录 provider、logical model name、provider model ID、HTTP/run outcome、frame count、tool-call count、
+cursor 和耗时的脱敏摘要。
 prompt、completion、reasoning、tool arguments/result body 和 provider raw response 均不得持久化到 M8 证据。
 
 ## 10. 完整灾难恢复切换演练
@@ -355,8 +362,10 @@ schema 拒绝任意额外字段，尤其是 `prompt`、`message`、`memory`、`o
 `database_url`、`owner_id`、`thread_id`、任何业务 Run identifier、`credential`、`token`、`cookie`、`nonce`、
 `ciphertext`、`locator` 或 raw path。失败阶段也必须使用同一脱敏 writer，不能直接复制 stdout/stderr。
 
-仓库只提交人工可读的 M8 closure summary 和审查结论，不提交本地证据目录。summary 引用 exact commit、
-manifest digest、命令、计数和 verdict，但不包含 invocation locator 或 private data。
+仓库只提交人工可读的 M8 closure summary 和审查结论，不提交本地证据目录。summary 引用允许状态更新的
+pre-closure certified commit、manifest digest、命令、计数和 verdict，但不包含 invocation locator 或 private
+data。关闭提交本身的 exact commit 和 evidence digest 由 post-closure final-pass manifest 记录；tracked Git
+内容不能包含自身尚未形成的 commit hash。该 manifest 生成后不得再修改 tracked file。
 
 ## 12. 失败、取消与清理语义
 
@@ -418,8 +427,9 @@ M8 实施按以下责任边界拆分，详细文件和 RED/GREEN 命令由后续
 
 M8 关闭前必须同时满足：
 
-- 不带 review report 的 `make release-acceptance` 在精确 clean commit 上从 fresh state 产生
-  `candidate_ready`；独立审查 0/0/0 后，带匹配 `M8_REVIEW_REPORT` 的第二次 fresh 运行产生 `final_pass`；
+- 实现提交先由不带 review report 的 `make release-acceptance` 从 fresh state 产生 `candidate_ready`，独立审查
+  0/0/0 后由带匹配 `M8_REVIEW_REPORT` 的第二次 fresh 运行产生 `final_pass`；状态文档提交后，必须在精确
+  clean closure commit 上重新执行同一 candidate/review/final 对，最终运行后不得有 tracked change；
 - fixed M1–M8 PostgreSQL gate 真实运行且 0 skip；
 - backend full、blocking-I/O、Ruff、format 全绿；
 - frontend full unit、check、production/static build、deterministic/live Chromium 全绿；
