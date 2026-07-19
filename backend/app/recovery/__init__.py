@@ -2,6 +2,7 @@
 
 from .archive import (
     ARCHIVE_FORMAT_VERSION,
+    ARCHIVE_SCHEMA_VERSION,
     CHUNK_SIZE,
     MAX_ARCHIVE_CHUNKS,
     MAX_ARCHIVE_PLAINTEXT_BYTES,
@@ -15,6 +16,7 @@ from .archive import (
     BackupKeyMissing,
     BackupManifest,
     BackupSnapshot,
+    UnsupportedArchiveSchema,
     create_backup,
     known_deployment_secrets,
     load_backup_key,
@@ -51,6 +53,7 @@ from .restore import (
 
 __all__ = [
     "ARCHIVE_FORMAT_VERSION",
+    "ARCHIVE_SCHEMA_VERSION",
     "CHUNK_SIZE",
     "MAX_ARCHIVE_CHUNKS",
     "MAX_ARCHIVE_PLAINTEXT_BYTES",
@@ -64,6 +67,7 @@ __all__ = [
     "BackupKeyMissing",
     "BackupManifest",
     "BackupSnapshot",
+    "UnsupportedArchiveSchema",
     "create_backup",
     "drill_restore",
     "load_backup_key",

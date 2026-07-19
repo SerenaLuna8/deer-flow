@@ -15,7 +15,12 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.recovery import BackupKeyInvalid, BackupKeyMissing, load_backup_key
+from app.recovery import (
+    BackupKeyInvalid,
+    BackupKeyMissing,
+    UnsupportedArchiveSchema,
+    load_backup_key,
+)
 from app.recovery.journal import TombstoneJournal, TombstoneJournalUnavailable, load_journal_key
 from app.recovery.restore import (
     RecoveryProbeFailed,
@@ -51,6 +56,9 @@ async def async_main(argv: list[str] | None = None) -> int:
             backup_key=load_backup_key(database_url=current_url),
             keyring=AuditHmacKeyring.from_environment(),
         )
+    except UnsupportedArchiveSchema:
+        print("UNSUPPORTED_ARCHIVE_SCHEMA", file=sys.stderr)
+        return 1
     except (
         AuditHmacKeyringInvalid,
         BackupKeyInvalid,

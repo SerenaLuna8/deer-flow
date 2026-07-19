@@ -20,7 +20,13 @@ import app.recovery.restore as restore_module
 from app.audit.service import AuditService, _bind_recovery_audit_process
 from app.audit.sinks import TrustedOperationAuditSink
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
-from app.recovery import BackupArchiveWriter, BackupConfig, create_backup
+from app.recovery import (
+    ARCHIVE_SCHEMA_VERSION,
+    BackupArchiveWriter,
+    BackupConfig,
+    create_backup,
+)
+from app.recovery.archive import M7_CANONICAL_SCHEMA_DIGEST
 from app.recovery.identity import source_installation_id
 from app.recovery.journal import (
     TombstoneJournal,
@@ -192,7 +198,6 @@ def _unit_archive(
         archive,
         BACKUP_KEY,
         source_installation_id=source_id,
-        schema_revision="0015_project_reliability_finalize",
         pg_dump_version="pg_dump (PostgreSQL) 14.19",
         table_count=41,
     ) as writer:
@@ -401,8 +406,13 @@ async def test_restore_rejects_current_existing_nonempty_and_non_restore_targets
     migrated_postgres_database_url: str,
     tmp_path: Path,
 ) -> None:
-    archive = _unit_archive(tmp_path)
-    journal = TombstoneJournal(tmp_path / "journal" / "tombstones.jsonl", JOURNAL_KEY, source_installation_id=UNIT_SOURCE_ID)
+    live_source_id = await _source_id(migrated_postgres_database_url)
+    archive = _unit_archive(tmp_path, source_id=live_source_id)
+    journal = TombstoneJournal(
+        tmp_path / "journal" / "tombstones.jsonl",
+        JOURNAL_KEY,
+        source_installation_id=live_source_id,
+    )
     journal.snapshot()
     base = dict(
         archive=archive,
@@ -573,6 +583,51 @@ async def test_probe_failure_is_fail_closed_and_does_not_leave_target_or_proof(
             await _drop_restore_database(migrated_postgres_database_url, target_url)
 
 
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_restore_rejects_runtime_schema_mismatch_before_proof(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, _file_id, archive, _manifest, journal = await _archive_then_purge(
+        migrated_postgres_database_url,
+        tmp_path,
+        monkeypatch,
+    )
+    target_url = _restore_url(migrated_postgres_database_url)
+    target_name = restore_module.database_name(target_url)
+    real_probe = restore_module._run_recovery_probes
+
+    async def drift_then_probe(*args: object, **kwargs: object) -> None:
+        engine = create_async_engine(target_url)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("CREATE TABLE runtime_schema_mismatch (id integer)"))
+        finally:
+            await engine.dispose()
+        await real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(restore_module, "_run_recovery_probes", drift_then_probe)
+    try:
+        with pytest.raises(RecoveryProbeFailed):
+            await Restorer(
+                RestoreConfig(
+                    archive=archive,
+                    target_database_url=target_url,
+                    current_database_url=migrated_postgres_database_url,
+                    journal=journal,
+                    backup_key=BACKUP_KEY,
+                    keyring=_keyring(),
+                )
+            ).restore()
+        assert not await _database_exists(migrated_postgres_database_url, target_name)
+    finally:
+        await seed.engine.dispose()
+        if await _database_exists(migrated_postgres_database_url, target_name):
+            await _drop_restore_database(migrated_postgres_database_url, target_url)
+
+
 @pytest.mark.parametrize(
     ("column", "tampered_value"),
     [
@@ -686,7 +741,9 @@ async def test_drill_rejects_forged_success_without_dropping_target(
         return restore_module.RestoreResult(
             proof_id=uuid.uuid4(),
             archive_id=str(uuid.uuid4()),
-            schema_revision="0015_project_reliability_finalize",
+            archive_schema_version=ARCHIVE_SCHEMA_VERSION,
+            schema_revision="0001_project_saas_baseline",
+            schema_digest=M7_CANONICAL_SCHEMA_DIGEST,
             table_count=41,
             tombstones_replayed=0,
             replayed_through_sequence=0,
@@ -717,6 +774,48 @@ async def test_drill_rejects_forged_success_without_dropping_target(
     assert dropped == []
 
 
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_successful_random_drill_drops_only_its_verified_target(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, _file_id, archive, _manifest, journal = await _archive_then_purge(
+        migrated_postgres_database_url,
+        tmp_path,
+        monkeypatch,
+    )
+    attempted: list[str] = []
+    real_restore = Restorer.restore
+
+    async def recording_restore(self: Restorer) -> restore_module.RestoreResult:
+        attempted.append(self.config.target_database_url)
+        return await real_restore(self)
+
+    monkeypatch.setattr(Restorer, "restore", recording_restore)
+    try:
+        result = await drill_restore(
+            current_database_url=migrated_postgres_database_url,
+            archive=archive,
+            journal=journal,
+            backup_key=BACKUP_KEY,
+            keyring=_keyring(),
+        )
+        assert result.status == "verified"
+        assert result.probes_complete is True
+        assert len(attempted) == 1
+        target_name = restore_module.database_name(attempted[0])
+        assert _RESTORE_NAME.fullmatch(target_name)
+        assert not await _database_exists(migrated_postgres_database_url, target_name)
+    finally:
+        await seed.engine.dispose()
+        for target_url in attempted:
+            target_name = restore_module.database_name(target_url)
+            if await _database_exists(migrated_postgres_database_url, target_name):
+                await _drop_restore_database(migrated_postgres_database_url, target_url)
+
+
 def test_restore_result_and_cli_contract_are_public_safe() -> None:
     from scripts.restore_postgres import public_restore_result
 
@@ -724,7 +823,9 @@ def test_restore_result_and_cli_contract_are_public_safe() -> None:
         restore_module.RestoreResult(
             proof_id=uuid.uuid4(),
             archive_id=str(uuid.uuid4()),
-            schema_revision="0015_project_reliability_finalize",
+            archive_schema_version=ARCHIVE_SCHEMA_VERSION,
+            schema_revision="0001_project_saas_baseline",
+            schema_digest=M7_CANONICAL_SCHEMA_DIGEST,
             table_count=41,
             tombstones_replayed=2,
             replayed_through_sequence=9,
@@ -734,7 +835,16 @@ def test_restore_result_and_cli_contract_are_public_safe() -> None:
         )
     )
     encoded = json.dumps(payload, sort_keys=True)
-    assert set(payload) == {"archive_id", "schema_revision", "table_count", "status", "checksum", "proof"}
+    assert set(payload) == {
+        "archive_id",
+        "archive_schema_version",
+        "schema_revision",
+        "schema_digest",
+        "table_count",
+        "status",
+        "checksum",
+        "proof",
+    }
     assert payload["checksum"] == "a" * 16
     assert "postgresql://" not in encoded
     assert "journal" not in encoded
@@ -885,6 +995,7 @@ async def test_sensitive_workspace_cleanup_failure_drops_target_and_never_writes
         raise RestoreCommandFailed
 
     monkeypatch.setattr(restore_module, "_database_exists", database_missing)
+    monkeypatch.setattr(restore_module, "_require_exact_m7_database", no_op)
     monkeypatch.setattr(restore_module, "_source_recovery_authority", source_authority)
     monkeypatch.setattr(restore_module, "_record_source_restore_started", no_op)
     monkeypatch.setattr(restore_module, "_create_empty_database", no_op)

@@ -1,4 +1,4 @@
-# M6 backup and recovery
+# M7 backup and recovery
 
 This runbook covers encrypted backups of the M7 final baseline, the external deletion
 journal, restore into a new database, and the separate restore drill required
@@ -23,20 +23,30 @@ and permissioned `0700` for directories and `0600` for files. The database
 role must be able to read `pg_control_system()` and the source schema. Restore
 also requires administrator authority to create and drop the exact new target.
 
-## Create and retain a final-M6 backup
+## Create and retain an M7 backup
 
 ```bash
 make check-db
 make backup-db ARGS="--output /secure/deerflow/backups"
 ```
 
-The command exports one read-only repeatable-read snapshot and passes that
-snapshot to fixed `pg_dump --format=custom --no-owner --no-acl` arguments. It
-publishes only after complete archive authentication and the trusted
+The command first requires the exact M7 baseline revision, canonical schema
+digest, and allowed root-object inventory. It then exports one read-only
+repeatable-read snapshot, verifies the canonical catalog again inside that
+snapshot, and passes the snapshot to fixed
+`pg_dump --format=custom --no-owner --no-acl` arguments. It publishes only
+after complete archive authentication and the trusted
 `backup.created` audit transaction commit. Record the public `archive_id`,
-schema revision, chunk count, and truncated checksum in the operator ledger;
-never copy keys, database URLs, private identifiers, or archive plaintext into
-that ledger.
+archive schema version, schema revision, canonical schema digest, chunk count,
+and truncated checksum in the operator ledger; never copy keys, database URLs,
+private identifiers, or archive plaintext into that ledger.
+
+New archives use archive schema version `7` and revision
+`0001_project_saas_baseline`. Chunk AAD binds the archive ID, archive schema
+version, schema revision, canonical schema digest, source installation ID, and
+chunk index. A fully authenticated pre-M7 archive fails closed with
+`UNSUPPORTED_ARCHIVE_SCHEMA`; changing and re-signing only manifest schema
+fields cannot bypass chunk authentication.
 
 A command failure is not a usable backup. Preserve an already audited archive
 after a later process-cleanup error, but do not adopt a staging path or partial
@@ -66,10 +76,12 @@ source, and must be named exactly
 make restore-db ARGS="--archive /secure/deerflow/backups/<archive_id>.dfba --target-url postgresql://operator@db/deerflow_restore_1234_0123456789abcdef0123456789abcdef --journal /secure/deerflow/recovery/tombstones.jsonl --execute"
 ```
 
-The command authenticates the complete archive, freezes source/journal
-authority, creates the target, runs `pg_restore --exit-on-error --no-owner
+The command authenticates the complete archive and rejects pre-M7 schema
+versions before target-name resolution, existence checks, creation, or DDL. It
+then requires the source itself to remain the exact M7 baseline, freezes
+source/journal authority, creates the target, runs `pg_restore --exit-on-error --no-owner
 --no-acl`, replays the exact journal suffix, executes schema/isolation and
-M1–M6 probes, removes sensitive workspace files by captured identity, and only
+M7 exact-schema probes, removes sensitive workspace files by captured identity, and only
 then writes a restore proof bound to archive, source, journal ID, final
 sequence, and final head digest. It never changes `DATABASE_URL`, starts an
 application process, overwrites a database, or switches traffic.
@@ -90,7 +102,7 @@ make drill-restore ARGS="--archive /secure/deerflow/backups/<archive_id>.dfba --
 ```
 
 The drill uses the same authentication, journal replay, sensitive cleanup, and
-M1–M6 probes as restore. It generates one random new database and drops only
+M7 exact-schema probes as restore. It generates one random new database and drops only
 that invocation-owned target after the same `Restorer` hands off a verified
 ownership token. A pre-existing or racing database and a forged/stale result
 never authorize `DROP`. Retain the public drill proof metadata and timestamp;
@@ -101,6 +113,7 @@ do not retain target credentials or private restored content.
 | Failure | Required action |
 | --- | --- |
 | `BACKUP_FAILED` | No backup exists unless a prior audited archive is independently present. Correct source authority, key separation, path permissions, or `pg_dump` prerequisites and retry with a new archive ID. |
+| `UNSUPPORTED_ARCHIVE_SCHEMA` | The authenticated artifact is not an M7 version-7 archive with the canonical revision and digest. Do not create a target or attempt compatibility restore; create and drill a new M7 backup. |
 | `RESTORE_EXECUTE_REQUIRED` | Review the target and add `--execute`; do not work around the explicit execution boundary. |
 | `RESTORE_FAILED` before target creation | Leave source and journal unchanged; correct authentication, source anchor, target naming, or administrator authority. |
 | `RESTORE_FAILED` after target creation | The command must remove only its invocation-owned target and workspace. Verify absence; if cleanup cannot be proven, quarantine that target and investigate before retrying. |

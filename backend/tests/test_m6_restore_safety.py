@@ -13,6 +13,8 @@ import app.recovery.authority as authority_module
 import app.recovery.cleanup as cleanup_module
 import app.recovery.restore as restore_module
 import app.recovery.restore_process as restore_process_module
+from app.recovery import ARCHIVE_SCHEMA_VERSION
+from app.recovery.archive import M7_CANONICAL_SCHEMA_DIGEST
 from app.recovery.cleanup import (
     OwnedFile,
     OwnedWorkspace,
@@ -37,6 +39,14 @@ TARGET_URL = "postgresql://operator@localhost/deerflow_restore_1_0123456789abcde
 SOURCE_URL = "postgresql://operator@localhost/deerflow_source"
 
 
+@pytest.fixture(autouse=True)
+def exact_m7_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def exact(_database_url: str) -> None:
+        return None
+
+    monkeypatch.setattr(restore_module, "_require_exact_m7_database", exact)
+
+
 def _keyring() -> AuditHmacKeyring:
     return AuditHmacKeyring(
         active_key_id="audit-v1",
@@ -47,7 +57,9 @@ def _keyring() -> AuditHmacKeyring:
 def _authenticated(dump: OwnedFile) -> restore_module._AuthenticatedArchive:
     return restore_module._AuthenticatedArchive(
         archive_id="00000000-0000-0000-0000-000000000001",
-        schema_revision="0015_project_reliability_finalize",
+        archive_schema_version=ARCHIVE_SCHEMA_VERSION,
+        schema_revision="0001_project_saas_baseline",
+        schema_digest=M7_CANONICAL_SCHEMA_DIGEST,
         source_installation_id=SOURCE_ID,
         tombstone_journal_sequence=0,
         table_count=1,
@@ -542,7 +554,9 @@ async def test_restore_body_failure_keeps_authority_until_target_and_workspace_c
 
     authenticated = restore_module._AuthenticatedArchive(
         archive_id="00000000-0000-0000-0000-000000000001",
-        schema_revision="0015_project_reliability_finalize",
+        archive_schema_version=ARCHIVE_SCHEMA_VERSION,
+        schema_revision="0001_project_saas_baseline",
+        schema_digest=M7_CANONICAL_SCHEMA_DIGEST,
         source_installation_id=SOURCE_ID,
         tombstone_journal_sequence=0,
         table_count=1,
@@ -761,7 +775,9 @@ async def test_drill_cancellation_waits_for_owned_target_drop(
         result = restore_module.RestoreResult(
             proof_id=uuid.uuid4(),
             archive_id=str(uuid.uuid4()),
-            schema_revision="0015_project_reliability_finalize",
+            archive_schema_version=ARCHIVE_SCHEMA_VERSION,
+            schema_revision="0001_project_saas_baseline",
+            schema_digest=M7_CANONICAL_SCHEMA_DIGEST,
             table_count=1,
             tombstones_replayed=0,
             replayed_through_sequence=0,

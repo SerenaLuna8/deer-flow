@@ -17,7 +17,9 @@ import pytest
 
 import app.recovery.archive as archive_module
 from app.recovery.archive import (
+    ARCHIVE_SCHEMA_VERSION,
     CHUNK_SIZE,
+    M7_CANONICAL_SCHEMA_DIGEST,
     BackupArchiveReader,
     BackupArchiveWriter,
     BackupAuthenticationFailed,
@@ -48,7 +50,8 @@ def backup_runtime_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_snapshot(_database_url: str):
         yield BackupSnapshot(
             snapshot_id="00000003-0000001B-1",
-            schema_revision="0015_project_reliability_finalize",
+            schema_revision="0001_project_saas_baseline",
+            schema_digest=M7_CANONICAL_SCHEMA_DIGEST,
             source_installation_id=_SOURCE_ID,
             database_high_watermark=12,
             tombstone_journal_sequence=4,
@@ -61,9 +64,26 @@ def backup_runtime_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_audit(_database_url: str, _manifest: object) -> None:
         return None
 
+    async def exact_m7_source(_database_url: str) -> None:
+        return None
+
     monkeypatch.setattr(archive_module, "_exported_snapshot", fake_snapshot)
+
+    async def exact_m7_catalog(_connection: object) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        archive_module,
+        "verify_m7_catalog_asyncpg",
+        exact_m7_catalog,
+    )
     monkeypatch.setattr(archive_module, "_read_pg_dump_version", fake_version)
     monkeypatch.setattr(archive_module, "_record_backup_audit", fake_audit)
+    monkeypatch.setattr(
+        archive_module,
+        "_require_exact_m7_source",
+        exact_m7_source,
+    )
 
 
 def make_archive(tmp_path: Path, backup_key: bytes, payload: bytes):
@@ -420,7 +440,7 @@ async def test_dump_uses_exported_snapshot_for_revision_identity_and_contiguous_
 
         async def fetchrow(self, _query: str) -> dict[str, object]:
             return {
-                "schema_revision": "0015_project_reliability_finalize",
+                "schema_revision": "0001_project_saas_baseline",
                 "system_identifier": "7312345678901234567",
                 "database_oid": 16384,
                 "database_high_watermark": 17,
@@ -469,147 +489,14 @@ async def test_dump_uses_exported_snapshot_for_revision_identity_and_contiguous_
     )
 
     expected_identity = hashlib.sha256(b"deerflow-postgres-source-v1\x007312345678901234567\x0016384").hexdigest()
-    assert manifest.schema_revision == "0015_project_reliability_finalize"
+    assert manifest.archive_schema_version == ARCHIVE_SCHEMA_VERSION
+    assert manifest.schema_revision == "0001_project_saas_baseline"
+    assert manifest.schema_digest == M7_CANONICAL_SCHEMA_DIGEST
     assert manifest.source_installation_id == expected_identity
     assert manifest.tombstone_journal_sequence == 3
     assert manifest.pg_dump_version == "pg_dump (PostgreSQL) 16.4"
     assert not state["transaction_open"]
     assert state["closed"]
-
-
-@pytest.mark.asyncio
-async def test_explicit_pre_m6_backup_accepts_0013_without_m6_audit_tables(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
-    @asynccontextmanager
-    async def m5_snapshot(_database_url: str):
-        yield BackupSnapshot(
-            snapshot_id="00000003-0000001B-1",
-            schema_revision="0013_project_automation_finalize",
-            source_installation_id=_SOURCE_ID,
-            database_high_watermark=9,
-            tombstone_journal_sequence=0,
-            table_count=33,
-            pre_m6_recovery_domain_absent=True,
-        )
-
-    async def fail_if_audited(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("0013 has no M6 audit tables")
-
-    async def fake_subprocess(*_argv: str, **_kwargs: object) -> _FakeProcess:
-        return _FakeProcess(0, [b"PGDMPpayload"])
-
-    monkeypatch.setattr(archive_module, "_exported_snapshot", m5_snapshot)
-    monkeypatch.setattr(archive_module, "_record_backup_audit", fail_if_audited)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
-
-    manifest = await create_backup(
-        BackupConfig(
-            database_url="postgresql://user:password@db/test",
-            output=tmp_path / "pre-m6.dfba",
-            key=backup_key,
-            pre_m6_cutover=True,
-            commit_proof=tmp_path / "pre-m6.dfba.commit.json",
-        )
-    )
-
-    assert manifest.schema_revision == "0013_project_automation_finalize"
-    assert manifest.tombstone_journal_sequence == 0
-    proof = json.loads((tmp_path / "pre-m6.dfba.commit.json").read_bytes())
-    assert proof["schema_revision"] == "0013_project_automation_finalize"
-    assert proof["tombstone_journal_sequence"] == 0
-    assert proof["archive_manifest_sha256"] == hashlib.sha256((tmp_path / "pre-m6.dfba" / "manifest.json").read_bytes()).hexdigest()
-
-
-@pytest.mark.asyncio
-async def test_pre_m6_commit_proof_failure_removes_published_archive(tmp_path: Path, backup_key: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
-    @asynccontextmanager
-    async def m5_snapshot(_database_url: str):
-        yield BackupSnapshot(
-            snapshot_id="00000003-0000001B-1",
-            schema_revision="0013_project_automation_finalize",
-            source_installation_id=_SOURCE_ID,
-            database_high_watermark=9,
-            tombstone_journal_sequence=0,
-            table_count=33,
-            pre_m6_recovery_domain_absent=True,
-        )
-
-    async def fake_subprocess(*_argv: str, **_kwargs: object) -> _FakeProcess:
-        return _FakeProcess(0, [b"PGDMPpayload"])
-
-    async def fail_commit(*_args: object, **_kwargs: object) -> None:
-        raise OSError("proof unavailable")
-
-    monkeypatch.setattr(archive_module, "_exported_snapshot", m5_snapshot)
-    monkeypatch.setattr(archive_module, "commit_pre_cutover_backup", fail_commit)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
-
-    archive = tmp_path / "pre-m6.dfba"
-    with pytest.raises(BackupCommandFailed):
-        await create_backup(
-            BackupConfig(
-                database_url="postgresql://user:password@db/test",
-                output=archive,
-                key=backup_key,
-                pre_m6_cutover=True,
-                commit_proof=tmp_path / "pre-m6.dfba.commit.json",
-            )
-        )
-    assert not archive.exists()
-    assert not (tmp_path / "pre-m6.dfba.commit.json").exists()
-
-
-@pytest.mark.asyncio
-async def test_pre_m6_snapshot_reads_legacy_event_watermark_without_m6_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-    queries: list[str] = []
-
-    class Transaction:
-        async def start(self) -> None:
-            return None
-
-        async def rollback(self) -> None:
-            return None
-
-    class Connection:
-        def transaction(self, **_kwargs: object) -> Transaction:
-            return Transaction()
-
-        async def fetchval(self, query: str) -> str:
-            assert "pg_export_snapshot" in query
-            return "00000003-0000001B-1"
-
-        async def fetchrow(self, query: str) -> dict[str, object]:
-            queries.append(query)
-            if len(queries) == 1:
-                return {
-                    "schema_revision": "0013_project_automation_finalize",
-                    "system_identifier": "7312345678901234567",
-                    "database_oid": 16384,
-                    "table_count": 33,
-                    "audit_logs_present": False,
-                    "deletion_tombstones_present": False,
-                    "thread_event_sequences_present": False,
-                    "recovery_journal_state_present": False,
-                }
-            assert "run_events" in query
-            assert "thread_event_sequences" not in query
-            assert "deletion_tombstones" not in query
-            return {"database_high_watermark": 9}
-
-        async def close(self) -> None:
-            return None
-
-    async def connect(*_args: object, **_kwargs: object) -> Connection:
-        return Connection()
-
-    monkeypatch.setitem(sys.modules, "asyncpg", types.SimpleNamespace(connect=connect))
-
-    async with _ORIGINAL_EXPORTED_SNAPSHOT("postgresql://db/test") as snapshot:
-        assert snapshot.schema_revision == "0013_project_automation_finalize"
-        assert snapshot.database_high_watermark == 9
-        assert snapshot.tombstone_journal_sequence == 0
-        assert snapshot.pre_m6_recovery_domain_absent is True
-
-    assert len(queries) == 2
 
 
 @pytest.mark.asyncio
@@ -632,7 +519,7 @@ async def test_tombstone_snapshot_gap_fails_before_pg_dump(tmp_path: Path, backu
 
         async def fetchrow(self, _query: str) -> dict[str, object]:
             return {
-                "schema_revision": "0015_project_reliability_finalize",
+                "schema_revision": "0001_project_saas_baseline",
                 "system_identifier": "7312345678901234567",
                 "database_oid": 16384,
                 "database_high_watermark": 17,
@@ -701,7 +588,7 @@ async def test_snapshot_acquisition_cancellation_rolls_back_and_closes(cancel_st
                 entered.set()
                 await asyncio.Event().wait()
             return {
-                "schema_revision": "0015_project_reliability_finalize",
+                "schema_revision": "0001_project_saas_baseline",
                 "system_identifier": "7312345678901234567",
                 "database_oid": 16384,
                 "database_high_watermark": 17,
@@ -762,7 +649,7 @@ async def test_snapshot_cleanup_is_shielded_through_repeated_cancellation(monkey
 
         async def fetchrow(self, _query: str) -> dict[str, object]:
             return {
-                "schema_revision": "0015_project_reliability_finalize",
+                "schema_revision": "0001_project_saas_baseline",
                 "system_identifier": "7312345678901234567",
                 "database_oid": 16384,
                 "database_high_watermark": 17,
@@ -1599,7 +1486,19 @@ async def test_backup_cli_output_is_redacted_and_uses_only_environment_secrets(t
 
     async def fake_create_backup(config: BackupConfig):
         assert config.database_url == "postgresql://user:password@db/test"
-        return type("Manifest", (), {"archive_id": "archive-a", "schema_revision": "0015_project_reliability_finalize", "chunk_count": 2, "chunks": (), "as_dict": lambda self: {}})()
+        return type(
+            "Manifest",
+            (),
+            {
+                "archive_id": "archive-a",
+                "archive_schema_version": ARCHIVE_SCHEMA_VERSION,
+                "schema_revision": "0001_project_saas_baseline",
+                "schema_digest": M7_CANONICAL_SCHEMA_DIGEST,
+                "chunk_count": 2,
+                "chunks": (),
+                "as_dict": lambda self: {},
+            },
+        )()
 
     monkeypatch.setattr(module, "create_backup", fake_create_backup)
     assert await module.async_main(["--output", str(tmp_path)]) == 0

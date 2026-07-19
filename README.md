@@ -854,14 +854,19 @@ passfile ownership for safe cleanup retry. Passfile ownership begins with the pi
 open or later write/fsync/lseek/validation failure cannot bypass that cleanup. When
 `AUTH_JWT_SECRET` is absent, key separation reads the existing
 `DEER_FLOW_HOME/.jwt_secret` without creating or rotating it; missing, unsafe, or unreadable Auth
-material fails closed. The archive records the actual Alembic revision, `pg_dump` version,
-non-empty byte/table counts, and a proven contiguous tombstone cursor. It uses per-archive keys
+material fails closed. Backup first requires the exact M7 root-object inventory, baseline revision,
+and canonical catalog digest, then verifies the same catalog inside the exported snapshot. Archive
+schema version 7 records that fixed revision and digest, the `pg_dump` version, non-empty byte/table
+counts, and a proven contiguous tombstone cursor. It uses per-archive keys
 with counter nonces, no-clobber publication, and a bounded authenticated plaintext spool. The
+chunk AAD binds archive version, revision, digest, source identity, and chunk index, so re-signing
+changed manifest schema fields cannot authenticate unchanged ciphertext. A fully authenticated
+pre-M7 archive returns `UNSUPPORTED_ARCHIVE_SCHEMA` and is never compatibility-restored. The
 format permits at most 65,536 chunks of at most 1 MiB (64 GiB plaintext) and a 16 MiB manifest;
 writer and reader enforce the same limits. A failed or uncommitted audit removes the archive,
 while the successful audit commit is the durable operation commit point: later cancellation or
 engine disposal cannot delete the valid audited archive. Output remains limited to archive ID,
-schema revision, chunk count, and a truncated checksum.
+archive schema version, schema revision/digest, chunk count, and a truncated checksum.
 
 M7 does not upgrade an existing M1–M6 database in place. Provision a new empty database and run `make setup-db`; any old revision or unknown nonempty schema fails before DDL with `M7_RECREATE_REQUIRED`.
 Local launch starts Gateway and Worker separately and starts Scheduler only when
@@ -879,8 +884,9 @@ anchor stores its journal ID, committed sequence, and complete envelope-head dig
 the full database prefix with that anchor and updates both in one transaction after journal fsync.
 
 Restore only targets a nonexistent, distinct database named
-`deerflow_restore_<pid>_<32hex>`. It authenticates the full archive, restores it, replays the journal
-without sequence gaps, runs M1–M6 probes, and writes a restore proof bound to the frozen journal ID,
+`deerflow_restore_<pid>_<32hex>`. It authenticates and validates the M7 archive before any target
+resolution or creation, requires the source to remain exact M7, restores it, replays the journal
+without sequence gaps, runs the exact M7 schema verifier, and writes a restore proof bound to the frozen journal ID,
 final sequence, and head digest. Restore holds the same PostgreSQL advisory authority as purge from
 source-anchor verification through replay, probes, proof, and sensitive workspace cleanup, so a
 concurrent tombstone cannot be omitted. The authenticated dump, passfile, and owned workspace are

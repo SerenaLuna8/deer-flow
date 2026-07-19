@@ -21,6 +21,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.audit.service import AuditService, _bind_recovery_audit_process
 from app.audit.sinks import TrustedOperationAuditSink
 from app.recovery import BackupArchiveReader, BackupAuthenticationFailed
+from app.recovery.archive import (
+    ARCHIVE_SCHEMA_VERSION,
+    M7_CANONICAL_SCHEMA_DIGEST,
+    UnsupportedArchiveSchema,
+    require_supported_archive,
+)
 from app.recovery.authority import (
     RecoveryAuthorityReleaseFailed,
     SourceIdentityMismatch,
@@ -54,6 +60,11 @@ from app.recovery.restore_process import (
 )
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.persistence.bootstrap import (
+    M7_FINAL_SCHEMA_REVISION,
+    M7RecreateRequired,
+    classify_database,
+)
 from deerflow.persistence.recovery.model import (
     DeletionTombstoneRow,
     RecoveryJournalStateRow,
@@ -133,7 +144,9 @@ class RecoveryProbeFailed(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class _AuthenticatedArchive:
     archive_id: str
+    archive_schema_version: int
     schema_revision: str
+    schema_digest: str
     source_installation_id: str
     tombstone_journal_sequence: int
     table_count: int
@@ -146,7 +159,9 @@ class _AuthenticatedArchive:
 class RestoreResult:
     proof_id: uuid.UUID
     archive_id: str
+    archive_schema_version: int
     schema_revision: str
+    schema_digest: str
     table_count: int
     tombstones_replayed: int
     replayed_through_sequence: int
@@ -234,12 +249,16 @@ def _read_manifest_bytes(archive: Path) -> bytes:
         os.close(descriptor)
 
 
-def _parse_authenticated_manifest(raw: bytes) -> tuple[str, str, str, int, int, str]:
+def _parse_authenticated_manifest(
+    raw: bytes,
+) -> tuple[str, int, str, str, str, int, int, str]:
     try:
         envelope = json.loads(raw)
         body = envelope["manifest"]
         archive_id = str(uuid.UUID(str(body["archive_id"])))
+        archive_schema_version = body["archive_schema_version"]
         schema_revision = str(body["schema_revision"])
+        schema_digest = str(body["schema_digest"])
         source_id = str(body["source_installation_id"])
         sequence = body["tombstone_journal_sequence"]
         table_count = body["table_count"]
@@ -248,7 +267,9 @@ def _parse_authenticated_manifest(raw: bytes) -> tuple[str, str, str, int, int, 
     if (
         not isinstance(envelope, dict)
         or set(envelope) != {"manifest", "signature"}
+        or type(archive_schema_version) is not int
         or _SCHEMA_REVISION.fullmatch(schema_revision) is None
+        or _HEX_DIGEST.fullmatch(schema_digest) is None
         or _HEX_DIGEST.fullmatch(source_id) is None
         or type(sequence) is not int
         or sequence < 0
@@ -256,7 +277,16 @@ def _parse_authenticated_manifest(raw: bytes) -> tuple[str, str, str, int, int, 
         or table_count < 1
     ):
         raise RestoreAuthenticationFailed
-    return archive_id, schema_revision, source_id, sequence, table_count, hashlib.sha256(raw).hexdigest()
+    return (
+        archive_id,
+        archive_schema_version,
+        schema_revision,
+        schema_digest,
+        source_id,
+        sequence,
+        table_count,
+        hashlib.sha256(raw).hexdigest(),
+    )
 
 
 def _authenticate_archive(
@@ -289,10 +319,21 @@ def _authenticate_archive(
         after = _read_manifest_bytes(archive)
         if before != after:
             raise RestoreAuthenticationFailed
-        archive_id, revision, source_id, sequence, table_count, digest = _parse_authenticated_manifest(after)
-        return _AuthenticatedArchive(
+        (
             archive_id,
+            archive_schema_version,
             revision,
+            schema_digest,
+            source_id,
+            sequence,
+            table_count,
+            digest,
+        ) = _parse_authenticated_manifest(after)
+        authenticated = _AuthenticatedArchive(
+            archive_id,
+            archive_schema_version,
+            revision,
+            schema_digest,
             source_id,
             sequence,
             table_count,
@@ -300,6 +341,8 @@ def _authenticate_archive(
             dump.path,
             dump.identity,
         )
+        require_supported_archive(authenticated)
+        return authenticated
     except BackupAuthenticationFailed:
         raise RestoreAuthenticationFailed from None
     except OSError:
@@ -488,11 +531,30 @@ async def replay_tombstones(
         await engine.dispose()
 
 
+async def _require_exact_m7_database(database_url: str) -> None:
+    engine = create_async_engine(DatabaseConfig(url=database_url).sqlalchemy_url)
+    try:
+        async with engine.connect() as connection:
+            if await classify_database(connection) != "m7":
+                raise RecoveryProbeFailed
+    except RecoveryProbeFailed:
+        raise
+    except M7RecreateRequired:
+        raise RecoveryProbeFailed from None
+    except Exception:
+        raise RecoveryProbeFailed from None
+    finally:
+        await engine.dispose()
+
+
 async def _run_recovery_probes(
     target_database_url: str,
     archive: _AuthenticatedArchive,
     journal_snapshot: TombstoneSnapshot,
 ) -> None:
+    if archive.archive_schema_version != ARCHIVE_SCHEMA_VERSION or archive.schema_revision != M7_FINAL_SCHEMA_REVISION or archive.schema_digest != M7_CANONICAL_SCHEMA_DIGEST:
+        raise RecoveryProbeFailed
+    await _require_exact_m7_database(target_database_url)
     replayed_through = journal_snapshot.high_watermark
     expected_head = journal_snapshot.entries[-1].record_digest if journal_snapshot.entries else "0" * 64
     engine = create_async_engine(DatabaseConfig(url=target_database_url).sqlalchemy_url)
@@ -667,9 +729,6 @@ class Restorer:
 
     async def restore(self) -> RestoreResult:
         self._verified_result = None
-        target_database = _validate_target(self.config)
-        if await _database_exists(self.config.target_database_url, target_database):
-            raise RestoreTargetRejected
         workspace, workspace_creation_cancelled = await _settle_blocking_result(
             _create_owned_workspace,
             prefix="deerflow-restore-work-",
@@ -735,6 +794,7 @@ class Restorer:
             )
             if authentication_cancelled:
                 raise asyncio.CancelledError
+            require_supported_archive(authenticated)
             async with _source_recovery_authority(
                 self.config.current_database_url,
                 journal=self.config.journal,
@@ -742,6 +802,15 @@ class Restorer:
                 archive_tombstone_sequence=authenticated.tombstone_journal_sequence,
             ) as journal_snapshot:
                 try:
+                    await _require_exact_m7_database(
+                        self.config.current_database_url,
+                    )
+                    target_database = _validate_target(self.config)
+                    if await _database_exists(
+                        self.config.target_database_url,
+                        target_database,
+                    ):
+                        raise RestoreTargetRejected
                     await _record_source_restore_started(
                         self.config.current_database_url,
                         restore_id=restore_id,
@@ -795,7 +864,9 @@ class Restorer:
             result = RestoreResult(
                 proof_id=restore_id,
                 archive_id=authenticated.archive_id,
+                archive_schema_version=authenticated.archive_schema_version,
                 schema_revision=authenticated.schema_revision,
+                schema_digest=authenticated.schema_digest,
                 table_count=authenticated.table_count,
                 tombstones_replayed=replayed,
                 replayed_through_sequence=replayed_through,
@@ -807,7 +878,13 @@ class Restorer:
             self._verified_result = result
             created = False
             return result
-        except (RestoreTargetRejected, RestoreAuthenticationFailed, TombstoneJournalUnavailable, RecoveryProbeFailed):
+        except (
+            RestoreTargetRejected,
+            RestoreAuthenticationFailed,
+            UnsupportedArchiveSchema,
+            TombstoneJournalUnavailable,
+            RecoveryProbeFailed,
+        ):
             raise
         except SourceIdentityMismatch:
             raise RestoreAuthenticationFailed from None

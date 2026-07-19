@@ -24,11 +24,6 @@ from app.recovery.archive import BackupCommandFailed, BackupConfig, BackupKeyInv
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create an authenticated encrypted PostgreSQL backup archive")
     parser.add_argument("--output", required=True, type=Path, help="External operator archive directory")
-    parser.add_argument(
-        "--pre-m6-cutover",
-        action="store_true",
-        help="Create an externally committed revision-0013 archive before the M6 database audit schema exists",
-    )
     return parser
 
 
@@ -61,8 +56,6 @@ async def async_main(argv: list[str] | None = None) -> int:
                 output=archive,
                 key=key,
                 archive_id=archive_id,
-                pre_m6_cutover=args.pre_m6_cutover,
-                commit_proof=(root / f"{archive.name}.commit.json" if args.pre_m6_cutover else None),
             )
         )
     except (BackupCommandFailed, BackupKeyInvalid, BackupKeyMissing, ValueError, OSError):
@@ -71,12 +64,12 @@ async def async_main(argv: list[str] | None = None) -> int:
     digest = hashlib.sha256(json.dumps(manifest.as_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
     payload: dict[str, object] = {
         "archive_id": manifest.archive_id,
+        "archive_schema_version": manifest.archive_schema_version,
         "schema_revision": manifest.schema_revision,
+        "schema_digest": manifest.schema_digest,
         "chunk_count": manifest.chunk_count,
         "checksum": digest,
     }
-    if args.pre_m6_cutover:
-        payload["commit_proof"] = f"{manifest.archive_id}.dfba.commit.json"
     print(json.dumps(payload, sort_keys=True))
     return 0
 

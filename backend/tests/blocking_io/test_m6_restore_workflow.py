@@ -11,6 +11,15 @@ from pathlib import Path
 
 import pytest
 
+import app.recovery.restore as restore_module
+from app.recovery.cleanup import (
+    _cleanup_owned_workspace,
+    _create_owned_workspace,
+)
+from app.recovery.journal import TombstoneJournal
+from app.recovery.restore import RestoreConfig, Restorer
+from app.reliability.owner_refs import AuditHmacKeyring
+
 pytestmark = pytest.mark.asyncio
 SOURCE_ID = hashlib.sha256(b"restore-blocking-source").hexdigest()
 
@@ -24,7 +33,6 @@ def _build_archive(root: Path, key: bytes) -> Path:
         archive,
         key,
         source_installation_id=SOURCE_ID,
-        schema_revision="0015_project_reliability_finalize",
         table_count=41,
     ) as writer:
         writer.write_chunk(b"PGDMP restore blocking test")
@@ -36,11 +44,6 @@ async def test_restore_archive_and_journal_file_io_does_not_block_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import app.recovery.restore as restore_module
-    from app.recovery.journal import TombstoneJournal
-    from app.recovery.restore import RestoreConfig, Restorer
-    from app.reliability.owner_refs import AuditHmacKeyring
-
     key = b"b" * 32
     archive = await asyncio.to_thread(_build_archive, tmp_path / "archive-root", key)
     journal = TombstoneJournal(
@@ -64,6 +67,7 @@ async def test_restore_archive_and_journal_file_io_does_not_block_event_loop(
         yield await asyncio.to_thread(journal.snapshot, require_existing=True)
 
     monkeypatch.setattr(restore_module, "_database_exists", database_missing)
+    monkeypatch.setattr(restore_module, "_require_exact_m7_database", no_op)
     monkeypatch.setattr(restore_module, "_source_recovery_authority", source_authority)
     monkeypatch.setattr(restore_module, "_record_source_restore_started", no_op)
     monkeypatch.setattr(restore_module, "_create_empty_database", no_op)
@@ -130,12 +134,6 @@ async def test_cancelled_pg_restore_settles_child_and_removes_passfile_off_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import app.recovery.restore as restore_module
-    from app.recovery.cleanup import (
-        _cleanup_owned_workspace,
-        _create_owned_workspace,
-    )
-
     process = _CancellableProcess()
     workspace = await asyncio.to_thread(
         _create_owned_workspace,
@@ -176,11 +174,6 @@ async def test_repeated_cancellation_still_settles_pg_restore_termination(
         importlib.import_module,
         "app.recovery.restore_process",
     )
-    from app.recovery.cleanup import (
-        _cleanup_owned_workspace,
-        _create_owned_workspace,
-    )
-
     process = _SlowTerminationProcess()
     workspace = await asyncio.to_thread(
         _create_owned_workspace,

@@ -32,14 +32,22 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.recovery.pre_cutover_backup import (
-    PRE_M6_SCHEMA_REVISION,
-    commit_pre_cutover_backup,
+from deerflow.config.database_config import DatabaseConfig
+from deerflow.persistence.bootstrap import (
+    M7_FINAL_SCHEMA_REVISION,
+    M7RecreateRequired,
+    classify_database,
+)
+from deerflow.persistence.final_schema_contract import (
+    M7_CANONICAL_SCHEMA_DIGEST,
+    verify_m7_catalog_asyncpg,
 )
 
 CHUNK_SIZE = 1_048_576
 ARCHIVE_FORMAT_VERSION = 1
+ARCHIVE_SCHEMA_VERSION = 7
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_CHUNKS = 65_536
 MAX_ARCHIVE_PLAINTEXT_BYTES = CHUNK_SIZE * MAX_ARCHIVE_CHUNKS
@@ -102,6 +110,13 @@ class BackupCommandFailed(RuntimeError):
         super().__init__("BACKUP_COMMAND_FAILED")
 
 
+class UnsupportedArchiveSchema(RuntimeError):
+    """The authenticated archive is not the one supported M7 contract."""
+
+    def __init__(self) -> None:
+        super().__init__("UNSUPPORTED_ARCHIVE_SCHEMA")
+
+
 @dataclass(frozen=True)
 class BackupChunk:
     index: int
@@ -124,8 +139,10 @@ class BackupChunk:
 class BackupManifest:
     archive_id: str
     archive_format_version: int
+    archive_schema_version: int
     archive_salt: str
     schema_revision: str
+    schema_digest: str
     source_installation_id: str
     chunk_bytes: int
     chunks: tuple[BackupChunk, ...]
@@ -145,8 +162,10 @@ class BackupManifest:
         return {
             "archive_id": self.archive_id,
             "archive_format_version": self.archive_format_version,
+            "archive_schema_version": self.archive_schema_version,
             "archive_salt": self.archive_salt,
             "schema_revision": self.schema_revision,
+            "schema_digest": self.schema_digest,
             "source_installation_id": self.source_installation_id,
             "chunk_bytes": self.chunk_bytes,
             "chunks": [chunk.as_dict() for chunk in self.chunks],
@@ -167,8 +186,6 @@ class BackupConfig:
     key: bytes
     chunk_bytes: int = CHUNK_SIZE
     archive_id: str | None = None
-    pre_m6_cutover: bool = False
-    commit_proof: Path | None = None
 
     def __post_init__(self) -> None:
         _validate_key(self.key)
@@ -178,28 +195,17 @@ class BackupConfig:
             raise ValueError("chunk_bytes must fit the pg_dump header and archive bound")
         if self.archive_id is not None:
             _canonical_uuid(self.archive_id)
-        if type(self.pre_m6_cutover) is not bool:
-            raise ValueError("pre_m6_cutover must be a boolean")
-        if self.pre_m6_cutover:
-            if self.commit_proof is None:
-                raise ValueError("pre-M6 backup commit proof is required")
-            output = self.output.expanduser().absolute()
-            proof = self.commit_proof.expanduser().absolute()
-            if proof.parent != output.parent or proof.name != f"{output.name}.commit.json":
-                raise ValueError("pre-M6 backup commit proof must be the archive sibling")
-        elif self.commit_proof is not None:
-            raise ValueError("backup commit proof is only valid for pre-M6 cutover")
 
 
 @dataclass(frozen=True)
 class BackupSnapshot:
     snapshot_id: str
     schema_revision: str
+    schema_digest: str
     source_installation_id: str
     database_high_watermark: int
     tombstone_journal_sequence: int
     table_count: int
-    pre_m6_recovery_domain_absent: bool = False
 
 
 @dataclass
@@ -365,15 +371,32 @@ def _canonical_json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
-def _aad(archive_id: str, schema_revision: str, source_installation_id: str, index: int) -> bytes:
+def _aad(
+    archive_id: str,
+    *,
+    archive_schema_version: int,
+    schema_revision: str,
+    schema_digest: str,
+    source_installation_id: str,
+    index: int,
+) -> bytes:
     return _canonical_json(
         {
             "archive_id": archive_id,
+            "archive_schema_version": archive_schema_version,
             "chunk_index": index,
+            "schema_digest": schema_digest,
             "schema_revision": schema_revision,
             "source_installation_id": source_installation_id,
         }
     )
+
+
+def require_supported_archive(manifest: BackupManifest | object) -> None:
+    """Accept exactly one authenticated archive schema and revision."""
+
+    if getattr(manifest, "archive_schema_version", None) != ARCHIVE_SCHEMA_VERSION or getattr(manifest, "schema_revision", None) != M7_FINAL_SCHEMA_REVISION or getattr(manifest, "schema_digest", None) != M7_CANONICAL_SCHEMA_DIGEST:
+        raise UnsupportedArchiveSchema
 
 
 def _archive_salt(value: str) -> bytes:
@@ -509,7 +532,9 @@ class BackupArchiveWriter:
         *,
         chunk_bytes: int = CHUNK_SIZE,
         source_installation_id: str,
-        schema_revision: str = "test-schema",
+        archive_schema_version: int = ARCHIVE_SCHEMA_VERSION,
+        schema_revision: str = M7_FINAL_SCHEMA_REVISION,
+        schema_digest: str = M7_CANONICAL_SCHEMA_DIGEST,
         pg_dump_version: str = "pg_dump (PostgreSQL) test",
         table_count: int = 1,
         archive_id: str | None = None,
@@ -520,8 +545,8 @@ class BackupArchiveWriter:
             raise ValueError("invalid backup chunk size")
         if _SOURCE_ID.fullmatch(source_installation_id) is None:
             raise ValueError("invalid source installation identity")
-        if _SCHEMA_REVISION.fullmatch(schema_revision) is None:
-            raise ValueError("invalid schema revision")
+        if archive_schema_version != ARCHIVE_SCHEMA_VERSION or schema_revision != M7_FINAL_SCHEMA_REVISION or schema_digest != M7_CANONICAL_SCHEMA_DIGEST:
+            raise UnsupportedArchiveSchema
         if _PG_DUMP_VERSION.fullmatch(pg_dump_version) is None:
             raise ValueError("invalid pg_dump version")
         if type(table_count) is not int or table_count < 1:
@@ -530,7 +555,9 @@ class BackupArchiveWriter:
         self._key = key
         self._chunk_bytes = chunk_bytes
         self._source_installation_id = source_installation_id
+        self._archive_schema_version = archive_schema_version
         self._schema_revision = schema_revision
+        self._schema_digest = schema_digest
         self._pg_dump_version = pg_dump_version
         self._table_count = table_count
         self._archive_id = str(uuid.uuid4()) if archive_id is None else str(_canonical_uuid(archive_id))
@@ -554,7 +581,9 @@ class BackupArchiveWriter:
         *,
         chunk_bytes: int = CHUNK_SIZE,
         source_installation_id: str,
-        schema_revision: str = "test-schema",
+        archive_schema_version: int = ARCHIVE_SCHEMA_VERSION,
+        schema_revision: str = M7_FINAL_SCHEMA_REVISION,
+        schema_digest: str = M7_CANONICAL_SCHEMA_DIGEST,
         pg_dump_version: str = "pg_dump (PostgreSQL) test",
         table_count: int = 1,
         archive_id: str | None = None,
@@ -565,7 +594,9 @@ class BackupArchiveWriter:
             key,
             chunk_bytes=chunk_bytes,
             source_installation_id=source_installation_id,
+            archive_schema_version=archive_schema_version,
             schema_revision=schema_revision,
+            schema_digest=schema_digest,
             pg_dump_version=pg_dump_version,
             table_count=table_count,
             archive_id=archive_id,
@@ -661,7 +692,14 @@ class BackupArchiveWriter:
         ciphertext = AESGCM(chunk_key).encrypt(
             nonce,
             plaintext,
-            _aad(self._archive_id, self._schema_revision, self._source_installation_id, index),
+            _aad(
+                self._archive_id,
+                archive_schema_version=self._archive_schema_version,
+                schema_revision=self._schema_revision,
+                schema_digest=self._schema_digest,
+                source_installation_id=self._source_installation_id,
+                index=index,
+            ),
         )
         descriptor = os.open(
             _chunk_name(index),
@@ -705,8 +743,10 @@ class BackupArchiveWriter:
         manifest = BackupManifest(
             archive_id=self._archive_id,
             archive_format_version=ARCHIVE_FORMAT_VERSION,
+            archive_schema_version=self._archive_schema_version,
             archive_salt=base64.b64encode(self._salt).decode("ascii"),
             schema_revision=self._schema_revision,
+            schema_digest=self._schema_digest,
             source_installation_id=self._source_installation_id,
             chunk_bytes=self._chunk_bytes,
             chunks=tuple(self._chunks),
@@ -803,7 +843,8 @@ class BackupArchiveReader:
             if spool.read(len(_PGDMP_MAGIC)) != _PGDMP_MAGIC:
                 raise BackupAuthenticationFailed
             spool.seek(0)
-        except BackupAuthenticationFailed:
+            require_supported_archive(manifest)
+        except (BackupAuthenticationFailed, UnsupportedArchiveSchema):
             if spool is not None:
                 spool.close()
             if chunks_fd is not None:
@@ -844,8 +885,10 @@ class BackupArchiveReader:
         if set(body) != {
             "archive_id",
             "archive_format_version",
+            "archive_schema_version",
             "archive_salt",
             "schema_revision",
+            "schema_digest",
             "source_installation_id",
             "chunk_bytes",
             "chunks",
@@ -861,10 +904,18 @@ class BackupArchiveReader:
         if body.get("archive_format_version") != ARCHIVE_FORMAT_VERSION:
             raise BackupAuthenticationFailed
         archive_id = str(_canonical_uuid(str(body["archive_id"])))
+        archive_schema_version = body["archive_schema_version"]
         schema_revision = str(body["schema_revision"])
+        schema_digest = str(body["schema_digest"])
         source_id = str(body["source_installation_id"])
         pg_dump_version = str(body["pg_dump_version"])
-        if _SCHEMA_REVISION.fullmatch(schema_revision) is None or _SOURCE_ID.fullmatch(source_id) is None or _PG_DUMP_VERSION.fullmatch(pg_dump_version) is None:
+        if (
+            type(archive_schema_version) is not int
+            or _SCHEMA_REVISION.fullmatch(schema_revision) is None
+            or _SOURCE_ID.fullmatch(schema_digest) is None
+            or _SOURCE_ID.fullmatch(source_id) is None
+            or _PG_DUMP_VERSION.fullmatch(pg_dump_version) is None
+        ):
             raise BackupAuthenticationFailed
         archive_salt = str(body["archive_salt"])
         _archive_salt(archive_salt)
@@ -877,8 +928,10 @@ class BackupArchiveReader:
         manifest = BackupManifest(
             archive_id=archive_id,
             archive_format_version=ARCHIVE_FORMAT_VERSION,
+            archive_schema_version=archive_schema_version,
             archive_salt=archive_salt,
             schema_revision=schema_revision,
+            schema_digest=schema_digest,
             source_installation_id=source_id,
             chunk_bytes=_positive_int(body["chunk_bytes"]),
             chunks=chunks,
@@ -952,7 +1005,14 @@ class BackupArchiveReader:
                 plaintext = AESGCM(chunk_key).decrypt(
                     chunk.index.to_bytes(_NONCE_BYTES, "big"),
                     ciphertext,
-                    _aad(manifest.archive_id, manifest.schema_revision, manifest.source_installation_id, chunk.index),
+                    _aad(
+                        manifest.archive_id,
+                        archive_schema_version=manifest.archive_schema_version,
+                        schema_revision=manifest.schema_revision,
+                        schema_digest=manifest.schema_digest,
+                        source_installation_id=manifest.source_installation_id,
+                        index=chunk.index,
+                    ),
                 )
             except InvalidTag:
                 raise BackupAuthenticationFailed from None
@@ -1136,10 +1196,6 @@ async def _exported_snapshot(database_url: str) -> AsyncIterator[BackupSnapshot]
                        (SELECT version_num FROM alembic_version LIMIT 1) AS schema_revision,
                        (SELECT system_identifier::text FROM pg_control_system()) AS system_identifier,
                        (SELECT oid::bigint FROM pg_database WHERE datname = current_database()) AS database_oid,
-                       to_regclass('audit_logs') IS NOT NULL AS audit_logs_present,
-                       to_regclass('deletion_tombstones') IS NOT NULL AS deletion_tombstones_present,
-                       to_regclass('thread_event_sequences') IS NOT NULL AS thread_event_sequences_present,
-                       to_regclass('recovery_journal_state') IS NOT NULL AS recovery_journal_state_present,
                        (SELECT COUNT(*)::bigint
                           FROM pg_class
                          WHERE relnamespace = current_schema()::regnamespace
@@ -1149,24 +1205,13 @@ async def _exported_snapshot(database_url: str) -> AsyncIterator[BackupSnapshot]
             system_identifier = str(row["system_identifier"])
             database_oid = int(row["database_oid"])
             table_count = int(row["table_count"])
-            recovery_presence = tuple(
-                bool(row.get(name, True))
-                for name in (
-                    "audit_logs_present",
-                    "deletion_tombstones_present",
-                    "thread_event_sequences_present",
-                    "recovery_journal_state_present",
-                )
-            )
+            if schema_revision != M7_FINAL_SCHEMA_REVISION:
+                raise BackupCommandFailed
+            if not await verify_m7_catalog_asyncpg(connection):
+                raise BackupCommandFailed
             if "database_high_watermark" in row:
-                # Unit-level adapters may return the complete legacy shape.
+                # Unit-level adapters may return the complete final shape.
                 metadata = row
-            elif schema_revision == PRE_M6_SCHEMA_REVISION:
-                metadata = await connection.fetchrow(
-                    """SELECT
-                           COALESCE(MAX(seq), 0)::bigint AS database_high_watermark
-                         FROM run_events"""
-                )
             else:
                 metadata = await connection.fetchrow(
                     """SELECT
@@ -1176,14 +1221,9 @@ async def _exported_snapshot(database_url: str) -> AsyncIterator[BackupSnapshot]
                            COALESCE((SELECT MAX(journal_sequence) FROM deletion_tombstones), 0)::bigint AS tombstone_max"""
                 )
             database_high_watermark = int(metadata["database_high_watermark"])
-            if schema_revision == PRE_M6_SCHEMA_REVISION:
-                tombstone_count = 0
-                tombstone_min = 0
-                tombstone_max = 0
-            else:
-                tombstone_count = int(metadata["tombstone_count"])
-                tombstone_min = int(metadata["tombstone_min"])
-                tombstone_max = int(metadata["tombstone_max"])
+            tombstone_count = int(metadata["tombstone_count"])
+            tombstone_min = int(metadata["tombstone_min"])
+            tombstone_max = int(metadata["tombstone_max"])
             if (
                 not snapshot_id
                 or _SCHEMA_REVISION.fullmatch(schema_revision) is None
@@ -1200,11 +1240,11 @@ async def _exported_snapshot(database_url: str) -> AsyncIterator[BackupSnapshot]
             snapshot = BackupSnapshot(
                 snapshot_id=str(snapshot_id),
                 schema_revision=schema_revision,
+                schema_digest=M7_CANONICAL_SCHEMA_DIGEST,
                 source_installation_id=hashlib.sha256(source_payload).hexdigest(),
                 database_high_watermark=database_high_watermark,
                 tombstone_journal_sequence=tombstone_max,
                 table_count=table_count,
-                pre_m6_recovery_domain_absent=(schema_revision == PRE_M6_SCHEMA_REVISION and not any(recovery_presence)),
             )
         except asyncio.CancelledError:
             raise
@@ -1418,16 +1458,27 @@ async def _record_backup_audit(database_url: str, manifest: BackupManifest) -> N
         await _dispose_audit_engine(engine, committed=committed)
 
 
-async def create_backup(config: BackupConfig) -> BackupManifest:
-    """Create one archive from a single exported PostgreSQL snapshot.
+async def _require_exact_m7_source(database_url: str) -> None:
+    engine = create_async_engine(DatabaseConfig(url=database_url).sqlalchemy_url)
+    try:
+        async with engine.connect() as connection:
+            if await classify_database(connection) != "m7":
+                raise BackupCommandFailed
+    except BackupCommandFailed:
+        raise
+    except M7RecreateRequired:
+        raise BackupCommandFailed from None
+    except Exception:
+        raise BackupCommandFailed from None
+    finally:
+        await engine.dispose()
 
-    Normal backups are recorded in the M6 audit ledger. The explicit
-    ``pre_m6_cutover`` mode is limited to revision 0013, whose schema cannot yet
-    contain that ledger; Task 18 binds its authenticated manifest into the
-    reliability migration evidence instead.
-    """
+
+async def create_backup(config: BackupConfig) -> BackupManifest:
+    """Create one M7 archive from a single exported PostgreSQL snapshot."""
 
     _validate_key_separation(config.key, config.database_url)
+    await _require_exact_m7_source(config.database_url)
     invocation = await _acquire_libpq_invocation(config.database_url, config.output.parent)
     process = None
     stderr_task: asyncio.Task[object] | None = None
@@ -1437,7 +1488,7 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
     try:
         pg_dump_version = await _read_pg_dump_version()
         async with _exported_snapshot(config.database_url) as snapshot:
-            if config.pre_m6_cutover and (snapshot.schema_revision != PRE_M6_SCHEMA_REVISION or not snapshot.pre_m6_recovery_domain_absent or snapshot.tombstone_journal_sequence != 0):
+            if snapshot.schema_revision != M7_FINAL_SCHEMA_REVISION or snapshot.schema_digest != M7_CANONICAL_SCHEMA_DIGEST:
                 raise BackupCommandFailed
             process = await asyncio.create_subprocess_exec(
                 *pg_dump_argv(config.database_url, snapshot_id=snapshot.snapshot_id),
@@ -1454,7 +1505,9 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
                 config.key,
                 chunk_bytes=config.chunk_bytes,
                 source_installation_id=snapshot.source_installation_id,
+                archive_schema_version=ARCHIVE_SCHEMA_VERSION,
                 schema_revision=snapshot.schema_revision,
+                schema_digest=snapshot.schema_digest,
                 pg_dump_version=pg_dump_version,
                 table_count=snapshot.table_count,
                 archive_id=config.archive_id,
@@ -1486,31 +1539,9 @@ async def create_backup(config: BackupConfig) -> BackupManifest:
         manifest = await _await_shielded(finalize_task)
         if not isinstance(manifest, BackupManifest):
             raise BackupCommandFailed
-        audit_cancelled = False
-        if config.pre_m6_cutover:
-            if config.commit_proof is None:
-                raise BackupCommandFailed
-            if writer._parent_fd is None:
-                raise BackupCommandFailed
-            manifest_body = manifest.as_dict()
-            manifest_envelope = _canonical_json(
-                {
-                    "manifest": manifest_body,
-                    "signature": _manifest_signature(config.key, manifest_body),
-                }
-            )
-            await commit_pre_cutover_backup(
-                parent_fd=writer._parent_fd,
-                name=config.commit_proof.name,
-                manifest=manifest_body,
-                manifest_envelope=manifest_envelope,
-                key=config.key,
-            )
-            audit_committed = True
-        else:
-            audit_task = asyncio.create_task(_record_backup_audit(config.database_url, manifest))
-            _, audit_cancelled = await _await_task_through_cancellation(audit_task)
-            audit_committed = True
+        audit_task = asyncio.create_task(_record_backup_audit(config.database_url, manifest))
+        _, audit_cancelled = await _await_task_through_cancellation(audit_task)
+        audit_committed = True
         close_task = asyncio.create_task(asyncio.to_thread(writer.close))
         _, close_cancelled = await _await_task_through_cancellation(close_task)
         if audit_cancelled or close_cancelled:

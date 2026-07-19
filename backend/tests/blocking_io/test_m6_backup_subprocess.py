@@ -9,6 +9,14 @@ from pathlib import Path
 
 import pytest
 
+import app.recovery.archive as archive_module
+from app.recovery.archive import (
+    M7_CANONICAL_SCHEMA_DIGEST,
+    BackupConfig,
+    BackupSnapshot,
+    create_backup,
+)
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -40,14 +48,12 @@ class _Process:
 
 
 async def test_backup_subprocess_file_and_crypto_work_does_not_block_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.recovery.archive as archive_module
-    from app.recovery.archive import BackupConfig, BackupSnapshot, create_backup
-
     @asynccontextmanager
     async def fake_snapshot(_database_url: str):
         yield BackupSnapshot(
             snapshot_id="00000003-0000001B-1",
-            schema_revision="0015_project_reliability_finalize",
+            schema_revision="0001_project_saas_baseline",
+            schema_digest=M7_CANONICAL_SCHEMA_DIGEST,
             source_installation_id=hashlib.sha256(b"blocking-test").hexdigest(),
             database_high_watermark=1,
             tombstone_journal_sequence=0,
@@ -60,6 +66,9 @@ async def test_backup_subprocess_file_and_crypto_work_does_not_block_event_loop(
     async def fake_audit(_database_url: str, _manifest: object) -> None:
         return None
 
+    async def exact_m7_source(_database_url: str) -> None:
+        return None
+
     async def fake_subprocess(*_argv: str, **_kwargs: object) -> _Process:
         return _Process()
 
@@ -68,6 +77,7 @@ async def test_backup_subprocess_file_and_crypto_work_does_not_block_event_loop(
     monkeypatch.setattr(archive_module, "_exported_snapshot", fake_snapshot)
     monkeypatch.setattr(archive_module, "_read_pg_dump_version", fake_version)
     monkeypatch.setattr(archive_module, "_record_backup_audit", fake_audit)
+    monkeypatch.setattr(archive_module, "_require_exact_m7_source", exact_m7_source)
     await create_backup(
         BackupConfig(
             database_url="postgresql://db/test",

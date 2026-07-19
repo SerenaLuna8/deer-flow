@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -85,11 +86,11 @@ FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
     "constraints": CatalogInvariant(
         count=382,
-        digest="180657219c1836015b5a972f934ea7801343551fdd2d644290659c3efabeb1b7",
+        digest="62a3649e176850ee91c43a18b4b899f5392fafbe67b71b5a24cad7c2d8eeab0c",
     ),
     "indexes": CatalogInvariant(
         count=161,
-        digest="eeaca606226eb52f002e87bea4d06e56dcd9578f51e45798a3e40bb94c7bb39f",
+        digest="927049f40b6cce93cab8d404ef1fad187cb642b494770332956e069f8bde8b08",
     ),
     "functions": CatalogInvariant(
         count=10,
@@ -100,6 +101,24 @@ FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
         digest="a9124147f208a824175614af4d8bcdcb8194f2c3f3bd3bf3b2a332130d13ce95",
     ),
 }
+
+
+def _catalog_signature_digest(signature: dict[str, CatalogInvariant]) -> str:
+    payload = {category: {"count": invariant.count, "digest": invariant.digest} for category, invariant in sorted(signature.items())}
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+M7_CANONICAL_SCHEMA_DIGEST = _catalog_signature_digest(FINAL_M7_CATALOG_SIGNATURE)
+
+
+_VARCHAR_TEXT_ARRAY = re.compile(r"ARRAY\[(?P<body>(?:'(?:''|[^'])*'::character varying(?:::text)?(?:,\s*)?)+)\](?:::text\[\])?")
 
 
 _CATALOG_QUERIES = {
@@ -179,8 +198,32 @@ _CATALOG_QUERIES = {
 
 
 def _rows_digest(rows: tuple[tuple[object, ...], ...]) -> str:
-    payload = json.dumps(rows, ensure_ascii=True, separators=(",", ":"), default=str)
+    normalized = tuple(tuple(_normalize_catalog_value(value) for value in row) for row in rows)
+    payload = json.dumps(
+        normalized,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalize_catalog_value(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+
+    # pg_dump renders text-array ANY expressions with a cast on each element,
+    # while direct baseline DDL retains one cast on the array. PostgreSQL stores
+    # the same expression tree either way; normalize that presentation-only
+    # difference so one canonical verifier covers fresh and restored M7 schemas.
+    def normalize_varchar_text_array(match: re.Match[str]) -> str:
+        body = match.group("body").replace(
+            "::character varying::text",
+            "::character varying",
+        )
+        return f"ARRAY[{body}]"
+
+    return _VARCHAR_TEXT_ARRAY.sub(normalize_varchar_text_array, value)
 
 
 async def read_m7_catalog_signature(connection: AsyncConnection) -> dict[str, CatalogInvariant]:
@@ -202,6 +245,33 @@ async def verify_m7_catalog(connection: AsyncConnection) -> bool:
     """Return whether all canonical M7 catalog invariants match exactly."""
 
     return await read_m7_catalog_signature(connection) == FINAL_M7_CATALOG_SIGNATURE
+
+
+async def read_m7_catalog_signature_asyncpg(connection: object) -> dict[str, CatalogInvariant]:
+    """Read the same contract through the exported-snapshot asyncpg session."""
+
+    signature: dict[str, CatalogInvariant] = {}
+    for category, query in _CATALOG_QUERIES.items():
+        if ":app_tables" in query:
+            sql = query.replace(":app_tables", "$1")
+            rows = await connection.fetch(sql, sorted(FINAL_APP_TABLES))
+        elif ":required_functions" in query:
+            sql = query.replace(":required_functions", "$1")
+            rows = await connection.fetch(sql, sorted(REQUIRED_FUNCTIONS))
+        else:  # pragma: no cover - every audited query is parameterized
+            rows = await connection.fetch(query)
+        normalized = tuple(tuple(row) for row in rows)
+        signature[category] = CatalogInvariant(
+            len(normalized),
+            _rows_digest(normalized),
+        )
+    return signature
+
+
+async def verify_m7_catalog_asyncpg(connection: object) -> bool:
+    """Verify the canonical schema inside an asyncpg exported snapshot."""
+
+    return await read_m7_catalog_signature_asyncpg(connection) == FINAL_M7_CATALOG_SIGNATURE
 
 
 async def inventory_user_schema_objects(connection: AsyncConnection) -> frozenset[str]:
@@ -442,6 +512,7 @@ __all__ = [
     "FINAL_APP_TABLES",
     "FINAL_APP_SEQUENCES",
     "FINAL_M7_CATALOG_SIGNATURE",
+    "M7_CANONICAL_SCHEMA_DIGEST",
     "LANGGRAPH_INDEXES",
     "LANGGRAPH_ROOT_OBJECTS",
     "LANGGRAPH_SEQUENCES",
@@ -450,5 +521,7 @@ __all__ = [
     "inventory_is_m7_allowed",
     "inventory_user_schema_objects",
     "read_m7_catalog_signature",
+    "read_m7_catalog_signature_asyncpg",
     "verify_m7_catalog",
+    "verify_m7_catalog_asyncpg",
 ]
