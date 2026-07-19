@@ -57,10 +57,20 @@ class _CoordinatedExecutor:
             barrier,
             {
                 "event": "leased",
+                "role": "worker",
                 "job_id": str(claim.job_id),
                 "pid": os.getpid(),
                 "project_id": str(claim.scope.project_id),
                 "owner_user_id": claim.scope.owner_user_id,
+            },
+        )
+        _append_barrier(
+            barrier,
+            {
+                "event": "graph_execution",
+                "role": "worker",
+                "job_id": str(claim.job_id),
+                "pid": os.getpid(),
             },
         )
         while not release.exists():
@@ -83,7 +93,25 @@ class _CoordinatedExecutor:
             "updates",
             {"worker_pid": os.getpid()},
         )
+        _append_barrier(
+            barrier,
+            {
+                "event": "stream_append",
+                "role": "worker",
+                "job_id": str(claim.job_id),
+                "pid": os.getpid(),
+            },
+        )
         await bridge.publish_end(execution.run.run_id)
+        _append_barrier(
+            barrier,
+            {
+                "event": "terminal_append",
+                "role": "worker",
+                "job_id": str(claim.job_id),
+                "pid": os.getpid(),
+            },
+        )
         return AgentExecutionResult.succeeded()
 
 
@@ -129,6 +157,15 @@ class _CoordinatedPrivateRunHandler:
         return self._handler
 
     async def __call__(self, claim, authority) -> JobSettlement:
+        _append_barrier(
+            Path(os.environ["M6_PROCESS_BARRIER"]),
+            {
+                "event": "claim",
+                "role": "worker",
+                "job_id": str(claim.job_id),
+                "pid": os.getpid(),
+            },
+        )
         settlement = await self._production_handler()(claim, authority)
 
         async def commit() -> None:
@@ -137,6 +174,7 @@ class _CoordinatedPrivateRunHandler:
                 Path(os.environ["M6_PROCESS_BARRIER"]),
                 {
                     "event": "settled",
+                    "role": "worker",
                     "job_id": str(claim.job_id),
                     "pid": os.getpid(),
                 },

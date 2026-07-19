@@ -28,9 +28,21 @@ afterEach(() => {
   rs.unstubAllGlobals();
 });
 
-test("creates explicit compatibility clients without a global registry", () => {
-  expect(createTestClient()).not.toBe(createTestClient());
+test("creates explicit project compatibility clients without a global registry", () => {
+  const options = {
+    apiUrl:
+      "http://localhost:2026/api/projects/00000000-0000-0000-0000-000000000001/private-work",
+  };
+  expect(createCompatibleClient(options)).not.toBe(
+    createCompatibleClient(options),
+  );
   expect(createTestClient(true)).not.toBe(createTestClient(true));
+});
+
+test("rejects a compatibility client without project or mock scope", () => {
+  expect(() => createTestClient()).toThrow(
+    "A project-private API URL is required",
+  );
 });
 
 test("identifies inactive run stream errors", () => {

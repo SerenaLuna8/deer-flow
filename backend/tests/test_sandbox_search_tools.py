@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool
 
@@ -436,6 +437,12 @@ def test_ls_tool_masks_skills_host_paths(tmp_path, monkeypatch) -> None:
         ],
     )
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    mount = RunScopedReadOnlyMount(
+        run_id="run-exact",
+        container_path="/mnt/skills",
+        host_path=str(skills_dir),
+    )
+    runtime.context.update({"run_id": "run-exact", "__run_read_only_mounts": (mount,)})
 
     result = ls_tool.func(
         runtime=runtime,
@@ -465,10 +472,8 @@ def test_ls_tool_returns_empty_for_empty_directory(tmp_path, monkeypatch) -> Non
     assert result == "(empty)"
 
 
-def test_ls_tool_skills_path_uses_sandbox_mapping_user_id_not_contextvar(tmp_path, monkeypatch) -> None:
-    """ls_tool must resolve /mnt/skills/custom via the sandbox PathMapping
-    (which uses the user_id from acquire time), not via _resolve_skills_path
-    (which uses get_effective_user_id() from contextvar).
+def test_ls_tool_exact_skill_mount_ignores_unrelated_contextvar(tmp_path, monkeypatch) -> None:
+    """An exact run mount, not ambient user state, authorizes Skill reads.
 
     Regression: when the contextvar user_id differs from the sandbox mapping's
     user_id (e.g., contextvar unset → "default", but sandbox uses authenticated
@@ -490,8 +495,13 @@ def test_ls_tool_skills_path_uses_sandbox_mapping_user_id_not_contextvar(tmp_pat
     default_custom = base_dir / "users" / "default" / "skills" / "custom"
     default_custom.mkdir(parents=True)  # exists but empty
 
-    # Create a sandbox with PathMappings that use user-abc's directory
-    # (simulating a sandbox acquired for user-abc)
+    # The host path resembles an old user bucket, but authority comes only
+    # from the server-issued exact run mount below.
+    mount = RunScopedReadOnlyMount(
+        run_id="run-exact",
+        container_path="/mnt/skills/custom",
+        host_path=str(user_abc_custom),
+    )
     sandbox = LocalSandbox(
         id="local:user-abc:thread-1",
         path_mappings=[
@@ -505,8 +515,10 @@ def test_ls_tool_skills_path_uses_sandbox_mapping_user_id_not_contextvar(tmp_pat
     # After the fix, the sandbox PathMapping resolves to user-abc_custom (has my-skill)
     token = set_current_user(SimpleNamespace(id="default"))  # contextvar says "default"
     try:
+        runtime = _make_runtime(tmp_path)
+        runtime.context.update({"run_id": "run-exact", "__run_read_only_mounts": (mount,)})
         result = ls_tool.func(
-            runtime=_make_runtime(tmp_path),
+            runtime=runtime,
             description="list custom skills",
             path="/mnt/skills/custom",
         )

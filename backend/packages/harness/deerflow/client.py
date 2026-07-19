@@ -58,7 +58,6 @@ from deerflow.uploads.manager import (
     ensure_uploads_dir,
     get_uploads_dir,
     list_files_in_dir,
-    upload_artifact_url,
     upload_virtual_path,
 )
 
@@ -1251,7 +1250,6 @@ class DeerFlowClient:
                     "size": dest.stat().st_size,
                     "path": str(dest),
                     "virtual_path": upload_virtual_path(dest_name),
-                    "artifact_url": upload_artifact_url(thread_id, dest_name),
                 }
                 if dest_name != src_path.name:
                     info["original_filename"] = src_path.name
@@ -1274,7 +1272,6 @@ class DeerFlowClient:
                         info["markdown_file"] = md_path.name
                         info["markdown_path"] = str(uploads_dir / md_path.name)
                         info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
-                        info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
 
                 uploaded_files.append(info)
         finally:

@@ -125,7 +125,6 @@ async def test_task_tool_builds_catalog_tools_off_provider_owner_loop(monkeypatc
     )
     provider = PostgresAssetCatalogProvider.for_test(
         generation=1,
-        cutover=True,
         mcp=(snapshot,),
     )
     set_asset_catalog_provider(provider)

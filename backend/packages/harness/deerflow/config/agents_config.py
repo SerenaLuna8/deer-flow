@@ -136,9 +136,8 @@ class AgentConfig(BaseModel):
     github: GitHubAgentConfig | None = None
 
 
-# Fields explicitly managed by the agent-update surfaces (the
-# ``update_agent`` harness tool and the HTTP ``PATCH /api/agents/{name}``
-# route). Anything else declared on :class:`AgentConfig` — currently
+# Fields explicitly managed by PostgreSQL shared-asset authoring.
+# Anything else declared on :class:`AgentConfig` — currently
 # ``github``, and any future field — is preserved verbatim by
 # :func:`preserve_non_managed_fields` so neither surface can silently
 # drop hand-authored configuration. ``name`` is included because the
@@ -150,13 +149,12 @@ MANAGED_AGENT_CONFIG_FIELDS: frozenset[str] = frozenset({"name", "description", 
 def preserve_non_managed_fields(existing_cfg: AgentConfig) -> dict[str, object]:
     """Return every top-level field on ``existing_cfg`` not in :data:`MANAGED_AGENT_CONFIG_FIELDS`.
 
-    Used by the two surfaces that rewrite a custom agent's ``config.yaml``
-    (the ``update_agent`` harness tool and the HTTP ``PATCH /api/agents/{name}``
-    route) to carry forward any hand-authored field — currently ``github``,
+    Used by PostgreSQL shared-asset authoring to carry forward any field it
+    does not expose directly — currently ``github``,
     and any field added to :class:`AgentConfig` in the future — that the
     update API does not expose as an argument. Without this, operators who
     hand-author a ``github:`` block on a custom agent would silently lose
-    it the next time the agent or a UI editor touched ``description`` /
+    it the next time a project asset editor touched ``description`` /
     ``model`` / ``tool_groups`` / ``skills``.
 
     ``exclude_unset=True`` is recursive in Pydantic v2, so a sub-field the

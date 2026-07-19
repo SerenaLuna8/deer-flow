@@ -1,0 +1,104 @@
+# M7 Task 10 Report: fixed M1-M7 release and source-absence gates
+
+## Status
+
+PASS — Task 10 establishes the ordered M1-M7 PostgreSQL release gate, production source-absence checks, and a real Gateway/Scheduler/Worker process boundary. This report covers Task 10 only on base `4ab7649cd8591a8d77b0fdf81170cfb2a2cd3160`; it does not mark M7 complete or start Task 11. Independent review remains a separate acceptance step.
+
+## Delivered
+
+- Root `PROJECT_FOUNDATION_POSTGRES_TESTS` is the only ordered 22-file M1-M7 list. CI calls the root target instead of duplicating the order, and a print target gives contract tests a cross-platform way to read the list.
+- The gate includes the exact M7 baseline and packaged bootstrap, final project capabilities, job/stream/quota/audit/retention/recovery boundaries, real process behavior, production source absence, and the release contract itself. Missing `POSTGRES_TEST_URL` exits before pytest collection; selected PostgreSQL tests enforce zero skips.
+- `test_m7_source_absence.py` scans production roots only and rejects deleted modules, global routes, removed imports, runtime `setup_agent`/`update_agent` residue, and legacy config authority outside the exact tombstone validator allowlist. Historical documentation and tests are not treated as production authority.
+- `test_m7_process_boundary.py` starts real Scheduler, Gateway, and Worker processes against one random database. Gateway performs HTTP admission, Scheduler owns only scheduling, and the registered Worker owns the lease, graph execution, durable stream append, terminal append, and settlement. The test restarts Gateway, reconnects by `Last-Event-ID`, and proves account/project/thread scope isolation.
+- Process child evidence records PID and role for claim, lease, graph execution, stream append, terminal append, and settlement. Existing Scheduler/Gateway/Worker tests were updated to the final M7 contracts.
+- Removed the dead file-backed `setup_agent` and `update_agent` runtime modules and their filesystem-only tests. Final Agent configuration coverage now parses immutable asset payloads; final Skill filesystem coverage uses explicit run-owned read-only mounts and rejects ambient global mounts.
+- Removed the remaining global LangGraph/thread/artifact URL fallbacks from Nginx, frontend compatibility config, embedded upload results, and associated docs/tests. Embedded results expose virtual paths only; authenticated project APIs own download URLs.
+
+## TDD and failure classification
+
+Initial new-gate RED result:
+
+```text
+9 tests: 6 failed, 3 passed
+```
+
+The intended failures were the missing 22-file list/print target, missing process-role evidence, and production legacy residue. After implementing the gate, the first complete backend run exposed 52 obsolete expectations:
+
+```text
+52 failed, 6801 passed, 945 skipped
+```
+
+They were classified by isolated reruns, not hidden with ordering or skips:
+
+- 31 filesystem Agent write tests were pure legacy. Their dead production tools and dedicated tests were deleted.
+- 21 tests represented behavior that remains final: immutable Agent payload parsing, explicit run Skill mounts, project-private SSE dependencies, permanent catalog provider signatures, channel tombstones, shared path constants, and the single M1-M7 list. Those tests were ported and retained.
+- 0 failures were cross-test state pollution; every failure reproduced independently.
+
+The migrated focused slice finished:
+
+```text
+161 passed, 8 skipped, 0 failed
+```
+
+The eight skips were PostgreSQL cases in a non-PostgreSQL focused invocation, not release evidence. The final fixed PostgreSQL gate had zero skips.
+
+## Final verification
+
+Dedicated PostgreSQL gate, using only `127.0.0.1:55443` and random `deerflow_test_*` / `deerflow_restore_*` databases:
+
+```text
+M1-M7 release stats: collected=242 passed=242 skipped=0
+242 passed in 115.58s
+```
+
+Backend gates:
+
+```text
+Full backend: 6815 passed, 944 skipped, 0 failed in 92.57s
+Blocking-I/O: 27 passed in 11.00s
+Ruff format: 1047 files already formatted
+Ruff check: All checks passed
+Final source/release contracts: 7 passed
+```
+
+Frontend gates:
+
+```text
+Unit: 122 files, 888 passed, 0 skipped, 0 failed
+pnpm check: PASS
+Production Playwright: 14 passed
+Static Playwright: 2 passed
+BUILD_MODE=production pnpm build: PASS
+BUILD_MODE=static pnpm build: PASS
+Prettier changed scope: PASS
+```
+
+The first sandboxed Playwright and final unit invocations could not bind a loopback port (`EPERM`). The same commands passed unchanged with the required local-server permission; these were environment failures, not code failures.
+
+Additional checks:
+
+```text
+Fixed Makefile list count: 22
+Workflow YAML parse: PASS
+git diff --check: PASS
+Production source-absence: 4 passed
+```
+
+## Resource cleanup
+
+- The disposable PostgreSQL cluster listened only on `127.0.0.1:55443`; no process touched the normal `5432` service.
+- Before shutdown, the cluster contained no `deerflow_test_*` or `deerflow_restore_*` databases.
+- PostgreSQL was stopped cleanly, `/private/tmp/deerflow_m7_task10_pg_AVi1zn` was removed, and port `55443` was confirmed closed.
+- Final process inspection found no Gateway, Scheduler, Worker, or process-test child from this worktree.
+
+## Self-review
+
+- The Gateway and Scheduler process sources do not import graph execution code; graph/stream/terminal role evidence is produced only by the Worker PID.
+- Reconnect assertions cover cursor ordering and deduplication across a real Gateway restart, plus foreign-account denial.
+- Source scanning deliberately excludes historical docs/tests while checking runtime Python, frontend application code, scripts, and Nginx configuration.
+- The root Makefile remains the sole CI order source. The test contract contains an expected order for drift detection, but workflows do not duplicate it.
+- No progress ledger was changed and Task 11 was not started.
+
+## Remaining acceptance boundary
+
+Task 10 implementation and mandatory gates are complete. Independent review must still inspect the committed diff before Task 10 is formally accepted; M7 final documentation/closure belongs to Task 11.

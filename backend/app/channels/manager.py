@@ -862,12 +862,8 @@ class ChannelManager:
         # owns the connection. Preserve the raw platform user under
         # ``channel_user_id`` for platform-facing lookups and audits.
         run_context_identity: dict[str, Any] = {"thread_id": thread_id}
-        # ``channel_name`` lets in-graph code (e.g. ``_make_lead_agent``)
-        # decide whether a tool is safe to expose for this run. Webhook
-        # channels carry untrusted external prompts (GitHub comments,
-        # Telegram chats from non-owners, etc.), so admin-shaped tools
-        # like ``update_agent`` are dropped when the run was triggered
-        # via one. See ``_make_lead_agent`` for the gate.
+        # Preserve the authenticated provider identity for runtime policy and
+        # audit attribution. It is server-derived, never accepted from input.
         run_context_identity["channel_name"] = msg.channel_name
         # Single source of truth for the run identity: the same helper that scopes
         # inbound files and outbound artifacts, so the bucket the agent reads/writes

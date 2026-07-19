@@ -28,6 +28,9 @@ class _Session:
     def begin(self):
         return self
 
+    def begin_nested(self):
+        return self
+
 
 def _session_factory():
     return _Session()
@@ -57,7 +60,9 @@ async def test_scheduler_poll_only_admits_jobs_in_caller_transaction() -> None:
 
     await service.admit_due_occurrences(session, now=NOW)
 
-    assert occurrences.due_definitions_in_session.await_args_list[0].args == (session,)
+    first_poll = occurrences.due_definitions_in_session.await_args_list[0]
+    assert first_poll.args == (session,)
+    assert first_poll.kwargs == {"now": NOW, "limit": 3, "after": None}
     dispatcher.admit_occurrence_in_session.assert_awaited_once_with(
         session,
         definition,

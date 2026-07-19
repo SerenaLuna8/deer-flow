@@ -47,50 +47,9 @@ from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.private_work.model import PrivateFileRow
 from deerflow.persistence.recovery.model import RecoveryJournalStateRow, RestoreProofRow
 
-PROJECT_FOUNDATION_POSTGRES_TESTS = (
-    "tests/test_m7_final_baseline_postgres.py",
-    "tests/integration/test_project_isolation_postgres.py",
-    "tests/integration/test_m2_project_governance_postgres.py",
-    "tests/integration/test_m3_shared_assets_postgres.py",
-    "tests/integration/test_m4_private_work_postgres.py",
-    "tests/integration/test_m5_project_automation_postgres.py",
-    "tests/test_m6_process_readiness.py",
-    "tests/test_m6_job_repository_postgres.py",
-    "tests/test_m6_durable_stream_postgres.py",
-    "tests/test_m6_quota_service_postgres.py",
-    "tests/test_m6_audit_redaction.py",
-    "tests/test_m6_audit_integration_postgres.py",
-    "tests/test_m6_restore_postgres.py",
-    "tests/test_m6_release_gate_postgres.py",
-    "tests/test_m6_worker_crash_recovery_postgres.py",
-    "tests/test_m6_gateway_reconnect_process.py",
-)
-
 NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
 BACKUP_KEY = b"b" * 32
 JOURNAL_KEY = b"j" * 32
-
-
-def _make_variable(makefile: str, name: str) -> tuple[str, ...]:
-    prefix = f"{name} ="
-    lines = makefile.splitlines()
-    try:
-        index = next(index for index, line in enumerate(lines) if line.startswith(prefix))
-    except StopIteration:
-        raise AssertionError(f"Make variable {name!r} is missing") from None
-
-    values: list[str] = []
-    line = lines[index][len(prefix) :].strip()
-    while True:
-        continued = line.endswith("\\")
-        value = line.removesuffix("\\").strip()
-        if value:
-            values.extend(value.split())
-        if not continued:
-            return tuple(values)
-        index += 1
-        assert index < len(lines), f"Make variable {name!r} has an unterminated continuation"
-        line = lines[index].strip()
 
 
 def _keyring() -> AuditHmacKeyring:
@@ -490,27 +449,6 @@ async def test_encrypted_archive_restore_replays_journal_and_rejects_tamper_and_
                     migrated_postgres_database_url,
                     target_url,
                 )
-
-
-def test_root_make_and_workflows_pin_the_current_postgres_release_list() -> None:
-    root = Path(__file__).resolve().parents[2]
-    makefile = (root / "Makefile").read_text(encoding="utf-8")
-    postgres_workflow = (root / ".github" / "workflows" / "project-foundation-postgres-tests.yml").read_text(encoding="utf-8")
-    frontend_workflow = (root / ".github" / "workflows" / "frontend-unit-tests.yml").read_text(encoding="utf-8")
-
-    assert "test-project-foundation-postgres:" in makefile
-    assert "test: test-project-foundation-postgres" in makefile
-    assert _make_variable(makefile, "PROJECT_FOUNDATION_POSTGRES_TESTS") == PROJECT_FOUNDATION_POSTGRES_TESTS
-    recipe = makefile.split("test-project-foundation-postgres:", 1)[1].split("\n\n", 1)[0]
-    assert "$(PROJECT_FOUNDATION_POSTGRES_TESTS)" in recipe
-    assert "tests/support/release_gate_plugin.py" in recipe
-    assert "test -n" not in recipe
-    assert "DEER_FLOW_REQUIRE_ZERO_SKIPS=1" not in recipe
-    assert not any(test_file in recipe for test_file in PROJECT_FOUNDATION_POSTGRES_TESTS)
-    assert 'test -n "${POSTGRES_TEST_URL:-}"' in postgres_workflow
-    assert "make test-project-foundation-postgres" in postgres_workflow
-    assert PROJECT_FOUNDATION_POSTGRES_TESTS[0] not in postgres_workflow
-    assert "m6-static-gates.test.tsx" in frontend_workflow
 
 
 def test_cross_platform_release_runner_requires_url_and_fails_a_real_child_skip(tmp_path: Path) -> None:

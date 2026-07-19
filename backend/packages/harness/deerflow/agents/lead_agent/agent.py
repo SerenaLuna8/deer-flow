@@ -54,12 +54,6 @@ _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
 
 
-# Channels whose inbound messages originate from untrusted external
-# commenters (anyone on a GitHub repo, etc.) and whose run context is
-# therefore unsafe for admin-shaped tools like ``update_agent``. The
-# corresponding gate lives in :func:`_make_lead_agent`; the channel name
-# itself is plumbed into ``run_context`` by
-# ``ChannelManager._resolve_run_params``.
 def _get_runtime_config(config: RunnableConfig) -> dict:
     """Merge legacy configurable options with LangGraph runtime context."""
     cfg = dict(config.get("configurable", {}) or {})
@@ -580,8 +574,6 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             state_schema=ThreadState,
         )
 
-    # Custom agents can update their own SOUL.md / config via update_agent.
-    # The default agent (no agent_name) does not see this tool.
     # Build skill search setup from policy-filtered skills (same list used for
     # tool-policy filtering), so describe_skill only exposes allowed skills.
     skill_setup = build_skill_search_setup(

@@ -771,7 +771,7 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 
 ## Embedded Python Client
 
-DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
+DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process agent helpers; it is not a fallback authority for the project-only HTTP API. Project Threads, Runs, files, artifacts, Memory, and connections are available only through their authenticated `/api/projects/{project_id}/...` routes:
 
 ```python
 from deerflow.client import DeerFlowClient
@@ -790,13 +790,13 @@ for event in client.stream("hello"):
 models = client.list_models()        # {"models": [...]}
 skills = client.list_skills()        # {"skills": [...]}
 client.update_skill("web-search", enabled=True)
-client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
+client.upload_files("thread-1", ["./report.pdf"])  # files contain sandbox virtual_path, not an HTTP artifact URL
 client.set_goal("thread-1", "finish the implementation and make all tests pass")
 client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
 client.clear_goal("thread-1")
 ```
 
-All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
+Embedded upload/list results expose sandbox virtual paths only; project download URLs require PostgreSQL file/artifact IDs and are produced by the project-private API. See `backend/packages/harness/deerflow/client.py` for the in-process API documentation.
 
 ## Project Automations
 

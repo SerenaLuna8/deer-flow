@@ -482,7 +482,6 @@ export interface Translations {
     saving: string;
     saveRequested: string;
     saveHint: string;
-    saveCommandMessage: string;
     agentCreatedPendingRefresh: string;
     more: string;
     agentCreated: string;

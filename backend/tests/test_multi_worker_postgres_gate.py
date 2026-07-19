@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-from types import SimpleNamespace
 
 import pytest
 
@@ -35,12 +34,9 @@ def test_database_config_rejects_backend_selector() -> None:
         DatabaseConfig(url="postgresql://localhost/test", backend="memory")
 
 
-def test_db_event_store_does_not_fallback_when_engine_is_uninitialized(monkeypatch) -> None:
+def test_db_event_store_requires_explicit_postgres_session_factory() -> None:
     from deerflow.runtime.events import store as event_store_module
 
-    def fail_uninitialized():
-        raise RuntimeError("Persistence engine is not initialized")
-
-    monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", fail_uninitialized)
-    with pytest.raises(RuntimeError, match="not initialized"):
-        event_store_module.make_run_event_store(SimpleNamespace(backend="db", max_trace_content=100))
+    assert not hasattr(event_store_module, "make_run_event_store")
+    parameter = inspect.signature(event_store_module.DbRunEventStore).parameters["session_factory"]
+    assert parameter.default is inspect.Parameter.empty

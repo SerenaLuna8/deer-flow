@@ -17,6 +17,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import (
     _SECRETS_BINDING_AUDIT_KEY,
     _SLASH_SECRET_SOURCE_KEY,
@@ -126,7 +127,7 @@ class SkillActivationMiddleware(AgentMiddleware):
             text,
             skills,
             available_skills=self._available_skills,
-            container_base_path=(self._runtime_skills_container_path or str(self._runtime_skills_root or "/mnt/skills")),
+            container_base_path=(self._runtime_skills_container_path or str(self._runtime_skills_root or DEFAULT_SKILLS_CONTAINER_PATH)),
         )
         if resolved is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be resolved.")

@@ -189,7 +189,7 @@ class TestLiveFileUpload:
         for r in result["files"]:
             assert int(r["size"]) > 0
             assert r["virtual_path"].startswith("/mnt/user-data/uploads/")
-            assert "artifact_url" in r
+            assert "artifact_url" not in r
         print(f"  uploaded: {filenames}")
 
         # List

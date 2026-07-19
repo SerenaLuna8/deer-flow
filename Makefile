@@ -1,14 +1,16 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install test test-project-foundation-postgres setup setup-db migrate-db reconcile-usage backup-db restore-db drill-restore rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon gateway worker scheduler nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install test test-project-foundation-postgres print-project-foundation-postgres-tests setup setup-db migrate-db reconcile-usage backup-db restore-db drill-restore rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon gateway worker scheduler nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
 PROJECT_FOUNDATION_POSTGRES_TESTS = \
 	tests/test_m7_final_baseline_postgres.py \
+	tests/test_m7_asset_bootstrap_postgres.py \
 	tests/integration/test_project_isolation_postgres.py \
 	tests/integration/test_m2_project_governance_postgres.py \
 	tests/integration/test_m3_shared_assets_postgres.py \
+	tests/integration/test_m3_mcp_credentials_postgres.py \
 	tests/integration/test_m4_private_work_postgres.py \
 	tests/integration/test_m5_project_automation_postgres.py \
 	tests/test_m6_process_readiness.py \
@@ -17,10 +19,14 @@ PROJECT_FOUNDATION_POSTGRES_TESTS = \
 	tests/test_m6_quota_service_postgres.py \
 	tests/test_m6_audit_redaction.py \
 	tests/test_m6_audit_integration_postgres.py \
+	tests/test_m6_retention_purge_postgres.py \
+	tests/test_m7_backup_restore_postgres.py \
 	tests/test_m6_restore_postgres.py \
-	tests/test_m6_release_gate_postgres.py \
 	tests/test_m6_worker_crash_recovery_postgres.py \
-	tests/test_m6_gateway_reconnect_process.py
+	tests/test_m6_gateway_reconnect_process.py \
+	tests/test_m7_process_boundary.py \
+	tests/test_m7_source_absence.py \
+	tests/test_m7_release_gate_postgres.py
 
 # Detect OS for Windows compatibility
 ifeq ($(OS),Windows_NT)
@@ -80,6 +86,9 @@ test: test-project-foundation-postgres
 
 test-project-foundation-postgres:
 	@$(BACKEND_UV_RUN) python tests/support/release_gate_plugin.py $(PROJECT_FOUNDATION_POSTGRES_TESTS) -ra
+
+print-project-foundation-postgres-tests:
+	@echo $(PROJECT_FOUNDATION_POSTGRES_TESTS)
 
 setup:
 	@$(BACKEND_UV_RUN) python ../scripts/setup_wizard.py

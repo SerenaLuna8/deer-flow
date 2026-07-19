@@ -1003,8 +1003,8 @@ class E2BSandboxProvider(SandboxProvider):
     ) -> None:
         """Mirror agent artifacts from the e2b VM back to host thread dirs.
 
-        DeerFlow's ``/api/threads/{tid}/artifacts/...`` endpoint resolves
-        files against the host-side per-thread ``user-data/`` tree (see
+        DeerFlow's project-private file and artifact endpoints resolve files
+        against the host-side per-thread ``user-data/`` tree (see
         :meth:`Paths.sandbox_outputs_dir`). LocalSandbox writes there
         directly via path mappings, so the endpoint just works for the
         local provider. The e2b VM has no shared host filesystem, so we

@@ -34,11 +34,8 @@ export function getLangGraphBaseURL(isMock?: boolean) {
     }
     return "http://localhost:3000/mock/api";
   } else {
-    // LangGraph SDK requires a full URL, construct it from current origin
-    if (typeof window !== "undefined") {
-      return `${window.location.origin}/api/langgraph`;
-    }
-    // Fallback for SSR
-    return "http://localhost:2026/api/langgraph";
+    throw new Error(
+      "A project-private API URL is required for the LangGraph-compatible client.",
+    );
   }
 }

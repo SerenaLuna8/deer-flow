@@ -38,3 +38,7 @@ jobs:
       - name: Run unit tests of backend
         working-directory: backend
         run: make test
+
+      - name: Run M7 source and release-list contracts
+        working-directory: backend
+        run: uv run pytest -q tests/test_m7_source_absence.py tests/test_m7_release_gate_postgres.py tests/test_m7_process_boundary.py -m "not postgres"

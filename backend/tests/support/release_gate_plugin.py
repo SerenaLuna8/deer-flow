@@ -16,7 +16,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     stats = getattr(reporter, "stats", {})
     passed = len(stats.get("passed", ()))
     skipped = len(stats.get("skipped", ()))
-    reporter.write_line(f"M1-M6 release stats: collected={session.testscollected} passed={passed} skipped={skipped}")
+    reporter.write_line(f"M1-M7 release stats: collected={session.testscollected} passed={passed} skipped={skipped}")
     if skipped:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 

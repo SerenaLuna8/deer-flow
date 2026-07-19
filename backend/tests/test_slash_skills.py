@@ -7,7 +7,7 @@ import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.commands import KNOWN_CHANNEL_COMMANDS, REMOVED_CHANNEL_COMMANDS
 from deerflow.agents.middlewares.skill_activation_middleware import (
     SkillActivationMiddleware,
     _is_user_activation_target,
@@ -102,7 +102,7 @@ def test_resolve_slash_skill_ignores_reserved_control_commands(tmp_path):
 
 
 def test_reserved_slash_skill_names_match_channel_commands():
-    assert RESERVED_SLASH_SKILL_NAMES == {command.removeprefix("/") for command in KNOWN_CHANNEL_COMMANDS}
+    assert RESERVED_SLASH_SKILL_NAMES == {command.removeprefix("/") for command in KNOWN_CHANNEL_COMMANDS | REMOVED_CHANNEL_COMMANDS}
 
 
 def test_resolve_slash_skill_respects_available_skill_whitelist(tmp_path):

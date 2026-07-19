@@ -400,8 +400,7 @@ Proxied through nginx: `/api/*` → Gateway REST APIs. Agent execution is Worker
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`)
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware, which preserves text fallback and adds `artifact.human_input` for Web UI Human Input Cards)
    - `view_image` - Read image as base64 (added only if model supports vision)
-   - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
-   - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
+   - Agent and Skill authoring is project-scoped through authenticated shared-asset APIs; no built-in tool writes ambient Agent/Skill files.
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type)
 
@@ -1020,10 +1019,13 @@ M4 项目私有 backend 已完成并挂载：`/api/projects/{project_id}/private
 负责 readiness、Thread、run/stream/wait、feed、file 和 artifact，项目 Memory 与 Connections
 使用各自的 project UUID 路由。Gateway lifespan 只在同一 PostgreSQL 配置上创建 scoped
 repositories、`ProjectScopedCheckpointer` 和专用 PostgreSQL private run-event store；普通项目
-代码不得取得 raw saver 或 unscoped repository。固定 M1–M6 PostgreSQL release gate 以 root
-`Makefile` 的 20 文件 `PROJECT_FOUNDATION_POSTGRES_TESTS` 为唯一有序来源，并由
+代码不得取得 raw saver 或 unscoped repository。固定 M1–M7 PostgreSQL release gate 以 root
+`Makefile` 的 22 文件 `PROJECT_FOUNDATION_POSTGRES_TESTS` 为唯一有序来源，并由
 `POSTGRES_TEST_URL=... make test-project-foundation-postgres` 强制 0 skip；CI 调用同一 target，变量
-缺失时在 pytest 前硬失败。普通本地单文件测试仍可在缺少管理员 URL 时明确 skip，但不能作为 release evidence。
+缺失时在 pytest collection 前硬失败。该列表覆盖 M7 exact baseline/bootstrap/recovery、既有项目能力、
+真实 Gateway/Scheduler/Worker 进程、Worker lease/graph/terminal、Gateway restart cursor 与跨
+account/project/owner 隔离；`test_m7_source_absence.py` 只扫描生产 roots，并对 legacy config tombstone
+使用精确 validator allowlist。普通本地单文件测试仍可在缺少管理员 URL 时明确 skip，但不能作为 release evidence。
 
 M7 不提供 private-work staged migration。所有 project-private persistence 都是 baseline final shape；
 旧库必须由 operator 保留后创建新的空数据库，不能通过运行期或 CLI 原地导入。

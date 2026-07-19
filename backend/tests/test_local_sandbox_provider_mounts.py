@@ -568,11 +568,10 @@ class TestLocalSandboxProviderMounts:
         with patch("deerflow.config.get_app_config", return_value=config):
             provider = LocalSandboxProvider()
 
-        # Public skills are the only static skills mount; custom skills are
-        # per-user and built dynamically in _build_thread_path_mappings.
-        # Custom volume mount /custom-skills/nested is also included (not
-        # a reserved prefix like /custom-skills/custom).
-        assert [m.container_path for m in provider._path_mappings] == ["/custom-skills/public", "/custom-skills/nested"]
+        # Ambient Skill roots never become runtime mounts. The configured
+        # nested mount is rejected because the Skill prefix is reserved for
+        # exact run-owned read-only mounts.
+        assert provider._path_mappings == []
 
     def test_setup_path_mappings_skips_relative_host_path(self, tmp_path):
         skills_dir = tmp_path / "skills"
@@ -596,8 +595,7 @@ class TestLocalSandboxProviderMounts:
         with patch("deerflow.config.get_app_config", return_value=config):
             provider = LocalSandboxProvider()
 
-        # Public skills mount is static; custom skills are per-thread.
-        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills/public"]
+        assert provider._path_mappings == []
 
     def test_setup_path_mappings_skips_non_absolute_container_path(self, tmp_path):
         skills_dir = tmp_path / "skills"
@@ -623,7 +621,7 @@ class TestLocalSandboxProviderMounts:
         with patch("deerflow.config.get_app_config", return_value=config):
             provider = LocalSandboxProvider()
 
-        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills/public"]
+        assert provider._path_mappings == []
 
     def test_setup_path_mappings_logs_actionable_error_for_missing_host_path(self, tmp_path, caplog):
         """Regression for #3244.
@@ -658,9 +656,8 @@ class TestLocalSandboxProviderMounts:
             with patch("deerflow.config.get_app_config", return_value=config):
                 provider = LocalSandboxProvider()
 
-        # Silent-skip behaviour is preserved (no breaking change for existing deployments).
-        # Only public skills mount is static; custom skills are per-thread.
-        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills/public"]
+        # Silent-skip behaviour is preserved; no ambient Skill mount is added.
+        assert provider._path_mappings == []
 
         # The failure must be observable at ERROR level and reference the offending paths.
         error_records = [r for r in caplog.records if r.levelname == "ERROR"]
@@ -792,7 +789,7 @@ class TestLocalSandboxProviderMounts:
         with patch("deerflow.config.get_app_config", return_value=config):
             provider = LocalSandboxProvider()
 
-        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills/public", "/mnt/data"]
+        assert [m.container_path for m in provider._path_mappings] == ["/mnt/data"]
 
 
 class TestLocalSandboxProviderResetClearsSingleton:

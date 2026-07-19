@@ -10,7 +10,7 @@ import pytest
 from fastapi import FastAPI
 from support.m4_private_threads import install_open_project_cutover_guard
 
-from app.gateway.deps import private_work_context
+from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.routers import private_work as private_work_router
 from deerflow.runtime import DisconnectMode
 from deerflow.runtime.events.models import StoredStreamFrame
@@ -27,6 +27,7 @@ def app(context: SimpleNamespace) -> FastAPI:
     install_open_project_cutover_guard(value)
     value.include_router(private_work_router.router)
     value.dependency_overrides[private_work_context] = lambda: context
+    value.dependency_overrides[require_project_private_open] = lambda: None
     return value
 
 

@@ -142,7 +142,7 @@ async def _archive_then_purge(source_url: str, tmp_path: Path, monkeypatch: pyte
     monkeypatch.setenv("AUTH_JWT_SECRET", "task17-distinct-auth-secret")
     postgres_bin = "/opt/homebrew/Cellar/postgresql@14/14.19/bin"
     monkeypatch.setenv("PATH", f"{postgres_bin}:{os.environ.get('PATH', '')}")
-    # A valid M1-M6 source includes the LangGraph-owned checkpoint and Store
+    # A valid M7 source includes the LangGraph-owned checkpoint and Store
     # schemas in the same database; ORM bootstrap intentionally does not own
     # these tables.
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver

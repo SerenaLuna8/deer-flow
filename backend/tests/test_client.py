@@ -1421,7 +1421,8 @@ class TestUploads:
             assert len(result["files"]) == 1
             assert result["files"][0]["filename"] == "test.txt"
             assert result["files"][0]["size"] == len("hello")
-            assert "artifact_url" in result["files"][0]
+            assert "artifact_url" not in result["files"][0]
+            assert result["files"][0]["virtual_path"] == "/mnt/user-data/uploads/test.txt"
             assert "message" in result
             assert (uploads_dir / "test.txt").exists()
 
@@ -1502,9 +1503,10 @@ class TestUploads:
             assert names == {"a.txt", "b.txt"}
             sizes = {f["filename"]: f["size"] for f in result["files"]}
             assert sizes == {"a.txt": 1, "b.txt": 2}
-            # Verify artifact_url is present
+            # M7 exposes downloads only through project-scoped file records.
             for f in result["files"]:
-                assert "artifact_url" in f
+                assert "artifact_url" not in f
+                assert f["virtual_path"].startswith("/mnt/user-data/uploads/")
 
     def test_delete_upload(self, client):
         with tempfile.TemporaryDirectory() as tmp:

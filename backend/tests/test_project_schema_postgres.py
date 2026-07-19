@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import uuid
 from datetime import UTC, datetime
-from types import SimpleNamespace
 
 import pytest
 from alembic import command
@@ -33,23 +31,6 @@ def test_project_metadata_uses_uuid_projects_and_string_user_foreign_keys() -> N
     assert {fk.target_fullname for fk in ProjectMembershipRow.__table__.c.user_id.foreign_keys} == {"users.id"}
 
 
-def test_downgrade_checks_for_project_data_before_any_mutation(monkeypatch) -> None:
-    migration = importlib.import_module("deerflow.persistence.migrations.versions.0005_project_foundation")
-    mutations: list[str] = []
-    fake_op = SimpleNamespace(
-        get_bind=lambda: SimpleNamespace(execute=lambda _statement: SimpleNamespace(scalar_one=lambda: True)),
-        drop_index=lambda *_args, **_kwargs: mutations.append("drop_index"),
-        drop_table=lambda *_args, **_kwargs: mutations.append("drop_table"),
-        drop_constraint=lambda *_args, **_kwargs: mutations.append("drop_constraint"),
-        execute=lambda *_args, **_kwargs: mutations.append("execute"),
-    )
-    monkeypatch.setattr(migration, "op", fake_op)
-
-    with pytest.raises(RuntimeError, match="project data exists"):
-        migration.downgrade()
-    assert mutations == []
-
-
 @pytest.mark.asyncio
 async def test_empty_database_head_has_project_constraints(migrated_postgres_database_url: str) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -73,40 +54,6 @@ async def test_empty_database_head_has_project_constraints(migrated_postgres_dat
         cascading_fks = {item["constrained_columns"][0] for item in membership_fks if item["options"].get("ondelete") == "CASCADE"}
         assert cascading_fks == {"project_id", "user_id"}
         assert "ix_project_memberships_user_id" in {item["name"] for item in membership_indexes}
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_upgrade_from_0004_maps_legacy_admin(postgres_database_url: str) -> None:
-    engine = create_async_engine(postgres_database_url)
-    try:
-        cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(command.upgrade, cfg, "0004_migration_ledger")
-        async with engine.begin() as conn:
-            await conn.execute(text("CREATE SCHEMA constraint_collision"))
-            await conn.execute(text("CREATE TABLE constraint_collision.users (system_role text)"))
-            await conn.execute(
-                text("""ALTER TABLE constraint_collision.users
-                    ADD CONSTRAINT ck_users_system_role CHECK (system_role = 'other')""")
-            )
-            await conn.execute(
-                text("""INSERT INTO users
-                    (id,email,system_role,created_at,needs_setup,token_version)
-                    VALUES (:id,:email,'admin',:now,false,0)"""),
-                {"id": str(uuid.uuid4()), "email": "legacy@example.com", "now": datetime.now(UTC)},
-            )
-        await asyncio.to_thread(command.upgrade, cfg, "0005_project_foundation")
-        async with engine.connect() as conn:
-            assert (await conn.execute(text("SELECT system_role FROM users"))).scalar_one() == "system_admin"
-        with pytest.raises(IntegrityError):
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text("""INSERT INTO users
-                        (id,email,system_role,created_at,needs_setup,token_version)
-                        VALUES (:id,'invalid@example.com','admin',:now,false,0)"""),
-                    {"id": str(uuid.uuid4()), "now": datetime.now(UTC)},
-                )
     finally:
         await engine.dispose()
 

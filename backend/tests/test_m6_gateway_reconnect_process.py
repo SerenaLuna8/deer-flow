@@ -60,8 +60,8 @@ def _gateway_environment(tmp_path: Path, database_url: str) -> dict[str, str]:
             "DEER_FLOW_HOME": str(tmp_path / "gateway-home"),
             "GATEWAY_WORKERS": "1",
             "AUTH_JWT_SECRET": "m6-release-gateway-process-secret",
-            "DEER_FLOW_AUDIT_ACTIVE_KEY_ID": "release-gate-v1",
-            "DEER_FLOW_AUDIT_KEYRING_JSON": ('{"release-gate-v1":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}'),
+            "DEER_FLOW_AUDIT_ACTIVE_KEY_ID": "test-audit-v1",
+            "DEER_FLOW_AUDIT_KEYRING_JSON": ('{"test-audit-v1":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}'),
         }
     )
     return environment

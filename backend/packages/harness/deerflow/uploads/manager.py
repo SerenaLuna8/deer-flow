@@ -10,7 +10,6 @@ import os
 import re
 import stat
 from pathlib import Path
-from urllib.parse import quote
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -339,26 +338,18 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     return {"success": True, "message": f"Deleted {filename}"}
 
 
-def upload_artifact_url(thread_id: str, filename: str) -> str:
-    """Build the artifact URL for a file in a thread's uploads directory.
-
-    *filename* is percent-encoded so that spaces, ``#``, ``?`` etc. are safe.
-    """
-    return f"/api/threads/{thread_id}/artifacts{VIRTUAL_PATH_PREFIX}/uploads/{quote(filename, safe='')}"
-
-
 def upload_virtual_path(filename: str) -> str:
     """Build the virtual path for a file in the uploads directory."""
     return f"{VIRTUAL_PATH_PREFIX}/uploads/{filename}"
 
 
 def enrich_file_listing(result: dict, thread_id: str) -> dict:
-    """Add virtual paths and artifact URLs on a listing result.
+    """Add virtual paths on a listing result.
 
     Mutates *result* in place and returns it for convenience.
     """
+    del thread_id  # retained for the embedded-client compatibility signature
     for f in result["files"]:
         filename = f["filename"]
         f["virtual_path"] = upload_virtual_path(filename)
-        f["artifact_url"] = upload_artifact_url(thread_id, filename)
     return result

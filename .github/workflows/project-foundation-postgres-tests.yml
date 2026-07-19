@@ -1,4 +1,4 @@
-name: M1-M6 PostgreSQL Gates
+name: M1-M7 PostgreSQL Gates
 
 on:
   push:
@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   postgres-release-gates:
-    name: M1-M6 PostgreSQL gates
+    name: M1-M7 PostgreSQL gates
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -96,7 +96,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run the fixed M1-M6 PostgreSQL release gate with zero skips
+      - name: Run the fixed M1-M7 PostgreSQL release gate with zero skips
         run: make test-project-foundation-postgres
 
       - name: Run PostgreSQL scripts and project lint gates

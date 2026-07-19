@@ -27,6 +27,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 | `pnpm format`          | Prettier check (`pnpm format:write` to apply)     |
 | `pnpm test`            | Run unit tests with Rstest                        |
 | `pnpm test:e2e`        | Run E2E tests with Playwright (Chromium)          |
+| `pnpm test:e2e:m7`     | Run fixed project-only M7 production E2E tests    |
 | `pnpm test:e2e:static` | Build and test the static demo gate               |
 | `pnpm test:e2e:all`    | Run normal and static-demo E2E gates              |
 | `pnpm typecheck`       | TypeScript type check (`tsc --noEmit`)            |
@@ -34,7 +35,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; both `pnpm build` and its production WebServer build use Webpack explicitly so production compilation remains deterministic across local and CI environments. Static-demo release coverage lives under `tests/e2e-static/` and uses `playwright.static.config.ts`; it builds with the canonical `BUILD_MODE=static` contract into the independent `.next-static` dist directory, so normal and static production builds cannot reuse each other's output or module graph.
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`; `pnpm test:e2e:m7` fixes the project-only route and Automation files, and production artifacts go to `test-results/m7-production`. Both `pnpm build` and its production WebServer build use Webpack explicitly so production compilation remains deterministic across local and CI environments. Static-demo release coverage lives under `tests/e2e-static/` and uses `playwright.static.config.ts`; it writes `test-results/m7-static` and builds with the canonical `BUILD_MODE=static` contract into the independent `.next-static` dist directory, so normal and static production builds cannot reuse each other's output or module graph.
 
 ## Architecture
 

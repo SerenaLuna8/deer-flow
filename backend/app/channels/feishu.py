@@ -11,7 +11,7 @@ import time
 from typing import Any, Literal
 
 from app.channels.base import Channel
-from app.channels.commands import is_known_channel_command
+from app.channels.commands import is_known_channel_command, is_removed_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
@@ -1019,7 +1019,7 @@ class FeishuChannel(Channel):
             if chat_type == "p2p" and not resolved_from_stored_mapping:
                 topic_id = None
             resolved_from_pending = False
-            if msg_type == InboundMessageType.CHAT and not resolved_from_stored_mapping:
+            if msg_type == InboundMessageType.CHAT and not is_removed_channel_command(text) and not resolved_from_stored_mapping:
                 pending = self._consume_pending_clarification(chat_id, sender_id)
                 pending_topic_id = self._non_empty_str(pending.get("topic_id")) if pending else None
                 if pending_topic_id:

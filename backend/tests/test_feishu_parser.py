@@ -535,7 +535,9 @@ def test_feishu_command_does_not_consume_pending_clarification():
         channel._on_message(_make_text_event("/status", message_id="msg_command"))
 
         metadata = mock_make_inbound.call_args.kwargs["metadata"]
-        assert mock_make_inbound.call_args.kwargs["msg_type"].value == "command"
+        # Provider adapters leave tombstones as chat so only the manager owns
+        # command dispatch, but must not consume a pending clarification.
+        assert mock_make_inbound.call_args.kwargs["msg_type"].value == "chat"
         assert metadata["topic_id"] == "msg_command"
         assert metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is False
         assert key in channel._pending_clarifications

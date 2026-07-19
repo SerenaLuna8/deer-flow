@@ -80,7 +80,7 @@ async def m5_app(m5_seed: M5Seed):
         await app.aclose()
 
 
-def test_release_workflow_delegates_exact_m1_to_m6_gate_after_hard_fail() -> None:
+def test_release_workflow_delegates_exact_m1_to_m7_gate_after_hard_fail() -> None:
     workflow_path = Path(__file__).resolve().parents[3] / ".github/workflows/project-foundation-postgres-tests.yml"
     workflow = yaml.load(
         workflow_path.read_text(encoding="utf-8"),
@@ -90,13 +90,13 @@ def test_release_workflow_delegates_exact_m1_to_m6_gate_after_hard_fail() -> Non
     # BaseLoader intentionally keeps YAML 1.1 words such as `on` as strings.
     # SafeLoader would silently turn this workflow key into boolean True.
     assert "on" in workflow
-    assert workflow["name"] == "M1-M6 PostgreSQL Gates"
+    assert workflow["name"] == "M1-M7 PostgreSQL Gates"
     job = workflow["jobs"]["postgres-release-gates"]
-    assert job["name"] == "M1-M6 PostgreSQL gates"
+    assert job["name"] == "M1-M7 PostgreSQL gates"
     steps = job["steps"]
     step_names = [step.get("name") for step in steps]
     assert step_names.count("Require PostgreSQL test administrator URL") == 1
-    gate_name = "Run the fixed M1-M6 PostgreSQL release gate with zero skips"
+    gate_name = "Run the fixed M1-M7 PostgreSQL release gate with zero skips"
     assert step_names.count(gate_name) == 1
     hard_fail_index = next(index for index, step in enumerate(steps) if step.get("name") == "Require PostgreSQL test administrator URL")
     gate_index = next(index for index, step in enumerate(steps) if step.get("name") == gate_name)

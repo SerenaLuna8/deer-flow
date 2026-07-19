@@ -7,8 +7,6 @@ when absent (so every existing agent continues to load unchanged), and that
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import yaml
 
@@ -17,7 +15,6 @@ from deerflow.config.agents_config import (
     GitHubAgentConfig,
     GitHubBinding,
     GitHubTriggerConfig,
-    load_agent_config,
 )
 
 
@@ -94,23 +91,15 @@ def test_github_bindings_must_have_repo() -> None:
 
 
 # ---------------------------------------------------------------------------
-# YAML round-trip via load_agent_config
+# YAML parsing at the immutable asset boundary
 # ---------------------------------------------------------------------------
 
 
-def _write_agent(base: Path, user_id: str, name: str, body: dict) -> None:
-    agent_dir = base / "users" / user_id / "agents" / name
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / "config.yaml").write_text(yaml.safe_dump(body), encoding="utf-8")
+def _parse_agent_yaml(body: dict) -> AgentConfig:
+    return AgentConfig.model_validate(yaml.safe_load(yaml.safe_dump(body)))
 
 
-def test_load_agent_config_reads_github_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
-    # Reset the singleton so the new HOME is picked up.
-    from deerflow.config import paths as paths_module
-
-    monkeypatch.setattr(paths_module, "_paths", None)
-
+def test_asset_agent_config_reads_github_block_from_yaml() -> None:
     body = {
         "name": "coding-llm-gateway",
         "model": "claude-sonnet-4-6",
@@ -126,25 +115,15 @@ def test_load_agent_config_reads_github_block(tmp_path: Path, monkeypatch: pytes
             ],
         },
     }
-    _write_agent(tmp_path, "default", "coding-llm-gateway", body)
-
-    cfg = load_agent_config("coding-llm-gateway", user_id="default")
-    assert cfg is not None
+    cfg = _parse_agent_yaml(body)
     assert cfg.github is not None
     assert cfg.github.installation_id == 999
     assert cfg.github.bindings[0].repo == "zhfeng/llm-gateway"
     assert cfg.github.bindings[0].triggers["pull_request"].actions == ["opened"]
 
 
-def test_load_agent_config_without_github_block_is_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
-    from deerflow.config import paths as paths_module
-
-    monkeypatch.setattr(paths_module, "_paths", None)
-
-    _write_agent(tmp_path, "default", "plain-agent", {"name": "plain-agent"})
-    cfg = load_agent_config("plain-agent", user_id="default")
-    assert cfg is not None
+def test_asset_agent_config_without_github_block_is_none() -> None:
+    cfg = _parse_agent_yaml({"name": "plain-agent"})
     assert cfg.github is None
 
 
@@ -197,15 +176,8 @@ def test_distinct_repo_bindings_allowed() -> None:
     assert [b.repo for b in cfg.bindings] == ["a/one", "a/two", "b/three"]
 
 
-def test_load_agent_config_rejects_duplicate_repo_bindings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """End-to-end: load_agent_config surfaces the validator error from YAML."""
-    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
-    from deerflow.config import paths as paths_module
-
-    monkeypatch.setattr(paths_module, "_paths", None)
-
-    agent_dir = tmp_path / "users" / "default" / "agents" / "broken"
-    agent_dir.mkdir(parents=True)
+def test_asset_agent_config_rejects_duplicate_repo_bindings_from_yaml() -> None:
+    """The immutable asset parser surfaces duplicate repository bindings."""
     body = {
         "name": "broken",
         "github": {
@@ -215,7 +187,5 @@ def test_load_agent_config_rejects_duplicate_repo_bindings(tmp_path: Path, monke
             ],
         },
     }
-    (agent_dir / "config.yaml").write_text(yaml.safe_dump(body), encoding="utf-8")
-
     with pytest.raises(ValueError, match="duplicate repos"):
-        load_agent_config("broken", user_id="default")
+        _parse_agent_yaml(body)

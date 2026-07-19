@@ -214,8 +214,11 @@ These apply repo-wide; module guides own the module-specific detail.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **PostgreSQL release gate** — root `Makefile` 的 `PROJECT_FOUNDATION_POSTGRES_TESTS`
-  是真实 PostgreSQL gate 的唯一有序来源；覆盖 M7 baseline、M2–M5 runtime integration 以及 M6
-  process/job/stream/quota/audit/recovery/multi-process release 边界。每个数据库测试只创建
+  是固定 22 文件 M1–M7 真实 PostgreSQL gate 的唯一有序来源；覆盖 M7 baseline/bootstrap、M2–M5
+  runtime integration、M6 process/job/stream/quota/audit/recovery，以及真实 Gateway/Scheduler/Worker
+  lease、Worker-only graph、Gateway restart cursor 和跨 account/project/owner 隔离。生产 source-absence
+  gate 只扫描 app/harness/scripts/frontend runtime/nginx roots，历史 docs/tests 不参与；legacy config
+  tombstone 只允许出现在精确 validator allowlist。每个数据库测试只创建
   随机 `deerflow_test_*`/`deerflow_restore_*` 数据库。Release evidence 必须通过
   `POSTGRES_TEST_URL=... make test-project-foundation-postgres` 运行并保持 0 skip；跨平台 Python runner 和
   `.github/workflows/project-foundation-postgres-tests.yml` 都会在变量缺失时于 pytest 前硬失败。

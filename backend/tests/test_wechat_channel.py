@@ -307,7 +307,7 @@ def test_handle_update_skips_image_without_url_or_key(tmp_path: Path):
     _run(go())
 
 
-def test_handle_update_routes_slash_command_as_command():
+def test_handle_update_leaves_removed_slash_command_for_manager_tombstone():
     from app.channels.wechat import WechatChannel
 
     async def go():
@@ -330,7 +330,7 @@ def test_handle_update_routes_slash_command_as_command():
         )
 
         assert len(published) == 1
-        assert published[0].msg_type == InboundMessageType.COMMAND
+        assert published[0].msg_type == InboundMessageType.CHAT
 
     _run(go())
 
