@@ -247,6 +247,8 @@ async def test_live_archive_restore_replays_tombstone_runs_probes_and_writes_pro
                 assert tombstone is not None and tombstone.purge_status == "purged"
                 proof = await session.get(RestoreProofRow, result.proof_id)
                 assert proof is not None and proof.probes_complete is True
+                assert proof.archive_schema_version == ARCHIVE_SCHEMA_VERSION
+                assert proof.schema_digest == M7_CANONICAL_SCHEMA_DIGEST
                 assert proof.replayed_through_sequence == 1
                 assert str(proof.journal_id) == journal.snapshot().journal_id
                 assert proof.final_journal_head_digest == journal.snapshot().entries[-1].record_digest

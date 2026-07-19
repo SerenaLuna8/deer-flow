@@ -72,10 +72,23 @@ def backup_runtime_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     async def exact_m7_catalog(_connection: object) -> bool:
         return True
 
+    async def exact_m7_inventory(_connection: object) -> frozenset[str]:
+        return frozenset({"relation:r:alembic_version"})
+
     monkeypatch.setattr(
         archive_module,
         "verify_m7_catalog_asyncpg",
         exact_m7_catalog,
+    )
+    monkeypatch.setattr(
+        archive_module,
+        "inventory_user_schema_objects_asyncpg",
+        exact_m7_inventory,
+    )
+    monkeypatch.setattr(
+        archive_module,
+        "inventory_is_m7_allowed",
+        lambda _objects: True,
     )
     monkeypatch.setattr(archive_module, "_read_pg_dump_version", fake_version)
     monkeypatch.setattr(archive_module, "_record_backup_audit", fake_audit)

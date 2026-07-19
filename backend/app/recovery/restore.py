@@ -20,7 +20,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.audit.service import AuditService, _bind_recovery_audit_process
 from app.audit.sinks import TrustedOperationAuditSink
-from app.recovery import BackupArchiveReader, BackupAuthenticationFailed
+from app.recovery import (
+    BackupArchiveReader,
+    BackupAuthenticationFailed,
+    BackupManifest,
+)
 from app.recovery.archive import (
     ARCHIVE_SCHEMA_VERSION,
     M7_CANONICAL_SCHEMA_DIGEST,
@@ -72,8 +76,6 @@ from deerflow.persistence.recovery.model import (
 )
 
 _RESTORE_DATABASE = re.compile(r"deerflow_restore_[0-9]+_[0-9a-f]{32}\Z")
-_SCHEMA_REVISION = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
-_HEX_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _REQUIRED_TABLES = frozenset(
     {
         "alembic_version",
@@ -254,37 +256,22 @@ def _parse_authenticated_manifest(
 ) -> tuple[str, int, str, str, str, int, int, str]:
     try:
         envelope = json.loads(raw)
-        body = envelope["manifest"]
-        archive_id = str(uuid.UUID(str(body["archive_id"])))
-        archive_schema_version = body["archive_schema_version"]
-        schema_revision = str(body["schema_revision"])
-        schema_digest = str(body["schema_digest"])
-        source_id = str(body["source_installation_id"])
-        sequence = body["tombstone_journal_sequence"]
-        table_count = body["table_count"]
+        if not isinstance(envelope, dict) or set(envelope) != {
+            "manifest",
+            "signature",
+        }:
+            raise RestoreAuthenticationFailed
+        manifest = BackupManifest.model_validate(envelope["manifest"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         raise RestoreAuthenticationFailed from None
-    if (
-        not isinstance(envelope, dict)
-        or set(envelope) != {"manifest", "signature"}
-        or type(archive_schema_version) is not int
-        or _SCHEMA_REVISION.fullmatch(schema_revision) is None
-        or _HEX_DIGEST.fullmatch(schema_digest) is None
-        or _HEX_DIGEST.fullmatch(source_id) is None
-        or type(sequence) is not int
-        or sequence < 0
-        or type(table_count) is not int
-        or table_count < 1
-    ):
-        raise RestoreAuthenticationFailed
     return (
-        archive_id,
-        archive_schema_version,
-        schema_revision,
-        schema_digest,
-        source_id,
-        sequence,
-        table_count,
+        manifest.archive_id,
+        manifest.archive_schema_version,
+        manifest.schema_revision,
+        manifest.schema_digest,
+        manifest.source_installation_id,
+        manifest.tombstone_journal_sequence,
+        manifest.table_count,
         hashlib.sha256(raw).hexdigest(),
     )
 
@@ -696,6 +683,8 @@ async def _write_proof_and_completion(
                     id=restore_id,
                     archive_id=uuid.UUID(archive.archive_id),
                     archive_digest=archive.archive_digest,
+                    archive_schema_version=archive.archive_schema_version,
+                    schema_digest=archive.schema_digest,
                     target_database_ref_key_id=target_ref.key_id,
                     target_database_ref_hmac=target_ref.hmac_hex,
                     schema_revision=archive.schema_revision,

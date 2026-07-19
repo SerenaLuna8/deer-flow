@@ -32,8 +32,8 @@ make backup-db ARGS="--output /secure/deerflow/backups"
 
 The command first requires the exact M7 baseline revision, canonical schema
 digest, and allowed root-object inventory. It then exports one read-only
-repeatable-read snapshot, verifies the canonical catalog again inside that
-snapshot, and passes the snapshot to fixed
+repeatable-read snapshot, verifies the exact root inventory, revision, and
+canonical catalog again inside that same transaction, and passes the snapshot to fixed
 `pg_dump --format=custom --no-owner --no-acl` arguments. It publishes only
 after complete archive authentication and the trusted
 `backup.created` audit transaction commit. Record the public `archive_id`,
@@ -42,7 +42,9 @@ and truncated checksum in the operator ledger; never copy keys, database URLs,
 private identifiers, or archive plaintext into that ledger.
 
 New archives use archive schema version `7` and revision
-`0001_project_saas_baseline`. Chunk AAD binds the archive ID, archive schema
+`0001_project_saas_baseline`. The writer and reader share one strict frozen
+manifest model: unknown fields, scalar coercion, and non-M7 constants are
+rejected. Chunk AAD binds the archive ID, archive schema
 version, schema revision, canonical schema digest, source installation ID, and
 chunk index. A fully authenticated pre-M7 archive fails closed with
 `UNSUPPORTED_ARCHIVE_SCHEMA`; changing and re-signing only manifest schema
@@ -82,8 +84,10 @@ then requires the source itself to remain the exact M7 baseline, freezes
 source/journal authority, creates the target, runs `pg_restore --exit-on-error --no-owner
 --no-acl`, replays the exact journal suffix, executes schema/isolation and
 M7 exact-schema probes, removes sensitive workspace files by captured identity, and only
-then writes a restore proof bound to archive, source, journal ID, final
-sequence, and final head digest. It never changes `DATABASE_URL`, starts an
+then writes a restore proof bound to archive schema version and digest, source,
+journal ID, final sequence, and final head digest. PostgreSQL constraints require
+the M7 version/revision and a lower-hex digest; the authenticated restore path
+persists the exact canonical digest. It never changes `DATABASE_URL`, starts an
 application process, overwrites a database, or switches traffic.
 
 After a verified result, independently inspect the public proof and run

@@ -25,12 +25,20 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -42,6 +50,8 @@ from deerflow.persistence.bootstrap import (
 )
 from deerflow.persistence.final_schema_contract import (
     M7_CANONICAL_SCHEMA_DIGEST,
+    inventory_is_m7_allowed,
+    inventory_user_schema_objects_asyncpg,
     verify_m7_catalog_asyncpg,
 )
 
@@ -117,66 +127,82 @@ class UnsupportedArchiveSchema(RuntimeError):
         super().__init__("UNSUPPORTED_ARCHIVE_SCHEMA")
 
 
-@dataclass(frozen=True)
-class BackupChunk:
-    index: int
+class BackupChunk(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    index: int = Field(ge=0)
     nonce: str
-    plaintext_bytes: int
+    plaintext_bytes: int = Field(gt=0, le=CHUNK_SIZE)
     ciphertext_sha256: str
-    ciphertext_bytes: int
+    ciphertext_bytes: int = Field(gt=0, le=CHUNK_SIZE + _TAG_BYTES)
+
+    @model_validator(mode="after")
+    def validate_chunk_contract(self) -> BackupChunk:
+        try:
+            nonce = base64.b64decode(self.nonce, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("invalid chunk nonce") from None
+        if nonce != self.index.to_bytes(_NONCE_BYTES, "big") or _SOURCE_ID.fullmatch(self.ciphertext_sha256) is None or self.ciphertext_bytes != self.plaintext_bytes + _TAG_BYTES:
+            raise ValueError("invalid chunk contract")
+        return self
 
     def as_dict(self) -> dict[str, object]:
-        return {
-            "index": self.index,
-            "nonce": self.nonce,
-            "plaintext_bytes": self.plaintext_bytes,
-            "ciphertext_sha256": self.ciphertext_sha256,
-            "ciphertext_bytes": self.ciphertext_bytes,
-        }
+        return self.model_dump(mode="json")
 
 
-@dataclass(frozen=True)
-class BackupManifest:
+class BackupManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
     archive_id: str
-    archive_format_version: int
-    archive_schema_version: int
+    archive_format_version: Literal[1]
+    archive_schema_version: Literal[7]
     archive_salt: str
-    schema_revision: str
-    schema_digest: str
+    schema_revision: Literal["0001_project_saas_baseline"]
+    schema_digest: Literal[M7_CANONICAL_SCHEMA_DIGEST]
     source_installation_id: str
-    chunk_bytes: int
-    chunks: tuple[BackupChunk, ...]
-    total_plaintext_bytes: int
-    total_ciphertext_bytes: int
-    database_high_watermark: int
-    tombstone_journal_sequence: int
-    table_count: int
+    chunk_bytes: int = Field(ge=len(_PGDMP_MAGIC), le=CHUNK_SIZE)
+    chunks: tuple[BackupChunk, ...] = Field(
+        min_length=1,
+        max_length=MAX_ARCHIVE_CHUNKS,
+    )
+    total_plaintext_bytes: int = Field(gt=0, le=MAX_ARCHIVE_PLAINTEXT_BYTES)
+    total_ciphertext_bytes: int = Field(gt=0)
+    database_high_watermark: int = Field(ge=0)
+    tombstone_journal_sequence: int = Field(ge=0)
+    table_count: int = Field(gt=0)
     pg_dump_version: str
-    tool: str = "pg_dump --format=custom --no-owner --no-acl"
+    tool: Literal["pg_dump --format=custom --no-owner --no-acl"] = "pg_dump --format=custom --no-owner --no-acl"
+
+    @field_validator("chunks", mode="before")
+    @classmethod
+    def freeze_json_chunks(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_manifest_contract(self) -> BackupManifest:
+        try:
+            _canonical_uuid(self.archive_id)
+            salt = base64.b64decode(self.archive_salt, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("invalid archive identity") from None
+        if (
+            len(salt) != _SALT_BYTES
+            or base64.b64encode(salt).decode("ascii") != self.archive_salt
+            or _SOURCE_ID.fullmatch(self.source_installation_id) is None
+            or _PG_DUMP_VERSION.fullmatch(self.pg_dump_version) is None
+            or [chunk.index for chunk in self.chunks] != list(range(len(self.chunks)))
+            or sum(chunk.plaintext_bytes for chunk in self.chunks) != self.total_plaintext_bytes
+            or sum(chunk.ciphertext_bytes for chunk in self.chunks) != self.total_ciphertext_bytes
+        ):
+            raise ValueError("invalid archive manifest contract")
+        return self
 
     @property
     def chunk_count(self) -> int:
         return len(self.chunks)
 
     def as_dict(self) -> dict[str, object]:
-        return {
-            "archive_id": self.archive_id,
-            "archive_format_version": self.archive_format_version,
-            "archive_schema_version": self.archive_schema_version,
-            "archive_salt": self.archive_salt,
-            "schema_revision": self.schema_revision,
-            "schema_digest": self.schema_digest,
-            "source_installation_id": self.source_installation_id,
-            "chunk_bytes": self.chunk_bytes,
-            "chunks": [chunk.as_dict() for chunk in self.chunks],
-            "total_plaintext_bytes": self.total_plaintext_bytes,
-            "total_ciphertext_bytes": self.total_ciphertext_bytes,
-            "database_high_watermark": self.database_high_watermark,
-            "tombstone_journal_sequence": self.tombstone_journal_sequence,
-            "table_count": self.table_count,
-            "pg_dump_version": self.pg_dump_version,
-            "tool": self.tool,
-        }
+        return self.model_dump(mode="json")
 
 
 @dataclass(frozen=True)
@@ -882,7 +908,7 @@ class BackupArchiveReader:
         body, signature = envelope["manifest"], envelope["signature"]
         if not isinstance(body, dict) or not isinstance(signature, str) or not hmac.compare_digest(signature, _manifest_signature(self._key, body)):
             raise BackupAuthenticationFailed
-        if set(body) != {
+        v7_fields = {
             "archive_id",
             "archive_format_version",
             "archive_schema_version",
@@ -899,74 +925,35 @@ class BackupArchiveReader:
             "table_count",
             "pg_dump_version",
             "tool",
-        }:
+        }
+        fields = set(body)
+        if fields == v7_fields - {"archive_schema_version", "schema_digest"}:
+            try:
+                archive_id = body["archive_id"]
+                archive_salt = body["archive_salt"]
+                schema_revision = body["schema_revision"]
+                source_id = body["source_installation_id"]
+                if (
+                    type(archive_id) is not str
+                    or type(archive_salt) is not str
+                    or type(schema_revision) is not str
+                    or type(source_id) is not str
+                    or body["archive_format_version"] != ARCHIVE_FORMAT_VERSION
+                    or _SCHEMA_REVISION.fullmatch(schema_revision) is None
+                    or _SOURCE_ID.fullmatch(source_id) is None
+                ):
+                    raise BackupAuthenticationFailed
+                _canonical_uuid(archive_id)
+                _archive_salt(archive_salt)
+            except (KeyError, TypeError, ValueError):
+                raise BackupAuthenticationFailed from None
+            raise UnsupportedArchiveSchema
+        if fields != v7_fields:
             raise BackupAuthenticationFailed
-        if body.get("archive_format_version") != ARCHIVE_FORMAT_VERSION:
-            raise BackupAuthenticationFailed
-        archive_id = str(_canonical_uuid(str(body["archive_id"])))
-        archive_schema_version = body["archive_schema_version"]
-        schema_revision = str(body["schema_revision"])
-        schema_digest = str(body["schema_digest"])
-        source_id = str(body["source_installation_id"])
-        pg_dump_version = str(body["pg_dump_version"])
-        if (
-            type(archive_schema_version) is not int
-            or _SCHEMA_REVISION.fullmatch(schema_revision) is None
-            or _SOURCE_ID.fullmatch(schema_digest) is None
-            or _SOURCE_ID.fullmatch(source_id) is None
-            or _PG_DUMP_VERSION.fullmatch(pg_dump_version) is None
-        ):
-            raise BackupAuthenticationFailed
-        archive_salt = str(body["archive_salt"])
-        _archive_salt(archive_salt)
-        chunks_data = body.get("chunks")
-        if not isinstance(chunks_data, list) or not chunks_data or len(chunks_data) > MAX_ARCHIVE_CHUNKS:
-            raise BackupAuthenticationFailed
-        chunks = tuple(self._parse_chunk(entry) for entry in chunks_data)
-        if [chunk.index for chunk in chunks] != list(range(len(chunks))):
-            raise BackupAuthenticationFailed
-        manifest = BackupManifest(
-            archive_id=archive_id,
-            archive_format_version=ARCHIVE_FORMAT_VERSION,
-            archive_schema_version=archive_schema_version,
-            archive_salt=archive_salt,
-            schema_revision=schema_revision,
-            schema_digest=schema_digest,
-            source_installation_id=source_id,
-            chunk_bytes=_positive_int(body["chunk_bytes"]),
-            chunks=chunks,
-            total_plaintext_bytes=_positive_int(body["total_plaintext_bytes"]),
-            total_ciphertext_bytes=_positive_int(body["total_ciphertext_bytes"]),
-            database_high_watermark=_nonnegative_int(body["database_high_watermark"]),
-            tombstone_journal_sequence=_nonnegative_int(body["tombstone_journal_sequence"]),
-            table_count=_positive_int(body["table_count"]),
-            pg_dump_version=pg_dump_version,
-            tool=str(body["tool"]),
-        )
-        if manifest.tool != "pg_dump --format=custom --no-owner --no-acl" or manifest.chunk_bytes < len(_PGDMP_MAGIC) or manifest.chunk_bytes > CHUNK_SIZE or manifest.total_plaintext_bytes > MAX_ARCHIVE_PLAINTEXT_BYTES:
-            raise BackupAuthenticationFailed
-        if sum(chunk.plaintext_bytes for chunk in chunks) != manifest.total_plaintext_bytes or sum(chunk.ciphertext_bytes for chunk in chunks) != manifest.total_ciphertext_bytes:
-            raise BackupAuthenticationFailed
-        return manifest
-
-    @staticmethod
-    def _parse_chunk(entry: object) -> BackupChunk:
-        if not isinstance(entry, dict) or set(entry) != {"index", "nonce", "plaintext_bytes", "ciphertext_sha256", "ciphertext_bytes"}:
-            raise BackupAuthenticationFailed
-        index = _nonnegative_int(entry["index"])
-        nonce = str(entry["nonce"])
         try:
-            nonce_bytes = base64.b64decode(nonce, validate=True)
-        except (binascii.Error, ValueError):
-            raise BackupAuthenticationFailed from None
-        if nonce_bytes != index.to_bytes(_NONCE_BYTES, "big"):
+            return BackupManifest.model_validate(body)
+        except ValidationError:
             raise BackupAuthenticationFailed
-        digest = str(entry["ciphertext_sha256"])
-        plaintext_bytes = _positive_int(entry["plaintext_bytes"])
-        ciphertext_bytes = _positive_int(entry["ciphertext_bytes"])
-        if re.fullmatch(r"[0-9a-f]{64}", digest) is None or ciphertext_bytes != plaintext_bytes + _TAG_BYTES:
-            raise BackupAuthenticationFailed
-        return BackupChunk(index, nonce, plaintext_bytes, digest, ciphertext_bytes)
 
     @staticmethod
     def _verify_ciphertext_pass(chunks_fd: int, manifest: BackupManifest) -> tuple[tuple[int, int, int], ...]:
@@ -1022,18 +1009,6 @@ class BackupArchiveReader:
         spool.flush()
         if spool.tell() != manifest.total_plaintext_bytes:
             raise BackupAuthenticationFailed
-
-
-def _positive_int(value: object) -> int:
-    if type(value) is not int or value < 1:
-        raise BackupAuthenticationFailed
-    return value
-
-
-def _nonnegative_int(value: object) -> int:
-    if type(value) is not int or value < 0:
-        raise BackupAuthenticationFailed
-    return value
 
 
 def pg_dump_argv(database_url: str, *, snapshot_id: str | None = None) -> tuple[str, ...]:
@@ -1208,6 +1183,9 @@ async def _exported_snapshot(database_url: str) -> AsyncIterator[BackupSnapshot]
             if schema_revision != M7_FINAL_SCHEMA_REVISION:
                 raise BackupCommandFailed
             if not await verify_m7_catalog_asyncpg(connection):
+                raise BackupCommandFailed
+            root_objects = await inventory_user_schema_objects_asyncpg(connection)
+            if "relation:r:alembic_version" not in root_objects or not inventory_is_m7_allowed(root_objects):
                 raise BackupCommandFailed
             if "database_high_watermark" in row:
                 # Unit-level adapters may return the complete final shape.

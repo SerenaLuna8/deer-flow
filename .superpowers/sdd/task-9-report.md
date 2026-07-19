@@ -27,6 +27,41 @@ The final Task 9 test file covers:
 - authenticated pre-M7 rejection before any target operation;
 - restore-stable canonical schema hashing plus near-miss drift rejection.
 
+## Independent review repair
+
+The first bounded repair review addressed exactly four frozen findings:
+
+- **I1 — exported-snapshot TOCTOU:** three real-PostgreSQL RED cases injected an
+  owned sequence, a LangGraph index, or a function after the outer precheck and
+  all three still reached the mocked `pg_dump` spawn. The exported snapshot now
+  checks the exact root inventory, revision, and canonical catalog through the
+  same asyncpg connection and already-open repeatable-read transaction; the
+  three cases are GREEN and never spawn.
+- **I2 — genuine old archive:** an exact authenticated old manifest and its
+  old-AAD ciphertext now reaches `UNSUPPORTED_ARCHIVE_SCHEMA` before target
+  parsing. HMAC validation still happens first, so a bad old-shape signature is
+  `BACKUP_AUTHENTICATION_FAILED`, while a malformed version-7 manifest cannot
+  use unsupported-schema classification as an authentication oracle.
+- **I3 — strict manifest contract:** writer, reader, restore parser, public
+  construction, and generated JSON schema now share one frozen strict Pydantic
+  model. Unknown fields, scalar coercion, wrong version/revision/digest, invalid
+  chunk bounds, and mutation are rejected. The combined I2/I3 RED set was eight
+  failures and is now eight passes.
+- **I4 — proof propagation:** `restore_proofs` now persists non-null archive
+  schema version and canonical digest. The static baseline constrains the exact
+  M7 version/revision and a lower-hex digest; append-only triggers protect both
+  fields. The two real-PostgreSQL RED cases are GREEN, including a live restore
+  ORM read and invalid-insert/update rejection.
+
+The repair changed the canonical baseline signature intentionally. An
+independent metadata database read confirmed 615 columns with digest
+`8bb79d7b08cd7404a9e459a42ebb56471d57888310c965f143d40cd553ecd5b4`
+and 383 constraints with digest
+`94879d7adbea1e3c59b9847a8d9982ed6681b36ecb416879c75b49a114ad82e9`;
+all other signature dimensions remain unchanged. A direct catalog audit also
+confirmed `archive_schema_version smallint NOT NULL`, `schema_digest char(64)
+NOT NULL`, and the exact M7 proof constraint.
+
 ## Restore-stable catalog contract
 
 Real PostgreSQL 14 `pg_dump`/`pg_restore` changes only the presentation of varchar status arrays in check constraints and two partial indexes:
@@ -49,17 +84,17 @@ The shared Task 8/Task 9 verifier normalizes only a complete array of string lit
 
 ## Verification evidence
 
-- Task 8 exact baseline plus live restore: `27 passed` (`26` Task 8 tests plus one live restore).
+- Final Task 8 plus repaired Task 9 PostgreSQL regression: `50 passed` (`26` + `24`).
 - Fixed 16-file project-foundation PostgreSQL release gate: `157 passed`, `0 skipped`.
-- Recovery gate (`test_m7_backup_restore_postgres.py`, backup archive, restore PostgreSQL, restore safety, retention purge, tombstone journal): `133 passed`, zero skips.
+- Recovery gate (`test_m7_backup_restore_postgres.py`, backup archive, restore PostgreSQL, restore safety, retention purge, tombstone journal): `144 passed`, zero skips.
 - Fresh standalone blocking-I/O gate: `4 passed`.
-- Focused runtime-schema mismatch and successful random drill: `2 passed`.
-- Ruff format check: `19 files already formatted`.
+- Focused live backup/restore proof plus successful random drill: `2 passed`.
+- Ruff format check: `9 files already formatted`.
 - Ruff lint: `All checks passed!`.
-- Full backend collection: `7774 tests collected`, zero collection errors.
+- Full backend collection: `7785 tests collected`, zero collection errors.
 - Production residue scan for `PRE_M6`, `pre[_-]cutover`, revision `0013`, and revision `0015`: no matches.
 - `git diff --check`: clean.
-- Isolated PostgreSQL cleanup: no `deerflow_test_*`/`deerflow_restore_*`/`deerflow_autogen_*` databases remained; the port-55439 cluster was stopped, its exact temporary data directory and diagnostic files were removed, and `pg_isready` returned `no response`.
+- Isolated repair PostgreSQL cleanup: no `deerflow_test_*`/`deerflow_restore_*`/`deerflow_autogen_*` databases remained; the port-55440 cluster was stopped, its exact temporary data directory and diagnostic file were removed, and `pg_isready` returned `no response`.
 
 ## Documentation
 

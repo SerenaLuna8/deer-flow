@@ -55,6 +55,8 @@ class RestoreProofRow(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     archive_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     archive_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    archive_schema_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    schema_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     target_database_ref_key_id: Mapped[str] = mapped_column(String(64), nullable=False)
     target_database_ref_hmac: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     schema_revision: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -69,6 +71,10 @@ class RestoreProofRow(Base):
         CheckConstraint(
             "archive_tombstone_sequence >= 0 AND replayed_through_sequence >= archive_tombstone_sequence",
             name="ck_restore_proofs_sequences",
+        ),
+        CheckConstraint(
+            "archive_schema_version = 7 AND schema_revision = '0001_project_saas_baseline' AND schema_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_restore_proofs_archive_schema",
         ),
         Index("ix_restore_proofs_archive", "archive_id", restored_at.desc()),
     )

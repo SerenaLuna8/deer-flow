@@ -18,6 +18,7 @@ from app.private_work.run_repository import PrivateRunCreate, PrivateRunReposito
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.base import Base
+from deerflow.persistence.final_schema_contract import M7_CANONICAL_SCHEMA_DIGEST
 from scripts.check_postgres import check_postgres
 from scripts.setup_postgres import PostgresSetupError, _bootstrap_existing
 
@@ -825,10 +826,12 @@ async def test_append_only_audit_ledger_tombstone_and_restore_proof_reject_mutat
             await connection.execute(
                 text(
                     """INSERT INTO restore_proofs
-                    (id,archive_id,archive_digest,target_database_ref_key_id,
-                     target_database_ref_hmac,schema_revision,archive_tombstone_sequence,
-                     replayed_through_sequence,journal_id,final_journal_head_digest)
-                    VALUES (:id,:archive,:digest,'test',:ref,:revision,0,0,:journal,:head)"""
+                    (id,archive_id,archive_digest,archive_schema_version,schema_digest,
+                     target_database_ref_key_id,target_database_ref_hmac,schema_revision,
+                     archive_tombstone_sequence,replayed_through_sequence,journal_id,
+                     final_journal_head_digest)
+                    VALUES (:id,:archive,:digest,7,:schema_digest,'test',:ref,:revision,
+                            0,0,:journal,:head)"""
                 ),
                 {
                     "id": uuid.uuid4(),
@@ -836,17 +839,49 @@ async def test_append_only_audit_ledger_tombstone_and_restore_proof_reject_mutat
                     "digest": "6" * 64,
                     "ref": "7" * 64,
                     "revision": M7_FINAL_SCHEMA_REVISION,
+                    "schema_digest": M7_CANONICAL_SCHEMA_DIGEST,
                     "journal": uuid.uuid4(),
                     "head": "8" * 64,
                 },
             )
+
+        for archive_schema_version, schema_digest in (
+            (6, M7_CANONICAL_SCHEMA_DIGEST),
+            (7, "not-a-canonical-digest"),
+        ):
+            with pytest.raises(DBAPIError):
+                async with seed.engine.begin() as connection:
+                    await connection.execute(
+                        text(
+                            """INSERT INTO restore_proofs
+                            (id,archive_id,archive_digest,archive_schema_version,
+                             schema_digest,target_database_ref_key_id,
+                             target_database_ref_hmac,schema_revision,
+                             archive_tombstone_sequence,replayed_through_sequence,
+                             journal_id,final_journal_head_digest)
+                            VALUES (:id,:archive,:digest,:archive_schema_version,
+                                    :schema_digest,'test',:ref,:revision,0,0,
+                                    :journal,:head)"""
+                        ),
+                        {
+                            "id": uuid.uuid4(),
+                            "archive": uuid.uuid4(),
+                            "digest": "6" * 64,
+                            "archive_schema_version": archive_schema_version,
+                            "schema_digest": schema_digest,
+                            "ref": "7" * 64,
+                            "revision": M7_FINAL_SCHEMA_REVISION,
+                            "journal": uuid.uuid4(),
+                            "head": "8" * 64,
+                        },
+                    )
 
         mutations = {
             "project_usage_ledger": "delta=2",
             "audit_logs": "outcome='rejected'",
             "dead_jobs": "public_error_code='MUTATED'",
             "deletion_tombstones": "purge_status='purged'",
-            "restore_proofs": "probes_complete=true",
+            "restore_proofs": "archive_schema_version=6, schema_digest='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
         }
         for table_name, assignment in mutations.items():
             with pytest.raises(DBAPIError):

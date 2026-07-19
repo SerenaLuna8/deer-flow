@@ -81,12 +81,12 @@ FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
         digest="9428d581f97bb36d1beb911e8017e8cdae28b5760aa9897e2c1c300b4abba54a",
     ),
     "columns": CatalogInvariant(
-        count=613,
-        digest="05cb4eccb92d613bf7590967961ffe8ae5ecb92efcc0a027143b42e805c53a7e",
+        count=615,
+        digest="8bb79d7b08cd7404a9e459a42ebb56471d57888310c965f143d40cd553ecd5b4",
     ),
     "constraints": CatalogInvariant(
-        count=382,
-        digest="62a3649e176850ee91c43a18b4b899f5392fafbe67b71b5a24cad7c2d8eeab0c",
+        count=383,
+        digest="94879d7adbea1e3c59b9847a8d9982ed6681b36ecb416879c75b49a114ad82e9",
     ),
     "indexes": CatalogInvariant(
         count=161,
@@ -274,12 +274,7 @@ async def verify_m7_catalog_asyncpg(connection: object) -> bool:
     return await read_m7_catalog_signature_asyncpg(connection) == FINAL_M7_CATALOG_SIGNATURE
 
 
-async def inventory_user_schema_objects(connection: AsyncConnection) -> frozenset[str]:
-    """List non-extension-owned root objects in the active user schema."""
-
-    result = await connection.execute(
-        text(
-            """
+_USER_SCHEMA_INVENTORY_SQL = """
             SELECT 'relation:' || c.relkind::text || ':' || c.relname
             FROM pg_class c
             JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -446,9 +441,20 @@ async def inventory_user_schema_objects(connection: AsyncConnection) -> frozense
                   WHERE d.classid='pg_trigger'::regclass AND d.objid=trigger.oid AND d.deptype='e'
               )
             """
-        )
-    )
+
+
+async def inventory_user_schema_objects(connection: AsyncConnection) -> frozenset[str]:
+    """List non-extension-owned root objects in the active user schema."""
+
+    result = await connection.execute(text(_USER_SCHEMA_INVENTORY_SQL))
     return frozenset(str(value) for value in result.scalars())
+
+
+async def inventory_user_schema_objects_asyncpg(connection: object) -> frozenset[str]:
+    """Read the same exact root inventory inside an asyncpg snapshot."""
+
+    rows = await connection.fetch(_USER_SCHEMA_INVENTORY_SQL)
+    return frozenset(str(row[0]) for row in rows)
 
 
 def inventory_is_m7_allowed(objects: frozenset[str]) -> bool:
@@ -520,6 +526,7 @@ __all__ = [
     "REQUIRED_FUNCTIONS",
     "inventory_is_m7_allowed",
     "inventory_user_schema_objects",
+    "inventory_user_schema_objects_asyncpg",
     "read_m7_catalog_signature",
     "read_m7_catalog_signature_asyncpg",
     "verify_m7_catalog",

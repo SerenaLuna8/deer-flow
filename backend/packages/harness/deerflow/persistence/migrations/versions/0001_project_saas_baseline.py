@@ -455,6 +455,8 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("archive_id", sa.Uuid(), nullable=False),
         sa.Column("archive_digest", sa.CHAR(length=64), nullable=False),
+        sa.Column("archive_schema_version", sa.SmallInteger(), nullable=False),
+        sa.Column("schema_digest", sa.CHAR(length=64), nullable=False),
         sa.Column("target_database_ref_key_id", sa.String(length=64), nullable=False),
         sa.Column("target_database_ref_hmac", sa.CHAR(length=64), nullable=False),
         sa.Column("schema_revision", sa.String(length=64), nullable=False),
@@ -464,6 +466,10 @@ def upgrade() -> None:
         sa.Column("final_journal_head_digest", sa.CHAR(length=64), nullable=False),
         sa.Column("probes_complete", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("restored_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.CheckConstraint(
+            "archive_schema_version = 7 AND schema_revision = '0001_project_saas_baseline' AND schema_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_restore_proofs_archive_schema",
+        ),
         sa.CheckConstraint("archive_tombstone_sequence >= 0 AND replayed_through_sequence >= archive_tombstone_sequence", name="ck_restore_proofs_sequences"),
         sa.PrimaryKeyConstraint("id"),
     )
