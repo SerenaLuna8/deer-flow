@@ -7,8 +7,10 @@
 - First review verdict: `0 Critical / 4 Important / 1 Minor`
 - First repair commit: `744e7b8725dfc38ff5f256b6af1075dbd0a5e246`
 - Second frozen rereview verdict at `744e7b87`: `0 Critical / 3 Important / 0 Minor`
-- Current status: all three second-rereview Important findings repaired and full gates rerun; second repair commit pending
-- M7/M8 status: this repair does not mark M7 complete, does not change the milestone ledger, and does not start M8
+- Second repair commit: `e39aff392c100b7e2d509f5be6c5159b183e10d6`
+- Final reviewed branch range: `00f7ae3ca0a15e069a03fd19bc009ca0c53d1b2a..e39aff392c100b7e2d509f5be6c5159b183e10d6`
+- Final independent-review verdict: `0 Critical / 0 Important / 0 Minor` (`Approved`)
+- Current status: M7 complete at 7/8 (87.5%); M8 remains pending
 
 ## Review repairs
 

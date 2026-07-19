@@ -29,9 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with real Gateway/Scheduler/Worker process boundaries, Worker-only graph execution,
   Gateway restart replay, exact schema/recovery, and source-absence coverage.
 
-The M7 implementation and Task 1–10 reviews are recorded. Documentation and full gates
-form a closure candidate awaiting the final independent branch review. M8 full release
-acceptance remains pending, so this is not yet a complete releasable multi-user SaaS.
+M7 is complete after the full branch passed independent review with 0 Critical, 0 Important,
+and 0 Minor findings. Overall milestone progress is 7/8 (87.5%). M8 full release acceptance
+remains pending, so this is not yet a complete releasable multi-user SaaS.
 
 ## [2.0.0] — 2026-06-15
 

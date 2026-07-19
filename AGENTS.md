@@ -97,9 +97,9 @@ Recovery accepts only authenticated archive schema version 7 at
 the external tombstone journal, verifies the exact schema, and writes proof before a separate manual
 traffic switch. See [docs/operations/m6-backup-recovery.md](docs/operations/m6-backup-recovery.md).
 
-M7 is currently a closure candidate awaiting the final independent branch review. M8 full release
-acceptance remains pending, so DeerFlow must not yet be described as a complete releasable
-multi-user SaaS.
+M7 is complete after a full-branch independent review reported 0 Critical, 0 Important, and
+0 Minor findings. Overall milestone progress is 7/8 (87.5%). M8 full release acceptance remains
+pending, so DeerFlow must not yet be described as a complete releasable multi-user SaaS.
 
 ## Commands: Root vs. Module
 

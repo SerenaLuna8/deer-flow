@@ -31,12 +31,12 @@
 
 ## Execution status (2026-07-19)
 
-Tasks 1–10 are implemented, repaired, and independently reviewed at 0 Critical / 0 Important /
+Tasks 1–11 are implemented, repaired, and independently reviewed at 0 Critical / 0 Important /
 0 Minor. Their exact implementation/review ranges are recorded in
 [`2026-07-18-project-legacy-cleanup-m7-design.md`](../specs/2026-07-18-project-legacy-cleanup-m7-design.md#12-实施切片与已审查证据).
-Task 11 is the current closure candidate: active documentation, final full gates, and a full-branch
-independent review remain in progress. This plan does not mark M7 `Completed`, update the master
-ledger to 7/8, or claim release readiness before that review finishes. M8 remains pending.
+Task 11 closed the full branch at `e39aff39`; the final independent review reported 0 Critical,
+0 Important, and 0 Minor findings. M7 is `Completed` and the master ledger is 7/8 (87.5%). M8
+remains pending, so complete release readiness is not claimed.
 
 ## File Structure
 
@@ -1323,11 +1323,11 @@ git commit -m "test: establish M1-M7 release gate"
 - Independent review compares the full branch diff against the M7 spec and this plan；all Critical/Important findings are fixed and affected/full gates rerun before closure。
 - M8 remains explicitly pending; completion text must not say the complete SaaS release is ready。
 
-- [ ] **Step 1: 更新 active docs and milestone ledger**
+- [x] **Step 1: 更新 active docs and milestone ledger**
 
 Document fresh install: create empty PostgreSQL DB → `make setup-db` → `make start`; document `M7_RECREATE_REQUIRED` as manual new-database action。Document system asset catalog seed, project-only URLs, process boundaries and M7-only restore。Remove obsolete root/module guidance and deleted make targets。
 
-- [ ] **Step 2: 运行 doc/source consistency checks**
+- [x] **Step 2: 运行 doc/source consistency checks**
 
 ```bash
 rg -n "migrate-(sqlite|assets|private-work|automations|reliability)|/api/(threads|runs|assistants|memory|scheduled-tasks|agents|skills|mcp/config)|extensions_config|CUTOVER" README.md AGENTS.md backend/AGENTS.md frontend/AGENTS.md docs/operations
@@ -1336,7 +1336,7 @@ rg -n "M7|7/8|87.5%|M8" AGENTS.md docs/superpowers/specs/2026-07-12-project-firs
 
 Expected: first command returns no obsolete active-doc matches; second returns the updated ledger and M8 warning。
 
-- [ ] **Step 3: 运行 final clean-tree verification from the Task 10 gate list**
+- [x] **Step 3: 运行 final clean-tree verification from the Task 10 gate list**
 
 ```bash
 POSTGRES_TEST_URL="$POSTGRES_TEST_URL" make test-project-foundation-postgres
@@ -1363,13 +1363,13 @@ git status --short
 
 Expected: all gates PASS、0 PostgreSQL skips、support bundle contains no secret/removed extension field、no local Markdown link is broken，and only intended documentation/status changes are uncommitted before the closure commit。After process tests, verify no child PID/listener/database from the random M7 fixtures remains。
 
-- [ ] **Step 4: 请求 independent code review and repair findings**
+- [x] **Step 4: 请求 independent code review and repair findings**
 
 Use `superpowers:requesting-code-review` with review range `00f7ae3c..HEAD` and require explicit review of: spec coverage、deleted-surface absence、project/owner authority、system-admin content redaction、Gateway/Worker/Scheduler boundaries、baseline schema equality、old-DB fail-before-DDL、M7 recovery invariants、frontend static no-network contract。Record every Task 1–10 review range plus the final range/verdict in the M7 spec；Minor findings must be recorded with evidence that they do not block M8。
 
 For every Critical/Important finding, use `superpowers:receiving-code-review`, reproduce with a failing test, fix, rerun the affected gate and then rerun the Task 10 full release gate。Do not close M7 on implementation green alone。
 
-- [ ] **Step 5: 提交 closure docs**
+- [x] **Step 5: 提交 closure docs**
 
 ```bash
 git add AGENTS.md backend/AGENTS.md frontend/AGENTS.md README.md CHANGELOG.md docs

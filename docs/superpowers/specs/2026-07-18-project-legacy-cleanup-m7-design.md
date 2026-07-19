@@ -1,10 +1,10 @@
 # M7 最终 Legacy 清理与发布前基线重置设计
 
 - 日期：2026-07-18
-- 状态：关闭候选，待最终独立分支审查
+- 状态：Completed
 - 总体规格：`docs/superpowers/specs/2026-07-12-project-first-saas-design.md`
 - 前置里程碑：M1、M2、M3、M4、M5、M6 已正式完成
-- 当前总体进度：M1–M6 已完成；M7 最终结论与 7/8 ledger 等待独立审查后写入
+- 当前总体进度：M1–M7 已完成，共 7/8（87.5%）；M8 仍待交付
 - 里程碑：M7 — 最终 legacy source/API 清理与回滚窗口收口
 - 后续里程碑：M8 完整发布验收
 
@@ -339,17 +339,17 @@ implementation 与全部 review repair；ledger-only commit 不混入被审查�
 | 8 | sole `0001_project_saas_baseline` | `25095e17` | `ff580895..2732c014` | 0 / 0 / 0 |
 | 9 | archive schema version 7 and exact restore proof | `228d3e2c` | `d806c089..3b08d56d` | 0 / 0 / 0 |
 | 10 | fixed 22-file M1–M7/source/process release gate | `a35ed544` | `4ab7649c..b828e317` | 0 / 0 / 0 |
-| 11 | docs, complete gates, full-branch closure review | closure candidate | `70a36a5c..candidate HEAD` | 待独立审查 |
+| 11 | docs, complete gates, full-branch closure review | `fd2550f4`（repairs `744e7b87`、`e39aff39`） | `00f7ae3c..e39aff39` | 0 Critical / 0 Important / 0 Minor |
 
 Evidence: [reviewed task ledger](../../../.superpowers/sdd/progress.md),
 [Task 10 gate report](../../../.superpowers/sdd/task-10-report.md),
-[Task 11 closure candidate report](../../../.superpowers/sdd/task-11-report.md),
+[Task 11 final closure report](../../../.superpowers/sdd/task-11-report.md),
 [fixed PostgreSQL gate](../../../Makefile),
 [source/link/process absence gate](../../../backend/tests/test_m7_source_absence.py), and
 [M7 recovery runbook](../../operations/m6-backup-recovery.md).
 
-每个切片使用测试驱动开发，先运行会失败的 contract，再实现最终路径并重跑 affected gate。M7 的
-`Completed` 状态、7/8 ledger、最终 branch range/verdict 和 Task 11 修复证据只能在独立关闭审查完成后写入。
+每个切片使用测试驱动开发，先运行会失败的 contract，再实现最终路径并重跑 affected gate。完整分支
+`00f7ae3c..e39aff39` 的最终独立审查结论为 0 Critical / 0 Important / 0 Minor；M7 已关闭，M8 仍待交付。
 
 ## 13. 验收门禁
 
