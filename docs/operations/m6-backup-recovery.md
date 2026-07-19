@@ -2,7 +2,8 @@
 
 This runbook covers encrypted backups of the M7 final baseline, the external deletion
 journal, restore into a new database, and the separate restore drill required
-for operational acceptance. Pre-M7 migration backup workflows are no longer supported.
+for operational acceptance. Every usable archive must use schema version 7 and revision
+`0001_project_saas_baseline`.
 
 ## Authority and secret prerequisites
 
@@ -124,7 +125,7 @@ do not retain target credentials or private restored content.
 | `RESTORE_FAILED` before target creation | Leave source and journal unchanged; correct authentication, source anchor, target naming, or administrator authority. |
 | `RESTORE_FAILED` after target creation | The command must remove only its invocation-owned target and workspace. Verify absence; if cleanup cannot be proven, quarantine that target and investigate before retrying. |
 | Archive tamper, wrong key, journal gap, source mismatch, or proof mismatch | Treat the artifact set as unusable. Never suppress the probe or edit the manifest/journal; select a matching retained key/artifact set or create and drill a new backup. |
-| `RESTORE_DRILL_FAILED` | Recovery readiness is not established. Do not delete the source, rotate away required keys, or claim M6 recovery acceptance. Diagnose and repeat a fresh drill. |
+| `RESTORE_DRILL_FAILED` | Recovery readiness is not established. Do not delete the source, rotate away required keys, or claim recovery acceptance. Diagnose and repeat a fresh drill. |
 | `make check-db` or application smoke fails on a verified target | Do not switch traffic. Repair forward on a new target or create another restore; preserve evidence from the failed target. |
 
 ## Forward-only rule

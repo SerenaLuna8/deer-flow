@@ -1,10 +1,10 @@
 # M7 最终 Legacy 清理与发布前基线重置设计
 
 - 日期：2026-07-18
-- 状态：待实施
+- 状态：关闭候选，待最终独立分支审查
 - 总体规格：`docs/superpowers/specs/2026-07-12-project-first-saas-design.md`
 - 前置里程碑：M1、M2、M3、M4、M5、M6 已正式完成
-- 当前总体进度：6/8（75%）
+- 当前总体进度：M1–M6 已完成；M7 最终结论与 7/8 ledger 等待独立审查后写入
 - 里程碑：M7 — 最终 legacy source/API 清理与回滚窗口收口
 - 后续里程碑：M8 完整发布验收
 
@@ -195,9 +195,9 @@ stream、backup/recovery 所需结构。
 4. 事务化写入 bootstrap system assets；
 5. 运行 final schema、asset、role 和 process readiness probes。
 
-`make migrate-db` 在 M7 首个候选版本中只验证/应用从 M7 baseline 之后产生的未来 revision。遇到旧
-`0001`–`0015` revision 或 legacy marker 时返回 `M7_RECREATE_REQUIRED`，不做 DDL。命令输出可以包含公共
-revision 名和重建指引，但不能打印数据库 URL、credential、owner map 或私有内容。
+M7 只记录新空数据库 → `make setup-db` → `make start` 的安装路径。任何旧 revision、unknown
+nonempty schema 或不精确的 M7 catalog 都返回 `M7_RECREATE_REQUIRED`，不做 DDL。命令输出可以包含
+公共 revision 名和新建空数据库指引，但不能打印数据库 URL、credential、owner map 或私有内容。
 
 ## 7. 系统资产 bootstrap 与 source 清理
 
@@ -321,21 +321,35 @@ M7 关闭的是 pre-M7 代码和数据库回滚窗口，不删除 M6 的灾难�
 - system_admin 继续不能读取 prompt、消息、Memory、文件、artifact 或 run output 正文。
 - 删除兼容分支后，测试 fake 必须位于 tests/support，不得把 production memory/fallback backend 留作测试捷径。
 
-## 12. 实施切片
+## 12. 实施切片与已审查证据
 
-M7 实施计划按以下独立审查边界拆分：
+最终实施计划拆分为 11 个任务。Tasks 1–10 已分别完成实现、修复和独立复审；Task 11 负责 active
+docs、最终全量门禁和完整分支独立关闭审查。下表 range 使用 `base..last-reviewed-repair`，覆盖该任务的
+implementation 与全部 review repair；ledger-only commit 不混入被审查实现范围。
 
-1. 建立 M7 baseline、空库 setup、旧库拒绝和 final schema readiness。
-2. 建立 deterministic system asset bootstrap，移除 file-backed asset authority 和兼容 API。
-3. 移除 Gateway legacy runtime、global private-work API、startup migration 和相关配置。
-4. 移除 legacy Automation API/read adapter，同时保持 project Scheduler/Worker contract。
-5. 收敛 channel authority，删除 global connection fallback。
-6. 拆分前端纯组件与 project adapter，删除旧 workspace route/client/fallback。
-7. 删除 staged migration CLI、旧 Make/doctor/wizard/runbook 入口，更新 M7 backup/restore schema contract。
-8. 建立 M1–M7 PostgreSQL/Frontend/process/recovery gate，运行全量门禁并完成独立关闭审查。
+| Task | 范围 | 实现 commit | 已审查实现范围 | 任务复审结论 |
+| --- | --- | --- | --- | --- |
+| 1 | marker-free final schema/readiness | `55d2e656` | `d5076af3..08ed19be` | 0 Critical / 0 Important / 0 Minor |
+| 2 | PostgreSQL system asset bootstrap | `2d422c12` | `528e43c7..b4df0137` | 0 / 0 / 0 |
+| 3 | Gateway admission-only/project private API | `670d695a` | `bcd3e1ec..523bf5ee` | 0 / 0 / 0 |
+| 4 | project-only Automation | `896cace8` | `2da9e6a6..fbfe6c56` | 0 / 0 / 0 |
+| 5 | exact project channel/input-polish authority | `8fd7aba9` | `44b38861..eea90125` | 0 / 0 / 0 |
+| 6 | project-only frontend and static isolation | `8428e136` | `05b31530..eb5d2d8c` | 0 / 0 / 0 |
+| 7 | canonical config and PostgreSQL-only runtime stores | `6e79290d` | `e1533d6f..c2bbc25b` | 0 / 0 / 0 |
+| 8 | sole `0001_project_saas_baseline` | `25095e17` | `ff580895..2732c014` | 0 / 0 / 0 |
+| 9 | archive schema version 7 and exact restore proof | `228d3e2c` | `d806c089..3b08d56d` | 0 / 0 / 0 |
+| 10 | fixed 22-file M1–M7/source/process release gate | `a35ed544` | `4ab7649c..b828e317` | 0 / 0 / 0 |
+| 11 | docs, complete gates, full-branch closure review | closure candidate | `70a36a5c..candidate HEAD` | 待独立审查 |
 
-每个切片使用测试驱动开发，先写会失败的 contract，再删除或改造实现。每个切片必须有独立提交和独立审查；
-只有最后一项通过后才更新里程碑状态。
+Evidence: [reviewed task ledger](../../../.superpowers/sdd/progress.md),
+[Task 10 gate report](../../../.superpowers/sdd/task-10-report.md),
+[Task 11 closure candidate report](../../../.superpowers/sdd/task-11-report.md),
+[fixed PostgreSQL gate](../../../Makefile),
+[source/link/process absence gate](../../../backend/tests/test_m7_source_absence.py), and
+[M7 recovery runbook](../../operations/m6-backup-recovery.md).
+
+每个切片使用测试驱动开发，先运行会失败的 contract，再实现最终路径并重跑 affected gate。M7 的
+`Completed` 状态、7/8 ledger、最终 branch range/verdict 和 Task 11 修复证据只能在独立关闭审查完成后写入。
 
 ## 13. 验收门禁
 

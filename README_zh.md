@@ -58,7 +58,6 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
   - [从 Deep Research 到 Super Agent Harness](#从-deep-research-到-super-agent-harness)
   - [核心特性](#核心特性)
     - [Skills 与 Tools](#skills-与-tools)
-      - [Claude Code 集成](#claude-code-集成)
     - [Session Goals](#session-goals)
     - [手动上下文压缩](#手动上下文压缩)
     - [Sub-Agents](#sub-agents)
@@ -66,9 +65,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [Context Engineering](#context-engineering)
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
-  - [内嵌 Python Client](#内嵌-python-client)
   - [定时任务 (Scheduled Tasks)](#定时任务-scheduled-tasks)
-  - [终端工作台 (TUI)](#终端工作台-tui)
   - [文档](#文档)
   - [⚠️ 安全使用](#️-安全使用)
   - [参与贡献](#参与贡献)
@@ -117,16 +114,15 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    ```bash
    make setup-db
    make check-db
+   make start
    ```
 
-   `setup-db` 不会创建或修改 role；目标 role 必须已存在。后续只升级已存在数据库时
-   使用 `make migrate-db`，它不读取管理员连接，也不会创建数据库。`setup-db` 和
-   `migrate-db` 都会先初始化 ORM/Alembic，再用同一个显式 `DATABASE_URL` 幂等初始化
-   LangGraph checkpointer/store 完整 schema。`make check-db` 只读检查 PostgreSQL 版本、
+   `setup-db` 不会创建或修改 role；目标 role 必须已存在。它先初始化 ORM/Alembic，再用同一个
+   显式 `DATABASE_URL` 幂等初始化 LangGraph checkpointer/store 完整 schema。`make check-db` 只读检查 PostgreSQL 版本、
    Alembic revision、业务表（包括 `projects`、`project_memberships`）以及
    checkpoint/store 必需表；只到 Alembic head 但缺少其中任一表仍会判定为不健康。
    命令输出不会显示 username、password 或完整 URL。
-   Gateway 启动只验证和升级已配置的目标数据库，不会自动建库。
+   Gateway、Worker 和 Scheduler 启动只验证已配置的目标数据库，不会自动建库或修复 schema。
 
    当前 DeerFlow compose stack 不会自动启动 PostgreSQL。本地可单独启动容器，以下值均为
    占位符，密码中的特殊字符写入 URL 前必须编码：
@@ -146,7 +142,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
    ### PostgreSQL final baseline（M7）
 
-   DeerFlow 只支持全新 PostgreSQL 数据库。`make setup-db` 在空库安装唯一 revision
+   DeerFlow 只支持全新 PostgreSQL 数据库。受支持的安装顺序是：创建空数据库 →
+   `make setup-db` → `make start`。`make setup-db` 在空库安装唯一 revision
    `0001_project_saas_baseline`，再初始化 builtin system asset catalog、LangGraph schema 和
    default project；`make check-db` 只读验证 revision 与必需表。
 
@@ -160,6 +157,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    export DATABASE_URL="postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow"
    make setup-db
    make check-db
+   make start
    ```
 
    如果你要提交本地安装、配置或运行问题，可以执行 `make support-bundle`。
@@ -291,7 +289,7 @@ make down   # 停止并移除容器
 ```
 
 > [!NOTE]
-> 当前 Agent 运行时嵌入在 Gateway 中运行，`/api/langgraph/*` 会由 nginx 重写到 Gateway 的 LangGraph-compatible API。
+> Gateway、Worker 和可选 Scheduler 是独立进程；nginx 将 `/api/*` 直接转发给 Gateway，Agent graph 只由 Worker 执行。
 
 访问地址：http://localhost:2026
 
@@ -301,7 +299,7 @@ make down   # 停止并移除容器
 
 如果你更希望直接在本地启动各个服务：
 
-前提：先完成上面的“配置”步骤（`make setup`）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`。可以用 `DEER_FLOW_PROJECT_ROOT` 显式指定项目根目录，也可以用 `DEER_FLOW_CONFIG_PATH` 指向某个具体配置文件。运行期状态默认写到项目根目录下的 `.deer-flow`，可用 `DEER_FLOW_HOME` 覆盖；skills 默认读取项目根目录下的 `skills/`，可用 `DEER_FLOW_SKILLS_PATH` 覆盖。启动前先运行 `make doctor` 校验配置。
+前提：先完成上面的“配置”步骤（`make setup`）。`make dev` 默认只读取 canonical 仓库根目录下的 `config.yaml`；如需使用其他文件，只能通过 `DEER_FLOW_CONFIG_PATH` 显式指定。运行期状态默认写到 `.deer-flow`，可用 `DEER_FLOW_HOME` 覆盖。启动前先运行 `make doctor` 校验配置、final schema readiness 和服务前置条件。
 在 Windows 上，请使用 Git Bash 运行本地开发流程。基于 bash 的服务脚本不支持直接在原生 `cmd.exe` 或 PowerShell 中执行，且 WSL 也不保证可用，因为部分脚本依赖 Git for Windows 的 `cygpath` 等工具。
 
 1. **检查依赖环境**：
@@ -341,15 +339,18 @@ Docker 开发时，服务启动行为会遵循 `config.yaml` 里的 sandbox 模�
 
 #### MCP Server
 
-DeerFlow 支持可配置的 MCP Server 和 skills，用来扩展能力。
-对于 HTTP/SSE MCP Server，还支持 OAuth token 流程（`client_credentials`、`refresh_token`）。
-详细说明见 [MCP Server 指南](backend/docs/MCP_SERVER.md)。
+System admin 通过 `/admin/assets/mcp` 发布系统 MCP；项目成员在
+`/projects/{project_slug}/mcp` 管理项目 MCP 和固定的系统 binding。定义与不可变版本存入
+PostgreSQL；Gateway admission 为每个 Run 固定 exact MCP/Credential-grant snapshot，Worker 只
+materialize 该 snapshot。HTTP/SSE OAuth 和 stdio transport 继续支持，但 secret 只存入加密的
+Credential envelope，不进入 MCP 定义或浏览器 cache。详细说明见
+[MCP Server 指南](backend/docs/MCP_SERVER.md)。
 
 #### IM 渠道
 
 DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
-DeerFlow 支持用户自有的 IM 渠道连接，并复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。Connections 和 provider availability 只使用 `/api/projects/{project_id}/connections*`；绑定后的文本消息会在精确的项目与 owner 作用域运行，全局渠道绑定 UI 和 API 已删除。设置和运维说明参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
+DeerFlow 支持 project-bound IM 渠道连接，并复用配置的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。Connections 和 provider availability 使用 `/api/projects/{project_id}/connections*`；绑定后的文本消息只在 PostgreSQL 中精确解析出的 account、project、owner、Agent 和 connection 作用域运行。设置和运维说明参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
 
 | 渠道 | 传输方式 | 上手难度 |
 |---------|-----------|------------|
@@ -364,20 +365,10 @@ DeerFlow 支持用户自有的 IM 渠道连接，并复用现有的 `channels.*`
 
 ```yaml
 channels:
-  # LangGraph-compatible Gateway API base URL（默认：http://localhost:8001/api）
+  # 辅助 Gateway command base URL（默认：http://localhost:8001/api）
   langgraph_url: http://localhost:8001/api
   # Gateway API URL（默认：http://localhost:8001）
   gateway_url: http://localhost:8001
-
-  # 可选：所有移动端渠道共用的全局 session 默认值
-  session:
-    assistant_id: lead_agent  # 也可以填自定义 agent 名；渠道层会自动转换为 lead_agent + agent_name
-    config:
-      recursion_limit: 100
-    context:
-      thinking_enabled: true
-      is_plan_mode: false
-      subagent_enabled: false
 
   feishu:
     enabled: true
@@ -402,20 +393,6 @@ channels:
     bot_token: $TELEGRAM_BOT_TOKEN
     allowed_users: []               # 留空表示允许所有人
 
-    # 可选：按渠道 / 按用户单独覆盖 session 配置
-    session:
-      assistant_id: mobile-agent  # 这里同样支持自定义 agent 名
-      context:
-        thinking_enabled: false
-      users:
-        "123456789":
-          assistant_id: vip-agent
-          config:
-            recursion_limit: 150
-          context:
-            thinking_enabled: true
-            subagent_enabled: true
-
   wechat:
     enabled: false
     bot_token: $WECHAT_BOT_TOKEN
@@ -437,9 +414,9 @@ channels:
     card_template_id: ""                       # 可选：AI 卡片模板 ID，用于流式打字机效果
 ```
 
-说明：
-- `assistant_id: lead_agent` 会直接调用默认的 LangGraph assistant。
-- 如果 `assistant_id` 填的是自定义 agent 名，DeerFlow 仍然会走 `lead_agent`，同时把该值注入为 `agent_name`，这样 IM 渠道也会生效对应 agent 的 SOUL 和配置。
+Project-bound IM worker 会从 PostgreSQL connection row 恢复固定 Agent version，再通过 Gateway
+内部 admission service 创建 exact project-private Run。消息字段和 provider-wide 配置都不能作为
+project、owner、membership 或 Agent authority。
 
 在 `.env` 里设置对应的 API key：
 
@@ -554,63 +531,18 @@ DeerFlow 2.0 不再是一个需要你自己拼装的 framework。它是一个开
 
 ### Skills 与 Tools
 
-Skills 是 DeerFlow 能做“几乎任何事”的关键。
+Skill 是不可变、带版本的 project 或 system asset。System admin 在
+`/admin/assets/skills` 发布系统 Skill；项目成员在 `/projects/{project_slug}/skills` 创建项目 Skill
+并固定启用的系统版本。创建和发布会先运行 deterministic SkillScan 与 contextual scanner，再把
+version 写入 PostgreSQL。
 
-标准的 Agent Skill 是一种结构化能力模块，通常就是一个 Markdown 文件，里面定义了工作流、最佳实践，以及相关的参考资源。DeerFlow 自带一批内置 skills，覆盖研究、报告生成、演示文稿制作、网页生成、图像和视频生成等场景。真正有意思的地方在于它的扩展性：你可以加自己的 skills，替换内置 skills，或者把多个 skills 组合成复合工作流。
+Gateway admission 会为每个 Run 固定 exact Agent、Skill、MCP version。Worker 只把该 admitted
+snapshot 中的 Skill bytes materialize 到 run-owned read-only `/mnt/skills`；运行时服务不会发现或修改
+ambient Skill 目录。`/data-analysis ...` 这类 slash activation 也只能选择 exact snapshot 中启用的 Skill。
 
-Skills 采用按需渐进加载，不会一次性把所有内容都塞进上下文。只有任务确实需要时才加载，这样能把上下文窗口控制得更干净，也更适合对 token 比较敏感的模型。
-
-在 Web UI 中，管理员可以直接从工作区的 Skills 列表打开只读渲染后的 `SKILL.md` 预览，无需离开当前列表。
-
-通过 Gateway 安装 `.skill` 压缩包时，DeerFlow 会接受标准的可选 frontmatter 元数据，比如 `version`、`author`、`compatibility`，不会把本来合法的外部 skill 拒之门外。
-
-Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索、网页抓取、网页渲染截图、文件操作、bash 执行；同时也支持通过 MCP Server 和 Python 函数扩展自定义工具。你可以替换任何一项，也可以继续往里加。
-
-Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
-
-Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。新 thread 会从该回复对应的 checkpoint 开始，并尽力复制当前 thread 的工作区文件。
-
-```text
-# sandbox 容器内的路径
-/mnt/skills/public
-├── research/SKILL.md
-├── report-generation/SKILL.md
-├── slide-creation/SKILL.md
-├── web-page/SKILL.md
-└── image-generation/SKILL.md
-
-/mnt/skills/custom
-└── your-custom-skill/SKILL.md      ← 你的 skill
-```
-
-#### Claude Code 集成
-
-借助 `claude-to-deerflow` skill，你可以直接在 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 里和正在运行的 DeerFlow 实例交互。不用离开终端，就能下发研究任务、查看状态、管理 threads。
-
-**安装这个 skill：**
-
-```bash
-npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
-```
-
-然后确认 DeerFlow 已经启动（默认地址是 `http://localhost:2026`），在 Claude Code 里使用 `/claude-to-deerflow` 命令即可。
-
-**你可以做的事情包括：**
-- 给 DeerFlow 发送消息，并接收流式响应
-- 选择执行模式：flash（更快）、standard、pro（规划模式）、ultra（sub-agents 模式）
-- 检查 DeerFlow 健康状态，列出 models / skills / agents
-- 管理 threads 和会话历史
-- 上传文件做分析
-
-**环境变量**（可选，用于自定义端点）：
-
-```bash
-DEERFLOW_URL=http://localhost:2026            # 统一代理基地址
-DEERFLOW_GATEWAY_URL=http://localhost:2026    # Gateway API
-DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
-```
-
-完整 API 说明见 [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md)。
+最终 toolset 由内置 sandbox tools 和 admitted snapshot 中固定的 MCP tools 组成。Credential 只从同
+scope 已批准的 grant 解析，并在 dispatch 时注入，不进入 prompt、API payload、browser cache、checkpoint
+或日志。
 
 ### Session Goals
 
@@ -677,35 +609,6 @@ DeerFlow 对模型没有强绑定，只要实现了 OpenAI 兼容 API 的 LLM，
 - **多模态输入**，适合理解图片和视频
 - **稳定的 tool use 能力**，适合可靠的函数调用和结构化输出
 
-## 内嵌 Python Client
-
-DeerFlow 也可以作为内嵌的 Python 库使用，不必启动完整的 HTTP 服务。`DeerFlowClient` 提供了进程内的直接访问方式，覆盖所有 agent 和 Gateway 能力，返回的数据结构与 HTTP Gateway API 保持一致。HTTP Gateway 还提供 `DELETE /api/threads/{thread_id}`，用于在 LangGraph thread 本身被删除之后，清理 DeerFlow 托管的本地 thread 数据：
-
-```python
-from deerflow.client import DeerFlowClient
-
-client = DeerFlowClient()
-
-# Chat
-response = client.chat("Analyze this paper for me", thread_id="my-thread")
-
-# Streaming（LangGraph SSE 协议：values、messages-tuple、end）
-for event in client.stream("hello"):
-    if event.type == "messages-tuple" and event.data.get("type") == "ai":
-        print(event.data["content"])
-
-# 配置与管理：返回值与 Gateway 对齐的 dict
-models = client.list_models()        # {"models": [...]}
-skills = client.list_skills()        # {"skills": [...]}
-client.update_skill("web-search", enabled=True)
-client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
-client.set_goal("thread-1", "finish the implementation and make all tests pass")
-client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
-client.clear_goal("thread-1")
-```
-
-所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
-
 ## 定时任务 (Scheduled Tasks)
 
 M5 在 `/projects/{project_slug}/automations` 提供项目 Automation。
@@ -730,29 +633,8 @@ PostgreSQL session ownership lock；Gateway 不再持有 poller。关闭轮询�
 手动触发仍使用同一 occurrence/Run/job 原子 admission。独立 Worker、持久化 SSE、通用 jobs/retries、
 配额、审计和通用备份恢复已在 M6 完成。
 
-项目 API 位于 `/api/projects/{project_id}/automations`。M5 已于 2026-07-16 通过 Task 18 全量门禁和
-独立关闭审查；M6 于 2026-07-18 完成，当前进度为 6/8（75%）。M7-M8 仍未交付，因此当前不能作为
-完整可发布的多用户 SaaS。
-
-## 终端工作台 (TUI)
-
-`deerflow` 是一个面向终端用户的工作台，**内嵌**运行在 `DeerFlowClient` 之上——无需启动 Gateway、前端、nginx 或 Docker，同时沿用与 DeerFlow 其它部分相同的 `config.yaml`、checkpointer、技能、记忆、MCP 和沙箱配置。
-
-![DeerFlow TUI](docs/tui/tui-preview.svg)
-
-```bash
-uv pip install 'deerflow-harness[tui]'        # 可选的 'textual' 依赖
-
-deerflow                                      # 启动终端 UI（需要 TTY）
-deerflow --continue                           # 恢复最近一次会话
-deerflow --resume THREAD                      # 按 id 恢复指定会话
-deerflow --print "总结一下这个仓库"             # 无头模式，结果打印到 stdout
-deerflow --json  "hello"                       # 无头模式，输出按行分隔的 StreamEvent
-```
-
-键盘驱动的对话界面：流式渲染的对话区（回答按 Markdown 渲染）、紧凑的工具活动卡片、`/` 斜杠命令面板、`/model` 与 `/threads` 选择器、输入历史，以及 `Esc` / `Ctrl+C` 打断。在 TUI 里开启的会话也会出现在 Web UI 侧边栏——它会以本地默认用户身份写入共享的会话存储，因此终端与网页保持同步，**无需运行 Gateway**。
-
-完整说明见 [backend/docs/TUI.md](backend/docs/TUI.md)。
+项目 API 位于 `/api/projects/{project_id}/automations`。M7 当前是等待最终独立分支审查的关闭候选；
+M8 完整发布验收仍未完成，因此当前不能作为完整可发布的多用户 SaaS。
 
 ## 文档
 

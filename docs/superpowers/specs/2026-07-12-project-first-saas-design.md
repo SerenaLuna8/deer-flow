@@ -2,7 +2,7 @@
 
 - 日期：2026-07-12
 - 状态：实施中
-- 当前完成度：M1、M2、M3、M4、M5、M6 已正式完成（6/8，75%）；M7、M8 仍待交付
+- 当前完成度：M1–M6 已正式完成；M7 为关闭候选并等待最终独立审查；M8 仍待交付
 - 代码仓库：DeerFlow 单体仓库
 - 数据库：PostgreSQL
 - 权限边界：业务层、仓储层和数据库模型约束
@@ -11,13 +11,9 @@
 
 本文档定义 DeerFlow 从个人 Agent 工作区演进为项目优先、多用户 SaaS 的 V1 产品边界、架构原则和交付顺序。本文档是总体方向，不代替各里程碑的专项规格和实施计划。
 
-M1、M2、M3、M4、M5、M6 已正式完成。M4 已交付项目 Chats、run、file/artifact、Memory、Connections、
-project/owner scoped runtime、staged cutover、legacy SQLite→0007→M4 final 迁移链与全量门禁。
-M5 已交付 project/owner-scoped Automation、持久化 occurrence、单 Gateway Scheduler、项目 API/UI、
-staged migration、全量门禁和独立关闭审查。M6 已交付 PostgreSQL durable job、独立 Worker/Scheduler、
-持久化 SSE、配额、隐私安全审计、平台运营、认证加密 backup、外部删除 journal、新库 restore/drill、
-显式 forward-only migration 和真实多进程/Frontend/M1–M6 发布门禁。M7 与 M8 仍未交付，整体 SaaS
-交付不得标记为已完成。
+M1–M6 已正式完成。M7 已形成只有 final PostgreSQL baseline、project/admin API、project-scoped
+frontend、独立 Worker/Scheduler、durable SSE/quota/audit 和 version-7 recovery 的关闭候选；最终独立
+分支审查尚未写入结论。M8 仍未交付，整体 SaaS 交付不得标记为已完成或可发布。
 
 ## 2. 已冻结决策
 
@@ -41,7 +37,7 @@ V1 采用以下不可变更基线；如需改变，必须先修订本文档并�
 16. 项目删除恢复期和成员退出后的私有数据冻结期均为 30 天。
 17. 保留现有 DeerFlow 对话、流式响应、输入区、文件侧栏、运行控制和长任务体验。
 18. Agent、Skill、MCP 分为系统级和项目级；系统资产对所有项目可见，但项目必须显式启用并固定具体系统版本。
-19. 当前仓库自带 Agent、`skills/public` 和全局 MCP 配置作为系统资产种子；用户自定义 Agent、Skill 迁入默认项目。
+19. 系统 Agent、Skill 和 MCP 只由 packaged、版本化且 digest 校验的 bootstrap catalog 写入 PostgreSQL；运行时不扫描仓库或用户目录。
 20. 系统 MCP 使用系统 credential，启用该 MCP 的项目共享该 credential；项目 MCP 只能使用同项目 credential。
 21. `system_admin` 可以治理所有系统和项目共享资产及 credential/grant，但该平台 override 不授予成员管理或用户私有内容访问权。
 
@@ -376,26 +372,19 @@ V1 初始默认值：
 - token 使用 URL fragment 传递，避免进入服务端访问日志和 referrer。
 - 邀请只能授予 Editor、Runner 或 Viewer；Admin 由现有 Admin 显式提升。
 
-## 16. 迁移策略
+## 16. Fresh-install 与恢复策略
 
-迁移准备不再作为独立里程碑。决策冻结、威胁模型、数据清单、备份方案和迁移验收全部并入 M1。
+项目尚未上线且没有生产用户或必须兼容的生产数据库。M7 固定采用发布前重置：只支持新空
+PostgreSQL 数据库初始化，或把 authenticated M7 archive 恢复到另一个新数据库。
 
-M1 首先完成现有 SQLite 持久化数据到 PostgreSQL 的一次性原样迁移。该步骤保持现有表的业务语义，不提前把所有私有数据改造成项目模型。迁移验证完成后，应用运行时完全切换到 PostgreSQL，并移除 SQLite 运行后端。SQLite 只允许作为只读迁移源和回滚窗口内的备份，不再接受新写入。
+唯一安装顺序是：创建空数据库 → `make setup-db` → `make start`。Setup 安装
+`0001_project_saas_baseline`、packaged system asset catalog、LangGraph schema 和 default project。
+检测到旧 revision 或未知非空 schema 时，程序在任何 DDL 前返回 `M7_RECREATE_REQUIRED`；operator
+必须保留需要的旧库、自行创建新空数据库并重新 setup，不能原地 stamp、清空、转换或自动删除。
 
-完成存储层切换后，M1 再建设项目、成员关系、`ProjectContext` 和项目列表基础。M2 把该基础重构为全局工作空间与项目壳层；后续每个业务里程碑继续交付对应数据的项目化回填和验证能力。
-
-统一顺序为：
-
-1. 预检、备份和来源清单；
-2. 扩展新 schema；
-3. 创建默认项目和 Admin 成员关系；
-4. 按业务域分批回填；
-5. 比较数量、关联、哈希和抽样行为；
-6. 启用非空、复合外键和唯一约束；
-7. 切换 API 和 UI；
-8. 在观察期后移除旧路径。
-
-V1 不采用长期双写。最终切换前执行维护窗口、最终增量回填和冒烟测试。重新开放后只允许前向修复或数据库备份恢复。
+恢复只接受 archive schema version 7 与 exact M7 revision/digest，且始终写入不存在的独立新数据库；
+它重放连续 external tombstone journal、运行 exact schema/probe、写 restore proof，再由 operator 执行
+独立人工 traffic switch。M8 仍需验证完整灾难恢复演练和发布流程。
 
 ## 17. 安全和错误语义
 
@@ -425,7 +414,7 @@ V1 不采用长期双写。最终切换前执行维护窗口、最终增量回�
 - SSE 重启恢复；
 - 凭据加密、轮换和脱敏；
 - 项目删除、成员退出、恢复和清除；
-- migration 幂等、故障恢复和回滚演练；
+- fresh setup 幂等、旧库 fail-before-DDL、新库恢复和故障演练；
 - 前端账户、项目切换和退出登录后的缓存隔离。
 
 除非隔离、隐私、迁移、凭据和恢复测试全部通过，否则不得发布。
@@ -440,7 +429,7 @@ V1 不采用长期双写。最终切换前执行维护窗口、最终增量回�
 | M4 | 私有对话、运行、文件、记忆和连接 | 已完成 |
 | M5 | 自动化项目化与持久化任务 | 已完成 |
 | M6 | Worker/持久化 SSE、配额、审计、平台管理和通用备份恢复 | 已完成 |
-| M7 | 最终 legacy source/API 清理与回滚窗口收口 | 未完成 |
+| M7 | 最终 legacy source/API 清理与回滚窗口收口 | 关闭候选，待最终独立审查 |
 | M8 | 完整隔离矩阵、安全审查、运维演练和发布验收 | 未完成 |
 
 每个里程碑必须有独立专项规格、实施计划、测试证据和审查结论。

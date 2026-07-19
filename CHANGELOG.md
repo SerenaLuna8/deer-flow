@@ -9,32 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **project automation:** Complete M5 with project- and
-  owner-scoped Automation definitions and durable occurrences, Viewer read-only
-  history, manual idempotent triggers, private-run admission, crash reconciliation,
-  and staged legacy migration.
-- **scheduler:** Add single-Gateway PostgreSQL scheduler ownership controlled by
-  `scheduler.enabled`; disabling automatic polling keeps project Automation APIs and
-  manual triggers available.
-- **frontend:** Add account/project-scoped Automation workbench, cache isolation,
-  capability gates, and independent static-build browser coverage.
-- **reliability:** Complete M6 with PostgreSQL durable Jobs, independent Worker
-  execution, independent Scheduler ownership, ordered durable SSE replay, safe
-  lease takeover, dead-job retry policy, and aggregate process readiness.
-- **governance:** Enforce project quotas in authoritative transactions, add
-  privacy-safe append-only audit, project Admin usage/audit pages, and a
-  public-field-only system-admin operations console.
-- **recovery:** Add authenticated encrypted PostgreSQL backup, an external
-  hash-chained deletion journal, retention purge, new-database restore and
-  disposable drill commands, plus the explicit forward-only M6 cutover.
-- **release gates:** Pin one cross-platform, zero-skip 20-file M1–M6 PostgreSQL
-  gate with real Worker/Scheduler/Gateway recovery, frontend static/cache, and
-  backup/journal/restore coverage.
+- **M7 database baseline:** Add the sole forward-only
+  `0001_project_saas_baseline` fresh-install revision. Empty databases initialize
+  deterministically; old revisions and unknown nonempty schemas fail before DDL with
+  `M7_RECREATE_REQUIRED` and require an operator-created new database.
+- **system assets:** Seed the packaged, digest-verified system Agent, Skill, and MCP
+  catalog transactionally under a fixed non-login principal. Runtime roles consume
+  PostgreSQL catalog rows and exact admitted snapshots only.
+- **project runtime:** Make Gateway admission/query/SSE only, Worker the sole Agent
+  graph executor, and Scheduler admission only. All private authority is bound to the
+  authenticated account plus exact project and owner.
+- **frontend:** Keep the authenticated multi-project `/workspace`, project-scoped
+  `/projects/{project_slug}` workbench, and system-admin `/admin` surfaces, with
+  account/project cache isolation and independent no-network static coverage.
+- **recovery:** Require authenticated archive schema version 7 at the exact M7 revision
+  and canonical digest; restore and drill use new databases only, replay the external
+  deletion journal, and bind final schema/journal proof.
+- **release gates:** Pin one cross-platform, zero-skip 22-file M1–M7 PostgreSQL gate
+  with real Gateway/Scheduler/Worker process boundaries, Worker-only graph execution,
+  Gateway restart replay, exact schema/recovery, and source-absence coverage.
 
-M5 passed the Task 18 full-stack gates and independent closure review on 2026-07-16.
-M6 completed its full reliability, governance, recovery, migration, and release gates
-on 2026-07-18. Overall progress is 6/8 (75%); M7 legacy cleanup and M8 final release
-acceptance remain open, so this is not yet a complete releasable multi-user SaaS.
+The M7 implementation and Task 1–10 reviews are recorded. Documentation and full gates
+form a closure candidate awaiting the final independent branch review. M8 full release
+acceptance remains pending, so this is not yet a complete releasable multi-user SaaS.
 
 ## [2.0.0] — 2026-06-15
 

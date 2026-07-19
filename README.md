@@ -62,7 +62,6 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
-      - [Claude Code Integration](#claude-code-integration)
     - [Session Goals](#session-goals)
     - [Manual Context Compaction](#manual-context-compaction)
     - [Sub-Agents](#sub-agents)
@@ -70,9 +69,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Context Engineering](#context-engineering)
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
-  - [Embedded Python Client](#embedded-python-client)
   - [Project Automations](#project-automations)
-  - [Terminal Workbench (TUI)](#terminal-workbench-tui)
   - [Documentation](#documentation)
   - [⚠️ Security Notice](#️-security-notice)
     - [Improper Deployment May Introduce Security Risks](#improper-deployment-may-introduce-security-risks)
@@ -264,23 +261,32 @@ the former independent `checkpointer` section is no longer accepted. Runtime
 startup validates the configured database but does not create it; provision the
 target database before starting DeerFlow.
 
-### PostgreSQL final baseline（M7）
+### PostgreSQL final baseline (M7)
 
-DeerFlow 只支持全新 PostgreSQL 数据库。`make setup-db` 会在空库安装唯一 Alembic revision `0001_project_saas_baseline`，随后幂等初始化 builtin system asset catalog、LangGraph schema 与 default project。`make check-db` 只读验证 revision 和必需表。
+DeerFlow supports only a fresh PostgreSQL database. The supported installation sequence is:
+create an empty database → `make setup-db` → `make start`. `make setup-db` installs the sole
+Alembic revision `0001_project_saas_baseline`, then idempotently initializes the builtin system
+asset catalog, LangGraph schema, and default project. `make check-db` performs a read-only check
+of the revision and required relations.
 
-已有 M1–M6 revision、无 `alembic_version` 的非空 schema、或包含未知 relation 的数据库都不会自动升级、清空或改写；setup 会在任何 DDL 前返回 `M7_RECREATE_REQUIRED`。请创建新的空数据库并重新运行 `make setup-db`。baseline downgrade 永远拒绝，旧 SQLite/shared-asset/private-work/Automation/reliability 迁移命令已删除。
+An existing M1–M6 revision, a nonempty schema without `alembic_version`, or a database with an
+unknown relation is never upgraded, cleared, or rewritten automatically. Setup returns
+`M7_RECREATE_REQUIRED` before any DDL; create a new empty database and rerun `make setup-db`.
+Baseline downgrade is always refused, and the old SQLite, shared-asset, private-work, Automation,
+and reliability migration commands have been removed.
 
 ```bash
 export POSTGRES_ADMIN_URL="postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres"
 export DATABASE_URL="postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow"
 make setup-db
 make check-db
+make start
 ```
 
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
 > [!IMPORTANT]
-> Under final M6 cutover, project-private and Automation runs are durable jobs consumed by the independent Worker; Gateway no longer executes them or owns Automation polling. Start the backend roles separately with `make gateway`, `make worker`, and—when `scheduler.enabled=true`—`make scheduler`. The Scheduler owns and verifies one PostgreSQL session advisory lock on its original backend connection; lock/PID/session loss fail-stops that process. Worker startup always performs terminal-only Automation reconciliation before claiming jobs, and enabled Scheduler startup repeats that idempotent check before polling; neither path replays or interrupts active Worker work. Worker stream frames are store-first PostgreSQL facts with one terminal frame per Run; Gateway SSE replay uses canonical `Last-Event-ID`, and the frontend persists and deduplicates cursors per account/project/thread. M6 service orchestration, quotas, audit, recovery, and release gates are complete; M7 legacy cleanup and M8 final release acceptance still prevent a complete production SaaS claim.
+> In the final M7 runtime, project-private and Automation Runs are durable jobs consumed by the independent Worker; Gateway only admits and reads them. Start Gateway, Worker, and—when `scheduler.enabled=true`—Scheduler as separate roles. Scheduler owns and verifies one PostgreSQL session advisory lock and only admits due work. Worker persists stream frames before notification, while Gateway SSE replay honors canonical `Last-Event-ID`; the frontend stores and deduplicates cursors per account/project/thread. M7 is awaiting final independent closure review, and M8 release acceptance remains pending.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
@@ -288,7 +294,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 If you prefer running services locally:
 
-Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. Runtime state defaults to `.deer-flow` under the project root and can be moved with `DEER_FLOW_HOME`; skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
+Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` reads `config.yaml` from the canonical repository root unless `DEER_FLOW_CONFIG_PATH` points to an explicit file. Runtime state defaults to `.deer-flow` and can be moved with `DEER_FLOW_HOME`. Run `make doctor` to verify configuration, final-schema readiness, and service prerequisites before starting.
 On Windows, run the local development flow from Git Bash. Native `cmd.exe` and PowerShell shells are not supported for the bash-based service scripts, and WSL is not guaranteed because some scripts rely on Git for Windows utilities such as `cygpath`.
 
 1. **Check prerequisites**:
@@ -323,7 +329,7 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 #### Startup Modes
 
-DeerFlow runs the agent runtime inside the Gateway API. Development mode enables hot-reload; production mode uses a pre-built frontend.
+DeerFlow runs Gateway, Worker, and optional Scheduler as separate roles. Development mode enables hot-reload; production mode uses a pre-built frontend.
 
 | | **Local Foreground** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
 |---|---|---|---|---|
@@ -335,7 +341,7 @@ DeerFlow runs the agent runtime inside the Gateway API. Development mode enables
 | **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
-Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
+Nginx forwards `/api/*` directly to Gateway. Agent graph execution remains Worker-only.
 
 #### Docker Production Deployment
 
@@ -367,17 +373,19 @@ See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to 
 
 #### MCP Server
 
-DeerFlow supports configurable MCP servers and skills to extend its capabilities.
-For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
-For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`.
-MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
-See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
+System administrators publish system MCP definitions through `/admin/assets/mcp`, while project
+members manage project MCP definitions and pinned system bindings under
+`/projects/{project_slug}/mcp`. Definitions and immutable versions live in PostgreSQL. Gateway
+admission persists the exact MCP/Credential-grant snapshot for each Run; Worker materializes only
+that snapshot. HTTP/SSE OAuth and stdio transports remain supported, but secrets are stored only as
+encrypted Credential envelopes and never in MCP definitions or browser caches. See the
+[MCP Server Guide](backend/docs/MCP_SERVER.md) for transport details.
 
 #### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
-DeerFlow supports user-owned IM channel connections and reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Connections and provider availability use only `/api/projects/{project_id}/connections*`; bound text runs in that exact PostgreSQL account, project, owner, and connection scope. The project Connections page uses this project-only API, and the global channel binding API has been removed. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and operational notes.
+DeerFlow supports project-bound IM channel connections and reuses the configured outbound `channels.*` transports, so no public IP or provider callback URL is required. Connections and provider availability use `/api/projects/{project_id}/connections*`; bound text runs in that exact PostgreSQL account, project, owner, Agent, and connection scope. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and operational notes.
 
 | Channel | Transport | Difficulty |
 |---------|-----------|------------|
@@ -392,20 +400,10 @@ DeerFlow supports user-owned IM channel connections and reuses the existing outb
 
 ```yaml
 channels:
-  # LangGraph-compatible Gateway API base URL (default: http://localhost:8001/api)
+  # Auxiliary Gateway command base URL (default: http://localhost:8001/api)
   langgraph_url: http://localhost:8001/api
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
-
-  # Optional: global session defaults for all mobile channels
-  session:
-    assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
-    config:
-      recursion_limit: 100
-    context:
-      thinking_enabled: true
-      is_plan_mode: false
-      subagent_enabled: false
 
   feishu:
     enabled: true
@@ -443,20 +441,6 @@ channels:
     max_inbound_file_bytes: 52428800
     max_outbound_file_bytes: 52428800
 
-    # Optional: per-channel / per-user session settings
-    session:
-      assistant_id: mobile-agent  # custom agent names are also supported here
-      context:
-        thinking_enabled: false
-      users:
-        "123456789":
-          assistant_id: vip-agent
-          config:
-            recursion_limit: 150
-          context:
-            thinking_enabled: true
-            subagent_enabled: true
-
   dingtalk:
     enabled: true
     client_id: $DINGTALK_CLIENT_ID             # Client ID of your DingTalk application
@@ -465,10 +449,10 @@ channels:
     card_template_id: ""                       # Optional: AI Card template ID for streaming typewriter effect
 ```
 
-Notes:
-- `assistant_id: lead_agent` calls the default LangGraph assistant directly.
-- If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
-- Project-bound IM channel workers resolve the persisted connection row and admit the exact project-private Run directly through Gateway's internal admission service; they do not call a global LangGraph-compatible API or derive project authority from message fields.
+Project-bound IM channel workers resolve the persisted connection row, including its fixed
+Agent version, then admit the exact project-private Run through Gateway's internal admission
+service. Message fields and provider-wide configuration are never project, owner, membership,
+or Agent authority.
 
 Set the corresponding API keys in your `.env` file:
 
@@ -553,7 +537,7 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 | `/help` | Show help |
 | `/<skill-name> <task>` | Activate an enabled skill for one project-scoped turn |
 
-> Messages without a command prefix are treated as regular project chat. Removed legacy commands (`/bootstrap`, `/goal`, `/new`, `/status`, and `/memory`) return an unsupported-command response and are never submitted as ordinary prompts.
+> Messages without a command prefix are treated as regular project chat. Only the commands listed above are accepted; every other slash command returns an unsupported-command response and is never submitted as an ordinary prompt.
 
 #### Request Trace Correlation
 
@@ -604,7 +588,7 @@ If you are using a self-hosted Langfuse instance, set `LANGFUSE_BASE_URL` to you
 - `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omitted when not set)
 - `metadata.deerflow_trace_id` = DeerFlow request correlation id, matching `X-Trace-Id` when request trace correlation is enabled
 
-These are injected into `RunnableConfig.metadata` at the graph invocation root for both the gateway path (`runtime/runs/worker.py::run_agent`) and the embedded path (`client.py::DeerFlowClient.stream`), so any LangChain-compatible callback can read them. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment.
+Worker injects these fields into `RunnableConfig.metadata` at the `run_agent()` graph invocation root, so any LangChain-compatible callback can read them. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment.
 
 #### Using Both Providers
 
@@ -630,71 +614,19 @@ Use it as-is. Or tear it apart and make it yours.
 
 ### Skills & Tools
 
-Skills are what make DeerFlow do *almost anything*.
+A Skill is an immutable versioned project or system asset. System administrators publish system
+Skills under `/admin/assets/skills`; project members create project Skills and pin enabled system
+versions under `/projects/{project_slug}/skills`. Creation and publication run the deterministic
+SkillScan plus the contextual scanner before PostgreSQL stores the version.
 
-A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
+Gateway admission records the exact Agent, Skill, and MCP versions for every Run. Worker exposes
+only those admitted Skill bytes through a run-owned read-only `/mnt/skills` mount; runtime services
+do not discover or mutate ambient Skill directories. Slash activation such as `/data-analysis ...`
+can select only an enabled Skill from that exact snapshot.
 
-Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
-
-In the Web UI, administrators can open a read-only rendered `SKILL.md` preview directly from the workspace Skills list without leaving it.
-
-Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and the final read-only channel commands `/models` and `/help`.
-
-When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
-
-Skill installs and agent-managed skill edits run through **SkillScan**, a native deterministic safety scanner before the LLM-based skill scanner. Phase 1 runs offline with no Semgrep/OpenGrep dependency, blocks high-confidence `CRITICAL` findings such as private keys or shell execution, and passes warning findings to the LLM scanner for contextual review. Set `skill_scan.enabled: false` in `config.yaml` to disable only the deterministic analyzers; safe archive extraction and the LLM scanner still run.
-
-Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
-
-Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
-
-The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
-
-Interrupted first-turn runs still persist a fallback conversation title, so stopping a streaming response does not leave the thread as "Untitled" after refresh.
-
-In the Web UI, completed assistant turns can be branched into a new main conversation. The new thread starts from that turn's checkpoint. Because workspace files are not checkpointed, the branch only receives a best-effort copy of the current workspace when you branch from the latest turn; branching from an older turn keeps just the restored message history so the branch never inherits files that were created in a later part of the conversation.
-
-```
-# Paths inside the sandbox container
-/mnt/skills/public
-├── research/SKILL.md
-├── report-generation/SKILL.md
-├── slide-creation/SKILL.md
-├── web-page/SKILL.md
-└── image-generation/SKILL.md
-
-/mnt/skills/custom
-└── your-custom-skill/SKILL.md      ← yours
-```
-
-#### Claude Code Integration
-
-The `claude-to-deerflow` skill lets you interact with a running DeerFlow instance directly from [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Send research tasks, check status, manage threads — all without leaving the terminal.
-
-**Install the skill**:
-
-```bash
-npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
-```
-
-Then make sure DeerFlow is running (default at `http://localhost:2026`) and use the `/claude-to-deerflow` command in Claude Code.
-
-**What you can do**:
-- Send messages to DeerFlow and get streaming responses
-- Choose execution modes: flash (fast), standard, pro (planning), ultra (sub-agents)
-- Check DeerFlow health, list models/skills/agents
-- Manage threads and conversation history
-- Upload files for analysis
-
-**Environment variables** (optional, for custom endpoints):
-
-```bash
-DEERFLOW_URL=http://localhost:2026            # Unified proxy base URL
-DEERFLOW_GATEWAY_URL=http://localhost:2026    # Gateway API
-DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
-```
-
-See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
+The final toolset combines built-in sandbox tools with the MCP tools fixed in the admitted snapshot.
+Credentials are resolved only from approved same-scope grants and are injected at dispatch without
+entering prompts, API payloads, browser caches, checkpoints, or logs.
 
 ### Session Goals
 
@@ -769,35 +701,6 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Multimodal inputs** for image understanding and video comprehension
 - **Strong tool-use** for reliable function calling and structured outputs
 
-## Embedded Python Client
-
-DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process agent helpers; it is not a fallback authority for the project-only HTTP API. Project Threads, Runs, files, artifacts, Memory, and connections are available only through their authenticated `/api/projects/{project_id}/...` routes:
-
-```python
-from deerflow.client import DeerFlowClient
-
-client = DeerFlowClient()
-
-# Chat
-response = client.chat("Analyze this paper for me", thread_id="my-thread")
-
-# Streaming (LangGraph SSE protocol: values, messages-tuple, end)
-for event in client.stream("hello"):
-    if event.type == "messages-tuple" and event.data.get("type") == "ai":
-        print(event.data["content"])
-
-# Configuration & management — returns Gateway-aligned dicts
-models = client.list_models()        # {"models": [...]}
-skills = client.list_skills()        # {"skills": [...]}
-client.update_skill("web-search", enabled=True)
-client.upload_files("thread-1", ["./report.pdf"])  # files contain sandbox virtual_path, not an HTTP artifact URL
-client.set_goal("thread-1", "finish the implementation and make all tests pass")
-client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
-client.clear_goal("thread-1")
-```
-
-Embedded upload/list results expose sandbox virtual paths only; project download URLs require PostgreSQL file/artifact IDs and are produced by the project-private API. See `backend/packages/harness/deerflow/client.py` for the in-process API documentation.
-
 ## Project Automations
 
 M5 adds project Automation at
@@ -825,8 +728,7 @@ Enable background polling with `config.yaml -> scheduler.enabled` and run the ba
 Scheduler role with `cd backend && make scheduler`. It—not Gateway—holds the PostgreSQL
 scheduler ownership lock and only admits jobs. Disabling polling leaves the project API
 and manual trigger available; manual trigger uses the same atomic occurrence/Run/job
-path. The legacy global `/api/scheduled-tasks*` API has been removed; only the
-project-scoped Automation API remains, while the existing `scheduled_tasks` and
+path. The project-scoped Automation API is the sole public Automation surface, while the existing `scheduled_tasks` and
 `scheduled_task_runs` table names stay as private persistence details. PostgreSQL durable
 stream writing/reading, terminal uniqueness, Gateway SSE reconnect,
 frontend cursor/dedupe, and the atomic project quota core are implemented. Member, storage,
@@ -871,7 +773,7 @@ archive schema version, schema revision/digest, chunk count, and a truncated che
 M7 does not upgrade an existing M1–M6 database in place. Provision a new empty database and run `make setup-db`; any old revision or unknown nonempty schema fails before DDL with `M7_RECREATE_REQUIRED`.
 Local launch starts Gateway and Worker separately and starts Scheduler only when
 `scheduler.enabled=true`; Docker uses the same roles and Scheduler profile. System-admin readiness
-returns only aggregate role/fleet/ownership/cutover state and never PIDs, lock keys, URLs, or tokens.
+returns only aggregate role/fleet/ownership state and never PIDs, lock keys, URLs, or tokens.
 
 Retention purge additionally requires a separate base64 32-byte
 `DEER_FLOW_RECOVERY_JOURNAL_KEY` and an operator-owned journal outside this repository. Each
@@ -913,33 +815,9 @@ The project-scoped backend API is available at
 `/api/projects/{project_id}/automations`. It provides strict create, list, read,
 update, pause, resume, delete, manual-trigger, run-history, thread-filter, and
 readiness endpoints. Manual trigger requires a UUID `Idempotency-Key`; disabling
-background polling does not disable manual runs. During the M5 expand window the
-legacy read routes remain outside the mutation freeze, while legacy mutations
-return a migration-required conflict; after cutover every legacy route rejects
-requests in favor of the project API. M5 completed its Task 18 full-stack gates and
-independent closure review on 2026-07-16. M6 completed its reliability, governance,
-recovery, migration, and release gates on 2026-07-18. Overall progress is 6/8 (75%);
-M7 and M8 remain open, so DeerFlow is still not a complete releasable multi-user SaaS.
-
-## Terminal Workbench (TUI)
-
-`deerflow` is a terminal-native workbench for people who live in the shell. It runs **embedded** over `DeerFlowClient` — no Gateway, frontend, nginx, or Docker required — while honoring the same `config.yaml`, checkpointer, skills, memory, MCP, and sandbox settings as the rest of DeerFlow.
-
-![DeerFlow TUI](docs/tui/tui-preview.svg)
-
-```bash
-uv pip install 'deerflow-harness[tui]'        # optional 'textual' dependency
-
-deerflow                                      # launch the terminal UI (TTY required)
-deerflow --continue                           # resume the most recent thread
-deerflow --resume THREAD                      # resume a thread by id
-deerflow --print "summarize this repo"        # headless one-shot answer to stdout
-deerflow --json  "hello"                       # headless newline-delimited StreamEvents
-```
-
-A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, `/goal` goal management, `/model` and `/threads` pickers, input history, and `Esc` / `Ctrl+C` interrupt. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
-
-See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
+background polling does not disable manual runs. M7 is a closure candidate awaiting
+the final independent branch review. M8 full release acceptance remains pending, so
+DeerFlow is not yet a complete releasable multi-user SaaS.
 
 ## Documentation
 

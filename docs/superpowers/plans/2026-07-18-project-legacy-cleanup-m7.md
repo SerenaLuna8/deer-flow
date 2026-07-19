@@ -29,6 +29,15 @@
 
 ---
 
+## Execution status (2026-07-19)
+
+Tasks 1–10 are implemented, repaired, and independently reviewed at 0 Critical / 0 Important /
+0 Minor. Their exact implementation/review ranges are recorded in
+[`2026-07-18-project-legacy-cleanup-m7-design.md`](../specs/2026-07-18-project-legacy-cleanup-m7-design.md#12-实施切片与已审查证据).
+Task 11 is the current closure candidate: active documentation, final full gates, and a full-branch
+independent review remain in progress. This plan does not mark M7 `Completed`, update the master
+ledger to 7/8, or claim release readiness before that review finishes. M8 remains pending.
+
 ## File Structure
 
 ### Final schema and setup

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -133,6 +134,28 @@ BANNED_IMPORT_PREFIXES = (
     "deerflow.tools.builtins.update_agent_tool",
 )
 BANNED_RUNTIME_SYMBOLS = frozenset({"setup_agent", "update_agent"})
+
+M7_CHANGED_MARKDOWN_DOCS = (
+    "AGENTS.md",
+    "backend/AGENTS.md",
+    "frontend/AGENTS.md",
+    "README.md",
+    "README_zh.md",
+    "CHANGELOG.md",
+    "docs/operations/m6-backup-recovery.md",
+    "docs/superpowers/specs/2026-07-12-project-first-saas-design.md",
+    "docs/superpowers/specs/2026-07-18-project-legacy-cleanup-m7-design.md",
+    "docs/superpowers/plans/2026-07-18-project-legacy-cleanup-m7.md",
+)
+
+ACTIVE_OPERATIONAL_DOCS = (
+    "AGENTS.md",
+    "backend/AGENTS.md",
+    "frontend/AGENTS.md",
+    "README.md",
+    "README_zh.md",
+    "docs/operations/m6-backup-recovery.md",
+)
 
 CONFIG_TOMBSTONES = frozenset(
     {
@@ -264,6 +287,65 @@ def _javascript_string_literals(text: str) -> tuple[str, ...]:
 
 def _nginx_directives(text: str) -> str:
     return "\n".join(line.partition("#")[0] for line in text.splitlines())
+
+
+_INLINE_MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^)\s]+)(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\)")
+_REFERENCE_MARKDOWN_LINK = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*(?P<target><[^>]+>|\S+)")
+
+
+def _relative_markdown_targets(line: str) -> tuple[str, ...]:
+    targets = [match.group("target") for match in _INLINE_MARKDOWN_LINK.finditer(line)]
+    reference = _REFERENCE_MARKDOWN_LINK.match(line)
+    if reference is not None:
+        targets.append(reference.group("target"))
+    return tuple(targets)
+
+
+def _markdown_link_findings(documents: tuple[Path, ...], *, repo_root: Path) -> list[str]:
+    findings: list[str] = []
+    for document in documents:
+        relative_document = document.relative_to(repo_root).as_posix()
+        if not document.is_file():
+            findings.append(f"{relative_document}:0:<missing-document>")
+            continue
+        for line_number, line in enumerate(document.read_text(encoding="utf-8").splitlines(), start=1):
+            for raw_target in _relative_markdown_targets(line):
+                target = raw_target[1:-1] if raw_target.startswith("<") and raw_target.endswith(">") else raw_target
+                if not target or target.startswith(("#", "/", "//")):
+                    continue
+                parsed = urlsplit(target)
+                if parsed.scheme or parsed.netloc:
+                    continue
+                decoded_path = unquote(parsed.path)
+                if not decoded_path:
+                    continue
+                if not (document.parent / decoded_path).exists():
+                    findings.append(f"{relative_document}:{line_number}:{raw_target}")
+    return findings
+
+
+_ACTIVE_DOC_RESIDUE_PATTERNS = (
+    re.compile(r"\bmigrate-(?:sqlite|assets|private-work|automations|reliability)\b"),
+    re.compile(r"\bmigrate_user_isolation\.py\b"),
+    *(re.compile(re.escape(route)) for route in sorted(BANNED_ROUTE_LITERALS)),
+    re.compile(r"\bextensions_config(?:\.example)?\.json\b"),
+    re.compile(r"\b(?:agents_api|stream_bridge)\b"),
+    re.compile(r"\bcutover\b", re.IGNORECASE),
+    re.compile(r"\b6/8\b"),
+    re.compile(r"\b75%\b"),
+)
+
+
+def _active_doc_residue_findings(documents: tuple[Path, ...], *, repo_root: Path) -> list[str]:
+    findings: list[str] = []
+    for document in documents:
+        relative_document = document.relative_to(repo_root).as_posix()
+        for line_number, line in enumerate(document.read_text(encoding="utf-8").splitlines(), start=1):
+            for pattern in _ACTIVE_DOC_RESIDUE_PATTERNS:
+                match = pattern.search(line)
+                if match is not None:
+                    findings.append(f"{relative_document}:{line_number}:{match.group(0)}")
+    return findings
 
 
 def _banned_path_has_production_source(path: Path) -> bool:
@@ -499,6 +581,52 @@ def test_source_gate_mutation_ignores_commented_nginx_route(
         "# location /api/threads { proxy_pass http://gateway; }\nserver { location /api/projects { proxy_pass http://gateway; } }\n",
     )
     test_production_sources_have_no_legacy_route_literals()
+
+
+def test_markdown_link_gate_mutation_rejects_missing_relative_target(tmp_path: Path) -> None:
+    document = tmp_path / "docs" / "guide.md"
+    document.parent.mkdir(parents=True)
+    document.write_text("See [missing](../missing.md).\n", encoding="utf-8")
+
+    assert _markdown_link_findings((document,), repo_root=tmp_path) == [
+        "docs/guide.md:1:../missing.md",
+    ]
+
+
+def test_markdown_link_gate_mutation_accepts_relative_target_and_ignores_remote_or_anchor(tmp_path: Path) -> None:
+    document = tmp_path / "docs" / "guide.md"
+    target = tmp_path / "README.md"
+    document.parent.mkdir(parents=True)
+    document.write_text(
+        "[local](../README.md#setup) [remote](https://example.com/x) [anchor](#local)\n",
+        encoding="utf-8",
+    )
+    target.write_text("# Setup\n", encoding="utf-8")
+
+    assert _markdown_link_findings((document,), repo_root=tmp_path) == []
+
+
+def test_active_doc_gate_mutation_rejects_removed_command_and_global_api(tmp_path: Path) -> None:
+    document = tmp_path / "README.md"
+    document.write_text(
+        "Run `make migrate-private-work`, then call `/api/threads`.\n",
+        encoding="utf-8",
+    )
+
+    assert _active_doc_residue_findings((document,), repo_root=tmp_path) == [
+        "README.md:1:migrate-private-work",
+        "README.md:1:/api/threads",
+    ]
+
+
+def test_all_m7_changed_markdown_links_resolve() -> None:
+    documents = tuple(REPO_ROOT / relative for relative in M7_CHANGED_MARKDOWN_DOCS)
+    assert _markdown_link_findings(documents, repo_root=REPO_ROOT) == []
+
+
+def test_active_operational_docs_describe_only_final_m7_surfaces() -> None:
+    documents = tuple(REPO_ROOT / relative for relative in ACTIVE_OPERATIONAL_DOCS)
+    assert _active_doc_residue_findings(documents, repo_root=REPO_ROOT) == []
 
 
 @pytest.mark.parametrize(
