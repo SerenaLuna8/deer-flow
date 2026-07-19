@@ -15,7 +15,6 @@ tables it does not own.
 from __future__ import annotations
 
 import asyncio
-import logging
 from logging.config import fileConfig
 
 from alembic import context
@@ -31,14 +30,11 @@ from deerflow.persistence.migrations._env_filters import (
 # via ``env.LANGGRAPH_OWNED_TABLES`` / ``env.include_object``.
 __all__ = ["LANGGRAPH_OWNED_TABLES", "include_object"]
 
-# Import all models so metadata is populated.
-try:
-    import deerflow.persistence.models as models  # register ORM models with Base.metadata
+# Import all models for future autogenerate comparisons. The committed M7 baseline
+# itself is static and imports no application models.
+import deerflow.persistence.models as models  # noqa: E402
 
-    _ = models
-except ImportError:
-    # Models not available — migration will work with existing metadata only.
-    logging.getLogger(__name__).warning("Could not import deerflow.persistence.models; Alembic may not detect all tables")
+_ = models
 
 config = context.config
 if config.config_file_name is not None:

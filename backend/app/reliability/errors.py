@@ -10,9 +10,7 @@ RELIABILITY_ERROR_STATUS = {
     "RELIABILITY_FORBIDDEN": 403,
     "RELIABILITY_CONFLICT": 409,
     "RELIABILITY_INVALID": 422,
-    "RELIABILITY_MIGRATION_REQUIRED": 409,
     "RELIABILITY_QUOTA_EXCEEDED": 429,
-    "RELIABILITY_CUTOVER": 503,
     "WORKER_UNAVAILABLE": 503,
     "DATABASE_UNAVAILABLE": 503,
 }
@@ -52,19 +50,9 @@ class ReliabilityInvalid(ReliabilityError):
     public_message = "Reliability request is invalid."
 
 
-class ReliabilityMigrationRequired(ReliabilityError):
-    code = "RELIABILITY_MIGRATION_REQUIRED"
-    public_message = "Reliability migration is required before this action."
-
-
 class ReliabilityQuotaExceeded(ReliabilityError):
     code = "RELIABILITY_QUOTA_EXCEEDED"
     public_message = "Reliability quota was exceeded."
-
-
-class ReliabilityCutover(ReliabilityError):
-    code = "RELIABILITY_CUTOVER"
-    public_message = "Reliability cutover is not complete."
 
 
 class ReliabilityWorkerUnavailable(ReliabilityError):
@@ -80,13 +68,11 @@ class ReliabilityDatabaseUnavailable(ReliabilityError):
 __all__ = [
     "RELIABILITY_ERROR_STATUS",
     "ReliabilityConflict",
-    "ReliabilityCutover",
     "ReliabilityDatabaseUnavailable",
     "ReliabilityError",
     "ReliabilityForbidden",
     "ReliabilityInvalid",
     "ReliabilityInvalidStreamCursor",
-    "ReliabilityMigrationRequired",
     "ReliabilityNotFound",
     "ReliabilityQuotaExceeded",
     "ReliabilityWorkerUnavailable",

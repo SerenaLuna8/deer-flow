@@ -37,25 +37,16 @@ def autogen_module():
 
 def test_autogen_builder_requires_explicit_postgres_url(autogen_module, monkeypatch) -> None:
     upgrades: list[tuple[str, str]] = []
-    seeded: list[str] = []
-
-    async def fake_seed(url: str) -> None:
-        seeded.append(url)
 
     monkeypatch.setattr(
         autogen_module.command,
         "upgrade",
         lambda config, revision: upgrades.append((config.get_main_option("sqlalchemy.url"), revision)),
     )
-    monkeypatch.setattr(autogen_module, "_seed_empty_finalize_prerequisites", fake_seed)
 
     url = f"postgresql+asyncpg://user:password@localhost/deerflow_test_1_{'a' * 32}"
     assert autogen_module._build_temp_db_at_head(url) == url
-    assert upgrades == [
-        (url, "0008_project_private_work_expand"),
-        (url, "head"),
-    ]
-    assert seeded == [url]
+    assert upgrades == [(url, "head")]
     with pytest.raises(ValueError, match="PostgreSQL"):
         autogen_module._build_temp_db_at_head("sqlite+aiosqlite:///tmp/autogen.db")
     with pytest.raises(ValueError, match="disposable"):

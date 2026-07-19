@@ -142,8 +142,14 @@ class JobAttemptRow(Base):
 class DeadJobRow(Base):
     __tablename__ = "dead_jobs"
 
-    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="RESTRICT"), primary_key=True)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", name="fk_dead_jobs_job", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", name="fk_dead_jobs_project", ondelete="RESTRICT"),
+        nullable=False,
+    )
     owner_ref_key_id: Mapped[str | None] = mapped_column(String(64))
     owner_ref_hmac: Mapped[str | None] = mapped_column(CHAR(64))
     job_type: Mapped[str] = mapped_column(String(32), nullable=False)

@@ -1,1009 +1,162 @@
-"""Hybrid schema bootstrap for DeerFlow's application tables.
-
-Replaces the unconditional ``Base.metadata.create_all`` at Gateway startup.
-Combines two ideas:
-
-1. ``create_all`` stays the empty-DB fast path -- it renders PostgreSQL
-   ``Base.metadata`` faithfully without anyone having to hand-keep a mirror
-   baseline in sync with the models.
-2. **Alembic owns every change from baseline onward.** Any new ORM column /
-   table / index must ship as a revision under ``migrations/versions/``.
-
-Three-branch decision (see ``_decide_state``)
----------------------------------------------
-
-| DB state                              | Action                                  |
-|---------------------------------------|-----------------------------------------|
-| empty (no DeerFlow tables)            | ``create_all`` + ``stamp head`` + M4/M5/M6 empty probes and markers |
-| legacy (DeerFlow tables, no alembic)  | baseline-era backfill + ``stamp 0001`` + ``upgrade 0007`` + require explicit M4 migration |
-| versioned before M4 final             | require explicit M4 migration before any upgrade |
-| versioned at M4 final through 0010    | upgrade to the 0011 Automation staging boundary |
-| versioned at 0011 with Automation rows| require explicit M5 migration before expand DDL |
-| versioned at 0011/0012 with empty rows| upgrade/finalize M5 and require the complete marker |
-| versioned at M5 final/M6 expand       | require explicit M6 reliability migration before M6 DDL/finalize |
-| versioned at M6 final/head            | verify the complete M5 marker; M6 runtime guard owns M6 readiness |
-
-The legacy branch handles pre-alembic databases that already have at least one
-DeerFlow-owned table. A frozen 0001-era catalog runs first because stamping at
-``0001_baseline`` makes alembic skip the baseline's own ``create_table`` DDL on
-the subsequent upgrade -- so any table added to the baseline after the user's
-DB was first provisioned (e.g. the
-``channel_*`` tables from PR #1930 for users upgrading across multiple
-releases) would otherwise never be created, and the first request hitting that
-table would 500 with ``no such table``. The backfill is **restricted to
-``_BASELINE_TABLE_NAMES``** and baseline-era columns/constraints so it does not
-introduce final ORM dependencies before their owning revisions. It also does
-not create tables that future revisions introduce -- those revisions' own
-``op.create_table`` would then
-fail with ``relation already exists``. A guard test pins the restriction
-set against ``0001_baseline.upgrade()``'s actual output.
-
-Column-level shape through revision 0007 (the pre-#3658 vs post-#3658 vs
-manual-ALTER cases for ``token_usage_by_model``) is answered by each
-``versions/*.py`` revision via
-the idempotent helpers in ``migrations/_helpers.py`` (``safe_add_column``
-no-ops when the column is already present and ``logger.warning``s on
-shape drift). The M4 boundary is crossed only by ``make migrate-private-work``;
-ordinary startup never invokes 0008/0009 for an existing database. The M5
-boundary similarly stops a non-empty 0011 Automation domain before 0012/0013;
-only an empty domain may finalize during ordinary startup.
-
-Concurrency safety
-------------------
-
-PostgreSQL ``pg_advisory_lock`` runs
-  the whole reflect-and-act sequence under an exclusive lock that survives
-  cross-process. Concurrent Gateway instances queue cleanly and the second
-  one observes head as a no-op.
-Column revisions additionally use idempotent helpers so repeated
-post-baseline changes, manual ALTERs, or retries do not duplicate work.
-
-``alembic upgrade head`` on a DB already at head is a no-op by alembic's own
-semantics, so the second-N-th actor simply observes head and exits.
-"""
+"""Fresh-install-only PostgreSQL bootstrap for the M7 final schema."""
 
 from __future__ import annotations
 
 import asyncio
-import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Literal
 
-import sqlalchemy as sa
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from deerflow.config.runtime_paths import runtime_home
-from deerflow.persistence.revisions import REVISION_ANCESTRY
+import deerflow.persistence.models  # noqa: F401 -- populate final metadata
+from deerflow.persistence.base import Base
 
-logger = logging.getLogger(__name__)
+M7_FINAL_SCHEMA_REVISION = "0001_project_saas_baseline"
 
-
-# Where the alembic environment lives, relative to this file.
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
-
-# Cached migration head, computed once per process from the disk script tree.
 _HEAD_REVISION: str | None = None
-
-# Baseline (stamp target for legacy DBs). Pinned here so the bootstrap layer
-# fails loudly if the baseline revision is ever renamed without updating the
-# stamp call. ``tests/test_persistence_bootstrap.py`` asserts this string is a
-# real revision id in the script tree.
-_BASELINE_REVISION = "0001_baseline"
-
-# Stable advisory-lock key for Postgres. Two random 32-bit halves picked once
-# so we never collide with any other application's advisory locks. Do not
-# change without coordinating a one-time migration (a key change effectively
-# releases the prior lock).
 _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
+_PG_LOCK_POLL_SECONDS = 0.1
 
-# Failed empty-schema cleanup must finish before the advisory lock is released,
-# but destructive DDL must not wait forever on another session's table lock.
-# Connection acquisition remains bounded by the engine's configured pool_timeout.
-_EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS = 5_000
-_EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS = 10_000
-
-_PRIVATE_WORK_FINAL_REVISION = "0009_project_private_work_finalize"
-_PRIVATE_WORK_PRE_EXPAND_REVISION = "0007_project_shared_assets"
-_PRIVATE_WORK_PRE_EXPAND_REVISIONS = frozenset(
+_LANGGRAPH_TABLES = frozenset(
     {
-        "0001_baseline",
-        "0002_runs_token_usage",
-        "0003_scheduled_tasks",
-        "0004_migration_ledger",
-        "0005_project_foundation",
-        "0006_project_governance",
-        _PRIVATE_WORK_PRE_EXPAND_REVISION,
+        "checkpoint_blobs",
+        "checkpoint_migrations",
+        "checkpoint_writes",
+        "checkpoints",
+        "store",
+        "store_migrations",
     }
 )
-_AUTOMATION_PRE_EXPAND_REVISION = "0011_private_artifact_tombstone"
-_AUTOMATION_FINAL_REVISION = "0013_project_automation_finalize"
-_RELIABILITY_FINAL_REVISION = "0015_project_reliability_finalize"
-_LEGACY_PRIVATE_WORK_DB_TABLES: tuple[str, ...] = (
-    "threads_meta",
-    "runs",
-    "run_events",
-    "feedback",
-    "channel_connections",
-    "channel_oauth_states",
-    "channel_conversations",
-)
-_LANGGRAPH_CHECKPOINT_TABLES: tuple[str, ...] = (
-    "checkpoints",
-    "checkpoint_blobs",
-    "checkpoint_writes",
-)
+_FINAL_APP_TABLES = frozenset(Base.metadata.tables)
+_FINAL_ALLOWED_RELATIONS = _FINAL_APP_TABLES | _LANGGRAPH_TABLES | {"alembic_version"}
 
 
-# Tables created by ``0001_baseline.upgrade()``. The legacy branch restricts
-# its ``create_all`` backfill to this set so it does NOT pre-empt later
-# ``op.create_table`` revisions for models added after baseline -- those
-# revisions would otherwise fail with ``relation already exists`` if
-# ``create_all`` had created their table first. (Column revisions are
-# already safe via the idempotent helpers in ``migrations/_helpers.py``;
-# there is no analogous ``safe_create_table`` yet, so we keep table-level
-# safety at this layer instead of pushing it onto every future revision.)
-#
-# ``test_baseline_table_names_constant_matches_0001`` pins this set against
-# what 0001 actually creates -- editing 0001 without updating this constant
-# (or vice versa) fires that test.
-_BASELINE_TABLE_NAMES: frozenset[str] = frozenset(
-    {
-        "channel_connections",
-        "channel_conversations",
-        "channel_credentials",
-        "channel_oauth_states",
-        "feedback",
-        "run_events",
-        "runs",
-        "threads_meta",
-        "users",
-    }
-)
+class M7RecreateRequired(RuntimeError):
+    """The existing database is not an exact M7 database and must be replaced."""
 
-_BASELINE_COLUMNS: dict[str, tuple[str, ...]] = {
-    "channel_connections": (
-        "id",
-        "owner_user_id",
-        "provider",
-        "status",
-        "external_account_id",
-        "external_account_name",
-        "workspace_id",
-        "workspace_name",
-        "bot_user_id",
-        "scopes_json",
-        "capabilities_json",
-        "metadata_json",
-        "created_at",
-        "updated_at",
-        "last_seen_at",
-        "last_error_at",
-    ),
-    "channel_oauth_states": (
-        "state_hash",
-        "owner_user_id",
-        "provider",
-        "code_verifier_encrypted",
-        "nonce_hash",
-        "redirect_after",
-        "requested_scopes_json",
-        "metadata_json",
-        "expires_at",
-        "consumed_at",
-        "created_at",
-    ),
-    "feedback": (
-        "feedback_id",
-        "run_id",
-        "thread_id",
-        "user_id",
-        "message_id",
-        "rating",
-        "comment",
-        "created_at",
-    ),
-    "run_events": (
-        "id",
-        "thread_id",
-        "run_id",
-        "user_id",
-        "event_type",
-        "category",
-        "content",
-        "event_metadata",
-        "seq",
-        "created_at",
-    ),
-    "runs": (
-        "run_id",
-        "thread_id",
-        "assistant_id",
-        "user_id",
-        "status",
-        "model_name",
-        "multitask_strategy",
-        "metadata_json",
-        "kwargs_json",
-        "error",
-        "message_count",
-        "first_human_message",
-        "last_ai_message",
-        "total_input_tokens",
-        "total_output_tokens",
-        "total_tokens",
-        "llm_call_count",
-        "lead_agent_tokens",
-        "subagent_tokens",
-        "middleware_tokens",
-        "token_usage_by_model",
-        "follow_up_to_run_id",
-        "created_at",
-        "updated_at",
-    ),
-    "threads_meta": (
-        "thread_id",
-        "assistant_id",
-        "user_id",
-        "display_name",
-        "status",
-        "metadata_json",
-        "created_at",
-        "updated_at",
-    ),
-    "users": (
-        "id",
-        "email",
-        "password_hash",
-        "system_role",
-        "created_at",
-        "oauth_provider",
-        "oauth_id",
-        "needs_setup",
-        "token_version",
-    ),
-    "channel_conversations": (
-        "id",
-        "connection_id",
-        "owner_user_id",
-        "provider",
-        "external_conversation_id",
-        "external_topic_id",
-        "thread_id",
-        "created_at",
-        "updated_at",
-    ),
-    "channel_credentials": (
-        "connection_id",
-        "encrypted_access_token",
-        "encrypted_refresh_token",
-        "token_type",
-        "expires_at",
-        "refresh_expires_at",
-        "encrypted_extra_json",
-        "version",
-        "updated_at",
-    ),
-}
+    code = "M7_RECREATE_REQUIRED"
 
-_BASELINE_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
-    "channel_connections": ("id",),
-    "channel_oauth_states": ("state_hash",),
-    "feedback": ("feedback_id",),
-    "run_events": ("id",),
-    "runs": ("run_id",),
-    "threads_meta": ("thread_id",),
-    "users": ("id",),
-    "channel_conversations": ("id",),
-    "channel_credentials": ("connection_id",),
-}
-
-_BASELINE_INDEXES: tuple[tuple[str, str, tuple[str, ...], bool, str | None], ...] = (
-    ("channel_connections", "idx_channel_connections_event_lookup", ("provider", "workspace_id", "bot_user_id"), False, None),
-    ("channel_connections", "ix_channel_connections_owner_user_id", ("owner_user_id",), False, None),
-    ("channel_connections", "ix_channel_connections_provider", ("provider",), False, None),
-    (
-        "channel_connections",
-        "uq_channel_connection_active_identity",
-        ("provider", "external_account_id", "workspace_id"),
-        True,
-        "status = 'connected'",
-    ),
-    ("channel_oauth_states", "ix_channel_oauth_states_owner_user_id", ("owner_user_id",), False, None),
-    ("channel_oauth_states", "ix_channel_oauth_states_provider", ("provider",), False, None),
-    ("feedback", "ix_feedback_run_id", ("run_id",), False, None),
-    ("feedback", "ix_feedback_thread_id", ("thread_id",), False, None),
-    ("feedback", "ix_feedback_user_id", ("user_id",), False, None),
-    ("run_events", "ix_events_run", ("thread_id", "run_id", "seq"), False, None),
-    ("run_events", "ix_events_thread_cat_seq", ("thread_id", "category", "seq"), False, None),
-    ("run_events", "ix_run_events_user_id", ("user_id",), False, None),
-    ("runs", "ix_runs_thread_id", ("thread_id",), False, None),
-    ("runs", "ix_runs_thread_status", ("thread_id", "status"), False, None),
-    ("runs", "ix_runs_user_id", ("user_id",), False, None),
-    ("threads_meta", "ix_threads_meta_assistant_id", ("assistant_id",), False, None),
-    ("threads_meta", "ix_threads_meta_user_id", ("user_id",), False, None),
-    ("users", "idx_users_oauth_identity", ("oauth_provider", "oauth_id"), True, "oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
-    ("users", "ix_users_email", ("email",), True, None),
-    ("channel_conversations", "ix_channel_conversations_connection_id", ("connection_id",), False, None),
-    ("channel_conversations", "ix_channel_conversations_owner_user_id", ("owner_user_id",), False, None),
-    ("channel_conversations", "ix_channel_conversations_provider", ("provider",), False, None),
-    ("channel_conversations", "ix_channel_conversations_thread_id", ("thread_id",), False, None),
-)
+    def __init__(self) -> None:
+        super().__init__("M7_RECREATE_REQUIRED: existing pre-M7 or unknown schema must be recreated manually")
 
 
 def _escape_url_for_alembic(url: str) -> str:
-    """Double literal ``%`` so ``ConfigParser`` interpolation leaves the URL intact.
-
-    ``alembic.config.Config.set_main_option`` forwards to ``ConfigParser.set``,
-    which performs ``%(name)s``-style interpolation on the value. A URL-encoded
-    password like ``p%40ss`` (``@`` escaped to ``%40``) would otherwise raise
-    ``InterpolationSyntaxError``. Doubling every literal ``%`` makes
-    ConfigParser unescape it back to one. Shared with
-    ``scripts/_autogen_revision.py`` so the round-trip rule lives in one place.
-    """
     return url.replace("%", "%%")
 
 
 def _alembic_safe_url(engine: AsyncEngine) -> str:
-    """Render *engine*'s URL in a form alembic ``set_main_option`` accepts.
-
-    Two pitfalls handled:
-
-    1. ``str(engine.url)`` (and ``URL.render_as_string()`` without args) masks
-       the password as ``***`` -- so alembic's stamp/upgrade would open its own
-       connection with garbage credentials and fail at runtime, even though
-       the live engine connects fine. Fix: ``render_as_string(hide_password=False)``.
-    2. ConfigParser interpolation on ``%`` -- delegated to
-       ``_escape_url_for_alembic`` so the rule is shared with the autogen
-       script.
-    """
-    rendered = engine.url.render_as_string(hide_password=False)
-    return _escape_url_for_alembic(rendered)
+    return _escape_url_for_alembic(engine.url.render_as_string(hide_password=False))
 
 
-def _get_alembic_config(engine: AsyncEngine) -> AlembicConfig:
-    """Build an in-process alembic config pointing at our migrations dir.
-
-    Avoids reading ``alembic.ini`` from disk so the production runtime doesn't
-    depend on a working-directory-relative file lookup. The ``script_location``
-    is anchored at the package path on disk.
-    """
-    cfg = AlembicConfig()
-    cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", _alembic_safe_url(engine))
-    return cfg
+def _get_alembic_config(engine_or_url: AsyncEngine | str) -> AlembicConfig:
+    config = AlembicConfig(str(_MIGRATIONS_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(_MIGRATIONS_DIR))
+    url = _alembic_safe_url(engine_or_url) if hasattr(engine_or_url, "url") else _escape_url_for_alembic(str(engine_or_url))
+    config.set_main_option("sqlalchemy.url", url)
+    return config
 
 
 def _get_head_revision() -> str:
-    """Return the head revision id from ``versions/``, cached per process."""
     global _HEAD_REVISION
     if _HEAD_REVISION is None:
-        cfg = AlembicConfig()
-        cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
-        script = ScriptDirectory.from_config(cfg)
-        head = script.get_current_head()
-        if head is None:
-            raise RuntimeError("alembic has no head revision -- versions/ directory is empty")
-        _HEAD_REVISION = head
+        config = AlembicConfig()
+        config.set_main_option("script_location", str(_MIGRATIONS_DIR))
+        heads = ScriptDirectory.from_config(config).get_heads()
+        if heads != [M7_FINAL_SCHEMA_REVISION]:
+            raise RuntimeError("M7 migration graph must contain exactly one final head")
+        _HEAD_REVISION = heads[0]
     return _HEAD_REVISION
 
 
-def _reflect_state(sync_conn: Any) -> dict[str, bool]:
-    """Inspect *sync_conn* (sync connection inside ``run_sync``) and return:
-
-    - ``has_alembic_version``: bool
-    - ``has_deerflow_tables``: True iff at least one table that ``Base.metadata``
-      knows about is present in the DB. Computed as ``reflected ∩ metadata`` so
-      the bootstrap layer never hardcodes a specific table or column name --
-      adding a new ORM model only changes ``Base.metadata``, not this module.
-    """
-    from deerflow.persistence.base import Base
-
-    # Make sure every ORM model is imported, otherwise ``Base.metadata.tables``
-    # may miss tables registered by submodules that haven't been imported yet.
-    try:
-        import deerflow.persistence.models  # noqa: F401
-    except ImportError:
-        logger.debug("deerflow.persistence.models not found; metadata may be incomplete")
-
-    insp = sa_inspect(sync_conn)
-    reflected = set(insp.get_table_names())
-    metadata_tables = set(Base.metadata.tables)
-    return {
-        "has_alembic_version": "alembic_version" in reflected,
-        "has_deerflow_tables": bool(reflected & metadata_tables),
-    }
-
-
-def _decide_state(state: dict[str, bool]) -> str:
-    """Map a reflected DB state to one of three branch labels.
-
-    The legacy branch covers every pre-alembic DB uniformly -- whether the
-    columns added by later revisions are present or not is a question each
-    revision answers for itself via the idempotent helpers in
-    ``migrations/_helpers.py``.
-    """
-    if state["has_alembic_version"]:
-        return "versioned"
-    if not state["has_deerflow_tables"]:
-        # Either a brand-new DB or a DB containing only tables we don't own
-        # (e.g. LangGraph's checkpointer tables on a fresh deployment). The
-        # empty branch provisions the tables alembic owns, then stamps head.
-        return "empty"
-    return "legacy"
-
-
-def _requires_explicit_private_work_migration(revision: str) -> bool:
-    """Return whether ordinary startup must stop at the M4 staged boundary."""
-    return not REVISION_ANCESTRY.contains(revision, _PRIVATE_WORK_FINAL_REVISION)
-
-
-def _filesystem_has_legacy_private_source(home: Path) -> bool:
-    """Probe known private-work paths without exposing names or contents."""
-    if not home.exists():
-        return False
-    memory_candidates = [home / "memory.json"]
-    memory_candidates.extend(home.glob("agents/*/memory.json"))
-    memory_candidates.extend(home.glob("users/*/memory.json"))
-    memory_candidates.extend(home.glob("users/*/agents/*/memory.json"))
-    if any(path.is_file() or path.is_symlink() for path in memory_candidates):
-        return True
-
-    for user_data_pattern in ("threads/*/user-data", "users/*/threads/*/user-data"):
-        for user_data in home.glob(user_data_pattern):
-            for directory_name in ("uploads", "workspace", "outputs"):
-                directory = user_data / directory_name
-                if directory.is_dir() and any(path.is_file() or path.is_symlink() for path in directory.rglob("*")):
-                    return True
-    return False
-
-
-def _database_has_legacy_private_source_sync(sync_conn: Any) -> bool:
-    inspector = sa_inspect(sync_conn)
-    present = set(inspector.get_table_names())
-    for table in _LEGACY_PRIVATE_WORK_DB_TABLES:
-        if table in present and sync_conn.execute(text(f'SELECT EXISTS (SELECT 1 FROM "{table}" LIMIT 1)')).scalar_one():  # noqa: S608 - fixed table allowlist
-            return True
-
-    checkpoint_tables = present & set(_LANGGRAPH_CHECKPOINT_TABLES)
-    if not checkpoint_tables:
-        return False
-
-    marker_is_valid = """
-        jsonb_typeof(metadata -> 'deerflow_private_scope') = 'object'
-        AND jsonb_typeof(metadata -> 'deerflow_private_scope' -> 'project_id') = 'string'
-        AND jsonb_typeof(metadata -> 'deerflow_private_scope' -> 'owner_user_id') = 'string'
-        AND metadata -> 'deerflow_private_scope' ->> 'project_id' <> ''
-        AND metadata -> 'deerflow_private_scope' ->> 'owner_user_id' <> ''
-    """
-    if "checkpoints" in checkpoint_tables:
-        has_unmarked_checkpoint = sync_conn.execute(text(f"SELECT EXISTS (SELECT 1 FROM checkpoints WHERE ({marker_is_valid}) IS NOT TRUE LIMIT 1)")).scalar_one()
-        if has_unmarked_checkpoint:
-            return True
-
-    if "checkpoint_blobs" in checkpoint_tables:
-        has_unmarked_blob = sync_conn.execute(
-            text(
-                f"""SELECT EXISTS (
-                    SELECT 1 FROM checkpoint_blobs blob
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM checkpoints checkpoint
-                        WHERE checkpoint.thread_id = blob.thread_id
-                          AND checkpoint.checkpoint_ns = blob.checkpoint_ns
-                          AND ({marker_is_valid})
-                    )
-                    LIMIT 1
-                )"""
-            )
-        ).scalar_one()
-        if has_unmarked_blob:
-            return True
-
-    if "checkpoint_writes" in checkpoint_tables:
-        has_unmarked_write = sync_conn.execute(
-            text(
-                f"""SELECT EXISTS (
-                    SELECT 1 FROM checkpoint_writes write
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM checkpoints checkpoint
-                        WHERE checkpoint.thread_id = write.thread_id
-                          AND checkpoint.checkpoint_ns = write.checkpoint_ns
-                          AND checkpoint.checkpoint_id = write.checkpoint_id
-                          AND ({marker_is_valid})
-                    )
-                    LIMIT 1
-                )"""
-            )
-        ).scalar_one()
-        if has_unmarked_write:
-            return True
-    return False
-
-
-async def _write_empty_install_cutover_marker(engine: AsyncEngine) -> None:
-    async with engine.begin() as conn:
-        database_has_source = await conn.run_sync(_database_has_legacy_private_source_sync)
-        if database_has_source:
-            raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
-        await conn.execute(
-            text(
-                """INSERT INTO private_work_cutover_state
-                (id, stage, migration_run_id, empty_domain_probe_complete,
-                 checkpoint_marker_probe_complete, cutover_at, updated_at)
-                VALUES (1, 'cutover_complete', NULL, true, true, now(), now())
-                ON CONFLICT (id) DO NOTHING"""
-            )
-        )
-
-
-def _database_has_legacy_automation_source_sync(sync_conn: Any) -> bool:
-    inspector = sa_inspect(sync_conn)
-    present = set(inspector.get_table_names())
-    for table in ("scheduled_tasks", "scheduled_task_runs"):
-        if table in present and sync_conn.execute(text(f'SELECT EXISTS (SELECT 1 FROM "{table}" LIMIT 1)')).scalar_one():  # noqa: S608 - fixed internal table allowlist
-            return True
-    return False
-
-
-def _automation_schema_is_final_sync(sync_conn: Any) -> bool:
-    inspector = sa_inspect(sync_conn)
-    present = set(inspector.get_table_names())
-    required_tables = {
-        "scheduled_tasks",
-        "scheduled_task_runs",
-        "automation_migration_runs",
-        "automation_migration_ledger",
-        "automation_cutover_state",
-    }
-    if not required_tables <= present:
-        return False
-    task_columns = {column["name"] for column in inspector.get_columns("scheduled_tasks")}
-    run_columns = {column["name"] for column in inspector.get_columns("scheduled_task_runs")}
-    triggers = set(
-        sync_conn.execute(
-            text(
-                """SELECT trigger_name FROM information_schema.triggers
-                WHERE event_object_schema=current_schema()
-                  AND trigger_name IN
-                      ('trg_scheduled_tasks_agent_project',
-                       'trg_agents_scheduled_task_project')"""
-            )
-        ).scalars()
-    )
-    return (
-        {"project_id", "owner_user_id", "agent_asset_id", "version"} <= task_columns
-        and {"user_id", "assistant_id", "last_run_id", "lease_owner"}.isdisjoint(task_columns)
-        and {
-            "project_id",
-            "owner_user_id",
-            "task_version",
-            "occurrence_key",
-            "launch_attempt_count",
-        }
-        <= run_columns
-        and "error" not in run_columns
-        and triggers
-        == {
-            "trg_scheduled_tasks_agent_project",
-            "trg_agents_scheduled_task_project",
-        }
-    )
-
-
-async def _write_empty_install_automation_cutover_marker(
-    engine: AsyncEngine,
-) -> None:
-    async with engine.begin() as conn:
-        database_has_source = await conn.run_sync(_database_has_legacy_automation_source_sync)
-        if database_has_source:
-            raise RuntimeError("automation migration required; stop writers before schema finalize")
-        m4_marker = (
-            await conn.execute(
-                text(
-                    """SELECT stage,cutover_at FROM private_work_cutover_state
-                    WHERE id=1"""
-                )
-            )
-        ).one_or_none()
-        if m4_marker is None or m4_marker.stage != "cutover_complete" or m4_marker.cutover_at is None:
-            raise RuntimeError("automation finalize prerequisites are incomplete: M4 cutover is not complete")
-        schema_is_final = await conn.run_sync(_automation_schema_is_final_sync)
-        if not schema_is_final:
-            raise RuntimeError("automation final schema probe failed")
-        await conn.execute(
-            text(
-                """INSERT INTO automation_cutover_state
-                (id,stage,migration_run_id,empty_domain_probe_complete,
-                 final_schema_probe_complete,cutover_at,updated_at)
-                VALUES (1,'cutover_complete',NULL,true,true,now(),now())
-                ON CONFLICT (id) DO NOTHING"""
-            )
-        )
-
-
-def _reliability_schema_is_final_sync(sync_conn: Any) -> bool:
-    inspector = sa_inspect(sync_conn)
-    present = set(inspector.get_table_names())
-    required_tables = {
-        "audit_logs",
-        "dead_jobs",
-        "job_attempts",
-        "jobs",
-        "project_quotas",
-        "project_usage_counters",
-        "project_usage_ledger",
-        "deletion_tombstones",
-        "reliability_cutover_state",
-        "reliability_migration_ledger",
-        "reliability_migration_runs",
-        "restore_proofs",
-        "worker_nodes",
-    }
-    if not required_tables <= present:
-        return False
-    run_foreign_keys = {item["name"] for item in inspector.get_foreign_keys("runs")}
-    occurrence_foreign_keys = {item["name"] for item in inspector.get_foreign_keys("scheduled_task_runs")}
-    job_foreign_keys = {item["name"] for item in inspector.get_foreign_keys("jobs")}
-    marker_columns = {column["name"] for column in inspector.get_columns("reliability_cutover_state")}
-    triggers = set(
-        sync_conn.execute(
-            text(
-                """SELECT trigger_name FROM information_schema.triggers
-                WHERE event_object_schema=current_schema()
-                  AND trigger_name IN
-                      ('trg_project_usage_ledger_append_only',
-                       'trg_audit_logs_append_only',
-                       'trg_dead_jobs_append_only')"""
-            )
-        ).scalars()
-    )
-    return (
-        "empty_domain_probe_complete" in marker_columns
-        and "fk_runs_job" in run_foreign_keys
-        and "fk_scheduled_task_runs_job" in occurrence_foreign_keys
-        and {
-            "fk_jobs_private_run",
-            "fk_jobs_automation_occurrence",
-            "fk_jobs_predecessor_dead_job",
-        }
-        <= job_foreign_keys
-        and triggers
-        == {
-            "trg_project_usage_ledger_append_only",
-            "trg_audit_logs_append_only",
-            "trg_dead_jobs_append_only",
-        }
-    )
-
-
-async def _write_empty_install_reliability_cutover_marker(engine: AsyncEngine) -> None:
-    async with engine.begin() as conn:
-        project_markers = (
-            await conn.execute(
-                text(
-                    """SELECT
-                        (SELECT stage='cutover_complete' AND cutover_at IS NOT NULL
-                           FROM private_work_cutover_state WHERE id=1) AS private_ready,
-                        (SELECT stage='cutover_complete'
-                                AND final_schema_probe_complete AND cutover_at IS NOT NULL
-                           FROM automation_cutover_state WHERE id=1) AS automation_ready"""
-                )
-            )
-        ).one()
-        if project_markers.private_ready is not True or project_markers.automation_ready is not True:
-            raise RuntimeError("reliability empty-install prerequisites are incomplete")
-        active_execution = await conn.scalar(
-            text(
-                """SELECT EXISTS (
-                    SELECT 1 FROM runs WHERE status IN ('pending','running')
-                    UNION ALL
-                    SELECT 1 FROM scheduled_task_runs
-                    WHERE status IN ('queued','launching','running')
-                )"""
-            )
-        )
-        if active_execution:
-            raise RuntimeError("reliability migration required: active legacy execution remains")
-        schema_is_final = await conn.run_sync(_reliability_schema_is_final_sync)
-        if not schema_is_final:
-            raise RuntimeError("reliability final schema probe failed")
-        await conn.execute(
-            text(
-                """INSERT INTO reliability_cutover_state
-                (id,stage,migration_run_id,empty_domain_probe_complete,
-                 source_probe_complete,active_run_probe_complete,
-                 quota_backfill_probe_complete,job_relation_probe_complete,
-                 audit_trigger_probe_complete,stream_probe_complete,
-                 recovery_probe_complete,final_schema_probe_complete,
-                 schema_revision,cutover_at,updated_at)
-                VALUES
-                (1,'cutover_complete',NULL,true,true,true,true,true,true,true,true,true,
-                 '0015_project_reliability_finalize',now(),now())
-                ON CONFLICT (id) DO NOTHING"""
-            )
-        )
-
-
-async def _assert_automation_cutover_complete(engine: AsyncEngine) -> None:
-    async with engine.connect() as conn:
-        marker_table = await conn.scalar(text("SELECT to_regclass('automation_cutover_state')"))
-        if marker_table is None:
-            raise RuntimeError("automation migration required: cutover marker missing")
-        marker = (
-            await conn.execute(
-                text(
-                    """SELECT stage,final_schema_probe_complete,cutover_at
-                    FROM automation_cutover_state WHERE id=1"""
-                )
-            )
-        ).one_or_none()
-    if marker is None or marker.stage != "cutover_complete" or marker.final_schema_probe_complete is not True or marker.cutover_at is None:
-        raise RuntimeError("automation migration required: cutover is not complete")
-
-
-def _run_create_all_sync(sync_conn: Any) -> None:
-    """Create all DeerFlow-owned tables on *sync_conn*."""
-    # Import here to ensure all model classes are registered with Base.metadata.
-    from deerflow.persistence.base import Base
-
-    try:
-        import deerflow.persistence.models  # noqa: F401
-    except ImportError:
-        logger.debug("deerflow.persistence.models not found; bootstrap will create empty schema")
-
-    Base.metadata.create_all(sync_conn)
-    # M4's descriptive revision identifiers exceed Alembic's historical
-    # VARCHAR(32) default. Empty installs create the control table explicitly;
-    # existing installs are widened by revision 0008.
-    sync_conn.execute(
+async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
+    rows = await connection.execute(
         text(
-            """CREATE TABLE IF NOT EXISTS alembic_version (
-                version_num VARCHAR(64) NOT NULL,
-                CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
-            )"""
+            """SELECT c.relname
+               FROM pg_class c
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = current_schema()
+                 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')"""
         )
     )
+    return frozenset(str(value) for value in rows.scalars())
 
 
-def _build_baseline_metadata() -> sa.MetaData:
-    """Build the immutable 0001-era table catalog used for legacy backfill."""
-    from deerflow.persistence.base import Base
+async def classify_database(connection: AsyncConnection) -> Literal["empty", "m7"]:
+    """Classify without mutation before Alembic or seed code can run."""
 
-    try:
-        import deerflow.persistence.models  # noqa: F401
-    except ImportError:
-        logger.debug("deerflow.persistence.models not found; baseline backfill may be incomplete")
+    relations = await list_user_relations(connection)
+    if not relations:
+        return "empty"
+    if "alembic_version" not in relations:
+        raise M7RecreateRequired()
 
-    metadata = sa.MetaData()
-    core_owner_tables = {"threads_meta", "runs", "run_events", "feedback"}
-    for table_name, column_names in _BASELINE_COLUMNS.items():
-        source_table = Base.metadata.tables[table_name]
-        columns: list[sa.Column[Any]] = []
-        for column_name in column_names:
-            source_name = "owner_user_id" if column_name == "user_id" and table_name in core_owner_tables else column_name
-            source_column = source_table.c[source_name]
-            column_type = source_column.type.copy()
-            nullable = source_column.nullable
-            if column_name == "user_id" and table_name in core_owner_tables:
-                column_type = sa.String(64)
-                nullable = True
-            elif column_name == "owner_user_id":
-                column_type = sa.String(64)
-            server_default = None
-            if table_name == "runs" and column_name == "token_usage_by_model":
-                server_default = sa.text("'{}'")
-            columns.append(
-                sa.Column(
-                    column_name,
-                    column_type,
-                    nullable=nullable,
-                    autoincrement=True if table_name == "run_events" and column_name == "id" else "auto",
-                    server_default=server_default,
-                )
-            )
-
-        constraints: list[sa.Constraint] = [sa.PrimaryKeyConstraint(*_BASELINE_PRIMARY_KEYS[table_name])]
-        if table_name == "channel_connections":
-            constraints.append(
-                sa.UniqueConstraint(
-                    "owner_user_id",
-                    "provider",
-                    "external_account_id",
-                    "workspace_id",
-                    name="uq_channel_connection_owner_provider_identity",
-                )
-            )
-        elif table_name == "feedback":
-            constraints.append(
-                sa.UniqueConstraint(
-                    "thread_id",
-                    "run_id",
-                    "user_id",
-                    name="uq_feedback_thread_run_user",
-                )
-            )
-        elif table_name == "run_events":
-            constraints.append(sa.UniqueConstraint("thread_id", "seq", name="uq_events_thread_seq"))
-        elif table_name == "channel_conversations":
-            constraints.extend(
-                (
-                    sa.ForeignKeyConstraint(
-                        ["connection_id"],
-                        ["channel_connections.id"],
-                        ondelete="CASCADE",
-                    ),
-                    sa.UniqueConstraint(
-                        "connection_id",
-                        "external_conversation_id",
-                        "external_topic_id",
-                        name="uq_channel_conversation_connection_external",
-                    ),
-                )
-            )
-        elif table_name == "channel_credentials":
-            constraints.append(
-                sa.ForeignKeyConstraint(
-                    ["connection_id"],
-                    ["channel_connections.id"],
-                    ondelete="CASCADE",
-                )
-            )
-        sa.Table(table_name, metadata, *columns, *constraints)
-
-    for table_name, index_name, column_names, unique, predicate in _BASELINE_INDEXES:
-        table = metadata.tables[table_name]
-        kwargs: dict[str, Any] = {}
-        if predicate is not None:
-            kwargs["postgresql_where"] = sa.text(predicate)
-        sa.Index(index_name, *(table.c[name] for name in column_names), unique=unique, **kwargs)
-    return metadata
+    revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+    if revision == M7_FINAL_SCHEMA_REVISION and _FINAL_APP_TABLES <= relations and not (relations - _FINAL_ALLOWED_RELATIONS):
+        return "m7"
+    raise M7RecreateRequired()
 
 
-def _run_baseline_create_all_sync(sync_conn: Any) -> None:
-    """Create only the baseline tables on *sync_conn* (idempotent via checkfirst).
-
-    Used by the legacy branch to backfill baseline-era tables missing from
-    the user's DB. Restricting the table list to ``_BASELINE_TABLE_NAMES``
-    is the safety property: an unrestricted ``create_all`` would also create
-    tables introduced by later revisions, which would then collide with
-    those revisions' ``op.create_table`` calls when alembic ran upgrade.
-    """
-    baseline_metadata = _build_baseline_metadata()
-    baseline_tables = [baseline_metadata.tables[name] for name in _BASELINE_TABLE_NAMES]
-    baseline_metadata.create_all(sync_conn, tables=baseline_tables, checkfirst=True)
-
-
-def _reset_failed_empty_bootstrap_sync(sync_conn: Any) -> None:
-    """Restore the DeerFlow-owned portion of a database that started empty."""
-    from deerflow.persistence.base import Base
-
-    Base.metadata.drop_all(sync_conn, checkfirst=True)
-    sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-
-
-async def _attempt_failed_empty_bootstrap_cleanup(engine: AsyncEngine) -> None:
-    """Finish best-effort cleanup without replacing the primary failure.
-
-    Caller cancellation is deliberately absorbed while cleanup is in flight:
-    returning early would release the advisory lock while destructive cleanup
-    was still running on a detached task. Once a connection is acquired (which
-    is governed by the engine's pool_timeout), transaction-local PostgreSQL
-    deadlines bound lock waits and the cleanup statement itself.
-    """
-
-    async def cleanup() -> None:
-        async with engine.begin() as conn:
-            await conn.execute(
-                text("SELECT set_config('lock_timeout', :value, true)"),
-                {"value": f"{_EMPTY_BOOTSTRAP_LOCK_TIMEOUT_MS}ms"},
-            )
-            await conn.execute(
-                text("SELECT set_config('statement_timeout', :value, true)"),
-                {"value": f"{_EMPTY_BOOTSTRAP_STATEMENT_TIMEOUT_MS}ms"},
-            )
-            await conn.run_sync(_reset_failed_empty_bootstrap_sync)
-
-    task = asyncio.create_task(cleanup(), name="deerflow-empty-bootstrap-cleanup")
-    while True:
-        try:
-            await asyncio.shield(task)
-            return
-        except asyncio.CancelledError:
-            if not task.done():
-                continue
-            try:
-                task.result()
-            except BaseException:
-                pass
-            logger.error("bootstrap: empty-schema cleanup did not complete; original failure preserved")
-            return
-        except BaseException:
-            logger.error("bootstrap: empty-schema cleanup did not complete; original failure preserved")
-            return
-
-
-def _stamp(cfg: AlembicConfig, revision: str) -> None:
-    """Synchronous alembic stamp; callers must wrap in ``asyncio.to_thread``."""
-    alembic_command.stamp(cfg, revision)
-
-
-def _upgrade(cfg: AlembicConfig, revision: str) -> None:
-    """Synchronous alembic upgrade; callers must wrap in ``asyncio.to_thread``."""
-    alembic_command.upgrade(cfg, revision)
-
-
-# ---------------------------------------------------------------------------
-# Cross-process locking
-# ---------------------------------------------------------------------------
+def _upgrade(config: AlembicConfig, revision: str = "head") -> None:
+    alembic_command.upgrade(config, revision)
 
 
 @asynccontextmanager
-async def _postgres_lock(engine: AsyncEngine):
-    """Hold a Postgres session-level advisory lock for the body of the block.
+async def _postgres_lock(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Serialize classification and upgrade on a dedicated PostgreSQL session."""
 
-    Session-level (not transaction-level) so the lock outlives implicit
-    transactions opened by alembic during ``stamp`` / ``upgrade``. The lock
-    is released explicitly on the way out and -- as a safety net -- when the
-    backing session disconnects (process crash, kill -9).
-
-    Idle-in-transaction protection
-    ------------------------------
-
-    A dedicated ``NullPool`` connection avoids consuming the application's
-    pool while alembic opens a different connection. This matters for valid
-    ``pool_size=1, max_overflow=0`` deployments, which would otherwise starve
-    during startup. The lock connection auto-begins a transaction on its first
-    ``execute`` and then sits idle while ``asyncio.to_thread(_upgrade, ...)``
-    runs alembic. Managed Postgres
-    (RDS, Cloud SQL, Supabase) ships with ``idle_in_transaction_session_
-    timeout`` set to 1-10 minutes by default; if alembic takes longer than
-    that, the host kills this idle-in-transaction session, and because
-    advisory locks are session-scoped, the lock is **silently released**.
-    A second Gateway then acquires it and runs DDL concurrently with the
-    first -- defeating the whole purpose of the lock.
-
-    Defence: ``SET LOCAL idle_in_transaction_session_timeout = 0`` and
-    ``SET LOCAL statement_timeout = 0`` disable both timeout classes **for
-    this transaction only** (no global / role-level effect).
-    Self-hosted Postgres usually ships with the timeout off, so this is a
-    no-op there; on managed PG it is what keeps the lock alive while DDL
-    runs. Must execute *before* ``pg_advisory_lock`` so a slow lock acquire
-    on a heavily-contended cluster is itself protected.
-    """
-    lock_engine = create_async_engine(engine.url.render_as_string(hide_password=False), poolclass=NullPool)
+    lock_engine = create_async_engine(
+        str(engine.url),
+        poolclass=NullPool,
+        isolation_level="AUTOCOMMIT",
+    )
     try:
-        async with lock_engine.connect() as conn:
-            async with conn.begin():
-                await conn.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
-                await conn.execute(text("SET LOCAL statement_timeout = 0"))
-                await conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _PG_LOCK_KEY})
+        async with lock_engine.connect() as connection:
+            await connection.execute(text("SET statement_timeout = 0"))
+            await connection.execute(text("SET idle_in_transaction_session_timeout = 0"))
+            idle_session_timeout = await connection.scalar(text("SELECT current_setting('idle_session_timeout', true)"))
+            if idle_session_timeout is not None:
+                await connection.execute(text("SET idle_session_timeout = 0"))
+            while not await connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": _PG_LOCK_KEY}):
+                await asyncio.sleep(_PG_LOCK_POLL_SECONDS)
+            try:
+                yield
+            finally:
                 try:
-                    logger.info("bootstrap: acquired postgres advisory lock key=0x%x", _PG_LOCK_KEY)
-                    yield
-                finally:
-                    try:
-                        unlocked = await conn.scalar(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY})
-                        if unlocked is not True:
-                            logger.warning("bootstrap: postgres advisory lock was not held during unlock")
-                    except Exception:  # noqa: BLE001
-                        logger.warning("bootstrap: pg_advisory_unlock raised; session close will release", exc_info=True)
+                    await connection.scalar(text("SELECT pg_advisory_unlock(:key)"), {"key": _PG_LOCK_KEY})
+                except Exception:
+                    # Closing this dedicated session is the fail-safe unlock.
+                    pass
     finally:
         await lock_engine.dispose()
 
 
-# ---------------------------------------------------------------------------
-# Top-level entry point
-# ---------------------------------------------------------------------------
+async def bootstrap_schema(engine: AsyncEngine) -> None:
+    """Install the final baseline on an empty DB or verify an exact M7 DB."""
+
+    if not isinstance(engine, AsyncEngine):
+        raise TypeError("bootstrap_schema() requires an AsyncEngine")
+    _get_head_revision()
+    async with _postgres_lock(engine):
+        async with engine.connect() as connection:
+            state = await classify_database(connection)
+        if state == "empty":
+            await _run_alembic_offload(_upgrade, _get_alembic_config(engine), "head")
+        async with engine.connect() as connection:
+            if await classify_database(connection) != "m7":
+                raise M7RecreateRequired()
 
 
 async def _run_alembic_offload(function, *args) -> None:
-    """Run synchronous Alembic work without releasing the DB lock on cancel."""
+    """Keep the advisory lock until synchronous Alembic work settles on cancellation."""
+
     task = asyncio.create_task(asyncio.to_thread(function, *args))
     pending_cancellation: asyncio.CancelledError | None = None
     while True:
@@ -1011,128 +164,20 @@ async def _run_alembic_offload(function, *args) -> None:
             await asyncio.shield(task)
             break
         except asyncio.CancelledError as exc:
-            # Each shield wait blocks on the worker again, so repeated cancels
-            # are absorbed without spinning until synchronous Alembic exits.
             if pending_cancellation is None:
                 pending_cancellation = exc
-        except Exception:  # noqa: BLE001 - cancellation remains authoritative
+        except Exception:
             if pending_cancellation is None:
                 raise
-            logger.exception("Alembic offload failed while bootstrap cancellation was pending")
             raise pending_cancellation
     if pending_cancellation is not None:
         raise pending_cancellation
 
 
-async def bootstrap_schema(engine: AsyncEngine) -> None:
-    """Bring the DB schema to head.
-
-    PostgreSQL calls are serialised across processes with an advisory lock.
-
-    Branch dispatch is documented at module top. ``alembic.command.stamp`` and
-    ``alembic.command.upgrade`` are synchronous and would block the event
-    loop; both are wrapped in ``asyncio.to_thread``.
-    """
-    head = _get_head_revision()
-    cfg = _get_alembic_config(engine)
-
-    async with _postgres_lock(engine):
-        async with engine.connect() as conn:
-            state = await conn.run_sync(_reflect_state)
-        decision = _decide_state(state)
-
-        if decision == "empty":
-            logger.info("bootstrap: branch=empty -> create_all + stamp head (%s)", head)
-            async with engine.begin() as conn:
-                await conn.run_sync(_run_create_all_sync)
-            try:
-                await _run_alembic_offload(_stamp, cfg, head)
-                has_filesystem_source = await asyncio.to_thread(_filesystem_has_legacy_private_source, runtime_home())
-                if has_filesystem_source:
-                    raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
-                await _write_empty_install_cutover_marker(engine)
-                await _write_empty_install_automation_cutover_marker(engine)
-                await _write_empty_install_reliability_cutover_marker(engine)
-            except BaseException:
-                # This invocation proved the DeerFlow-owned schema was empty
-                # before create_all. Restore that state so a failed stamp never
-                # turns the next retry into a false legacy migration that
-                # collides with post-baseline tables created from current
-                # metadata.
-                await _attempt_failed_empty_bootstrap_cleanup(engine)
-                raise
-
-        elif decision == "legacy":
-            async with engine.connect() as conn:
-                database_has_source = await conn.run_sync(_database_has_legacy_private_source_sync)
-            filesystem_has_source = await asyncio.to_thread(_filesystem_has_legacy_private_source, runtime_home())
-            if database_has_source or filesystem_has_source:
-                raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
-            logger.info(
-                "bootstrap: branch=legacy -> baseline-era backfill + stamp %s + upgrade %s + require explicit M4 migration",
-                _BASELINE_REVISION,
-                _PRIVATE_WORK_PRE_EXPAND_REVISION,
-            )
-            # ``_run_baseline_create_all_sync`` is restricted to
-            # ``_BASELINE_TABLE_NAMES`` -- a plain ``Base.metadata.create_all``
-            # would also create tables introduced by later revisions and
-            # collide with their ``op.create_table`` on the subsequent
-            # upgrade. With the restriction, missing baseline tables are
-            # backfilled and post-baseline ``create_table`` revisions run
-            # against a DB where their tables genuinely do not yet exist.
-            # The post-create_all column-add revisions still no-op via
-            # ``safe_add_column`` because baseline-era tables now have the
-            # columns those revisions would add.
-            async with engine.begin() as conn:
-                await conn.run_sync(_run_baseline_create_all_sync)
-            await _run_alembic_offload(_stamp, cfg, _BASELINE_REVISION)
-            await _run_alembic_offload(_upgrade, cfg, _PRIVATE_WORK_PRE_EXPAND_REVISION)
-            raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
-
-        elif decision == "versioned":
-            logger.info("bootstrap: branch=versioned -> upgrade head (%s)", head)
-            async with engine.connect() as conn:
-                current_revision = await conn.scalar(text("SELECT version_num FROM alembic_version"))
-            current_revision = str(current_revision)
-            if _requires_explicit_private_work_migration(current_revision):
-                if current_revision in _PRIVATE_WORK_PRE_EXPAND_REVISIONS and current_revision != _PRIVATE_WORK_PRE_EXPAND_REVISION:
-                    await _run_alembic_offload(
-                        _upgrade,
-                        cfg,
-                        _PRIVATE_WORK_PRE_EXPAND_REVISION,
-                    )
-                raise RuntimeError("private-work staged migration required; stop writers and run make migrate-private-work")
-
-            if not REVISION_ANCESTRY.contains(current_revision, _AUTOMATION_PRE_EXPAND_REVISION):
-                await _run_alembic_offload(
-                    _upgrade,
-                    cfg,
-                    _AUTOMATION_PRE_EXPAND_REVISION,
-                )
-                current_revision = _AUTOMATION_PRE_EXPAND_REVISION
-
-            if not REVISION_ANCESTRY.contains(current_revision, _AUTOMATION_FINAL_REVISION):
-                if current_revision == _AUTOMATION_PRE_EXPAND_REVISION:
-                    async with engine.connect() as conn:
-                        database_has_source = await conn.run_sync(_database_has_legacy_automation_source_sync)
-                    if database_has_source:
-                        raise RuntimeError("automation migration required; stop writers and run the staged automation migration")
-                await _run_alembic_offload(
-                    _upgrade,
-                    cfg,
-                    _AUTOMATION_FINAL_REVISION,
-                )
-                current_revision = _AUTOMATION_FINAL_REVISION
-
-            await _assert_automation_cutover_complete(engine)
-            if not REVISION_ANCESTRY.contains(current_revision, _RELIABILITY_FINAL_REVISION):
-                raise RuntimeError("reliability migration required; stop writers and run the staged reliability migration")
-            # Preserve the historical no-op Alembic call at head. Besides
-            # making externally-added revisions discoverable, the offload is
-            # the cancellation/lock boundary exercised by bootstrap callers.
-            await _run_alembic_offload(_upgrade, cfg, "head")
-
-        else:  # pragma: no cover -- defensive
-            raise RuntimeError(f"bootstrap: unhandled decision {decision!r}")
-
-    logger.info("bootstrap: complete (backend=postgres)")
+__all__ = [
+    "M7RecreateRequired",
+    "M7_FINAL_SCHEMA_REVISION",
+    "bootstrap_schema",
+    "classify_database",
+    "list_user_relations",
+]

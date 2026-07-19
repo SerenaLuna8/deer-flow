@@ -48,16 +48,12 @@ from deerflow.persistence.private_work.model import PrivateFileRow
 from deerflow.persistence.recovery.model import RecoveryJournalStateRow, RestoreProofRow
 
 PROJECT_FOUNDATION_POSTGRES_TESTS = (
-    "tests/integration/test_m1_postgres_cutover.py",
+    "tests/test_m7_final_baseline_postgres.py",
     "tests/integration/test_project_isolation_postgres.py",
     "tests/integration/test_m2_project_governance_postgres.py",
     "tests/integration/test_m3_shared_assets_postgres.py",
     "tests/integration/test_m4_private_work_postgres.py",
-    "tests/integration/test_m4_private_work_migration_postgres.py",
     "tests/integration/test_m5_project_automation_postgres.py",
-    "tests/integration/test_m5_automation_migration_postgres.py",
-    "tests/test_m6_reliability_migration_postgres.py",
-    "tests/test_m6_reliability_schema_postgres.py",
     "tests/test_m6_process_readiness.py",
     "tests/test_m6_job_repository_postgres.py",
     "tests/test_m6_durable_stream_postgres.py",
@@ -496,7 +492,7 @@ async def test_encrypted_archive_restore_replays_journal_and_rejects_tamper_and_
                 )
 
 
-def test_root_make_and_workflows_pin_the_exact_m1_to_m6_release_list() -> None:
+def test_root_make_and_workflows_pin_the_current_postgres_release_list() -> None:
     root = Path(__file__).resolve().parents[2]
     makefile = (root / "Makefile").read_text(encoding="utf-8")
     postgres_workflow = (root / ".github" / "workflows" / "project-foundation-postgres-tests.yml").read_text(encoding="utf-8")
@@ -560,8 +556,24 @@ def test_cross_platform_release_runner_requires_url_and_fails_a_real_child_skip(
     assert "collected=1 passed=0 skipped=1" in output
 
 
-def test_m4_migration_names_the_project_automation_revision_boundary() -> None:
-    source = (Path(__file__).parent.parent / "scripts" / "migrate_private_work.py").read_text(encoding="utf-8")
-
-    assert "database head revision is incomplete" not in source
-    assert "project Automation final revision is incomplete" in source
+def test_removed_database_migration_clis_do_not_return() -> None:
+    backend = Path(__file__).parent.parent
+    root_makefile = backend.parent.joinpath("Makefile").read_text(encoding="utf-8")
+    backend_makefile = backend.joinpath("Makefile").read_text(encoding="utf-8")
+    for stem in (
+        "migrate_sqlite_to_postgres",
+        "migrate_assets",
+        "migrate_private_work",
+        "migrate_automations",
+        "migrate_reliability",
+    ):
+        assert not backend.joinpath("scripts", f"{stem}.py").exists()
+    for target in (
+        "migrate-sqlite:",
+        "migrate-assets:",
+        "migrate-private-work:",
+        "migrate-automations:",
+        "migrate-reliability:",
+    ):
+        assert target not in root_makefile
+        assert target not in backend_makefile

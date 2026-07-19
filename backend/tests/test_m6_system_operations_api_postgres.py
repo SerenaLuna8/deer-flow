@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi import FastAPI, HTTPException, Request
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from support.m4_private_threads import seed_m4_thread_database
 
@@ -45,7 +45,6 @@ from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.jobs.model import DeadJobRow, JobRow
 from deerflow.persistence.quotas.model import ProjectUsageCounterRow
-from deerflow.persistence.reliability import ReliabilityCutoverStateRow
 from deerflow.persistence.user.model import UserRow
 
 NOW = datetime(2026, 7, 17, 6, tzinfo=UTC)
@@ -662,7 +661,6 @@ async def test_operations_overview_returns_closed_readiness_without_querying_agg
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     await _make_system_admin(seed)
     async with seed.factory() as session, session.begin():
-        await session.execute(delete(ReliabilityCutoverStateRow).where(ReliabilityCutoverStateRow.id == 1))
         await session.execute(text("DROP TABLE project_usage_ledger"))
 
     app = _test_app(seed, AuditService(seed.factory, _keyring()))

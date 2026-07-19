@@ -1,10 +1,8 @@
 # M6 backup and recovery
 
-This runbook covers normal final-M6 encrypted backups, the external deletion
+This runbook covers encrypted backups of the M7 final baseline, the external deletion
 journal, restore into a new database, and the separate restore drill required
-for operational acceptance. The exact-`0013` backup proof used during M6
-migration is a different workflow; follow
-`docs/operations/m6-reliability-migration.md` for that boundary.
+for operational acceptance. Pre-M7 migration backup workflows are no longer supported.
 
 ## Authority and secret prerequisites
 
@@ -112,7 +110,6 @@ do not retain target credentials or private restored content.
 
 ## Forward-only rule
 
-There is **no downgrade** from M6. Never restore over the current database,
-manually stamp `0014`/`0015`, edit a restore proof, or point an M5 binary at an
-M6 database. Recovery is always authenticated restore to a new database plus
+There is **no downgrade** from the M7 baseline. Never restore over the current database,
+manually stamp a revision, or edit a restore proof. Recovery is always authenticated restore to a new database plus
 explicit verification and a separate manual traffic switch.

@@ -4,7 +4,6 @@ from .context import PrivateWorkContext, strip_private_client_fields
 from .errors import (
     PrivateWorkAssetStale,
     PrivateWorkConflict,
-    PrivateWorkCutover,
     PrivateWorkError,
     PrivateWorkForbidden,
     PrivateWorkInvalid,
@@ -18,7 +17,6 @@ __all__ = [
     "PrivateWorkAssetStale",
     "PrivateWorkConflict",
     "PrivateWorkContext",
-    "PrivateWorkCutover",
     "PrivateWorkError",
     "PrivateWorkForbidden",
     "PrivateWorkInvalid",

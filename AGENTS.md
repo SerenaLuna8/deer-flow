@@ -80,9 +80,8 @@ account/project-scoped frontend client、项目 Chats、Memory、Connections 以
 file/artifact/sidecar；所有项目私有数据 URL 均从当前 `ProjectPrivateWorkProvider` 派生，Viewer 只获得
 服务端 capability 允许的只读与 own-delete 操作。`PROJECT_PRIVATE_WORKSPACE` 已编译期开启，但 Chats、
 Memory、Connections 和 recent-work 入口仍必须同时通过服务端 readiness 与 capability gate；静态构建不
-暴露入口。M4 已接入 singleton
-`private_work_cutover_state` guard：final schema 且 marker 完成后开放 project private API，同时关闭
-legacy Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run`。M4 已于
+暴露入口。Project private API 现在只依赖 final-schema readiness 与 capability；legacy
+Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run` 已删除。M4 已于
 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation 也已于
 2026-07-16 完成：definition、occurrence、API/UI 和迁移均以认证 account、
 project 与 owner 为 authority，Viewer 只读自己的定义与历史；自动和手动触发都先持久化唯一
@@ -102,10 +101,11 @@ target。显式 M6 staged migration、认证 backup attestation、逐资源 exac
 backfill、aggregate-only reconciliation 拒绝、process readiness 与 Gateway+Worker+可选 Scheduler
 本地/Docker 编排均已交付。Task 19 固定 20 文件 M1–M6 PostgreSQL gate，并以真实 Scheduler/Worker/Gateway
 多进程、SSE reconnect、Frontend static/cache 和新库 restore 覆盖发布边界；Task 20 的全量门禁和独立关闭
-审查于 2026-07-18 完成。M7 Task 1 已建立 marker-free final-schema readiness contract：运行时只检查
-Alembic revision 与最终必需 relations，Tasks 1–7 期间临时接受 `0015_project_reliability_finalize` 和
-未来的 `0001_project_saas_baseline`，不再用 M4/M5/M6 cutover marker 决定 project readiness、治理 API、
-Worker 或 Scheduler 是否开放。里程碑进度仍为 6/8（75%）；M7 其余 legacy source/API 清理与 M8 完整发布验收
+审查于 2026-07-18 完成。M7 Task 8 已把数据库历史重置为唯一 fresh-install baseline
+`0001_project_saas_baseline`。运行期只接受空数据库或精确 M7 schema；旧 revision、未知非空 schema
+和 legacy migration/cutover control tables 均在任何 DDL 前以 `M7_RECREATE_REQUIRED` 拒绝，必须创建
+全新空数据库。旧迁移 CLI、Make target、ledger 与 marker 已删除，baseline downgrade 固定拒绝。
+M7 其余 legacy source/API 清理与 M8 完整发布验收
 尚未交付，因此当前仍不能
 作为完整多用户 SaaS 发布。
 
@@ -142,7 +142,7 @@ Scheduled-task note:
 - Project Automation is available only under `/projects/{project_slug}/automations` and `/api/projects/{project_id}/automations*`; the global scheduled-task HTTP API has been removed. `config.yaml -> scheduler.enabled` gates an independent Scheduler process rather than a Gateway lifespan task.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal Worker run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. `AutomationDispatcher` writes that flag as server-owned admission data in the atomic occurrence/Run/job transaction; client-supplied `context.non_interactive` is dropped.
 - Project Automation occurrence, private Run/snapshot, and `automation_run` job now commit atomically. Gateway retains manual admission but never constructs Scheduler ownership or a poller. When enabled, `make scheduler` owns the process-lifetime PostgreSQL session advisory lock on a dedicated connection; each poll verifies the same backend PID and existing lock without reacquiring it, and ownership loss exits polling/process lifetime. A competing Scheduler may take over only after PostgreSQL releases the old session lock. Worker startup always reconciles already-admitted terminal Runs before claiming jobs, and enabled Scheduler startup performs the same idempotent reconciliation before polling; neither path interrupts or replays active Worker work. Disabled Scheduler mode takes no lock or poll task while manual APIs and Worker restart reconciliation remain available.
-- Existing M5 installations follow `docs/operations/m6-reliability-migration.md`: authenticated Task16 archive evidence and maintenance acknowledgment are required before `0014`; `0015` and the complete marker are written only after job/quota/audit/stream/recovery probes.
+- Database setup installs the only M7 baseline on a new empty database; in-place M1–M6 upgrades are unsupported.
 - Normal final-M6 backup, external tombstone journal, new-database restore, failure decisions, and the separate restore drill follow `docs/operations/m6-backup-recovery.md`; M6 never downgrades or restores in place.
 
 ## Commands: Root vs. Module
@@ -157,12 +157,7 @@ make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
 make setup-db    # 显式创建并完整初始化 PostgreSQL 目标库
-make setup-m4-migration-db  # 创建/验证固定在0007的legacy SQLite private-work迁移库
-make migrate-db  # 升级已存在 PostgreSQL 目标库
-make migrate-sqlite ARGS="..."  # 只读预检、备份并迁移 legacy SQLite；private rows需--m4-staging-target
-make migrate-assets ARGS="--dry-run ..."  # 脱敏 inventory；execute 前必须先 dry-run
-make migrate-private-work ARGS="--dry-run ..."  # 显式 owner map 的 M4 private-work staged migration
-make migrate-automations ARGS="--dry-run ..."  # 显式 owner/Agent map 的 M5 Automation staged migration
+make migrate-db  # 验证或初始化空 PostgreSQL 目标库；旧库必须重建
 make backup-db ARGS="--output /secure/backups"  # 外部认证加密 PostgreSQL archive
 make restore-db ARGS="--archive /secure/backups/<archive> --target-url <new-deerflow_restore-url> --journal /secure/recovery/tombstones.jsonl --execute"  # 恢复、重放、probe 并写 proof；不切换 DATABASE_URL
 make drill-restore ARGS="--archive /secure/backups/<archive> --journal /secure/recovery/tombstones.jsonl"  # 随机恢复库演练，仅清理该库
@@ -219,24 +214,15 @@ These apply repo-wide; module guides own the module-specific detail.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **PostgreSQL release gate** — root `Makefile` 的 `PROJECT_FOUNDATION_POSTGRES_TESTS`
-  是固定 20 文件 M1–M6 真实 PostgreSQL gate 的唯一有序来源；覆盖 M1–M5 integration 以及 M6
-  migration/schema/process/job/stream/quota/audit/recovery/multi-process release 边界。每个数据库测试只创建
+  是真实 PostgreSQL gate 的唯一有序来源；覆盖 M7 baseline、M2–M5 runtime integration 以及 M6
+  process/job/stream/quota/audit/recovery/multi-process release 边界。每个数据库测试只创建
   随机 `deerflow_test_*`/`deerflow_restore_*` 数据库。Release evidence 必须通过
   `POSTGRES_TEST_URL=... make test-project-foundation-postgres` 运行并保持 0 skip；跨平台 Python runner 和
   `.github/workflows/project-foundation-postgres-tests.yml` 都会在变量缺失时于 pytest 前硬失败。
-- **M4 private-work cutover 运维** — `migrate-private-work` 使用显式 owner UUID→active project UUID
-  map；先 dry-run，再在停止 Gateway/Scheduler/channel/embedded writers 的维护窗口 execute，随后运行
-  `make check-db` 与 M1–M4 probes。M4 marker 完成后，若 legacy Automation 任一表非空，命令固定停在
-  `0011` 并保留原行，由后续 `migrate-automations` 独占 `0012/0013`；仅 Automation 空域可继续完成
-  head bootstrap。当前 runnable-first CLI 不写 `--backup-dir`、不消费
-  `DEER_FLOW_M4_BACKUP_KEY`，因此 operator 必须在仓库外保留数据库备份证明；完整故障决策见
-  `docs/operations/m4-private-work-migration.md`。
-- **M3 asset cutover 运维** — `migrate-assets` 扫描 repo 默认/system Agent、`skills/public`、
-  canonical extensions config 和 `.deer-flow` 用户目录；project 来源必须通过 owner map 显式给出
-  active default project，system 来源必须给出 system-admin actor。执行前先 dry-run；execute 先做
-  全量 scope/dependency 预检和认证加密 backup/脱敏 ledger，四类 probe 全通过才写 cutover marker。
-  `rotate-credentials` 要求目标 key 已是 active key，使用 gap-safe `SKIP LOCKED` 分批重扫；cursor 只作
-  审计 checkpoint，tamper 回滚当前批。真实测试只准使用随机 `deerflow_test_*`，绝不连接业务库。
+- **M7 fresh-install baseline** — `migrations/versions/` 只允许
+  `0001_project_saas_baseline.py`；`down_revision=None`，downgrade 永远拒绝。`make setup-db` 在空库安装
+  final application schema、builtin catalog、LangGraph schema 与 default project；`make check-db` 只读验证
+  exact revision 和必需表。真实测试只准使用随机 `deerflow_test_*`，绝不连接业务库。
 - **M3 平台资产管理** — `/admin/assets` 由 server layout 强制限制为 `system_admin`，普通用户返回
   404。Credential create/replace 使用 imperative authenticated API，不得把 secret-bearing input
   放入 TanStack Query/Mutation cache；MCP Credential slot 只能走 submit/approve。轮换状态 GET

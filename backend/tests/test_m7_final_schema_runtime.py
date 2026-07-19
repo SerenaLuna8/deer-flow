@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.final_schema import (
-    PRE_RESET_SCHEMA_REVISION,
+    M7_FINAL_SCHEMA_REVISION,
     FinalSchemaProbe,
     FinalSchemaRequired,
     FinalSchemaState,
@@ -27,19 +27,19 @@ async def test_final_schema_probe_ignores_cutover_markers() -> None:
     session = SimpleNamespace(
         scalar=AsyncMock(
             side_effect=[
-                PRE_RESET_SCHEMA_REVISION,
+                M7_FINAL_SCHEMA_REVISION,
                 ("jobs", "projects", "run_events"),
             ]
         )
     )
 
     state = await FinalSchemaProbe(
-        accepted_revisions=(PRE_RESET_SCHEMA_REVISION,),
+        accepted_revisions=(M7_FINAL_SCHEMA_REVISION,),
         required_relations=("projects", "jobs", "run_events"),
     ).read(session)
 
     assert state == FinalSchemaState(
-        revision=PRE_RESET_SCHEMA_REVISION,
+        revision=M7_FINAL_SCHEMA_REVISION,
         missing_relations=(),
         ready=True,
     )
@@ -61,7 +61,7 @@ async def test_final_schema_probe_reports_wrong_revision_and_missing_relations()
     )
 
     state = await FinalSchemaProbe(
-        accepted_revisions=(PRE_RESET_SCHEMA_REVISION,),
+        accepted_revisions=(M7_FINAL_SCHEMA_REVISION,),
         required_relations=("projects", "jobs", "run_events"),
     ).read(session)
 

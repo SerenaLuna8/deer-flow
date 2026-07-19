@@ -6,7 +6,6 @@ from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import (
     PrivateWorkAssetStale,
     PrivateWorkConflict,
-    PrivateWorkCutover,
     PrivateWorkError,
     PrivateWorkForbidden,
     PrivateWorkInvalid,
@@ -26,7 +25,6 @@ from app.private_work.errors import (
         (PrivateWorkForbidden, 403, "PRIVATE_WORK_FORBIDDEN", "Private work action is forbidden."),
         (PrivateWorkConflict, 409, "PRIVATE_WORK_CONFLICT", "Private work conflict."),
         (PrivateWorkAssetStale, 409, "PRIVATE_WORK_ASSET_STALE", "Private work asset is stale."),
-        (PrivateWorkCutover, 409, "PRIVATE_WORK_CUTOVER", "Private work cutover is not complete."),
         (PrivateWorkTooLarge, 413, "PRIVATE_WORK_TOO_LARGE", "Private work payload is too large."),
         (PrivateWorkStorageQuotaExceeded, 429, "PROJECT_STORAGE_QUOTA_EXCEEDED", "Project storage quota was exceeded."),
         (PrivateWorkRunQuotaExceeded, 429, "PROJECT_RUN_QUOTA_EXCEEDED", "Project concurrent Run quota was exceeded."),

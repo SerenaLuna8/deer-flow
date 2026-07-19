@@ -264,184 +264,18 @@ the former independent `checkpointer` section is no longer accepted. Runtime
 startup validates the configured database but does not create it; provision the
 target database before starting DeerFlow.
 
-### PostgreSQL 初始化与 SQLite 切换（M1）
+### PostgreSQL final baseline（M7）
 
-M1 运行期只支持 PostgreSQL，不提供 SQLite 回退，也不依赖 PostgreSQL RLS。授权边界由
-认证身份、`ProjectContext` 和强制作用域 repository 共同执行；应用连接使用普通非
-superuser role，建库与 migration 属于显式 trusted operations。
+DeerFlow 只支持全新 PostgreSQL 数据库。`make setup-db` 会在空库安装唯一 Alembic revision `0001_project_saas_baseline`，随后幂等初始化 builtin system asset catalog、LangGraph schema 与 default project。`make check-db` 只读验证 revision 和必需表。
 
-本地可启动独立 PostgreSQL 容器（当前 DeerFlow compose stack 不会自动创建数据库）：
+已有 M1–M6 revision、无 `alembic_version` 的非空 schema、或包含未知 relation 的数据库都不会自动升级、清空或改写；setup 会在任何 DDL 前返回 `M7_RECREATE_REQUIRED`。请创建新的空数据库并重新运行 `make setup-db`。baseline downgrade 永远拒绝，旧 SQLite/shared-asset/private-work/Automation/reliability 迁移命令已删除。
 
 ```bash
-export POSTGRES_PASSWORD='<local-password>'
-docker run --name deerflow-postgres -d -p 5432:5432 \
-  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  -e POSTGRES_DB=postgres postgres:17-alpine
-docker exec deerflow-postgres psql -U postgres -d postgres \
-  -c "CREATE ROLE deerflow LOGIN PASSWORD '<app-password>'"
-export POSTGRES_ADMIN_URL='postgresql+asyncpg://postgres:<url-encoded-local-password>@127.0.0.1:5432/postgres'
-export DATABASE_URL='postgresql+asyncpg://deerflow:<url-encoded-app-password>@127.0.0.1:5432/deerflow'
+export POSTGRES_ADMIN_URL="postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres"
+export DATABASE_URL="postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow"
 make setup-db
 make check-db
 ```
-
-已有目标库只需运行 `make migrate-db`。从 legacy SQLite 切换时，先进入维护窗口，保留
-repo 外只读备份，并先 dry-run。下面的普通路径只适用于不含 legacy private Thread/run/
-event/feedback 的来源：
-
-```bash
-make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups --dry-run"
-make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups"
-make check-db
-```
-
-如果 SQLite 含上述 private rows，不要先运行会把目标直接升到 head 的 `make setup-db` 或
-`make migrate-db`；必须使用下方 M4 的 0007 staging 顺序和 `--m4-staging-target`。
-
-迁移器不会修改 SQLite `db`/`wal`/`shm` 来源；失败时保持旧版本和只读备份，修复后重跑。
-产生 PostgreSQL 新写入后使用前向 migration 修复，不执行破坏性 downgrade。M1 只交付
-PostgreSQL 与项目基础；项目私有入口必须等到 M4 的 final schema、cutover marker 和
-readiness gate 都就绪后才开放。
-
-### 工作空间与项目治理（M2）
-
-登录后的默认入口 `/workspace` 是多项目工作空间：页面展示多个项目卡片、待兑换邀请和
-可恢复项目，但不显示项目级左侧菜单。只有进入 `/projects/{project_slug}` 后才加载项目
-菜单，并提供项目概览、成员与邀请、项目设置以及返回工作空间入口。成员、邀请、角色、
-退出、移除和项目删除恢复都由服务端返回的能力与作用域 repository 授权，前端不根据
-角色推导权限。
-
-M2 不接入邮件服务；Admin 创建邀请后只获得一次性 fragment 链接。M2 不使用
-PostgreSQL RLS，也不物理清除成员私有数据或项目数据，只记录 30 天保留或恢复窗口。
-
-### 共享资产治理 API（M3）
-
-项目成员通过 `/api/projects/{project_id}/agents|skills|mcp-servers|credentials` 查看明确分开的
-系统资产与项目资产，并按 capability 创建版本、发布、审批、管理 credential 和固定 system
-binding。`system_admin` 使用 `/api/admin/assets/*` 管理系统资产，或使用
-`/api/admin/projects/{project_id}/assets/*` 对目标项目共享资产执行显式治理 override；该权限不会
-产生项目 membership，也不会开放成员或私有 Thread、run、file、Memory、automation 数据。
-
-Credential API 只返回名称、类型、状态、版本和时间等脱敏元数据。plaintext、ciphertext、nonce、
-key ID、storage locator 与 secret hash 永远不会出现在 HTTP 响应中。
-
-平台管理员可从 `/admin/assets` 进入独立的系统资产管理区，管理 Agent、Skill、MCP 与
-Credential 的创建、版本、发布和生命周期。含 Credential slot 的 MCP 版本只能经过
-submit/approve 流程发布；Credential 页面不提供明文查看或复制，并显示与 rotation CLI
-相同 eligibility 口径的 envelope 聚合状态。该状态接口只返回 eligible/current/pending 数量
-与状态，不暴露 key ID 或 envelope 存储字段。
-
-进入项目后，`/projects/{project_slug}/{agents,skills,mcp,credentials}` 分别展示系统资产与项目
-资产；系统资产只允许按 capability 固定、升级、回退或停用 binding，项目资产保留独立版本历史。
-旧 `/workspace/{agents,skills,tools}` 入口已删除；Agent、Skill、MCP 和 Credential 只通过项目页或
-`/admin/assets` 管理。所有 M3 项目页都不提供运行或开始对话入口。
-
-完成 catalog cutover 后，系统 Agent、Skill 与 MCP 的运行时和旧版 GET 接口只读取 PostgreSQL
-已发布版本；旧文件即使仍存在也不会回退使用。旧版文件写接口统一返回
-`409 ASSET_CATALOG_CUTOVER`，请改用 `/admin/assets` 管理系统资产。
-M3 的兼容运行不会构造项目运行身份：credential materialization 只接受应用内部解析出的真实、
-不可变 `ProjectContext`。
-
-### 项目私有工作（M4 已完成）
-
-进入 `/projects/{project_slug}` 后，服务端 readiness 为 `ready` 且当前成员具有
-`private_work.read_own` 时，项目菜单会显示 Chats、Memory 和 Connections。Chats 支持创建和继续
-自己的私有对话、运行与停止 Agent、上传文件、下载或删除自己的文件/产物，以及 chat sidecar；
-项目 Memory 可列出和导出，具有写能力的成员还可 reload/import/update/delete。Connections 绑定
-项目内可执行 Agent，普通入站文本复用同一项目私有 run lifecycle。
-
-Viewer 只能读取、导出和删除自己的既有 Thread、file 与 Memory 数据，不能创建 Thread、启动 run、
-上传文件、修改 Memory 或创建 connection。其他项目成员、项目 Admin 和平台 `system_admin` 不会因此
-获得 owner 私有内容读取权。所有页面和请求同时按 authenticated account UUID 与 project UUID 分区；
-切换账号或项目时先取消查询，再清理 cache、reconnect metadata 和 LangGraph client。
-
-Project-private backend API 基路径
-`/api/projects/{project_id}/private-work` 提供 readiness、Thread、run/stream/wait、feed
-（messages/events/token usage/feedback）、file 和 artifact 接口；项目 Memory 管理位于
-`/api/projects/{project_id}/memory`。这些接口复用 Gateway 的 run lifecycle，并按项目与 owner
-双重隔离；项目 run/feed 的消息与事件始终使用 PostgreSQL，因此 Gateway 重启后仍可读取，即使
-legacy `run_events.backend` 保持默认 `memory`。runnable-first 显式迁移命令首版覆盖
-PostgreSQL legacy Thread/run/event/feedback 与 checkpoint scope marker；要求每个 legacy owner UUID
-显式映射到 active project UUID，不推断 default/recent/unique project。运行期 cutover guard 只有 final schema 与
-`private_work_cutover_state.stage=cutover_complete` 同时满足时项目私有 API 才开放；marker 完成后，
-旧 Thread/run/Memory/channel connection/upload/artifact HTTP 入口与 shared `start_run` 会统一返回
-`409 PRIVATE_WORK_CUTOVER`。非空 legacy filesystem、Memory 或 connection source 当前会在 execute 前
-安全拒绝。完整操作顺序与故障决策见
-[M4 private-work migration runbook](docs/operations/m4-private-work-migration.md)。
-
-进入维护窗口并先完成外部 PostgreSQL 备份。owner map 是一个只包含 UUID→UUID 的 JSON object；
-`--backup-dir` 是当前 CLI 的保留运维参数，首版不会在其中写文件：
-
-```bash
-export DATABASE_URL='postgresql+asyncpg://...'
-make migrate-private-work ARGS="--dry-run --owner-map /secure/private-work-owner-map.json --backup-dir /secure/backups"
-make migrate-private-work ARGS="--execute --owner-map /secure/private-work-owner-map.json --backup-dir /secure/backups"
-```
-
-如果 private rows 仍在 legacy SQLite，目标必须先停在 0007，不能先创建 final/head schema。
-`DATABASE_URL` 应指向专用的新库或已验证的 0007 库；新库由 `POSTGRES_ADMIN_URL` 创建：
-
-```bash
-export POSTGRES_ADMIN_URL='postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres'
-export DATABASE_URL='postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow_m4_cutover'
-make setup-m4-migration-db
-make migrate-sqlite ARGS="--m4-staging-target --source /path/legacy.db --backup-dir /secure/sqlite-backups --dry-run"
-make migrate-sqlite ARGS="--m4-staging-target --source /path/legacy.db --backup-dir /secure/sqlite-backups"
-```
-
-随后在同一 0007 库中确认每个 migrated user 已有 active project membership，且每个 legacy
-`assistant_id` 对应一个已发布的 system/project Agent（先完成适用的 M2/M3 authority provisioning）。
-再生成 owner map 并执行上面的 `migrate-private-work` dry-run/execute。SQLite importer 会验证目标
-revision 恰为 `0007_project_shared_assets`，按实际 0007 表结构写入并保留 ledger；任何 head/final
-目标都会在写入前拒绝。完整顺序见 runbook。
-
-dry-run 只输出脱敏 counts 与稳定 source hash，不升级 schema、不写 ledger/marker，也不创建 backup
-目录。execute 固定按 0008 expand、分域 ledger、0009 finalize、0010/0011、最后
-`cutover_complete` marker 的顺序执行；同一已完成 cutover 再执行会直接 no-op。
-
-M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation
-也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查。M6 已于 2026-07-18 完成 durable job、
-独立 Worker、Worker-only private run、Automation 原子 admission、独立 Scheduler、PostgreSQL durable
-stream/SSE reconnect、配额、审计、平台运营、认证加密 backup、外部删除 journal、新库 restore/drill、
-显式 cutover 和真实多进程/Frontend/M1–M6 发布门禁。当前进度为 6/8（75%）；M7 legacy source/API
-清理和 M8 完整发布验收仍未交付，因此 DeerFlow 仍不能作为完整多用户 SaaS 发布。
-
-#### M3 共享资产迁移与 credential 轮换
-
-迁移不会随应用启动自动执行。`DATABASE_URL` 指向资产权威 PostgreSQL 数据库；credential keyring
-只从以下两个环境变量读取，数据库只保存带 key ID 的 AES-GCM envelope，不保存主密钥。先 dry-run
-核对脱敏 inventory，再进入维护窗口执行：
-
-```bash
-export DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID='m3-current'
-export DEER_FLOW_CREDENTIAL_KEYRING_JSON='{"m3-current":"<32-byte-key-base64>"}'
-make migrate-assets ARGS="--dry-run --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
-make migrate-assets ARGS="--execute --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
-```
-
-来源包含项目根 `config.yaml` 对应的默认 Agent、repo system Agent、`skills/public`，以及
-`.deer-flow`（或 `DEER_FLOW_HOME`）下的用户 Agent/Skill。MCP 只从 PostgreSQL asset catalog
-创建和管理，不再扫描本地 JSON。`owner-map.json` 的 `default_projects` 必须显式映射 user UUID 到其 active default
-project UUID；legacy shared custom 来源还必须设置 `legacy_shared_owner`，不得自动归入 system 或
-任意项目。`system_actor` 可写在 map 中，也可用 `--actor-user-id` 覆盖。
-
-execute 在 `.deer-flow/migrations/assets/<run-id>/` 写 0700 目录与 0600 文件；含 legacy secret 的
-source snapshot 使用认证加密，脱敏 ledger 保存原始 checksum、大小和可精确恢复的相对路径，不输出
-明文、ciphertext 或 nonce。全部 scope/owner/dependency 预检成功后才写资产；counts、canonical
-checksums、dependency closure、credential decrypt 四类 probe 全部通过后才写 cutover marker。
-
-轮换时 keyring 必须同时保留旧 key 和目标 key，且目标 `--key-id` 必须是 active key：
-
-```bash
-make rotate-credentials ARGS="--dry-run --key-id m3-next --batch-size 100"
-make rotate-credentials ARGS="--execute --key-id m3-next --batch-size 100"
-```
-
-轮换按独立事务分批并使用 gap-safe `SKIP LOCKED` 重扫；`resume_cursor` 仅是审计 checkpoint，完成由
-“不存在仍使用非目标 key 的 envelope”证明，暂时被锁的小 UUID 不会被越过。认证失败或 payload
-tamper 会回滚当前批，已提交批保持可安全续跑；旧 envelope 仅在新 envelope 验证成功后变为 inactive。
-真实 PostgreSQL 回归只能使用具备建库/删库权限的隔离测试 maintenance URL，并且只创建随机
-`deerflow_test_*` 数据库；禁止把业务库或 production URL 用作 `POSTGRES_TEST_URL`。
 
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
@@ -1029,22 +863,7 @@ while the successful audit commit is the durable operation commit point: later c
 engine disposal cannot delete the valid audited archive. Output remains limited to archive ID,
 schema revision, chunk count, and a truncated checksum.
 
-Existing M5 databases use the explicit forward-only
-[M6 reliability migration runbook](docs/operations/m6-reliability-migration.md). First create the exact-0013 archive and its
-externally committed sibling receipt, complete an isolated restore rehearsal, create the
-authenticated no-clobber attestation, review the zero-write dry-run, stop every writer, and execute:
-
-```bash
-make backup-db ARGS="--output /secure/m6 --pre-m6-cutover"
-make migrate-reliability ARGS="--attest-backup --archive /secure/m6/<archive_id>.dfba --backup-commit /secure/m6/<archive_id>.dfba.commit.json --proof-output /secure/m6/pre-cutover-proof.json --restore-verified"
-make migrate-reliability ARGS="--dry-run --backup-proof /secure/m6/pre-cutover-proof.json"
-make migrate-reliability ARGS="--execute --maintenance-acknowledged --backup-proof /secure/m6/pre-cutover-proof.json"
-```
-
-The migration attaches pending work to durable Jobs and writes the same per-resource member,
-ready-file, and pending-Run reservations used by online release. It refuses aggregate-only quota
-history, records the pre-M6 receipt through the trusted backup audit sink after `0014`, is resumable
-there, and applies `0015` plus the final marker only after every probe.
+M7 does not upgrade an existing M1–M6 database in place. Provision a new empty database and run `make setup-db`; any old revision or unknown nonempty schema fails before DDL with `M7_RECREATE_REQUIRED`.
 Local launch starts Gateway and Worker separately and starts Scheduler only when
 `scheduler.enabled=true`; Docker uses the same roles and Scheduler profile. System-admin readiness
 returns only aggregate role/fleet/ownership/cutover state and never PIDs, lock keys, URLs, or tokens.

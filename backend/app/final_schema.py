@@ -9,7 +9,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 M7_FINAL_SCHEMA_REVISION = "0001_project_saas_baseline"
-PRE_RESET_SCHEMA_REVISION = "0015_project_reliability_finalize"
 
 FINAL_REQUIRED_RELATIONS = (
     "projects",
@@ -56,10 +55,7 @@ class FinalSchemaProbe:
     def __init__(
         self,
         *,
-        accepted_revisions: tuple[str, ...] = (
-            M7_FINAL_SCHEMA_REVISION,
-            PRE_RESET_SCHEMA_REVISION,
-        ),
+        accepted_revisions: tuple[str, ...] = (M7_FINAL_SCHEMA_REVISION,),
         required_relations: tuple[str, ...] = FINAL_REQUIRED_RELATIONS,
     ) -> None:
         self._accepted_revisions = accepted_revisions
@@ -97,7 +93,6 @@ class FinalSchemaProbe:
 __all__ = [
     "FINAL_REQUIRED_RELATIONS",
     "M7_FINAL_SCHEMA_REVISION",
-    "PRE_RESET_SCHEMA_REVISION",
     "FinalSchemaError",
     "FinalSchemaProbe",
     "FinalSchemaRequired",

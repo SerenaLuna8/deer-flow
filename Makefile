@@ -1,20 +1,16 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install test test-project-foundation-postgres setup setup-db setup-m4-migration-db migrate-db migrate-sqlite migrate-assets migrate-private-work migrate-automations migrate-reliability reconcile-usage backup-db restore-db drill-restore rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon gateway worker scheduler nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install test test-project-foundation-postgres setup setup-db migrate-db reconcile-usage backup-db restore-db drill-restore rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon gateway worker scheduler nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
 PROJECT_FOUNDATION_POSTGRES_TESTS = \
-	tests/integration/test_m1_postgres_cutover.py \
+	tests/test_m7_final_baseline_postgres.py \
 	tests/integration/test_project_isolation_postgres.py \
 	tests/integration/test_m2_project_governance_postgres.py \
 	tests/integration/test_m3_shared_assets_postgres.py \
 	tests/integration/test_m4_private_work_postgres.py \
-	tests/integration/test_m4_private_work_migration_postgres.py \
 	tests/integration/test_m5_project_automation_postgres.py \
-	tests/integration/test_m5_automation_migration_postgres.py \
-	tests/test_m6_reliability_migration_postgres.py \
-	tests/test_m6_reliability_schema_postgres.py \
 	tests/test_m6_process_readiness.py \
 	tests/test_m6_job_repository_postgres.py \
 	tests/test_m6_durable_stream_postgres.py \
@@ -45,16 +41,10 @@ help:
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
-	@echo "  make test            - Run the fixed M1-M6 PostgreSQL release gate (0 skip)"
-	@echo "  make test-project-foundation-postgres - Run the fixed M1-M6 PostgreSQL release gate"
+	@echo "  make test            - Run the PostgreSQL project foundation release gate (0 skip)"
+	@echo "  make test-project-foundation-postgres - Run the PostgreSQL project foundation release gate"
 	@echo "  make setup-db        - 创建并初始化 PostgreSQL 数据库"
-	@echo "  make setup-m4-migration-db - 创建/验证固定在0007的legacy SQLite迁移库"
-	@echo "  make migrate-db      - 仅升级已存在 PostgreSQL 数据库"
-	@echo "  make migrate-sqlite  - 只读预检/备份并迁移 legacy SQLite（参数通过 ARGS 传入）"
-	@echo "  make migrate-assets  - 显式预检/备份并迁移 legacy shared assets（参数通过 ARGS 传入）"
-	@echo "  make migrate-private-work - 显式 dry-run/execute 迁移 legacy private work（参数通过 ARGS 传入）"
-	@echo "  make migrate-automations - 显式迁移 legacy automations，必须先 dry-run 再 execute（参数通过 ARGS 传入）"
-	@echo "  make migrate-reliability - 显式执行 M6 reliability dry-run/cutover（参数通过 ARGS 传入）"
+	@echo "  make migrate-db      - 验证或初始化空 PostgreSQL 数据库；旧库必须重建"
 	@echo "  make reconcile-usage - 预检或执行 quota reconciliation（参数通过 ARGS 传入）"
 	@echo "  make backup-db      - 创建外部、认证加密 PostgreSQL backup archive（参数通过 ARGS 传入）"
 	@echo "  make restore-db     - 恢复认证 archive 到全新 deerflow_restore_* 数据库（参数通过 ARGS 传入）"
@@ -100,26 +90,8 @@ doctor:
 setup-db:
 	@$(MAKE) -C backend setup-db
 
-setup-m4-migration-db:
-	@$(MAKE) -C backend setup-m4-migration-db
-
 migrate-db:
 	@$(MAKE) -C backend migrate-db
-
-migrate-sqlite:
-	@$(MAKE) -C backend migrate-sqlite ARGS="$(ARGS)"
-
-migrate-assets:
-	@$(MAKE) -C backend migrate-assets ARGS="$(ARGS)"
-
-migrate-private-work:
-	@$(MAKE) -C backend migrate-private-work ARGS="$(ARGS)"
-
-migrate-automations:
-	@$(MAKE) -C backend migrate-automations ARGS="$(ARGS)"
-
-migrate-reliability:
-	@$(MAKE) -C backend migrate-reliability ARGS="$(ARGS)"
 
 reconcile-usage:
 	@$(MAKE) -C backend reconcile-usage ARGS="$(ARGS)"

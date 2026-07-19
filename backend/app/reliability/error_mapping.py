@@ -8,13 +8,11 @@ from starlette.responses import JSONResponse
 from app.reliability.errors import (
     RELIABILITY_ERROR_STATUS,
     ReliabilityConflict,
-    ReliabilityCutover,
     ReliabilityDatabaseUnavailable,
     ReliabilityError,
     ReliabilityForbidden,
     ReliabilityInvalid,
     ReliabilityInvalidStreamCursor,
-    ReliabilityMigrationRequired,
     ReliabilityNotFound,
     ReliabilityQuotaExceeded,
     ReliabilityWorkerUnavailable,
@@ -26,9 +24,7 @@ _RELIABILITY_ERROR_TYPES = (
     ReliabilityForbidden,
     ReliabilityConflict,
     ReliabilityInvalid,
-    ReliabilityMigrationRequired,
     ReliabilityQuotaExceeded,
-    ReliabilityCutover,
     ReliabilityWorkerUnavailable,
     ReliabilityDatabaseUnavailable,
 )

@@ -12,12 +12,11 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext
-from app.private_work.cutover import PRIVATE_WORK_FINAL_REVISION
 from app.private_work.thread_service import PrivateThreadService
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from deerflow.persistence.revisions import REVISION_ANCESTRY
+from deerflow.persistence.bootstrap import M7_FINAL_SCHEMA_REVISION
 from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
@@ -115,16 +114,6 @@ async def m4_release_database_ready(database_url: str) -> bool:
         async with engine.connect() as connection:
             database = str(await connection.scalar(text("SELECT current_database()")))
             revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-            marker = (
-                await connection.execute(
-                    text(
-                        """SELECT stage,cutover_at IS NOT NULL AS cutover_complete
-                        FROM private_work_cutover_state WHERE id=1"""
-                    )
-                )
-            ).one_or_none()
-        return (
-            _TEST_DATABASE_PATTERN.fullmatch(database) is not None and REVISION_ANCESTRY.contains(str(revision), PRIVATE_WORK_FINAL_REVISION) and marker is not None and marker.stage == "cutover_complete" and marker.cutover_complete is True
-        )
+        return _TEST_DATABASE_PATTERN.fullmatch(database) is not None and revision == M7_FINAL_SCHEMA_REVISION
     finally:
         await engine.dispose()

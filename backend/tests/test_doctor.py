@@ -68,11 +68,9 @@ class TestCheckPostgres:
             host="db.internal",
             port=5432,
             database="deerflow",
-            current_revision="0011_private_artifact_tombstone",
-            head_revision="0011_private_artifact_tombstone",
+            current_revision="0001_project_saas_baseline",
+            head_revision="0001_project_saas_baseline",
             revision_matches=True,
-            automation_status="ready",
-            reliability_status="ready",
         )
         monkeypatch.setattr(check_postgres, "run_check", lambda _url: result)
 
@@ -100,11 +98,9 @@ class TestCheckPostgres:
                 "host": "db.internal",
                 "port": 5432,
                 "database": "deerflow",
-                "current_revision": "0005_project_foundation",
-                "head_revision": "0005_project_foundation",
+                "current_revision": "0001_project_saas_baseline",
+                "head_revision": "0001_project_saas_baseline",
                 "missing_tables": (),
-                "automation_status": "ready",
-                "reliability_status": "ready",
             },
         )
         result = doctor.check_postgres(tmp_path)
@@ -112,61 +108,6 @@ class TestCheckPostgres:
         assert "db.internal:5432/deerflow" in result.detail
         assert secret not in f"{result.detail}\n{result.fix}"
         assert "owner" not in result.detail
-        assert "Automation ready" in result.detail
-
-    def test_automation_migration_status_is_bounded_and_redacted(self, tmp_path, monkeypatch):
-        secret = "migration-secret-must-not-render"
-        monkeypatch.setenv(
-            "DATABASE_URL",
-            f"postgresql://owner:{secret}@db.internal:5432/deerflow",
-        )
-        monkeypatch.setattr(
-            doctor,
-            "_run_postgres_check",
-            lambda _root, _url: {
-                "healthy": False,
-                "host": "db.internal",
-                "port": 5432,
-                "database": "deerflow",
-                "current_revision": "0012_project_automation_expand",
-                "head_revision": "0013_project_automation_finalize",
-                "missing_tables": (),
-                "automation_status": "migration_required",
-            },
-        )
-
-        result = doctor.check_postgres(tmp_path)
-
-        assert result.status == "fail"
-        assert result.detail == "Automation migration_required"
-        assert "make migrate-automations" in (result.fix or "")
-        assert secret not in f"{result.detail}\n{result.fix}"
-
-    def test_completed_m5_installation_points_to_reliability_migration(self, tmp_path, monkeypatch):
-        monkeypatch.setenv(
-            "DATABASE_URL",
-            "postgresql://owner:secret@db.internal:5432/deerflow",
-        )
-        monkeypatch.setattr(
-            doctor,
-            "_run_postgres_check",
-            lambda _root, _url: {
-                "healthy": False,
-                "host": "db.internal",
-                "port": 5432,
-                "database": "deerflow",
-                "current_revision": "0013_project_automation_finalize",
-                "head_revision": "0015_project_reliability_finalize",
-                "missing_tables": ("reliability_cutover_state",),
-                "automation_status": "ready",
-                "reliability_status": "migration_required",
-            },
-        )
-
-        result = doctor.check_postgres(tmp_path)
-
-        assert result.detail == "Reliability migration_required"
-        assert "make migrate-reliability" in (result.fix or "")
 
     def test_database_failure_is_generic_and_points_to_existing_commands(self, tmp_path, monkeypatch):
         secret = "credential-must-not-render"
@@ -182,7 +123,7 @@ class TestCheckPostgres:
         result = doctor.check_postgres(tmp_path)
         assert result.status == "fail"
         assert "make check-db" in (result.fix or "")
-        assert "make migrate-db" in (result.fix or "")
+        assert "全新的空数据库" in (result.fix or "")
         assert secret not in f"{result.detail}\n{result.fix}"
 
 

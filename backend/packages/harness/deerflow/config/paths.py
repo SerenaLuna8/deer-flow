@@ -164,8 +164,7 @@ class Paths:
         """Legacy root for shared (pre user-isolation) custom agents: `{base_dir}/agents/`.
 
         New code should use :meth:`user_agents_dir` instead. This property remains
-        only as a read-side fallback for installations that have not yet run the
-        ``migrate_user_isolation.py`` script.
+        only as a read-side compatibility fallback.
         """
         return self.base_dir / "agents"
 

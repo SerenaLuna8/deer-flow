@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from sqlalchemy import (
     CHAR,
     BigInteger,
-    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -17,7 +16,6 @@ from sqlalchemy import (
     Index,
     LargeBinary,
     PrimaryKeyConstraint,
-    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -324,77 +322,4 @@ class UserProjectMemoryFactRow(Base):
         CheckConstraint("content <> ''", name="ck_user_project_memory_facts_content"),
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_user_project_memory_facts_confidence"),
         CheckConstraint("source_run_id IS NULL OR source_thread_id IS NOT NULL", name="ck_user_project_memory_facts_source"),
-    )
-
-
-class PrivateWorkMigrationRunRow(Base):
-    __tablename__ = "private_work_migration_runs"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    mode: Mapped[str] = mapped_column(String(16), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="running", server_default="running")
-    source_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    owner_map_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    database_backup_proof_digest: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
-    legacy_source_probe_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
-    checkpoint_marker_probe_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
-    cross_scope_probe_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    __table_args__ = (
-        CheckConstraint("mode IN ('dry_run', 'execute')", name="ck_private_work_migration_runs_mode"),
-        CheckConstraint("status IN ('running', 'completed', 'failed')", name="ck_private_work_migration_runs_status"),
-        CheckConstraint("source_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_private_work_migration_runs_source"),
-        CheckConstraint("owner_map_digest ~ '^[0-9a-f]{64}$'", name="ck_private_work_migration_runs_owner_map"),
-        CheckConstraint(
-            "database_backup_proof_digest IS NULL OR database_backup_proof_digest ~ '^[0-9a-f]{64}$'",
-            name="ck_private_work_migration_runs_backup",
-        ),
-    )
-
-
-class PrivateWorkMigrationLedgerRow(Base):
-    __tablename__ = "private_work_migration_ledger"
-
-    migration_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("private_work_migration_runs.id", ondelete="CASCADE"), primary_key=True)
-    domain: Mapped[str] = mapped_column(String(32), primary_key=True)
-    source_key_hash: Mapped[str] = mapped_column(CHAR(64), primary_key=True)
-    source_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    target_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="complete", server_default="complete")
-    row_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
-    byte_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
-    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
-
-    __table_args__ = (
-        CheckConstraint("status = 'complete'", name="ck_private_work_migration_ledger_status"),
-        CheckConstraint("source_key_hash ~ '^[0-9a-f]{64}$'", name="ck_private_work_migration_ledger_source_key"),
-        CheckConstraint("source_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_private_work_migration_ledger_source"),
-        CheckConstraint("target_digest ~ '^[0-9a-f]{64}$'", name="ck_private_work_migration_ledger_target"),
-        CheckConstraint("row_count >= 0 AND byte_count >= 0", name="ck_private_work_migration_ledger_counts"),
-    )
-
-
-class PrivateWorkCutoverStateRow(Base):
-    __tablename__ = "private_work_cutover_state"
-
-    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1, server_default=text("1"))
-    stage: Mapped[str] = mapped_column(String(24), nullable=False)
-    migration_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("private_work_migration_runs.id", ondelete="RESTRICT"), nullable=True)
-    empty_domain_probe_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
-    checkpoint_marker_probe_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
-    cutover_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now, server_default=text("now()"))
-
-    __table_args__ = (
-        CheckConstraint("id = 1", name="ck_private_work_cutover_state_singleton"),
-        CheckConstraint(
-            "stage IN ('empty_install', 'migration_ready', 'cutover_complete')",
-            name="ck_private_work_cutover_state_stage",
-        ),
-        CheckConstraint(
-            "stage != 'cutover_complete' OR cutover_at IS NOT NULL",
-            name="ck_private_work_cutover_state_cutover_at",
-        ),
     )

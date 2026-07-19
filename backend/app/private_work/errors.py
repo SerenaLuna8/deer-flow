@@ -7,7 +7,6 @@ PRIVATE_WORK_ERROR_STATUS = {
     "PRIVATE_WORK_FORBIDDEN": 403,
     "PRIVATE_WORK_CONFLICT": 409,
     "PRIVATE_WORK_ASSET_STALE": 409,
-    "PRIVATE_WORK_CUTOVER": 409,
     "PRIVATE_WORK_TOO_LARGE": 413,
     "PROJECT_STORAGE_QUOTA_EXCEEDED": 429,
     "PROJECT_RUN_QUOTA_EXCEEDED": 429,
@@ -44,11 +43,6 @@ class PrivateWorkConflict(PrivateWorkError):
 class PrivateWorkAssetStale(PrivateWorkError):
     code = "PRIVATE_WORK_ASSET_STALE"
     public_message = "Private work asset is stale."
-
-
-class PrivateWorkCutover(PrivateWorkError):
-    code = "PRIVATE_WORK_CUTOVER"
-    public_message = "Private work cutover is not complete."
 
 
 class PrivateWorkTooLarge(PrivateWorkError):

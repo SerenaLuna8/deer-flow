@@ -144,145 +144,23 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    make check-db
    ```
 
-   M1 不使用 PostgreSQL RLS；认证身份、`ProjectContext` 和强制作用域 repository 是应用
-   授权边界。应用 role 应为普通非 superuser，建库和 migration 只通过显式脚本执行。
+   ### PostgreSQL final baseline（M7）
 
-   当前 PostgreSQL schema 会创建项目与项目成员关系基础表。平台角色仅为
-   `system_admin` 和 `user`；项目内的 `admin`、`editor`、`runner`、`viewer` 是独立权限，
-   平台管理员不会因此自动成为任何项目的成员。旧数据库中的平台 `admin` 会在升级时
-   自动映射为 `system_admin`。
-   后端会从认证用户和有效成员关系解析可信、不可变的 `ProjectContext`；平台管理员若未
-   加入项目也不能旁路项目权限。项目不存在、无成员关系、暂停或非 active 状态对外使用
-   同一 not-found 语义，避免泄漏项目是否存在。
-   项目列表和修改同样强制使用成员作用域；列表使用稳定 keyset cursor，置顶和最近进入
-   只修改当前成员自己的偏好，不影响项目中的其他成员。
-   `ProjectContext` 解析和后续 repository 操作各自结束自己的 transaction；修改操作会在
-   同一 transaction 内再次核对成员版本并完成 read-back，确认结果有效后才提交。
-   项目 API 位于 `/api/projects`，只从认证 session 取得用户身份；默认项目使用固定
-   `default-project` slug，并在 PostgreSQL transaction advisory lock 下幂等创建。首次
-   `/initialize` 已创建管理员但默认项目初始化失败时不会签发 cookie；修复数据库冲突后可
-   运行 `make setup-db` 重试，系统不会猜测新 slug 或自动挂接不完整项目。
-   多个 Gateway 同时收到首次初始化请求时，会由 PostgreSQL 串行选出唯一管理员；后到的
-   请求返回“系统已初始化”，不会留下第二个管理员账户。
-   前端项目数据使用严格响应契约和按账户分区的查询键；切换账户或退出时会先取消请求，
-   再清空当前 QueryClient，旧账户的缓存和迟到响应不会进入新账户。项目能力只采用后端
-   返回值，不根据 `admin`、`editor`、`runner`、`viewer` 角色在浏览器中自行推导。
-   登录后的默认入口是 `/workspace` 工作空间，可搜索、创建、置顶和按能力编辑项目，且不
-   显示旧版或项目级侧栏；旧 chats、agents、memory、scheduled-tasks、skills、tools 和 projects
-   工作空间子路由均返回 not-found。静态演示构建在同一 `/workspace` URL 渲染本地无网络示例卡片，
-   不会发起 `/api/` 请求或暴露项目入口。项目卡只展示 API 的公开
-   字段。进入项目时，前端会通过成员可见的项目列表精确匹配 slug，再用返回的 UUID 调用
-   enter，绝不会把 slug 传给只接受 UUID 的详情或 enter 接口。
-   `/projects/<project_slug>` 使用独立的认证和查询容器，不继承旧聊天工作区外壳。项目首页
-   进入后才显示项目级菜单；M2 菜单只包含项目概览、成员与邀请、项目设置以及返回工作
-   空间。项目治理操作只使用服务端返回的能力，不从角色推导授权。Admin 创建邀请后只获得
-   一次性 fragment 链接，M2 不发送邀请邮件、验证邮件或密码重置邮件。
-   M2 不使用 PostgreSQL RLS，也不物理清除成员私有数据或项目数据；成员退出/移除与项目
-   删除只记录 30 天保留或恢复窗口。
+   DeerFlow 只支持全新 PostgreSQL 数据库。`make setup-db` 在空库安装唯一 revision
+   `0001_project_saas_baseline`，再初始化 builtin system asset catalog、LangGraph schema 和
+   default project；`make check-db` 只读验证 revision 与必需表。
 
-   M3 把 Agent、Skill、MCP 和 Credential 的系统级、项目级定义迁入 PostgreSQL。平台管理员
-   通过 `/admin/assets` 管理系统资产；进入项目后，
-   `/projects/<project_slug>/{agents,skills,mcp,credentials}` 分别显示系统资产与项目资产，系统
-   binding 固定到明确 version。旧 `/workspace/{agents,skills,tools}` 已删除，资产只通过项目页或
-   `/admin/assets` 管理。M3 资产页不直接启动运行，项目 Chats 从 M4 项目私有入口选择并执行
-   已发布且获准的 Agent、Skill 和 MCP 版本。
-
-   M4 项目私有工作在 `/projects/<project_slug>` 提供 Chats、Memory 和 Connections。入口同时要求
-   编译期 feature、服务端 readiness=`ready` 与 `private_work.read_own`；创建 Thread、运行、上传和
-   建立 connection 还要求相应 capability。Chats 复用现有 streaming/stop/human-input 体验，文件和
-   artifact 只通过项目作用域 URL 读取。Viewer 只能读取、导出和删除自己的既有私有数据，不能
-   创建 Thread、启动 run、上传、修改 Memory 或创建 connection。
-
-   项目私有请求和前端 cache 都按 authenticated account UUID + project UUID 分区；切换 scope 时先
-   取消查询，再清除 cache、reconnect metadata 与 LangGraph client。legacy cutover 完成后，旧
-   Thread/run/Memory/channel connection/upload/artifact HTTP 与 shared `start_run` 统一返回
-   `409 PRIVATE_WORK_CUTOVER`，不得读取 project rows。
-
-   M4 staged migration 只通过显式命令执行。owner map 是 legacy owner UUID 到 active project UUID
-   的 JSON object；命令不猜默认项目。先完成 operator PostgreSQL 备份，再 dry-run、execute 和检查：
+   旧 M1–M6 revision、无 Alembic 标记的非空 schema 或含未知 relation 的数据库都会在任何 DDL 前
+   返回 `M7_RECREATE_REQUIRED`。系统不会原地迁移、删除或改写旧数据；请创建新的空数据库。
+   baseline downgrade 永远拒绝，旧 SQLite、shared asset、private-work、Automation、reliability
+   迁移命令已删除。
 
    ```bash
-   export DATABASE_URL='postgresql+asyncpg://...'
-   make migrate-private-work ARGS="--dry-run --owner-map /secure/private-work-owner-map.json --backup-dir /secure/backups"
-   make migrate-private-work ARGS="--execute --owner-map /secure/private-work-owner-map.json --backup-dir /secure/backups"
+   export POSTGRES_ADMIN_URL="postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres"
+   export DATABASE_URL="postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow"
+   make setup-db
    make check-db
    ```
-
-   当前 runnable-first CLI 不写 `--backup-dir`，也不消费 `DEER_FLOW_M4_BACKUP_KEY`；数据库备份证明由
-   operator 在仓库外保存，非空 legacy filesystem、Memory 或 connection source 会在 execute 前
-   fail closed。完整操作与故障决策见
-   [M4 private-work migration runbook](docs/operations/m4-private-work-migration.md)。
-
-   M4 已于 2026-07-16 完成实现、迁移正向链、单次独立审查修复与全量门禁。M5 project Automation
-   也已于 2026-07-16 完成实现、迁移、全量门禁与独立关闭审查。M6 已于 2026-07-18 完成 Worker、
-   durable SSE、配额、审计、平台运营、通用 backup/restore、显式 cutover 与真实发布门禁；当前进度为
-   6/8（75%）。M7 legacy 清理和 M8 完整发布验收仍未交付，因此仍不能作为完整多用户 SaaS 发布。
-   运维顺序见 [M6 migration runbook](docs/operations/m6-reliability-migration.md) 和
-   [M6 backup/recovery runbook](docs/operations/m6-backup-recovery.md)。
-
-   共享资产迁移和 credential 轮换只通过显式命令执行，不会在应用启动时自动运行。
-   `DATABASE_URL` 指向资产权威 PostgreSQL 数据库；主密钥只从环境变量读取，数据库仅保存
-   AES-GCM envelope：
-
-   ```bash
-   export DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID='m3-current'
-   export DEER_FLOW_CREDENTIAL_KEYRING_JSON='{"m3-current":"<32-byte-key-base64>"}'
-   make migrate-assets ARGS="--dry-run --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
-   make migrate-assets ARGS="--execute --actor-user-id <system-admin-uuid> --owner-map /secure/owner-map.json"
-   make rotate-credentials ARGS="--dry-run --key-id m3-next --batch-size 100"
-   ```
-
-   `owner-map.json` 必须显式把项目来源映射到 active default project；未解析 owner、依赖或 scope
-   时迁移会 fail closed。轮换前 keyring 必须同时保留旧 key 与新的 32-byte key，并把目标
-   `m3-next` 设为 active；日志和报告只包含脱敏统计与 key ID，不输出 key material、明文、
-   ciphertext 或 nonce。
-
-   为避免误删项目，项目表或成员关系表存在数据时，数据库会拒绝降级到 0004；必须先按
-   运维方案迁出数据，不能依赖 downgrade 自动删除。
-
-   从旧版 SQLite 安装迁移时，先设置 `DATABASE_URL`，并把只读来源和 repo 外备份目录
-   作为参数传入。下面的普通路径只适用于不含 legacy private Thread/run/event/feedback 的来源。
-   先执行 dry-run；只有所有来源都通过 schema、冲突和语义预检后才移除 `--dry-run`。写迁移会
-   先为每个来源创建并校验原子备份，来源文件不会被修改或删除：
-
-   ```bash
-   make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups --dry-run"
-   make migrate-sqlite ARGS="--source /path/legacy.db --backup-dir /path/backups"
-   ```
-
-   如果 SQLite 含 legacy private rows，不得先运行会把目标升级到 head 的 `make setup-db` 或
-   `make migrate-db`。必须创建/验证固定在 0007 的目标，并显式启用 staging contract：
-
-   ```bash
-   export POSTGRES_ADMIN_URL='postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres'
-   export DATABASE_URL='postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow_m4_cutover'
-   make setup-m4-migration-db
-   make migrate-sqlite ARGS="--m4-staging-target --source /path/legacy.db --backup-dir /secure/sqlite-backups --dry-run"
-   make migrate-sqlite ARGS="--m4-staging-target --source /path/legacy.db --backup-dir /secure/sqlite-backups"
-   ```
-
-   导入后，在同一 0007 库中确认每个 migrated user 已有 active project membership，并且每个
-   legacy `assistant_id` 都能解析到已发布的 system/project Agent（先完成适用的 M2/M3 authority
-   provisioning）。然后生成 owner map，按前文执行 `migrate-private-work` dry-run/execute。
-   staging importer 会拒绝任何非 `0007_project_shared_assets` 目标，并按实际 0007 表结构写入；
-   完整顺序与失败处理见 M4 runbook。
-
-   可重复 `--source` 迁移多个来源。遇到未知表、非空 deferred 项目表、跨来源主键冲突、
-   解码或 read-back 校验失败时命令会停止；输出仅包含 fingerprint、计数和脱敏错误。
-
-   默认不会自动合并跨来源用户。若已经人工确认“首来源 `system_admin` 按唯一 email
-   吸收后续来源 legacy `admin`”方案，必须显式绑定来源顺序、完整 fingerprint 和精确
-   冲突数量，例如：
-
-   ```bash
-   make migrate-sqlite ARGS="--source /path/first.db --source /path/second.db --backup-dir /path/backups --dry-run --reconcile-users-by-email --reconcile-expected-conflicts 1 --reconcile-source-sha256 FIRST_SHA256 --reconcile-source-sha256 SECOND_SHA256"
-   ```
-
-   任一 fingerprint、顺序、数量、角色或唯一性条件不符都会在连接目标库前停止。归并只
-   改写明确登记的 DeerFlow 用户引用并保留所有业务行；外部平台的
-   `channel_connections.bot_user_id` 不会改写。被吸收用户和引用改写都会写入 migration
-   ledger 以支持审计和幂等重跑。正式迁移仍会先创建只读 snapshot，并要求 snapshot
-   复检得到完全相同的归并决策。
 
    如果你要提交本地安装、配置或运行问题，可以执行 `make support-bundle`。
    命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成

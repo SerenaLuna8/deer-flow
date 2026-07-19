@@ -1,10 +1,8 @@
 """Configuration and loaders for custom agents.
 
 Custom agents are stored per-user under ``{base_dir}/users/{user_id}/agents/{name}/``.
-A legacy shared layout at ``{base_dir}/agents/{name}/`` is still readable so that
-installations that pre-date user isolation continue to work until they run the
-``scripts/migrate_user_isolation.py`` migration. New writes always target the
-per-user layout.
+A shared layout at ``{base_dir}/agents/{name}/`` remains a read-only compatibility
+source. New writes always target the per-user layout.
 """
 
 import logging

@@ -99,11 +99,7 @@ make lint               # Lint with ruff
 make format             # Format code with ruff
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see Schema Migrations section)
 make setup-db           # 显式创建目标 PostgreSQL 数据库并 bootstrap 到 head
-make setup-m4-migration-db  # 创建/验证固定在0007的legacy SQLite private-work迁移库
-make migrate-db         # 仅升级已存在数据库，不执行管理员建库操作
-make migrate-assets ARGS="--dry-run ..."  # shared asset 脱敏 inventory / 显式 cutover
-make migrate-private-work ARGS="--dry-run ..."  # M4 core private-work staged migration
-make migrate-automations ARGS="--dry-run ..."  # M5 project Automation staged migration
+make migrate-db         # 验证/初始化空数据库；旧 revision 必须重建
 make backup-db ARGS="--output /secure/backups"  # encrypted PostgreSQL archive; requires DATABASE_URL, DEER_FLOW_BACKUP_KEY, audit HMAC env, and pg_control_system() access
 make restore-db ARGS="--archive /secure/backups/<archive> --target-url <new-deerflow_restore-url> --journal /secure/recovery/tombstones.jsonl --execute"  # authenticate archive, restore new DB, replay journal, probe, write proof
 make drill-restore ARGS="--archive /secure/backups/<archive> --journal /secure/recovery/tombstones.jsonl"  # disposable verification DB; always drops only its generated DB
@@ -339,10 +335,9 @@ metadata only.
 - `app.gateway.routers.project_automations` exposes the only Automation HTTP surface at `/api/projects/{project_id}/automations`. Its readiness route is mounted separately, while every data route uses `AutomationRoute`, server-issued `PrivateWorkContext`, and the marker-free final-schema probe. Request/query/header models reject client authority; public responses omit owner, membership, lease, idempotency hash, occurrence key, and raw error detail. Manual trigger requires a UUID idempotency header, calls the same atomic occurrence/Run/job admission used by Scheduler, and remains available when automatic polling is disabled; its dispatcher dependency first requires the composed operational audit sink and returns the stable Automation 503 before admission when that sink is missing. The global `/api/scheduled-tasks*` router and legacy read adapter no longer exist.
 - `AutomationSchedulerService` exposes only `reconcile_admitted_runs(session)` and `admit_due_occurrences(session, now=...)`. The independent Scheduler owns each transaction and the process-lifetime advisory lock; due reads and occurrence/Run/job admission use the same caller-owned session, neither service method commits independently, and ownership is reverified before every due page.
 - M5 scheduler configuration retains its five restart-required fields: `enabled`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, and `min_once_delay_seconds`. The M6 Scheduler no longer uses occurrence launch leases, but the field remains migration-compatible; durable job leases are governed by `worker.*`. Concurrency must be positive, once delay may be zero but not negative, and semantic schedule changes retain the existing validation. Gateway installs only Automation API/readiness/manual-admission dependencies; Scheduler process ownership and polling live exclusively under `app.scheduler`.
-- M5 completed its Task 18 full-stack gates and independent closure review on 2026-07-16. M6 is complete as of 2026-07-18: durable generic jobs, independent Worker-only execution, atomic Automation occurrence/Run/job admission, independent Scheduler ownership, PostgreSQL durable streams and Gateway replay, enforced project quotas, privacy-safe append-only audit, project/system governance consoles, encrypted backup, external deletion journal, retention purge, new-database restore/drill, explicit `0013 -> 0014 -> 0015` migration, aggregate readiness, and local/Compose role orchestration are all delivered. The fixed 20-file M1–M6 PostgreSQL gate enforces `POSTGRES_TEST_URL` plus zero skip and includes real Scheduler takeover, Worker SIGKILL recovery/retry safety/scope preservation, two-Gateway ordered SSE replay/auth, tamper/gap restore, quota/audit, and static frontend coverage. Follow `docs/operations/m5-automation-migration.md`, `docs/operations/m6-reliability-migration.md`, and `docs/operations/m6-backup-recovery.md`; never log private titles/prompts, owner maps, full resource identifiers, secret material, database URLs, or recovery locators. M7 legacy cleanup and M8 final release acceptance remain open.
-- M7 Task 1 adds `app.final_schema.FinalSchemaProbe` as the single marker-free runtime readiness contract. It reads only the Alembic revision and an allowlisted set of required relation names; during Tasks 1–7 it accepts both `0001_project_saas_baseline` and the temporary pre-reset `0015_project_reliability_finalize`. Private-work/Automation readiness, project governance, system operations, aggregate process readiness, Worker, and Scheduler now fail closed through this probe without reading cutover markers or private/project content. Public Automation readiness uses `schema_ready`, and process/system-operations readiness uses `schema_state`; retired cutover readiness fields are not serialized.
+- M7 Task 8 resets persistence to one static fresh-install revision, `0001_project_saas_baseline`. `FinalSchemaProbe` accepts only that revision and the final required relation allowlist. Empty databases install the baseline; old revisions and unknown nonempty schemas fail before DDL with `M7_RECREATE_REQUIRED`. All M1–M6 migration ledgers, cutover markers, migration scripts/targets, and historical revisions are removed. Never log private titles/prompts, full resource identifiers, secret material, database URLs, or recovery locators.
 - M6 Task 16's `app.recovery.archive` is an operator-only archive primitive, not a restore service. `make backup-db ARGS="--output /secure/backups"` reads `DATABASE_URL`, the independent base64 32-byte `DEER_FLOW_BACKUP_KEY`, and the existing audit HMAC environment. It holds one cancellation-safe read-only repeatable-read exporter transaction through dump completion; actual Alembic revision, a privacy-safe digest of `pg_control_system().system_identifier` plus database OID, event high-watermark, proven contiguous tombstone prefix, and table count all come from that snapshot, which is passed to fixed password-free `pg_dump --format=custom --no-owner --no-acl --snapshot=...` argv. The backup database role therefore requires `pg_control_system()` access and otherwise fails closed. Every external-root ancestor is opened fd-relatively with `O_DIRECTORY|O_NOFOLLOW`; the retained final fd owns `0600` passfile and staging/publication operations. `pg_dump` receives only an inherited `/dev/fd/N` passfile descriptor plus `pass_fds`, never a mutable absolute credential path. Passfile ownership begins immediately after parent pinning: open failure closes that parent, while post-open control/write/fsync/lseek failure retains the name/inode/file fd/pinned directory and reuses the same identity-safe release until deletion or confirmed absence survives directory fsync. Transient stat/unlink/fsync failure is retryable; control characters remain rejected. Writer enter/chunk thread tasks also settle through cancellation before abort/close can run. Archive-format version is separate from schema revision; the manifest records actual pg_dump version and non-empty plaintext/ciphertext counts. Per-archive HKDF keys plus deterministic counter nonces prevent cross-archive nonce reuse; AAD binds archive ID, actual revision, authoritative source identity, and chunk index. The writer and reader share a 16 MiB manifest limit and a documented maximum of 65,536 chunks of at most 1 MiB (64 GiB plaintext). Reader authentication uses two ciphertext passes plus a 0600 bounded plaintext spool, yielding nothing until the complete archive authenticates. Backup-key separation follows Auth precedence: explicit `AUTH_JWT_SECRET`, otherwise the existing `DEER_FLOW_HOME/.jwt_secret` read without creation/rotation; missing or unsafe Auth material fails closed. `TrustedOperationAuditSink.backup_created()` is mandatory, and its successful transaction commit is the durable operation commit point: pre-commit failure removes the archive, while later cancellation or engine disposal preserves the audited archive. The sole pre-audit-schema exception is `--pre-m6-cutover` at exact revision `0013`: `app.recovery.pre_cutover_backup` atomically publishes a sibling no-clobber `0600` HMAC receipt under a separate HKDF domain, and any proof/cleanup failure fails the producer and removes the owned archive where possible; M6 migration authenticates that receipt and records `backup.created` through the same trusted sink immediately after `0014`. Presence of any M6 recovery domain rejects this mode. Command output is restricted to public archive ID/revision/count/checksum and the sibling receipt name; it excludes URLs, keys, plaintext, and subprocess output. Task 17 consumes only this module's public archive reader and shared deployment-secret facade; journal, purge, restore, and drill logic remain in separate recovery modules.
-- M6 reliability contracts remain the pre-reset migration history. `config.yaml` version 23 adds restart-required `worker`, `quotas`, and non-secret `recovery` policy. M7 Task 1 makes `app.final_schema.FinalSchemaProbe` the runtime authority for aggregate process readiness, project/system governance, Worker, and Scheduler startup; `ReliabilityCutoverGuard` remains only for legacy execution and compatibility surfaces scheduled for removal in later M7 tasks. Fresh pre-reset databases still write the historical M6 marker after final relation and append-only-trigger probes; versioned M5 databases stop before M6 until `scripts/migrate_reliability.py` authenticates Task16 backup evidence, drains active execution, backfills durable Jobs and online-compatible exact quota reservations, passes job/quota/audit/stream/recovery probes, and writes `0015` plus the historical marker last. `scripts/reconcile_usage.py` previews all projects but requires an explicit project for execute and emits aggregate-only output. Local and Compose launch Gateway plus independent Worker and optional Scheduler. The M6 closure gates and independent review completed on 2026-07-18.
+- `config.yaml` version 23 retains restart-required `worker`, `quotas`, and non-secret `recovery` policy. `scripts/reconcile_usage.py` previews all projects but requires an explicit project for execute and emits aggregate-only output. Local and Compose launch Gateway plus independent Worker and optional Scheduler.
 - M6 Task 17 supersedes the pre-Task17 recovery boundary described above. `app.recovery.journal` writes a separate operator-owned external JSONL journal with an independent base64 32-byte `DEER_FLOW_RECOVERY_JOURNAL_KEY`; the authenticated header binds the authoritative PostgreSQL installation identity, and each tombstone uses a random 96-bit AEAD nonce, sequence/previous digest AAD, a complete-envelope hash chain, cross-process file locking, and fsync before the PostgreSQL physical-purge transaction may complete. Paths must be outside the repository, non-symlink, and permissioned `0700`/`0600`; the journal key must differ from backup, Auth (explicit secret or safely read existing `.jwt_secret`), audit, credential, and database-password material. `recovery_journal_state` is the singleton source anchor for journal UUID, source identity, committed sequence, and full head digest; `deletion_tombstones` retains each ciphertext and envelope digest. Purge holds one PostgreSQL advisory authority, validates every database row against the complete journal prefix, then atomically advances the row and anchor after physical deletion. File and project purge re-lock exact 30-day authority. Account purge locks User, Projects, and every membership in stable order, requires zero active memberships and every retention window expired, verifies the exact project set, deletes only that owner's private rows, and retains User/governance/job/audit/recovery shells.
 - `make restore-db ARGS="--archive ... --target-url ... --journal ... --execute"` authenticates the complete archive, then holds the same source PostgreSQL session advisory authority through source/archive/journal identity and anchor verification, target creation, fixed `pg_restore --exit-on-error --no-owner --no-acl`, exact frozen-suffix replay, M1–M6 probes, sensitive cleanup, proof, and explicit unlock. A concurrent purge therefore waits and cannot be omitted from a claimed proof. Anchor failure/cancellation still performs a cancellation-settled explicit unlock; cancellation received while unlocking is rethrown only after reliable release, and a proof already committed by that invocation does not permit a verified return—the invocation-owned target is removed. `restore_proofs` binds the archive plus frozen source identity, journal UUID, final sequence, and final head digest; probes compare all four before proof. The authenticated dump, libpq passfile, and invocation-owned workspace use separately captured dev/inode identities, bounded cancellation-safe deletion, absence checks, and directory fsync before proof. Body failure cleans target and workspace before leaving source authority. Cleanup accepts only the exact captured name→identity set; an unknown file is neither adopted nor deleted, blocks proof, and makes the operation fail closed. Restore accepts only a nonexistent distinct `deerflow_restore_<pid>_<32hex>` database and never changes `DATABASE_URL`, starts services, or cuts traffic. `make drill-restore ARGS="--archive ... --journal ..."` uses the same workflow for one random database and drops it only after the same Restorer instance hands off an unforgeable verified ownership token; failure before create, an existing/racing target, or a forged result never authorizes DROP. CLI output contains only public proof metadata.
 - M6 project quotas are session-bound and transaction-composable. `QuotaService` serializes each project/dimension/UTC-bucket counter with `FOR UPDATE`, computes the effective hard limit as the minimum of the platform default and an Admin-only project tightening, and writes the counter plus immutable ledger rows in the caller transaction. Defaults are 20 members, 5 GiB storage, 3 concurrent Runs, and 10,000 MCP calls per UTC day. Reserve/consume requires an unchanged issued `PrivateWorkContext` and re-locks current Project→Membership before the counter. Release accepts only a module-issued compensation authority, fixes `membership_end`→members, `file_delete`→storage, and `run_terminal`→concurrent Runs, and must match the original project+owner+source reservation before subtracting it; daily MCP use is consume-only. Idempotency derives from a secret HMAC bound to project, owner, dimension, bucket, operation, and source key, so raw or cross-scope source identifiers never enter persistence. A bucket records at most one ordinary/policy/reconcile 80% threshold event; policy-only warnings use zero-net compensating rows. `QuotaReconciler.preview()` is zero-write, while `execute()` requires a registry-verified module-issued trusted authority, locks the project and counters, and appends compensating rows before converging to active memberships, ready file bytes, pending/running Runs, and the current UTC-day MCP ledger. Do not add public authority constructors, repository-owned commits, mutable ledger operations, project loosening above platform defaults, aggregate releases without an exact reservation, or enforcement outside the same domain transaction.
@@ -624,23 +619,15 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
-DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run_events`, plus the four `channel_*` tables) are owned by alembic via a **hybrid bootstrap** strategy. LangGraph's checkpointer tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) live in the same database but are owned by LangGraph and excluded from alembic's view via `migrations/_env_filters.py::include_object`.
+DeerFlow application tables are owned by the single static Alembic revision
+`0001_project_saas_baseline.py` (`down_revision=None`). LangGraph checkpointer/store tables live in the
+same database but remain LangGraph-owned and are excluded by `_env_filters.py`.
 
-**Convention**: every ORM model change (new column, new table, new index) MUST ship as an alembic revision under `migrations/versions/`. The Gateway runs `alembic upgrade head` automatically on startup; users do not run `alembic` manually in production.
-
-**Hybrid bootstrap** (`persistence/bootstrap.py::bootstrap_schema`, invoked from `persistence/engine.py::init_engine`):
-
-| DB state                                  | Action                                  |
-|-------------------------------------------|-----------------------------------------|
-| empty (no DeerFlow tables)                | `create_all` + `alembic stamp head`     |
-| legacy (DeerFlow tables, no `alembic_version`) | `create_all` (baseline tables only, backfill) + `alembic stamp 0001_baseline` + `upgrade head` |
-| versioned (`alembic_version` row exists)  | `alembic upgrade head`                  |
-
-The legacy branch handles pre-alembic databases that already have at least one DeerFlow-owned table. `create_all` runs first because stamping at `0001_baseline` makes alembic skip the baseline's own `create_table` DDL on the subsequent upgrade — so any baseline table introduced into `Base.metadata` after the user's DB was first provisioned (e.g. the `channel_*` tables from PR #1930 for users upgrading across multiple releases) would otherwise never be created, and the first request hitting that table would 500 with `no such table`. The backfill is **restricted to `_BASELINE_TABLE_NAMES`** so it does not also create tables that future revisions introduce — those revisions' own `op.create_table` would otherwise fail with `relation already exists`. A guard test pins `_BASELINE_TABLE_NAMES` against `0001_baseline.upgrade()`'s actual output, so editing 0001 to add or remove a table forces a matching update to the constant. Column-level shape (pre-#3658 vs post-#3658 vs manual-ALTER for `token_usage_by_model`) is answered by each `versions/*.py` revision via the idempotent helpers in `migrations/_helpers.py` (`safe_add_column` / `safe_drop_column`) which no-op when the change is already present and `logger.warning` on shape drift. **Adding a new ORM column / table only requires a new revision file — no edit to `bootstrap.py` is needed** *unless* the new revision adds a new baseline table (rare; only happens when a new model is part of the baseline rather than introduced by its own revision).
-
-The empty-DB path keeps using `create_all` because `Base.metadata` is the authoritative PostgreSQL schema source; this avoids keeping a hand-written baseline in lockstep. `0001_baseline.upgrade()` is therefore almost never executed in practice; it exists as a stamp target + chain root.
-
-**Concurrency safety**: PostgreSQL uses `pg_advisory_lock` to serialise concurrent Gateway instances. Column revisions in `versions/` additionally use idempotent helpers (`_helpers.py::safe_add_column`, `safe_drop_column`) so repeated post-baseline changes and retries are no-ops when the change is already present.
+`bootstrap_schema` classifies before mutation: an empty database upgrades to the baseline; an exact M7
+database is verified idempotently; every old revision or unknown nonempty schema raises
+`M7_RECREATE_REQUIRED` before DDL. Downgrade is unsupported. The dedicated `AUTOCOMMIT`/`NullPool`
+session advisory lock serializes concurrent setup, and cancellation cannot release that lock until the
+synchronous Alembic worker settles.
 
 **本地初始化与检查**：`make setup-db` 仅从显式 `POSTGRES_ADMIN_URL` 取得连接
 `postgres` maintenance database 的管理员连接，并从显式 `DATABASE_URL` 取得目标连接。
@@ -661,59 +648,18 @@ setup/application pool，也绝不能持有 transaction/virtualxid（LangGraph �
 `SET idle_session_timeout = 0`，避免合法并发锁等待或长 DDL 被托管 PostgreSQL 误杀。
 `idle_session_timeout` 先通过 `current_setting(..., true)` 探测，旧版 PostgreSQL 不支持时
 跳过该项，不能因 unknown parameter 阻断 setup。
-M1 明确不使用 PostgreSQL RLS。应用 role 必须是普通非 superuser；路由只能通过可信
+应用不使用 PostgreSQL RLS。应用 role 必须是普通非 superuser；路由只能通过可信
 `ProjectContext` 和强制作用域 `ProjectRepository` 访问项目数据。建库、schema migration
-和 SQLite cutover 是显式 trusted operations，不得把 unscoped repository 暴露给普通路由。
+是显式 trusted operations，不得把 unscoped repository 暴露给普通路由。
 专用 session 关闭自动恢复设置并作为 unlock 兜底，禁止放宽运行期连接超时。
 取锁必须使用 `pg_try_advisory_lock` + client-side 短轮询，禁止阻塞式
 `pg_advisory_lock`：后者等待时自身持有 virtualxid，会与 LangGraph
 `CREATE INDEX CONCURRENTLY` 形成 wait-cycle。未取得锁时取消只关闭专用 session；取得锁
 后才在 finally 显式 unlock。
 
-**一次性 SQLite 数据迁移**：`make migrate-sqlite ARGS="..."` 调用
-`scripts/migrate_sqlite_to_postgres.py`。脚本只通过 Task 1 的 `mode=ro` /
-`PRAGMA query_only=ON` 路径读取 SQLite；固定映射 ORM 表，并使用 LangGraph serializer
-解码 checkpoint/writes 后再写 PostgreSQL，禁止把 SQLite BLOB 直接放进 JSONB。
-`--dry-run` 执行所有来源的 schema、冲突和语义预检且不写 target/ledger/sequence；实际
-迁移前必须用 `--backup-dir` 生成 size/SHA256 已验证的原子备份。ORM、checkpoint writes
-与 store 每表 target+ledger 同事务；checkpoint Saver API 无法加入该事务，因此使用冲突
-预检、语义 read-back、ledger replay 的安全收敛边界。未知表、非空
-`projects`/`project_memberships`、目标值冲突
-或校验差异均 fail closed。SQLite provider 包不是运行或迁移依赖；synthetic 测试只使用
-stdlib `sqlite3` 和 `JsonPlusSerializer`，真实 PostgreSQL 测试只创建随机
-`deerflow_test_*` 数据库。
-迁移器接受的每张 ORM source schema 与 primary key 都由显式常量锁定；空表也必须 exact，
-不得调用 ORM callable default 猜测缺列。多来源在备份前合并检查 PK、unique index/constraint
-和 checkpoint blob identity。dry-run 固定每个来源的 SHA256/size，后续 backup 与正式迁移
-必须使用相同 fingerprint，并在结束时复验；非空 `-wal`/`-shm` 直接拒绝。checkpoint 与
-blob 使用 `INSERT ... ON CONFLICT DO NOTHING` 后 semantic compare，绝不通过 Saver UPSERT
-覆盖目标；Saver 仅用于完整 read-back 验证。
-多来源计划严格遵循用户顺序：当前来源只能引用 target、当前来源或更早来源；dry-run 用
-累计 planned checkpoint/FK keys 模拟此前来源已落库。正式迁移只读取已经校验的 backup
-snapshot，不再重新读取可能变化的原 source。checkpoint+blob 在一个 asyncpg transaction
-内直接重建并核对 semantic digest，writes 在同事务核对完整 PK、task_path/channel/value
-后才写 ledger，提交后再用 Saver pending_writes 二次验证。channel active identity 的 partial
-unique 显式使用 `status != 'revoked'`，revoked 行不参与冲突集合。
-Store 在 raw SQL transaction 内验证 timestamp/TTL/value 并提交 ledger 后，还必须通过
-`AsyncPostgresStore.aget(..., refresh_ttl=False)` 做公共 API semantic read-back。迁移错误只
-输出结构化安全字段（code、table、source SHA 前缀、stable key hash），不得渲染原始异常、
-业务值、路径或连接 URL。
-
-跨来源重复用户归并默认关闭，只允许显式方案 A：同时提供
-`--reconcile-users-by-email`、精确的 `--reconcile-expected-conflicts`，并按每个
-`--source` 的顺序重复提供完整 `--reconcile-source-sha256`。只有首来源中唯一的
-`system_admin` 可以按唯一 email 吸收后续来源中同 email、不同 id、角色为 `admin` 的
-用户；顺序、fingerprint、数量、角色或唯一性任一不符都必须在 target connect 前失败。
-被吸收 users 行不写第二个用户，而以 `status=reconciled`、canonical target key 和决策
-digest 写 migration ledger；引用行保留原 source key，并以归一化后的 target key/digest
-写 ledger。原 source、dry-run 和 backup 规则不变，snapshot 必须重建出完全相同的决策。
-首次写被吸收 users ledger 前还必须确认目标库不存在其 legacy 原 id；若已存在且没有匹配
-的 `reconciled` ledger，users 事务立即回滚，禁止把既有目标用户静默吸收。
-
-**M1–M6 PostgreSQL 发布门禁**：root `Makefile` 的
-`PROJECT_FOUNDATION_POSTGRES_TESTS` 是固定 20 文件的唯一有序来源。前八个文件覆盖 M1 cutover、
-project isolation、M2 governance、M3 shared assets、M4 private work/migration 和 M5 project
-Automation/migration；后十二个文件覆盖 M6 reliability migration/schema/process readiness、Job、
+**PostgreSQL 发布门禁**：root `Makefile` 的
+`PROJECT_FOUNDATION_POSTGRES_TESTS` 是唯一有序来源，覆盖 M7 final baseline、project isolation、
+M2 governance、M3 shared assets、M4 private work、M5 project Automation，以及 M6 process readiness、Job、
 durable stream、quota、audit、restore、真实 Worker crash takeover 和跨 Gateway SSE reconnect。
 测试只复用 `POSTGRES_TEST_URL` 创建随机 `deerflow_test_*`/`deerflow_restore_*` 数据库，连接或清理
 失败必须 fail。跨平台 Python runner 强制 `DEER_FLOW_REQUIRE_ZERO_SKIPS=1` 并输出 collected/passed/skipped；
@@ -736,39 +682,28 @@ terminate connection 和 drop 随机测试库的权限，并且只能指向可�
 `channel_connections.bot_user_id` 是外部平台 bot 标识，绝不改写。schema 新增潜在内部
 用户引用时，exact schema 校验应先 fail closed，再通过代码、测试和本节文档显式扩展。
 
-**Authoring a new revision**:
+**Authoring a future revision**:
 ```bash
 cd backend && POSTGRES_ADMIN_URL="postgresql://.../postgres" make migrate-rev MSG="add foo column to runs"
 ```
 This creates a random `deerflow_autogen_*` PostgreSQL database from the explicit
-maintenance URL, upgrades it from migration history, invokes `alembic revision
+maintenance URL, upgrades it from the M7 baseline, invokes `alembic revision
 --autogenerate` against the live ORM models, and drops the random database in a
 `finally` block. It never falls back to `DATABASE_URL`, and it rejects non-disposable
 database names. Make exports `MSG` as `MIGRATION_MESSAGE`; recipe lines never interpolate
 the message into shell syntax, and Python rejects empty, overlong, or control-character
-messages without printing them. Review the generated file under `migrations/versions/` and switch raw
-`op.add_column` / `op.drop_column` calls to the idempotent helpers from `_helpers.py`
-before committing. Production migration execution goes through the same bootstrap API
-used by Gateway startup: `make migrate-db` exposes that path explicitly for an existing
-database, while `make setup-db` is the only production command allowed to create the
-target database.
+messages without printing them. Review the generated revision before committing. Until a later
+milestone explicitly introduces an upgrade policy, production accepts only the single M7 baseline.
 
 **Where things live**:
 - `migrations/env.py` — PostgreSQL-only alembic environment; delegates filtering to `_env_filters.py`
 - `migrations/_env_filters.py::include_object` — drops LangGraph checkpointer tables from alembic's view
-- `migrations/_helpers.py` — `safe_add_column` / `safe_drop_column`
-- `migrations/versions/0001_baseline.py` — chain root, matches the schema `create_all` produces from `Base.metadata`
-- `migrations/versions/0002_runs_token_usage.py` — fixes issue #3682
-- `migrations/versions/0004_migration_ledger.py` — per-source-row SQLite migration ledger
-- `migrations/versions/0005_project_foundation.py` — PostgreSQL project/membership tables and platform-role rename
-- `migrations/versions/0006_project_governance.py` — 项目成员生命周期、邀请、限流和项目删除恢复字段
-- `migrations/versions/0007_project_shared_assets.py` — M3 Agent、Skill、MCP、Credential 类型化共享资产 schema、复合约束与数据库 trigger
-- `migrations/versions/0012_project_automation_expand.py` — M5 nullable project Automation expansion, migration receipts, and supporting indexes
-- `migrations/versions/0013_project_automation_finalize.py` — M5 fail-before-DDL final scope constraints, durable occurrence indexes, and cutover probe
-- `migrations/versions/0014_project_reliability_expand.py` — M6 expand revision for jobs/Workers, quota, audit, recovery controls, nullable Run/occurrence job authority, deletion-stable Thread event high-watermarks, and the partial unique Run stream terminal index
-- `migrations/versions/0015_project_reliability_finalize.py` — M6 forward-only, fail-before-DDL final relations plus append-only triggers; ordinary Gateway bootstrap stops at the M5 final boundary until explicit M6 migration evidence exists
-- `persistence/bootstrap.py` — `bootstrap_schema(engine)`, the three-branch decision + PostgreSQL advisory locking
-- Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor)
+- `migrations/versions/0001_project_saas_baseline.py` — static final application catalog and PostgreSQL functions/triggers
+- `persistence/bootstrap.py` — empty/exact-M7/recreate-required classification plus PostgreSQL advisory locking
+- Tests: `tests/test_m7_final_baseline_postgres.py` (catalog, refusal, concurrency),
+  `tests/test_persistence_bootstrap_concurrency.py` (lock/cancellation),
+  `tests/test_persistence_migrations_env.py` (LangGraph filter), and
+  `tests/blocking_io/test_persistence_bootstrap.py` (async offload anchor)
 
 **M3 共享资产持久化边界**：`deerflow.persistence.shared_assets` 分别定义 Agent、
 Skill、MCP 和 Credential 的类型化 ORM，不使用通用 JSONB 资产注册表。逻辑资产以
@@ -782,11 +717,8 @@ DELETE 均由 PostgreSQL trigger 拒绝。版本工作流只允许 `draft→publ
 `draft→pending_approval` 和 `pending_approval→published|rejected`；`published` 与 `rejected`
 均为终态，不能回退到 draft。Credential semantic version 只允许 `active→retired|revoked` 和
 `retired→revoked`，revoked 不可逆。publish、archive、suspend、binding、grant 和 revoke 等
-影响 resolver 的变更会递增 `asset_catalog_state.generation`；migration 只建单例表，不预置
-`id=1`，首次相关事务或 cutover 才创建状态行。ORM 的 trigger 安装 listener 只在完整 M3
-metadata `create_all` 时执行，legacy bootstrap 的 baseline selective `create_all` 不得发出任何
-M3 DDL。`0007` downgrade 仅允许所有 M3 表（包括状态行）均为空时执行，任一表有数据必须在
-任何 schema 变更前拒绝。
+影响 resolver 的变更会递增 `asset_catalog_state.generation`；baseline 建单例表但不预置
+`id=1`，builtin catalog bootstrap 或首次相关事务创建状态行。数据库 trigger 均由静态 M7 baseline 安装。
 
 **M3 共享资产应用授权与 domain contract**：`app.shared_assets` 定义 `system|project`
 scope、`agent|skill|mcp` kind、四态 workflow、不可变选择与 typed resolved snapshot。
@@ -1088,14 +1020,8 @@ repositories、`ProjectScopedCheckpointer` 和专用 PostgreSQL private run-even
 `POSTGRES_TEST_URL=... make test-project-foundation-postgres` 强制 0 skip；CI 调用同一 target，变量
 缺失时在 pytest 前硬失败。普通本地单文件测试仍可在缺少管理员 URL 时明确 skip，但不能作为 release evidence。
 
-`make migrate-private-work` 是当前 runnable-first staged cutover：owner map 必须是 legacy owner UUID
-到 active project UUID 的直接 JSON 映射，dry-run 零写入，execute 依次完成 0008 expand、分域 ledger、
-0009 finalize、0010/0011 与 `cutover_complete` marker。marker commit 后若 `scheduled_tasks` 或
-`scheduled_task_runs` 任一非空，命令成功停在 0011 并把后续 revision 交给 M5 migration；仅两表都空时
-继续 bootstrap 到 current head。当前 CLI 的 `--backup-dir` 是保留参数，不写
-filesystem backup，也不消费 `DEER_FLOW_M4_BACKUP_KEY`；operator 必须在维护窗口前独立完成并保存
-PostgreSQL backup proof。非空 legacy filesystem、Memory、file/artifact 或 connection source 在 DDL 前
-fail closed。故障分界、幂等重跑和 marker 决策见 `docs/operations/m4-private-work-migration.md`。
+M7 不提供 private-work staged migration。所有 project-private persistence 都是 baseline final shape；
+旧库必须由 operator 保留后创建新的空数据库，不能通过运行期或 CLI 原地导入。
 
 M4 项目 Thread 的普通业务入口是 `app.private_work.PrivateThreadService`，repository 的每条
 create/get/search/check-access/update/delete SQL 必须把 `project_id`、`owner_user_id` 与

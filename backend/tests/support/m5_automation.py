@@ -34,7 +34,6 @@ from app.private_work.context import PrivateWorkContext
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.projects.context import ProjectContext, resolve_project_context
 from app.reliability.owner_refs import AuditHmacKeyring
-from deerflow.persistence.automations.migration_digest import canonical_digest
 from deerflow.persistence.bootstrap import _get_alembic_config, bootstrap_schema
 from deerflow.persistence.scheduled_task_runs import (
     ScheduledTaskRunCreate,
@@ -50,6 +49,11 @@ from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 M5_NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
 M5_FINAL_REVISION = "0013_project_automation_finalize"
+
+
+def canonical_digest(value: object) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

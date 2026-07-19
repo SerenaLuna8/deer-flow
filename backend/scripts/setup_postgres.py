@@ -14,7 +14,6 @@ from pathlib import Path
 import asyncpg
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
-from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -23,7 +22,7 @@ from sqlalchemy.pool import NullPool
 from app.projects.errors import ProjectBootstrapFailed
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import (
-    _get_alembic_config,
+    M7RecreateRequired,
     _get_head_revision,
     bootstrap_schema,
 )
@@ -36,7 +35,6 @@ _DUPLICATE_DATABASE_SQLSTATE = "42P04"
 _SETUP_LOCK_KEY = 0x0DEE_12F1_5E7D_0004
 _BOOTSTRAP_LOCK_KEY = 0x0DEE_12F1_5E7D_0005
 _BOOTSTRAP_LOCK_POLL_SECONDS = 0.1
-_M4_STAGING_REVISION = "0007_project_shared_assets"
 
 
 class PostgresSetupError(RuntimeError):
@@ -222,18 +220,18 @@ async def _bootstrap_existing(database_url: str) -> str:
             async with engine.connect() as connection:
                 await connection.execute(text("SELECT 1"))
             await bootstrap_schema(engine)
+            await _bootstrap_builtin_catalog(engine)
             await _bootstrap_langgraph_schemas(database_url)
             await _bootstrap_default_project_schema(engine)
         return _get_head_revision()
     except ProjectBootstrapFailed as exc:
         primary_error = exc
         raise PostgresSetupError(exc.code) from None
+    except M7RecreateRequired as exc:
+        primary_error = exc
+        raise PostgresSetupError("M7_RECREATE_REQUIRED: 目标库不是空库或精确 M7 schema；请创建一个新的空数据库，DeerFlow 不会删除或改写现有数据") from None
     except RuntimeError as exc:
         primary_error = exc
-        if str(exc).startswith("automation migration required"):
-            raise PostgresSetupError("automation migration required; stop writers and run make migrate-automations") from None
-        if str(exc).startswith("reliability migration required"):
-            raise PostgresSetupError("reliability migration required; stop Gateway/Worker/Scheduler and run make migrate-reliability") from None
         raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None
     except Exception as exc:
         primary_error = exc
@@ -246,79 +244,12 @@ async def _bootstrap_existing(database_url: str) -> str:
                 raise PostgresSetupError("PostgreSQL engine 清理失败；请确认没有其他初始化任务仍在运行") from None
 
 
-async def setup_m4_migration_target(database_url: str) -> SetupResult:
-    """Create or validate the explicit 0007 staging schema for legacy SQLite.
+async def _bootstrap_builtin_catalog(engine: AsyncEngine) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    This intentionally does not call the normal final-schema bootstrap.  It is
-    the only supported target for importing legacy private rows before
-    ``migrate-private-work`` crosses the staged M4 boundary.
-    """
-    from alembic import command
+    from app.shared_assets.bootstrap import bootstrap_system_assets
 
-    target = parse_target(database_url)
-    engine = _create_setup_engine(DatabaseConfig(url=database_url))
-    try:
-        async with _complete_bootstrap_lock(database_url):
-            async with engine.connect() as connection:
-                table_names = await connection.run_sync(lambda sync_connection: set(sa_inspect(sync_connection).get_table_names()))
-                revision = None
-                if "alembic_version" in table_names:
-                    revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-            if revision is None:
-                if table_names:
-                    raise PostgresSetupError("M4 migration target must be empty or already at 0007_project_shared_assets")
-                await asyncio.to_thread(
-                    command.upgrade,
-                    _get_alembic_config(engine),
-                    _M4_STAGING_REVISION,
-                )
-                revision = _M4_STAGING_REVISION
-            if revision != _M4_STAGING_REVISION:
-                raise PostgresSetupError("M4 migration target must be exactly 0007_project_shared_assets")
-            await _bootstrap_langgraph_schemas(database_url)
-        return SetupResult(
-            host=target.host,
-            port=target.port,
-            database=target.database,
-            owner=target.username,
-            created=False,
-            revision=revision,
-        )
-    except PostgresSetupError:
-        raise
-    except Exception:
-        raise PostgresSetupError("M4 migration target initialization failed; verify DATABASE_URL and target permissions") from None
-    finally:
-        await engine.dispose()
-
-
-async def setup_m4_migration_postgres(
-    admin_url: str,
-    database_url: str,
-    *,
-    expected_database: str | None = None,
-) -> SetupResult:
-    """Create a dedicated database and stop its app schema at revision 0007."""
-    parse_target(admin_url, maintenance=True)
-    target = parse_target(database_url)
-    if expected_database is not None:
-        expected_database = validate_identifier(expected_database, kind="database")
-        if target.database != expected_database:
-            raise ValueError("DATABASE_URL database does not match --database")
-    created = await ensure_database(
-        admin_url,
-        target.database,
-        owner_name=target.username,
-    )
-    result = await setup_m4_migration_target(database_url)
-    return SetupResult(
-        host=result.host,
-        port=result.port,
-        database=result.database,
-        owner=result.owner,
-        created=created,
-        revision=result.revision,
-    )
+    await bootstrap_system_assets(async_sessionmaker(engine, expire_on_commit=False))
 
 
 async def _bootstrap_default_project_schema(engine: AsyncEngine) -> None:
@@ -393,11 +324,6 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="仅升级已存在数据库，不读取 POSTGRES_ADMIN_URL，也不创建数据库",
     )
-    parser.add_argument(
-        "--m4-migration-target",
-        action="store_true",
-        help="创建/验证专用 legacy SQLite 迁移库，应用 schema 固定在 0007",
-    )
     return parser
 
 
@@ -408,9 +334,6 @@ def main(argv: list[str] | None = None) -> int:
         print("错误: 必须显式设置 DATABASE_URL", file=sys.stderr)
         return 2
     try:
-        if args.migrate_only and args.m4_migration_target:
-            print("错误: --migrate-only 与 --m4-migration-target 不能同时使用", file=sys.stderr)
-            return 2
         if args.migrate_only:
             result = asyncio.run(migrate_postgres(database_url, expected_database=args.database))
         else:
@@ -418,8 +341,7 @@ def main(argv: list[str] | None = None) -> int:
             if not admin_url:
                 print("错误: setup-db 必须显式设置 POSTGRES_ADMIN_URL", file=sys.stderr)
                 return 2
-            setup = setup_m4_migration_postgres if args.m4_migration_target else setup_postgres
-            result = asyncio.run(setup(admin_url, database_url, expected_database=args.database))
+            result = asyncio.run(setup_postgres(admin_url, database_url, expected_database=args.database))
         print_result(result, migrate_only=args.migrate_only)
         return 0
     except (PostgresSetupError, ValueError) as exc:

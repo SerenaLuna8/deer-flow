@@ -18,9 +18,7 @@ The generated file lands in
 ``packages/harness/deerflow/persistence/migrations/versions/`` -- exactly
 where alembic puts it by default. The random database is terminated and dropped
 in a ``finally`` block, including when upgrade or revision generation fails.
-Review the generated revision and switch raw ``op.add_column`` /
-``op.drop_column`` calls to the idempotent helpers in ``migrations/_helpers.py``
-before committing.
+Review the generated revision before committing.
 
 Run from the ``backend/`` directory:
     MIGRATION_MESSAGE="MESSAGE" POSTGRES_ADMIN_URL="postgresql://.../postgres" \
@@ -52,20 +50,6 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 MIGRATIONS_DIR = BACKEND_DIR / "packages/harness/deerflow/persistence/migrations"
 _AUTOGEN_DATABASE_PATTERN = re.compile(r"deerflow_autogen_[0-9]+_[0-9a-f]{32}\Z")
 _TEST_DATABASE_PATTERN = re.compile(r"deerflow_test_[0-9]+_[0-9a-f]{32}\Z")
-_EMPTY_FINALIZE_DOMAINS = (
-    "threads",
-    "runs",
-    "run_events",
-    "feedback",
-    "checkpoints",
-    "files",
-    "memory",
-    "channel_connections",
-    "channel_oauth_states",
-    "channel_conversations",
-    "counts_probe",
-    "scope_probe",
-)
 
 
 def _alembic_config(url: str) -> Config:
@@ -133,49 +117,6 @@ async def _drop_database(admin_url: str, database: str) -> None:
             await connection.close()
 
 
-async def _seed_empty_finalize_prerequisites(database_url: str) -> None:
-    """Record the explicit zero-source migration proof required by 0009.
-
-    Autogeneration builds from migration history, so it cannot use the runtime
-    empty-install ``create_all + stamp`` shortcut.  Revision 0009 intentionally
-    refuses to finalize without an execute run and all probe ledger domains;
-    an isolated, freshly-created autogen database has zero source rows, making
-    this deterministic empty proof the migration-history equivalent.
-    """
-    connection = await asyncpg.connect(_asyncpg_dsn(database_url))
-    migration_run_id = uuid.uuid4()
-    empty_digest = "0" * 64
-    try:
-        async with connection.transaction():
-            await connection.execute(
-                """INSERT INTO private_work_migration_runs
-                (id,mode,status,source_fingerprint,owner_map_digest,
-                 legacy_source_probe_complete,checkpoint_marker_probe_complete,
-                 cross_scope_probe_complete,completed_at)
-                VALUES ($1,'execute','completed',$2,$2,true,true,true,now())""",
-                migration_run_id,
-                empty_digest,
-            )
-            await connection.executemany(
-                """INSERT INTO private_work_migration_ledger
-                (migration_run_id,domain,source_key_hash,source_fingerprint,
-                 target_digest,status,row_count,byte_count)
-                VALUES ($1,$2,$3,$3,$3,'complete',0,0)""",
-                [(migration_run_id, domain, empty_digest) for domain in _EMPTY_FINALIZE_DOMAINS],
-            )
-            await connection.execute(
-                """INSERT INTO private_work_cutover_state
-                (id,stage,migration_run_id,cutover_at,updated_at)
-                VALUES (1,'cutover_complete',$1,now(),now())
-                ON CONFLICT (id) DO UPDATE
-                SET stage='cutover_complete',migration_run_id=EXCLUDED.migration_run_id,
-                    cutover_at=EXCLUDED.cutover_at,updated_at=EXCLUDED.updated_at""",
-                migration_run_id,
-            )
-    finally:
-        await connection.close()
-
-
 @contextmanager
 def _temporary_postgres_database(admin_url: str) -> Iterator[str]:
     _require_admin_url(admin_url)
@@ -205,8 +146,6 @@ def _temporary_postgres_database(admin_url: str) -> Iterator[str]:
 def _build_temp_db_at_head(database_url: str) -> str:
     _require_disposable_database_url(database_url)
     config = _alembic_config(database_url)
-    command.upgrade(config, "0008_project_private_work_expand")
-    asyncio.run(_seed_empty_finalize_prerequisites(database_url))
     command.upgrade(config, "head")
     return database_url
 

@@ -199,10 +199,14 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     async def langgraph(_database_url):
         calls.append("langgraph")
 
+    async def builtin(_engine):
+        calls.append("builtin")
+
     async def projects(_engine):
         calls.append("projects")
 
     monkeypatch.setattr(setup_postgres, "bootstrap_schema", bootstrap)
+    monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", builtin)
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", langgraph)
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_project_schema", projects)
     monkeypatch.setattr(setup_postgres, "_get_head_revision", lambda: "head")
@@ -212,6 +216,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
         "lock:enter",
         "SELECT 1",
         "orm",
+        "builtin",
         "langgraph",
         "projects",
         "lock:exit",
@@ -237,6 +242,7 @@ async def test_bootstrap_existing_preserves_ambiguous_admin_code(monkeypatch) ->
 
     monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
     monkeypatch.setattr(setup_postgres, "bootstrap_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", AsyncMock())
     monkeypatch.setattr(
         setup_postgres,
@@ -252,7 +258,7 @@ async def test_bootstrap_existing_preserves_ambiguous_admin_code(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_existing_preserves_automation_migration_instruction(monkeypatch) -> None:
+async def test_bootstrap_existing_requires_a_new_empty_database(monkeypatch) -> None:
     connection = AsyncMock()
     connection_context = MagicMock()
     connection_context.__aenter__ = AsyncMock(return_value=connection)
@@ -270,14 +276,14 @@ async def test_bootstrap_existing_preserves_automation_migration_instruction(mon
     monkeypatch.setattr(
         setup_postgres,
         "bootstrap_schema",
-        AsyncMock(side_effect=RuntimeError("automation migration required; private title must not leak")),
+        AsyncMock(side_effect=setup_postgres.M7RecreateRequired()),
     )
 
     with pytest.raises(setup_postgres.PostgresSetupError) as exc_info:
         await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc")
 
-    assert str(exc_info.value) == ("automation migration required; stop writers and run make migrate-automations")
-    assert "private title" not in str(exc_info.value)
+    assert str(exc_info.value).startswith("M7_RECREATE_REQUIRED:")
+    assert "新的空数据库" in str(exc_info.value)
     assert "private-password" not in str(exc_info.value)
     engine.dispose.assert_awaited_once()
 
@@ -299,6 +305,7 @@ async def test_bootstrap_existing_cleanup_failure_does_not_override_bootstrap_co
 
     monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
     monkeypatch.setattr(setup_postgres, "bootstrap_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", AsyncMock())
     monkeypatch.setattr(
         setup_postgres,
@@ -592,7 +599,7 @@ async def test_bootstrap_cleanup_failure_is_sanitized(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_two_concurrent_setup_calls_continue_to_bootstrap(monkeypatch) -> None:
     ensure = AsyncMock(side_effect=[True, False])
-    bootstrap = AsyncMock(return_value="0003_scheduled_tasks")
+    bootstrap = AsyncMock(return_value="0001_project_saas_baseline")
     monkeypatch.setattr(setup_postgres, "ensure_database", ensure)
     monkeypatch.setattr(setup_postgres, "_bootstrap_existing", bootstrap)
     args = (
@@ -622,14 +629,15 @@ def test_makefiles_expose_database_targets() -> None:
     root_makefile = setup_postgres.BACKEND_ROOT.parent.joinpath("Makefile").read_text()
     for target in (
         "setup-db:",
-        "setup-m4-migration-db:",
         "migrate-db:",
         "check-db:",
     ):
         assert target in backend_makefile
         assert target in root_makefile
     assert "setup_postgres.py --migrate-only" in backend_makefile
-    assert "setup_postgres.py --m4-migration-target" in backend_makefile
+    for removed in ("setup-m4-migration-db:", "migrate-sqlite:", "migrate-assets:", "migrate-private-work:", "migrate-automations:", "migrate-reliability:"):
+        assert removed not in backend_makefile
+        assert removed not in root_makefile
 
 
 @pytest_asyncio.fixture

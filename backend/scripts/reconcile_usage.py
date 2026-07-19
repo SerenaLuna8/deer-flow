@@ -50,15 +50,6 @@ async def reconcile_usage(
         service = QuotaService(factory, QuotaConfig(), source_ref_hasher=keyring)
         reconciler = QuotaReconciler(factory, service)
         async with engine.connect() as connection:
-            cutover = await connection.scalar(
-                text(
-                    """SELECT EXISTS (SELECT 1 FROM reliability_cutover_state
-                                       WHERE id=1 AND stage='cutover_complete'
-                                         AND final_schema_probe_complete)"""
-                )
-            )
-            if not cutover:
-                raise UsageReconciliationError("M6 reliability cutover is not ready")
             if project_id is None:
                 projects = list((await connection.execute(text("SELECT id FROM projects ORDER BY id"))).scalars())
             else:

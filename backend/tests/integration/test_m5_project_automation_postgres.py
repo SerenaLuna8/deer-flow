@@ -34,7 +34,6 @@ from app.automations.occurrences import (
 from app.automations.ownership import AutomationSchedulerOwnership
 from app.automations.reconciliation import AutomationReconciler
 from app.private_work.checkpointer import ProjectScopedCheckpointer
-from app.private_work.cutover import PrivateWorkCutoverGuard
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
@@ -951,9 +950,8 @@ async def test_m6_head_keeps_m4_ready_and_scheduler_ownership_is_exclusive(
 ) -> None:
     async with m5_database.factory() as session:
         revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-    assert revision == "0015_project_reliability_finalize"
+    assert revision == "0001_project_saas_baseline"
     assert m5_database.database_name.startswith("deerflow_test_")
-    await PrivateWorkCutoverGuard(m5_database.factory).require_project_open()
 
     first_engine = create_async_engine(m5_database.url)
     second_engine = create_async_engine(m5_database.url)

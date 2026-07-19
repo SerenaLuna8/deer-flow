@@ -14,7 +14,6 @@ from app.automations.readiness import AutomationReadinessService
 from app.gateway.app import create_app
 from app.gateway.deps import gateway_platform_runtime
 from app.private_work.connection_service import ProjectConnectionService
-from app.private_work.cutover import PrivateWorkCutoverGuard
 from app.private_work.file_service import PrivateFileService
 from app.private_work.file_streaming import PrivateFileStreamer
 from app.private_work.memory_service import PrivateMemoryService
@@ -76,10 +75,7 @@ async def test_gateway_platform_runtime_installs_project_private_work_services_f
         ),
     ):
         async with gateway_platform_runtime(app, config):
-            assert isinstance(
-                app.state.private_work_cutover_guard,
-                PrivateWorkCutoverGuard,
-            )
+            assert not hasattr(app.state, "private_work_cutover_guard")
             assert isinstance(app.state.private_thread_service, PrivateThreadService)
             assert app.state.private_thread_service._session_factory is session_factory
             assert app.state.private_thread_service._project_scoped_checkpointer is app.state.project_scoped_checkpointer
@@ -110,7 +106,7 @@ async def test_gateway_platform_runtime_installs_project_private_work_services_f
 
             assert isinstance(app.state.private_run_event_store, DbRunEventStore)
             assert app.state.private_run_event_store._sf is session_factory
-            assert app.state.private_run_event_store._max_trace_content == 321
+            assert app.state.private_run_event_store._max_trace_content == 10240
 
             assert not hasattr(app.state, "automation_cutover_guard")
             assert app.state.automation_service._min_once_delay_seconds == 73

@@ -134,7 +134,6 @@ async def test_repeatedly_cancelled_alembic_offload_keeps_lock_until_worker_fini
 ) -> None:
     engine = create_async_engine(postgres_database_url)
     probe_engine = create_async_engine(postgres_database_url)
-    await bootstrap_schema(engine)
     started = threading.Event()
     release = threading.Event()
     original_upgrade = bootstrap_module._upgrade

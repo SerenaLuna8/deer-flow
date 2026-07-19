@@ -713,34 +713,16 @@ def check_postgres(project_root: Path) -> CheckResult:
             "PostgreSQL",
             "fail",
             "只读健康检查失败",
-            fix="运行 make check-db 查看脱敏状态；如 revision 或表缺失，运行 make migrate-db",
-        )
-    if result.get("automation_status") == "migration_required":
-        return CheckResult(
-            "PostgreSQL",
-            "fail",
-            "Automation migration_required",
-            fix=('停止 Gateway、Scheduler、channel 与 embedded writers；先运行 make migrate-automations ARGS="--dry-run --owner-map <json> --backup-dir <path>"，再在维护窗口使用 --execute'),
-        )
-    if result.get("reliability_status") == "migration_required":
-        return CheckResult(
-            "PostgreSQL",
-            "fail",
-            "Reliability migration_required",
-            fix=(
-                "Stop Gateway/Worker/Scheduler, create and verify a Task16 backup proof, then run "
-                "make migrate-reliability ARGS='--dry-run --backup-proof <proof>' followed by "
-                "make migrate-reliability ARGS='--execute --maintenance-acknowledged --backup-proof <proof>'"
-            ),
+            fix="运行 make check-db 查看脱敏状态；旧 revision 或未知非空库必须创建全新的空数据库",
         )
     if not result.get("healthy"):
         return CheckResult(
             "PostgreSQL",
             "fail",
             "连接、Alembic revision 或必需表检查未通过",
-            fix="运行 make check-db 查看脱敏状态；如 revision 或表缺失，运行 make migrate-db",
+            fix="运行 make check-db 查看脱敏状态；旧 revision 或未知非空库必须创建全新的空数据库并运行 make setup-db",
         )
-    detail = f"{result['host']}:{result['port']}/{result['database']}, revision {result['current_revision']}, Automation {result.get('automation_status', 'unavailable')}, Reliability {result.get('reliability_status', 'unavailable')}"
+    detail = f"{result['host']}:{result['port']}/{result['database']}, revision {result['current_revision']}"
     return CheckResult("PostgreSQL", "ok", detail)
 
 

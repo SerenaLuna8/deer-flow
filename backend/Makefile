@@ -31,29 +31,11 @@ format:
 setup-db:
 	PYTHONPATH=. uv run python scripts/setup_postgres.py
 
-setup-m4-migration-db:
-	PYTHONPATH=. uv run python scripts/setup_postgres.py --m4-migration-target
-
 migrate-db:
 	PYTHONPATH=. uv run python scripts/setup_postgres.py --migrate-only
 
 check-db:
 	PYTHONPATH=. uv run python scripts/check_postgres.py
-
-migrate-sqlite:
-	PYTHONPATH=. uv run python scripts/migrate_sqlite_to_postgres.py $(ARGS)
-
-migrate-assets:
-	PYTHONPATH=. uv run python scripts/migrate_assets.py $(ARGS)
-
-migrate-private-work:
-	PYTHONPATH=. uv run python scripts/migrate_private_work.py $(ARGS)
-
-migrate-automations:
-	PYTHONPATH=. uv run python scripts/migrate_automations.py $(ARGS)
-
-migrate-reliability:
-	PYTHONPATH=. uv run python scripts/migrate_reliability.py $(ARGS)
 
 reconcile-usage:
 	PYTHONPATH=. uv run python scripts/reconcile_usage.py $(ARGS)

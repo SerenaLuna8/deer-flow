@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.automations.ownership import AutomationSchedulerOwnership
-from app.final_schema import FINAL_REQUIRED_RELATIONS, PRE_RESET_SCHEMA_REVISION
+from app.final_schema import FINAL_REQUIRED_RELATIONS, M7_FINAL_SCHEMA_REVISION
 from app.reliability.process_readiness import read_process_readiness
 
 
@@ -45,7 +45,7 @@ async def test_missing_worker_relation_reports_schema_unavailable_without_aggreg
         def __init__(self) -> None:
             self.values = iter(
                 (
-                    PRE_RESET_SCHEMA_REVISION,
+                    M7_FINAL_SCHEMA_REVISION,
                     FINAL_REQUIRED_RELATIONS,
                     False,
                 )
