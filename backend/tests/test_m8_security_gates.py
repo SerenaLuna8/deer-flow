@@ -239,7 +239,15 @@ def test_review_diff_scans_changed_blob_with_exact_path_allowlist(tmp_path: Path
         value_sha256=value_digest(secret),
         reason_kind="test_fake",
     )
-    assert SecretScanner(allowlist=SecretAllowlist(entries=(entry,))).scan_review_diff(repository, review_base) == ()
+    unrelated = entry.model_copy(update={"path": "unchanged-fixture.txt"})
+    scanner = SecretScanner(allowlist=SecretAllowlist(entries=(entry, unrelated)))
+    assert scanner.scan_review_diff(repository, review_base) == ()
+    assert scanner.unused_allowlist_findings(("review_diff",)) == ()
+
+    stale = entry.model_copy(update={"value_sha256": "0" * 64})
+    stale_scanner = SecretScanner(allowlist=SecretAllowlist(entries=(stale,)))
+    assert {finding.rule for finding in stale_scanner.scan_review_diff(repository, review_base)} == {"ProviderToken"}
+    assert {finding.rule for finding in stale_scanner.unused_allowlist_findings(("review_diff",))} == {"UNUSED_ALLOWLIST_ENTRY"}
 
 
 def test_backend_dependency_auditor_exports_locked_no_dev_graph(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

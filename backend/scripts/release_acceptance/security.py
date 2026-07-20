@@ -206,6 +206,7 @@ class SecretScanner:
         self._settings_active = False
         self._candidate_count = 0
         self._matched_allowlist_entries: set[tuple[SecretScope, str, str, str]] = set()
+        self._scanned_allowlist_paths: dict[SecretScope, set[str]] = {}
 
     @property
     def candidate_count(self) -> int:
@@ -313,7 +314,9 @@ class SecretScanner:
                 line=None,
             )
             for entry in self._allowlist.entries
-            if entry.scope in selected and (entry.scope, entry.path, entry.rule, entry.value_sha256) not in self._matched_allowlist_entries
+            if entry.scope in selected
+            and not (entry.scope == "review_diff" and entry.path not in self._scanned_allowlist_paths.get("review_diff", set()))
+            and (entry.scope, entry.path, entry.rule, entry.value_sha256) not in self._matched_allowlist_entries
         )
 
     def scan_file(self, path: Path, *, scope: SecretScope, relative_path: str) -> tuple[SecretFinding, ...]:
@@ -452,6 +455,7 @@ class SecretScanner:
                         )
                     )
                     continue
+                self._scanned_allowlist_paths.setdefault("review_diff", set()).add(relative)
                 revision = "HEAD" if (repository / relative).is_file() and not (repository / relative).is_symlink() else review_base
                 try:
                     data = self._git(repository, "show", f"{revision}:{relative}")
