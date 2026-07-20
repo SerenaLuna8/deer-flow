@@ -47,9 +47,9 @@ def _make_gate_files() -> tuple[str, ...]:
 
 def test_root_makefile_is_the_only_ordered_m1_m7_gate_source() -> None:
     assert _make_gate_files() == EXPECTED_M1_M7_GATE
-    workflow = (REPO_ROOT / ".github/workflows/project-foundation-postgres-tests.yml").read_text(encoding="utf-8")
-    assert "make test-project-foundation-postgres" in workflow
-    assert "M1-M7" in workflow
+    workflow = (REPO_ROOT / ".github/workflows/project-saas-release-gates.yml").read_text(encoding="utf-8")
+    assert "make test-project-saas-postgres" in workflow
+    assert "M1-M8" in workflow
     for test_file in EXPECTED_M1_M7_GATE:
         assert test_file not in workflow
 

@@ -18,6 +18,10 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 import asyncpg
 
+from scripts.release_acceptance.commands import (
+    SUPPORT_BUNDLE_ARGV,
+    SUPPORT_BUNDLE_OUTPUT_TOKEN,
+)
 from scripts.release_acceptance.live_probe import HostReadiness
 from scripts.release_acceptance.ownership import CleanupAction, DatabaseIdentity, OwnedDatabase, OwnedProcess, OwnershipLedger
 
@@ -685,16 +689,35 @@ class OwnedHostStack:
                 self._ledger.reserve_port(port)
         self._ports_reserved = True
 
-    async def _start_process(self, database_url: str, *, setup: bool) -> None:
+    async def _prepare_process(self, database_url: str, *, setup: bool) -> None:
         self._database_url = database_url
         environment = self._environment(database_url)
+        if setup:
+            await self._command_runner.run(
+                "host.setup_db",
+                ("make", "setup-db"),
+                environment,
+                timeout_seconds=900,
+            )
+        await self._command_runner.run(
+            "host.check_db",
+            ("make", "check-db"),
+            environment,
+            timeout_seconds=300,
+        )
+
+    async def launch(self) -> None:
+        if self._database_url is None or self._owned_process is not None:
+            raise RuntimeError("HOST_STACK_NOT_PREPARED")
+        environment = self._environment(self._database_url)
         try:
-            if setup:
-                await self._command_runner.run("host.setup_db", ("make", "setup-db"), environment, timeout_seconds=900)
-            await self._command_runner.run("host.check_db", ("make", "check-db"), environment, timeout_seconds=300)
             process = await self._command_runner.start("host.make_start", ("make", "start"), environment)
             self._host_process = process
-            self._owned_process = self._ledger.register_process(pid=process.pid, pgid=process.pgid, start_identity=process.start_identity)
+            self._owned_process = self._ledger.register_process(
+                pid=process.pid,
+                pgid=process.pgid,
+                start_identity=process.start_identity,
+            )
             self._last_pgid = process.pgid
             await self._readiness.wait_ready(scheduler_enabled=self._scheduler_enabled)
             expected_markers = {"gateway", "worker", "frontend", "nginx"}
@@ -711,16 +734,40 @@ class OwnedHostStack:
                 await self.stop()
             raise RuntimeError("HOST_READINESS_FAILED") from None
 
-    async def start(self, database_url: str) -> None:
+    async def prepare(self, database_url: str) -> None:
         if self._owned_process is not None:
             raise RuntimeError("HOST_STACK_ALREADY_STARTED")
+        if self._database_url is not None:
+            raise RuntimeError("HOST_STACK_ALREADY_PREPARED")
         await self._reserve_and_check_ports()
         name, source_url = self._source_database(database_url)
         marker = hashlib.sha256(f"deerflow-m8-database\0{self._acceptance_run_id}\0{name}\0{self._app_role}".encode()).hexdigest()
         await self._database_manager.create(name=name, owner=self._app_role, marker_digest=marker)
         self._owned_database = self._ledger.register_database(name=name, owner=self._app_role, marker_digest=marker)
         self._application_url_template = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-        await self._start_process(source_url, setup=True)
+        await self._prepare_process(source_url, setup=True)
+
+    async def run_release_checks(self) -> None:
+        if self._database_url is None or self._owned_process is not None:
+            raise RuntimeError("HOST_STACK_NOT_PREPARED")
+        environment = self._environment(self._database_url)
+        await self._command_runner.run("host.doctor", ("make", "doctor"), environment, timeout_seconds=300)
+        await self._command_runner.run("host.make_help", ("make", "help"), environment, timeout_seconds=300)
+        runtime_value = environment.get("DEER_FLOW_RUNTIME_ROOT", "")
+        if not runtime_value:
+            raise RuntimeError("HOST_RUNTIME_ROOT_MISSING")
+        support_output = Path(runtime_value) / "support-bundle.zip"
+        support_argv = tuple(str(support_output) if item == SUPPORT_BUNDLE_OUTPUT_TOKEN else item for item in SUPPORT_BUNDLE_ARGV)
+        await self._command_runner.run(
+            "host.support_bundle",
+            support_argv,
+            environment,
+            timeout_seconds=300,
+        )
+
+    async def start(self, database_url: str) -> None:
+        await self.prepare(database_url)
+        await self.launch()
 
     async def start_existing(self, database_url: str, owned: OwnedDatabase) -> None:
         if self._owned_process is not None:
@@ -735,7 +782,8 @@ class OwnedHostStack:
         if self._application_url_template is None:
             self._application_url_template = database_url
         self._owned_database = owned
-        await self._start_process(database_url, setup=False)
+        await self._prepare_process(database_url, setup=False)
+        await self.launch()
 
     async def restart_gateway(self) -> None:
         if self._inventory is None or self._database_url is None or self._gateway_owned_process is not None:

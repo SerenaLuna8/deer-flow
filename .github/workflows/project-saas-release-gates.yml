@@ -1,0 +1,113 @@
+name: M1-M8 Project SaaS Release Gates
+
+on:
+  push:
+    branches: [main, 2.0.x-dev]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: project-saas-release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-release-gates:
+    name: M1-M8 deterministic release gates
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CI: "1"
+      SKIP_ENV_VALIDATION: "1"
+
+    steps:
+      - name: Checkout full review history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install locked backend dependencies
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.26.2 --activate
+
+      - name: Install locked frontend dependencies and Chromium
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install chromium --with-deps
+
+      - name: Require PostgreSQL test administrator URL
+        env:
+          POSTGRES_TEST_URL: postgresql+asyncpg://postgres@127.0.0.1:5432/postgres
+        run: |
+          if ! test -n "${POSTGRES_TEST_URL:-}"; then
+            echo "POSTGRES_TEST_URL is required for the PostgreSQL release gate" >&2
+            exit 1
+          fi
+
+      - name: Run fixed M1-M8 PostgreSQL gate
+        env:
+          POSTGRES_TEST_URL: postgresql+asyncpg://postgres@127.0.0.1:5432/postgres
+        run: make test-project-saas-postgres
+
+      - name: Run backend deterministic gates
+        working-directory: backend
+        run: |
+          uv run pytest -q
+          uv run pytest tests/blocking_io -q
+          uvx ruff format --check .
+          uvx ruff check .
+          uv run python -m scripts.release_acceptance.security --scope dependencies-backend
+
+      - name: Run frontend deterministic gates
+        working-directory: frontend
+        run: |
+          pnpm test
+          pnpm check
+          pnpm test:e2e:m8:deterministic
+          pnpm build:production
+          pnpm build:static
+          pnpm audit --prod --audit-level low
+
+      - name: Run tracked and history security gates
+        working-directory: backend
+        run: |
+          REVIEW_BASE="$(git merge-base "${{ github.event.pull_request.base.sha || github.event.before }}" HEAD)"
+          uv run python -m scripts.release_acceptance.security --scope tracked-tree
+          uv run python -m scripts.release_acceptance.security --scope review-diff --review-base "$REVIEW_BASE"
+          uv run python -m scripts.release_acceptance.security --scope git-history

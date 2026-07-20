@@ -66,12 +66,14 @@ async def _run(args: argparse.Namespace) -> int:
         )
         return 0 if result.status == "passed" else 1
     assert isinstance(result, ReleaseEvidence)
+    relative_locator = (Path(".release-evidence") / str(result.acceptance_run_id) / "manifest.json").as_posix()
     print(
         json.dumps(
             {
                 "status": result.status.value,
                 "acceptance_run_id": str(result.acceptance_run_id),
                 "candidate_evidence_digest": result.candidate_evidence_digest,
+                "evidence_relative_locator": relative_locator,
             },
             sort_keys=True,
         )

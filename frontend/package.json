@@ -12,6 +12,8 @@
   "scripts": {
     "demo:save": "node scripts/save-demo.js",
     "build": "next build --webpack",
+    "build:production": "BUILD_MODE=production next build --webpack",
+    "build:static": "BUILD_MODE=static next build --webpack",
     "check": "eslint . --ext .ts,.tsx && tsc --noEmit",
     "dev": "next dev --turbo",
     "format": "prettier --check .",
@@ -25,6 +27,7 @@
     "test:e2e:all": "playwright test && playwright test --config playwright.static.config.ts",
     "test:e2e:m7": "playwright test tests/e2e/m7-project-only-routes.spec.ts tests/e2e/project-automations.spec.ts",
     "test:e2e:m8": "playwright test --config playwright.m8.config.ts",
+    "test:e2e:m8:deterministic": "playwright test tests/e2e/m8-isolation-matrix.spec.ts",
     "test:e2e:static": "playwright test --config playwright.static.config.ts",
     "typecheck": "tsc --noEmit"
   },

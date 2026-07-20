@@ -154,6 +154,7 @@ def _review(candidate: ReleaseEvidence, *, critical: int = 0, important: int = 0
     return ReviewReport.for_candidate(
         candidate,
         review_base_commit="c" * 40,
+        review_range=f"{'c' * 40}..{candidate.git_commit}",
         critical=critical,
         important=important,
         minor=minor,
@@ -200,7 +201,7 @@ def test_candidate_and_final_transitions_require_exact_review_binding() -> None:
     assert final.status is AcceptanceStatus.FINAL_PASS
     assert final.review.verdict == "passed"
 
-    mismatched = report.model_copy(update={"candidate_evidence_digest": "0" * 64})
+    mismatched = report.model_copy(update={"candidate_commit": "0" * 40})
     with pytest.raises(ReviewBindingError, match="REVIEW_BINDING_MISMATCH"):
         ReleaseEvidence.final(candidate=candidate, review=mismatched)
     with pytest.raises(ReviewBindingError, match="REVIEW_FINDINGS_PRESENT"):

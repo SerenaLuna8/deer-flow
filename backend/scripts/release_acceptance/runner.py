@@ -10,7 +10,7 @@ import signal
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
@@ -33,10 +33,12 @@ from scripts.release_acceptance.host_stack import (
 )
 from scripts.release_acceptance.live_probe import ChromiumJourneyRunner, RecoveryBrowserProbe
 from scripts.release_acceptance.models import (
+    M8_REVIEW_BASE_COMMIT,
     CleanupSummary,
     LiveModelSummary,
     RecoverySummary,
     ReleaseEvidence,
+    ReviewReport,
     SecuritySummary,
     StageEvidence,
     StageId,
@@ -91,7 +93,11 @@ class DiagnosticResult(StrictModel):
     chromium: TestSummary | None = None
     deepseek: LiveModelSummary | None = None
     recovery: RecoverySummary | None = None
+    evidence_log_security_passed: bool = True
     cleanup: CleanupSummary
+
+
+HostAcceptanceRunner = Callable[..., Awaitable[DiagnosticResult | PreflightFailure]]
 
 
 def _has_residual(cleanup: CleanupSummary) -> bool:
@@ -129,6 +135,7 @@ async def run_host_diagnostic(
     repository: Path,
     stages: tuple[StageId, ...],
     env: dict[str, str] | None = None,
+    acceptance_run_id: uuid.UUID | None = None,
 ) -> DiagnosticResult | PreflightFailure:
     repository = repository.resolve()
     environment = dict(os.environ if env is None else env)
@@ -137,7 +144,7 @@ async def run_host_diagnostic(
     if not isinstance(preflight_result, PreflightSuccess):
         return preflight_result
 
-    run_id = uuid.uuid4()
+    run_id = acceptance_run_id or uuid.uuid4()
     runtime_root = repository / f".m8-runtime-{run_id.hex}"
     frontend_runtime_root = repository / "frontend" / f".m8-next-{run_id.hex}"
     recovery_root = Path(tempfile.gettempdir()).resolve() / f"deerflow-m8-recovery-{run_id.hex}"
@@ -157,6 +164,7 @@ async def run_host_diagnostic(
     recovery_summary: RecoverySummary | None = None
     host_passed = False
     code = "HOST_DIAGNOSTIC_FAILED"
+    evidence_log_security_passed = False
     try:
         await asyncio.to_thread(runtime_root.mkdir, mode=0o700)
         ledger.register_path(runtime_root, disposition="temporary")
@@ -188,7 +196,9 @@ async def run_host_diagnostic(
             command_runner=command_runner,
             scheduler_enabled=scheduler_enabled,
         )
-        await host.start(database_url)
+        await host.prepare(database_url)
+        await host.run_release_checks()
+        await host.launch()
         host_passed = True
         if StageId.CHROMIUM in stages:
             journey_runner = ChromiumJourneyRunner(
@@ -246,6 +256,34 @@ async def run_host_diagnostic(
             except BaseException:
                 code = "HOST_STOP_FAILED"
         try:
+            from scripts.release_acceptance.security import (
+                SecretScanner,
+                load_secret_allowlist,
+            )
+
+            allowlist = await asyncio.to_thread(
+                load_secret_allowlist,
+                repository / "contracts" / "m8_secret_allowlist.json",
+            )
+            scanner = SecretScanner(allowlist=allowlist)
+            findings = await asyncio.to_thread(
+                scanner.scan_directory,
+                runtime_root,
+                scope="evidence",
+            )
+            support_findings = await asyncio.to_thread(
+                scanner.scan_zip_archive,
+                runtime_root / "support-bundle.zip",
+                relative_path="support-bundle.zip",
+            )
+            findings = (*findings, *support_findings)
+            evidence_log_security_passed = not findings
+            if findings:
+                code = "HOST_EVIDENCE_SECURITY_FAILED"
+        except BaseException:
+            evidence_log_security_passed = False
+            code = "HOST_EVIDENCE_SECURITY_FAILED"
+        try:
             cleanup = await asyncio.shield(ledger.cleanup())
         except BaseException:
             cleanup = CleanupSummary(
@@ -264,6 +302,7 @@ async def run_host_diagnostic(
         chromium=browser_summary,
         deepseek=live_summary,
         recovery=recovery_summary,
+        evidence_log_security_passed=evidence_log_security_passed,
         cleanup=cleanup,
     )
 
@@ -309,6 +348,9 @@ class ReleaseRunner:
         ledger: OwnershipLedger,
         git_probe: RunnerGitProbe,
         acceptance_run_id: uuid.UUID | None = None,
+        review_report: ReviewReport | None = None,
+        review_report_path: Path | None = None,
+        host_acceptance_runner: HostAcceptanceRunner = run_host_diagnostic,
     ) -> None:
         self._repository = repository.resolve()
         self._preflight = preflight
@@ -317,6 +359,9 @@ class ReleaseRunner:
         self._ledger = ledger
         self._git_probe = git_probe
         self._acceptance_run_id = acceptance_run_id or uuid.uuid4()
+        self._review_report = review_report
+        self._review_report_path = review_report_path
+        self._host_acceptance_runner = host_acceptance_runner
         self._cancel_event = asyncio.Event()
         self._installed_signals: list[signal.Signals] = []
 
@@ -325,6 +370,7 @@ class ReleaseRunner:
         repository = repository.resolve()
         run_id = uuid.uuid4()
         ledger = OwnershipLedger(repository=repository, acceptance_run_id=run_id)
+        review_value = os.environ.get("M8_REVIEW_REPORT", "").strip()
         return cls(
             repository=repository,
             preflight=Preflight(repository=repository),
@@ -333,6 +379,7 @@ class ReleaseRunner:
             ledger=ledger,
             git_probe=SubprocessRunnerGitProbe(),
             acceptance_run_id=run_id,
+            review_report_path=Path(review_value) if review_value else None,
         )
 
     def request_cancel(self) -> None:
@@ -366,6 +413,32 @@ class ReleaseRunner:
         preflight_result: PreflightResult = await self._preflight.check()
         if not isinstance(preflight_result, PreflightSuccess):
             return preflight_result
+        digest = manifest_digest(self._commands)
+        review = self._review_report
+        if review is None and self._review_report_path is not None:
+            try:
+                from scripts.create_m8_review_report import load_review_report
+
+                review = await asyncio.to_thread(
+                    load_review_report,
+                    self._repository,
+                    self._review_report_path,
+                )
+            except BaseException as exc:
+                code = str(exc)
+                if code not in {
+                    "REVIEW_BINDING_MISMATCH",
+                    "REVIEW_FINDINGS_PRESENT",
+                }:
+                    code = "REVIEW_REPORT_INVALID"
+                return PreflightFailure(code=code)
+        if review is not None:
+            if review.candidate_commit != preflight_result.git_commit or review.stage_manifest_digest != digest:
+                return PreflightFailure(code="REVIEW_BINDING_MISMATCH")
+            if review.review_base_commit != M8_REVIEW_BASE_COMMIT or review.review_range != f"{M8_REVIEW_BASE_COMMIT}..{preflight_result.git_commit}":
+                return PreflightFailure(code="REVIEW_RANGE_MISMATCH")
+            if review.verdict != "passed" or review.critical or review.important or review.minor:
+                return PreflightFailure(code="REVIEW_FINDINGS_PRESENT")
         writer = await self._prepare_writer()
         self._install_signals()
         stages: list[StageEvidence] = []
@@ -385,12 +458,31 @@ class ReleaseRunner:
             )
         )
         try:
+            host_result: DiagnosticResult | PreflightFailure | None = None
             for command in self._commands:
                 if failed:
                     break
+                if command.execution == "cleanup":
+                    continue
                 started_at = datetime.now(UTC)
                 if self._cancel_event.is_set():
                     outcome = _failed_outcome(command.stage)
+                elif command.execution == "host":
+                    if host_result is None:
+                        try:
+                            host_result = await self._host_acceptance_runner(
+                                repository=self._repository,
+                                stages=(
+                                    StageId.HOST_SETUP,
+                                    StageId.CHROMIUM,
+                                    StageId.DEEPSEEK,
+                                    StageId.RECOVERY,
+                                ),
+                                acceptance_run_id=self._acceptance_run_id,
+                            )
+                        except BaseException:
+                            host_result = None
+                    outcome = _host_outcome(command, host_result)
                 else:
                     try:
                         outcome = await self._executor.execute(command, self._cancel_event)
@@ -404,7 +496,7 @@ class ReleaseRunner:
                         outcome=outcome,
                     )
                 )
-                failed = outcome.status == "failed" or outcome.skipped > 0 or self._cancel_event.is_set()
+                failed = outcome.status == "failed" or (command.require_zero_skips and outcome.skipped > 0) or self._cancel_event.is_set()
         finally:
             cleanup_started = datetime.now(UTC)
             try:
@@ -426,27 +518,60 @@ class ReleaseRunner:
                 )
             )
             cleanup_finished = datetime.now(UTC)
-            stages.append(
-                StageEvidence(
-                    stage=StageId.CLEANUP,
-                    command_id="cleanup.owned_resources",
-                    status="failed" if cleanup_failed else "passed",
-                    started_at=cleanup_started,
-                    finished_at=cleanup_finished,
-                    duration_ms=int((cleanup_finished - cleanup_started).total_seconds() * 1000),
-                    passed=0 if cleanup_failed else 1,
-                    failed=1 if cleanup_failed else 0,
-                    skipped=0,
-                    summary=cleanup,
+            cleanup_commands = tuple(command for command in self._commands if command.execution == "cleanup")
+            if not cleanup_commands:
+                cleanup_commands = (
+                    CommandSpec(
+                        command_id="cleanup.owned_resources",
+                        stage=StageId.CLEANUP,
+                        argv=("internal", "owned-resources"),
+                        cwd="root",
+                        timeout_seconds=1,
+                        allowed_environment=frozenset(),
+                        summary_parser="exit_code",
+                        execution="cleanup",
+                    ),
+                )
+            host_cleanup = (
+                host_result.cleanup
+                if isinstance(host_result, DiagnosticResult)
+                else CleanupSummary(
+                    residual_processes=0,
+                    residual_ports=0,
+                    residual_databases=0,
+                    residual_paths=0,
+                    retained_evidence=0,
                 )
             )
+            combined_cleanup = CleanupSummary(
+                residual_processes=cleanup.residual_processes + host_cleanup.residual_processes,
+                residual_ports=cleanup.residual_ports + host_cleanup.residual_ports,
+                residual_databases=cleanup.residual_databases + host_cleanup.residual_databases,
+                residual_paths=cleanup.residual_paths + host_cleanup.residual_paths,
+                retained_evidence=cleanup.retained_evidence + host_cleanup.retained_evidence,
+            )
+            cleanup_failed = _has_residual(combined_cleanup) or (isinstance(host_result, DiagnosticResult) and not host_result.evidence_log_security_passed)
+            for command in cleanup_commands:
+                stages.append(
+                    StageEvidence(
+                        stage=StageId.CLEANUP,
+                        command_id=command.command_id,
+                        status="failed" if cleanup_failed else "passed",
+                        started_at=cleanup_started,
+                        finished_at=cleanup_finished,
+                        duration_ms=int((cleanup_finished - cleanup_started).total_seconds() * 1000),
+                        passed=0 if cleanup_failed else 1,
+                        failed=1 if cleanup_failed else 0,
+                        skipped=0,
+                        summary=combined_cleanup,
+                    )
+                )
             self._remove_signals()
         try:
             final_commit, final_clean = await asyncio.to_thread(self._git_probe.exact_commit_and_clean, self._repository)
         except BaseException:
             final_commit, final_clean = "", False
         failed = failed or self._cancel_event.is_set() or cleanup_failed or not final_clean or final_commit != preflight_result.git_commit
-        digest = manifest_digest(self._commands)
         if failed:
             evidence = ReleaseEvidence.failed(
                 acceptance_run_id=self._acceptance_run_id,
@@ -457,7 +582,7 @@ class ReleaseRunner:
                 stages=tuple(stages),
             )
         else:
-            evidence = ReleaseEvidence.candidate(
+            candidate = ReleaseEvidence.candidate(
                 acceptance_run_id=self._acceptance_run_id,
                 git_commit=preflight_result.git_commit,
                 stage_manifest_digest=digest,
@@ -465,5 +590,50 @@ class ReleaseRunner:
                 toolchain_digest=preflight_result.toolchain_digest,
                 stages=tuple(stages),
             )
+            evidence = ReleaseEvidence.final(candidate=candidate, review=review) if review is not None else candidate
         await asyncio.to_thread(writer.write, evidence)
         return evidence
+
+
+def _host_outcome(
+    command: CommandSpec,
+    result: DiagnosticResult | PreflightFailure | None,
+) -> CommandOutcome:
+    if not isinstance(result, DiagnosticResult) or result.status != "passed":
+        return _failed_outcome(command.stage)
+    if command.stage is StageId.HOST_SETUP:
+        summary = TestSummary(collected=1, passed=1, failed=0, skipped=0)
+        return CommandOutcome(
+            status="passed",
+            passed=1,
+            failed=0,
+            skipped=0,
+            summary=summary,
+        )
+    if command.stage is StageId.CHROMIUM and result.chromium is not None:
+        return CommandOutcome(
+            status="passed",
+            passed=result.chromium.passed,
+            failed=result.chromium.failed,
+            skipped=result.chromium.skipped,
+            summary=result.chromium,
+        )
+    if command.stage is StageId.DEEPSEEK and result.deepseek is not None:
+        passed = int(result.deepseek.outcome == "completed")
+        return CommandOutcome(
+            status="passed" if passed else "failed",
+            passed=passed,
+            failed=1 - passed,
+            skipped=0,
+            summary=result.deepseek,
+        )
+    if command.stage is StageId.RECOVERY and result.recovery is not None:
+        passed = int(result.recovery.rpo_outcome == "archive_point_confirmed")
+        return CommandOutcome(
+            status="passed" if passed else "failed",
+            passed=passed,
+            failed=1 - passed,
+            skipped=0,
+            summary=result.recovery,
+        )
+    return _failed_outcome(command.stage)

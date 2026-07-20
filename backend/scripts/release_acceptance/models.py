@@ -12,7 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40,64}$")
+_REVIEW_RANGE = re.compile(r"^[0-9a-f]{40,64}\.\.[0-9a-f]{40,64}$")
 _COMMAND_ID = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
+M8_REVIEW_BASE_COMMIT = "3f574b89a76182b5258f4ff7497dc3f1065ec683"
 
 
 class ReviewBindingError(RuntimeError):
@@ -151,6 +153,7 @@ class ReviewReport(StrictModel):
     stage_manifest_digest: str = Field(pattern=_SHA256.pattern)
     candidate_evidence_digest: str = Field(pattern=_SHA256.pattern)
     review_base_commit: str = Field(pattern=_GIT_COMMIT.pattern)
+    review_range: str = Field(pattern=_REVIEW_RANGE.pattern)
     critical: int = Field(ge=0)
     important: int = Field(ge=0)
     minor: int = Field(ge=0)
@@ -160,6 +163,9 @@ class ReviewReport(StrictModel):
         expected = "passed" if self.critical == self.important == self.minor == 0 else "findings_present"
         if self.verdict != expected:
             raise ValueError("review verdict does not match finding counts")
+        left, right = self.review_range.split("..", 1)
+        if left != self.review_base_commit or right != self.candidate_commit:
+            raise ValueError("review range does not match review binding")
         return self
 
     @classmethod
@@ -168,6 +174,7 @@ class ReviewReport(StrictModel):
         candidate: ReleaseEvidence,
         *,
         review_base_commit: str,
+        review_range: str,
         critical: int,
         important: int,
         minor: int,
@@ -178,6 +185,7 @@ class ReviewReport(StrictModel):
             stage_manifest_digest=candidate.stage_manifest_digest,
             candidate_evidence_digest=candidate.candidate_evidence_digest,
             review_base_commit=review_base_commit,
+            review_range=review_range,
             critical=critical,
             important=important,
             minor=minor,
@@ -196,14 +204,17 @@ class ReleaseEvidence(StrictModel):
     public_config_digest: str = Field(default="0" * 64, pattern=_SHA256.pattern)
     toolchain_digest: str = Field(default="0" * 64, pattern=_SHA256.pattern)
     candidate_evidence_digest: str = Field(pattern=_SHA256.pattern)
-    stages: tuple[StageEvidence, ...] = Field(min_length=1, max_length=len(STAGE_ORDER))
+    stages: tuple[StageEvidence, ...] = Field(min_length=1, max_length=64)
     review: ReviewState
 
     @model_validator(mode="after")
     def validate_release_contract(self) -> Self:
         stage_indexes = [_STAGE_INDEX[item.stage] for item in self.stages]
-        if stage_indexes != sorted(set(stage_indexes)):
-            raise ValueError("release stages are duplicated or out of order")
+        if stage_indexes != sorted(stage_indexes):
+            raise ValueError("release stages are out of order")
+        command_ids = [item.command_id for item in self.stages]
+        if len(command_ids) != len(set(command_ids)):
+            raise ValueError("release command evidence is duplicated")
         expected_digest = _candidate_binding_digest(
             acceptance_run_id=self.acceptance_run_id,
             git_commit=self.git_commit,
@@ -332,7 +343,7 @@ def _candidate_binding_digest(
 
 
 def _assert_review_binding(candidate: ReleaseEvidence, review: ReviewReport) -> None:
-    if review.candidate_commit != candidate.git_commit or review.stage_manifest_digest != candidate.stage_manifest_digest or review.candidate_evidence_digest != candidate.candidate_evidence_digest:
+    if review.candidate_commit != candidate.git_commit or review.stage_manifest_digest != candidate.stage_manifest_digest:
         raise ReviewBindingError("REVIEW_BINDING_MISMATCH")
     if review.verdict != "passed" or review.critical or review.important or review.minor:
         raise ReviewBindingError("REVIEW_FINDINGS_PRESENT")

@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -37,10 +39,6 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
-
-      - name: Run M7 project-only and static capability release gate
-        working-directory: frontend
-        run: pnpm test -- m6-static-gates.test.tsx m7-legacy-surface.test.tsx
 
       - name: Run unit tests of frontend
         working-directory: frontend

@@ -8,6 +8,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import zipfile
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -374,6 +375,129 @@ class SecretScanner:
                     continue
                 findings.extend(self.scan_file(path, scope=scope, relative_path=relative))
         return tuple(findings)
+
+    def scan_zip_archive(
+        self,
+        path: Path,
+        *,
+        relative_path: str,
+    ) -> tuple[SecretFinding, ...]:
+        descriptor = -1
+        try:
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode) or before.st_size > self._max_blob_bytes:
+                rule = "UNSCANNED_OVERSIZED_BLOB" if stat.S_ISREG(before.st_mode) else "UNSCANNED_NON_REGULAR"
+                return (
+                    self._finding(
+                        scope="support_bundle",
+                        locator=relative_path,
+                        rule=rule,
+                        line=None,
+                    ),
+                )
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or (
+                opened.st_dev,
+                opened.st_ino,
+            ) != (before.st_dev, before.st_ino):
+                raise OSError
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = -1
+                with zipfile.ZipFile(handle) as archive:
+                    members = archive.infolist()
+                    if len(members) > 1000:
+                        return (
+                            self._finding(
+                                scope="support_bundle",
+                                locator=relative_path,
+                                rule="UNSCANNED_OVERSIZED_BLOB",
+                                line=None,
+                            ),
+                        )
+                    findings: list[SecretFinding] = []
+                    names: set[str] = set()
+                    total_size = 0
+                    with self._detection_session():
+                        for member in members:
+                            name = member.filename
+                            member_path = PurePosixPath(name)
+                            locator = f"{relative_path}!/{name}"
+                            mode = member.external_attr >> 16
+                            file_type = stat.S_IFMT(mode)
+                            unsafe = (
+                                not name
+                                or name.startswith("/")
+                                or "\\" in name
+                                or str(member_path) != name.rstrip("/")
+                                or any(part in {"", ".", ".."} for part in member_path.parts)
+                                or name in names
+                                or bool(member.flag_bits & 0x1)
+                                or stat.S_ISLNK(mode)
+                                or (file_type not in {0, stat.S_IFREG, stat.S_IFDIR})
+                            )
+                            names.add(name)
+                            if unsafe:
+                                findings.append(
+                                    self._finding(
+                                        scope="support_bundle",
+                                        locator=locator,
+                                        rule="UNSCANNED_NON_REGULAR",
+                                        line=None,
+                                    )
+                                )
+                                continue
+                            if member.is_dir():
+                                continue
+                            total_size += member.file_size
+                            if member.file_size > self._max_blob_bytes or total_size > self._max_blob_bytes:
+                                findings.append(
+                                    self._finding(
+                                        scope="support_bundle",
+                                        locator=locator,
+                                        rule="UNSCANNED_OVERSIZED_BLOB",
+                                        line=None,
+                                    )
+                                )
+                                continue
+                            with archive.open(member, "r") as source:
+                                data = source.read(self._max_blob_bytes + 1)
+                            if len(data) != member.file_size:
+                                findings.append(
+                                    self._finding(
+                                        scope="support_bundle",
+                                        locator=locator,
+                                        rule="UNSCANNED_NON_REGULAR",
+                                        line=None,
+                                    )
+                                )
+                                continue
+                            try:
+                                findings.extend(
+                                    self.scan_bytes(
+                                        data,
+                                        scope="support_bundle",
+                                        locator=locator,
+                                        allowlist_path=locator,
+                                    )
+                                )
+                            finally:
+                                del data
+                    return tuple(findings)
+        except (OSError, zipfile.BadZipFile, RuntimeError, ValueError):
+            if descriptor >= 0:
+                os.close(descriptor)
+            return (
+                self._finding(
+                    scope="support_bundle",
+                    locator=relative_path,
+                    rule="UNSCANNED_NON_REGULAR",
+                    line=None,
+                ),
+            )
 
     def scan_runtime_log(self, path: Path, *, start_offset: int, relative_path: str) -> tuple[SecretFinding, ...]:
         descriptor = -1

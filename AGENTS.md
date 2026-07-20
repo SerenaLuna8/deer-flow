@@ -118,6 +118,7 @@ make restore-db ARGS="--archive /secure/backups/<archive> --target-url <new-deer
 make drill-restore ARGS="--archive /secure/backups/<archive> --journal /secure/recovery/tombstones.jsonl"  # 随机恢复库演练，仅清理该库
 make rotate-credentials ARGS="--dry-run --key-id m3-next"  # 分批轮换 credential envelope
 make check-db    # 只读检查连接、Alembic head 与必需表
+make release-acceptance  # M8 宿主机完整 candidate/review/final 验收（要求显式 live 环境）
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)
 make stop        # Stop all running services
@@ -175,7 +176,12 @@ These apply repo-wide; module guides own the module-specific detail.
   key 只允许出现在精确 validator allowlist。每个数据库测试只创建
   随机 `deerflow_test_*`/`deerflow_restore_*` 数据库。Release evidence 必须通过
   `POSTGRES_TEST_URL=... make test-project-foundation-postgres` 运行并保持 0 skip；跨平台 Python runner 和
-  `.github/workflows/project-foundation-postgres-tests.yml` 都会在变量缺失时于 pytest 前硬失败。
+  `.github/workflows/project-saas-release-gates.yml` 会在变量缺失时于 pytest 前硬失败。
+- **M8 final PostgreSQL gate** — `M8_RELEASE_POSTGRES_TESTS` 只允许在上述 22 文件前缀后追加
+  M8 isolation、capacity、recovery-switch 和 release-contract 四个文件；`make test` 与
+  `make test-project-saas-postgres` 使用该 26 文件 0-skip 清单。完整 live 关闭只能走
+  `make release-acceptance`，操作顺序见
+  [docs/operations/m8-host-release-acceptance.md](docs/operations/m8-host-release-acceptance.md)。
 - **M7 fresh-install baseline** — `migrations/versions/` 只允许
   `0001_project_saas_baseline.py`；`down_revision=None`，downgrade 永远拒绝。`make setup-db` 在空库安装
   final application schema、builtin catalog、LangGraph schema 与 default project；`make check-db` 只读验证

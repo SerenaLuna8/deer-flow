@@ -16,14 +16,18 @@ pnpm dev
 pnpm test
 pnpm check
 pnpm test:e2e:m7
+pnpm test:e2e:m8:deterministic
+pnpm test:e2e:m8
 pnpm test:e2e:static
-BUILD_MODE=production pnpm build
-BUILD_MODE=static pnpm build
+pnpm build:production
+pnpm build:static
 ```
 
 `pnpm check` runs lint and type checking. The M7 production Playwright gate writes to
 `test-results/m7-production`; the static gate builds into `.next-static` and writes to
 `test-results/m7-static`, so normal and static artifacts cannot be reused accidentally.
+`test:e2e:m8:deterministic` 是无 live model 的 CI Chromium matrix；`test:e2e:m8` 只由完整
+宿主机验收在 invocation-owned production stack 上运行，不能单独生成 M8 candidate/final。
 
 ## Final route model
 
@@ -183,5 +187,5 @@ response in the fourth `sendMessage(..., options)` argument under
 Backend base URLs may be set for split-origin development. Leave them unset for the normal
 root `make dev` or Docker flow so all browser calls use same-origin `/api/*` through Nginx.
 
-M7 is a closure candidate awaiting final independent branch review. M8 full release acceptance
+M7 is complete after independent branch review. M8 full release acceptance
 remains pending, so the frontend must not be described as a complete releasable multi-user SaaS.

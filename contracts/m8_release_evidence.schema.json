@@ -234,6 +234,11 @@
           "title": "Review Base Commit",
           "type": "string"
         },
+        "review_range": {
+          "pattern": "^[0-9a-f]{40,64}\\.\\.[0-9a-f]{40,64}$",
+          "title": "Review Range",
+          "type": "string"
+        },
         "schema_version": {
           "const": 1,
           "default": 1,
@@ -266,6 +271,7 @@
         "stage_manifest_digest",
         "candidate_evidence_digest",
         "review_base_commit",
+        "review_range",
         "critical",
         "important",
         "minor"
@@ -509,7 +515,7 @@
       "items": {
         "$ref": "#/$defs/StageEvidence"
       },
-      "maxItems": 11,
+      "maxItems": 64,
       "minItems": 1,
       "title": "Stages",
       "type": "array"

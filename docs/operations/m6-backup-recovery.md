@@ -1,5 +1,9 @@
 # M7 backup and recovery
 
+M8 宿主机发布认证中的完整 archive、external tombstone、恢复库流量切换和回切流程见
+[M8 宿主机发布验收](m8-host-release-acceptance.md)。本文仍是日常 M7 version-7 archive
+创建、恢复和演练的操作权威；M8 runner 只在 invocation-owned 随机数据库上组合这些能力。
+
 This runbook covers encrypted backups of the M7 final baseline, the external deletion
 journal, restore into a new database, and the separate restore drill required
 for operational acceptance. Every usable archive must use schema version 7 and revision

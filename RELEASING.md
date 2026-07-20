@@ -40,6 +40,12 @@ tag, the release is blocked (see [Version gate](#version-gate)).
 
 ## Release procedure
 
+在创建版本提交或 tag 前，宿主机发布候选还必须按
+[`docs/operations/m8-host-release-acceptance.md`](docs/operations/m8-host-release-acceptance.md)
+完成 fresh candidate、独立 `0/0/0` review report 和 fresh `final_pass`。该验收只认证全新
+PostgreSQL、`make setup-db` / `make start`、桌面版 Chromium 和 `deepseek-v4-pro`；它不会
+自动创建 tag、推送远端或发布制品，也不认证下文的 container/Helm 发布路径。
+
 1. **Bump the version** across all sources:
    ```bash
    scripts/bump_version.sh 2.2.0

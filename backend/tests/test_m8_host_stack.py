@@ -15,6 +15,10 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
+from scripts.release_acceptance.commands import (
+    SUPPORT_BUNDLE_ARGV,
+    SUPPORT_BUNDLE_OUTPUT_TOKEN,
+)
 from scripts.release_acceptance.host_stack import (
     AsyncpgHostDatabaseManager,
     HostInventory,
@@ -305,6 +309,32 @@ async def test_host_stack_invokes_only_certified_setup_start_path(tmp_path: Path
     assert ledger.processes == [OwnedProcess(pid=51001, pgid=51001, start_identity="owned-start-51001")]
     assert ledger.ports == [2026, 3000, 8001]
     assert all("deerflow_test_" in environment["DATABASE_URL"] for environment in command_probe.environments)
+
+
+@pytest.mark.asyncio
+async def test_release_checks_run_on_owned_database_and_write_support_bundle_to_runtime(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    host, command_probe, _ledger, _database = _host(
+        tmp_path,
+        environment={"DEER_FLOW_RUNTIME_ROOT": str(runtime_root)},
+    )
+    await host.prepare(_APP_DATABASE_URL)
+    await host.run_release_checks()
+    await host.launch()
+    assert command_probe.command_ids == [
+        "host.setup_db",
+        "host.check_db",
+        "host.doctor",
+        "host.make_help",
+        "host.support_bundle",
+        "host.make_start",
+    ]
+    assert all("deerflow_test_" in environment["DATABASE_URL"] for environment in command_probe.environments)
+    support_argv = command_probe.argv[4]
+    assert support_argv == tuple(str(runtime_root / "support-bundle.zip") if item == SUPPORT_BUNDLE_OUTPUT_TOKEN else item for item in SUPPORT_BUNDLE_ARGV)
 
 
 @pytest.mark.asyncio

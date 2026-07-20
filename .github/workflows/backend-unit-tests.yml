@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -39,6 +41,6 @@ jobs:
         working-directory: backend
         run: make test
 
-      - name: Run M7 source and release-list contracts
+      - name: Run M8 release-list contracts
         working-directory: backend
-        run: uv run pytest -q tests/test_m7_source_absence.py tests/test_m7_release_gate_postgres.py tests/test_m7_process_boundary.py -m "not postgres"
+        run: uv run pytest -q tests/test_m7_source_absence.py tests/test_m7_release_gate_postgres.py tests/test_m8_release_gate_postgres.py -m "not postgres"

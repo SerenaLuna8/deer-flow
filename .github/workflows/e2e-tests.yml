@@ -28,6 +28,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -48,9 +50,9 @@ jobs:
         working-directory: frontend
         run: npx playwright install chromium --with-deps
 
-      - name: Run E2E tests
+      - name: Run deterministic M8 Chromium isolation matrix
         working-directory: frontend
-        run: pnpm exec playwright test
+        run: pnpm test:e2e:m8:deterministic
         env:
           SKIP_ENV_VALIDATION: '1'
 

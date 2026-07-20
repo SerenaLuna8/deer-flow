@@ -13,15 +13,23 @@ import pytest
 
 import scripts.release_acceptance.runner as runner_module
 from scripts.release_acceptance.commands import (
+    AsyncCommandExecutor,
     CommandOutcome,
     CommandSpec,
     diagnostic_stages,
     manifest_digest,
 )
-from scripts.release_acceptance.models import CleanupSummary, StageId
+from scripts.release_acceptance.models import (
+    M8_REVIEW_BASE_COMMIT,
+    CleanupSummary,
+    LiveModelSummary,
+    RecoverySummary,
+    ReviewReport,
+    StageId,
+)
 from scripts.release_acceptance.models import TestSummary as AcceptanceTestSummary
 from scripts.release_acceptance.preflight import AcceptanceModel, PreflightSuccess
-from scripts.release_acceptance.runner import ReleaseRunner
+from scripts.release_acceptance.runner import DiagnosticResult, ReleaseRunner
 
 
 class FakePreflight:
@@ -96,11 +104,107 @@ class BlockingExecutor:
         raise AssertionError("unreachable")
 
 
+class SkipExecutor:
+    async def execute(self, _command: CommandSpec, _cancel_event) -> CommandOutcome:
+        return CommandOutcome(
+            status="passed",
+            passed=0,
+            failed=0,
+            skipped=1,
+            summary=AcceptanceTestSummary(
+                collected=1,
+                passed=0,
+                failed=0,
+                skipped=1,
+            ),
+        )
+
+
 def _commands() -> tuple[CommandSpec, ...]:
     return (
         CommandSpec(command_id="contracts.schemas", stage="contracts", argv=("fixed",), cwd="backend", timeout_seconds=10, allowed_environment=frozenset()),
         CommandSpec(command_id="backend.unit", stage="backend", argv=("fixed",), cwd="backend", timeout_seconds=10, allowed_environment=frozenset()),
     )
+
+
+def test_command_environment_can_force_ci_and_remove_separately_gated_database_url(
+    tmp_path: Path,
+) -> None:
+    command = CommandSpec(
+        command_id="backend.full",
+        stage="backend",
+        argv=("fixed",),
+        cwd="backend",
+        timeout_seconds=10,
+        allowed_environment=frozenset({"CI", "DEEPSEEK_API_KEY", "POSTGRES_TEST_URL"}),
+        fixed_environment=(("CI", "1"),),
+        removed_environment=frozenset({"POSTGRES_TEST_URL"}),
+    )
+    executor = AsyncCommandExecutor(
+        repository=tmp_path,
+        env={
+            "CI": "operator-value",
+            "DEEPSEEK_API_KEY": "present-but-not-serialized",
+            "POSTGRES_TEST_URL": "must-not-pass",
+            "PWD": str(tmp_path),
+            "UNRELATED": "must-not-pass",
+        },
+    )
+    child = executor._child_environment(command)
+    assert child["CI"] == "1"
+    assert child["DEEPSEEK_API_KEY"] == "present-but-not-serialized"
+    assert child["PWD"] == str(tmp_path)
+    assert "POSTGRES_TEST_URL" not in child
+    assert "UNRELATED" not in child
+
+
+def test_pytest_summary_prefers_exact_release_stats_without_double_counting() -> None:
+    output = b"M1-M8 release stats: collected=322 passed=322 failed=0 skipped=0\n======================= 322 passed in 246.74s =======================\n"
+
+    outcome = AsyncCommandExecutor._test_summary(output, returncode=0)
+
+    assert outcome.summary == AcceptanceTestSummary(
+        collected=322,
+        passed=322,
+        failed=0,
+        skipped=0,
+    )
+
+
+def test_rstest_summary_ignores_run_tests_stack_frames_after_success() -> None:
+    output = b" Test Files 123 passed\n      Tests 893 passed\n   Duration 3.48s\nat runTests (file:///workspace/node_modules/@rstest/core/dist/api.js:100:20)\n"
+
+    outcome = AsyncCommandExecutor._vitest_summary(output, returncode=0)
+
+    assert outcome.summary == AcceptanceTestSummary(
+        collected=893,
+        passed=893,
+        failed=0,
+        skipped=0,
+    )
+
+
+def test_security_summary_records_dependency_package_count() -> None:
+    output = json.dumps(
+        {
+            "effective_findings": 0,
+            "results": [
+                {
+                    "ecosystem": "python",
+                    "effective_findings": 0,
+                    "findings": [],
+                    "scanned_packages": 202,
+                }
+            ],
+            "schema_version": 1,
+        }
+    ).encode()
+
+    outcome = AsyncCommandExecutor._security_summary(output, returncode=0)
+
+    assert outcome.status == "passed"
+    assert outcome.summary.scanned == 202
+    assert outcome.summary.effective_findings == 0
 
 
 def _runner(
@@ -109,15 +213,20 @@ def _runner(
     executor: FakeExecutor | BlockingExecutor | None = None,
     ledger: FakeLedger | None = None,
     git: FakeGitProbe | None = None,
+    review_report: ReviewReport | None = None,
+    commands: tuple[CommandSpec, ...] | None = None,
+    host_acceptance_runner=None,
 ) -> ReleaseRunner:
     return ReleaseRunner(
         repository=tmp_path,
         preflight=FakePreflight(),
-        commands=_commands(),
+        commands=commands or _commands(),
         executor=executor or FakeExecutor(),
         ledger=ledger or FakeLedger(),
         git_probe=git or FakeGitProbe(),
         acceptance_run_id=uuid.UUID("11111111-1111-4111-8111-111111111111"),
+        review_report=review_report,
+        **({"host_acceptance_runner": host_acceptance_runner} if host_acceptance_runner is not None else {}),
     )
 
 
@@ -168,12 +277,203 @@ async def test_success_pins_immutable_manifest_and_candidate_commit(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_matching_review_report_reexecutes_fresh_stages_and_seals_final(tmp_path: Path) -> None:
+    (tmp_path / "candidate").mkdir()
+    (tmp_path / "final").mkdir()
+    candidate_executor = FakeExecutor()
+    candidate = await _runner(tmp_path / "candidate", executor=candidate_executor).run()
+    report = ReviewReport.for_candidate(
+        candidate,
+        review_base_commit=M8_REVIEW_BASE_COMMIT,
+        review_range=f"{M8_REVIEW_BASE_COMMIT}..{candidate.git_commit}",
+        critical=0,
+        important=0,
+        minor=0,
+    )
+    final_executor = FakeExecutor()
+    final = await _runner(
+        tmp_path / "final",
+        executor=final_executor,
+        review_report=report,
+    ).run()
+    assert final.status == "final_pass"
+    assert final_executor.calls == ["contracts.schemas", "backend.unit"]
+    assert final.review == report
+    assert final.candidate_evidence_digest != report.candidate_evidence_digest
+
+
+@pytest.mark.asyncio
+async def test_review_mismatch_fails_before_commands_or_evidence_directory(tmp_path: Path) -> None:
+    (tmp_path / "candidate").mkdir()
+    (tmp_path / "final").mkdir()
+    candidate = await _runner(tmp_path / "candidate").run()
+    report = ReviewReport.for_candidate(
+        candidate,
+        review_base_commit=M8_REVIEW_BASE_COMMIT,
+        review_range=f"{M8_REVIEW_BASE_COMMIT}..{candidate.git_commit}",
+        critical=0,
+        important=0,
+        minor=0,
+    ).model_copy(update={"candidate_commit": "e" * 40})
+    executor = FakeExecutor()
+    final_root = tmp_path / "final"
+    result = await _runner(final_root, executor=executor, review_report=report).run()
+    assert result.code == "REVIEW_BINDING_MISMATCH"
+    assert executor.calls == []
+    assert not (final_root / ".release-evidence").exists()
+
+
+@pytest.mark.asyncio
+async def test_review_range_must_start_at_fixed_m8_baseline(tmp_path: Path) -> None:
+    (tmp_path / "candidate").mkdir()
+    (tmp_path / "final").mkdir()
+    candidate = await _runner(tmp_path / "candidate").run()
+    short_base = "e" * 40
+    report = ReviewReport.for_candidate(
+        candidate,
+        review_base_commit=short_base,
+        review_range=f"{short_base}..{candidate.git_commit}",
+        critical=0,
+        important=0,
+        minor=0,
+    )
+    executor = FakeExecutor()
+    result = await _runner(
+        tmp_path / "final",
+        executor=executor,
+        review_report=report,
+    ).run()
+    assert result.code == "REVIEW_RANGE_MISMATCH"
+    assert executor.calls == []
+    assert not (tmp_path / "final" / ".release-evidence").exists()
+
+
+@pytest.mark.asyncio
+async def test_host_manifest_is_dispatched_once_without_executing_internal_commands(
+    tmp_path: Path,
+) -> None:
+    commands = (
+        *_commands(),
+        CommandSpec(command_id="host.setup_db", stage="host_setup", argv=("make", "setup-db"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+        CommandSpec(command_id="host.check_db", stage="host_setup", argv=("make", "check-db"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+        CommandSpec(command_id="chromium.host_journey", stage="chromium", argv=("internal", "chromium"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+        CommandSpec(command_id="deepseek.live_journey", stage="deepseek", argv=("internal", "deepseek"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+        CommandSpec(command_id="recovery.full_switch", stage="recovery", argv=("internal", "recovery"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+        CommandSpec(command_id="cleanup.evidence_log_security", stage="cleanup", argv=("internal", "security"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="cleanup"),
+        CommandSpec(command_id="cleanup.residual_audit", stage="cleanup", argv=("internal", "residual"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="cleanup"),
+    )
+    host_calls: list[tuple[StageId, ...]] = []
+
+    async def host_acceptance_runner(**kwargs):
+        host_calls.append(kwargs["stages"])
+        return DiagnosticResult(
+            status="passed",
+            code="OK",
+            host_setup_passed=True,
+            chromium=AcceptanceTestSummary(collected=4, passed=4, failed=0, skipped=0),
+            deepseek=LiveModelSummary(
+                provider="deepseek",
+                logical_model_name="release-live",
+                provider_model_id="deepseek-v4-pro",
+                outcome="completed",
+                frame_count=3,
+                tool_call_count=1,
+                terminal_count=1,
+                cursor_count=3,
+                duration_ms=5,
+            ),
+            recovery=RecoverySummary(
+                archive_schema_version=7,
+                schema_revision="0001_project_saas_baseline",
+                tombstone_count=1,
+                proof_digest="f" * 64,
+                rto_ms=5,
+                rpo_outcome="archive_point_confirmed",
+                restored_count=1,
+            ),
+            cleanup=CleanupSummary(
+                residual_processes=0,
+                residual_ports=0,
+                residual_databases=0,
+                residual_paths=0,
+                retained_evidence=0,
+            ),
+        )
+
+    executor = FakeExecutor()
+    evidence = await _runner(
+        tmp_path,
+        commands=commands,
+        executor=executor,
+        host_acceptance_runner=host_acceptance_runner,
+    ).run()
+    assert evidence.status == "candidate_ready"
+    assert executor.calls == ["contracts.schemas", "backend.unit"]
+    assert host_calls == [(StageId.HOST_SETUP, StageId.CHROMIUM, StageId.DEEPSEEK, StageId.RECOVERY)]
+    assert tuple(stage.command_id for stage in evidence.stages) == (
+        "preflight.host",
+        "contracts.schemas",
+        "backend.unit",
+        "host.setup_db",
+        "host.check_db",
+        "chromium.host_journey",
+        "deepseek.live_journey",
+        "recovery.full_switch",
+        "cleanup.evidence_log_security",
+        "cleanup.residual_audit",
+    )
+
+
+@pytest.mark.asyncio
 async def test_requested_cancellation_stops_business_stages_but_runs_cleanup(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     runner.request_cancel()
     evidence = await runner.run()
     assert evidence.status == "failed"
     assert evidence.cleanup.residual_processes == 0
+
+
+@pytest.mark.asyncio
+async def test_only_explicit_zero_skip_commands_reject_expected_platform_skips(
+    tmp_path: Path,
+) -> None:
+    allowed = (
+        CommandSpec(
+            command_id="backend.full",
+            stage="backend",
+            argv=("fixed",),
+            cwd="backend",
+            timeout_seconds=10,
+            allowed_environment=frozenset(),
+        ),
+    )
+    rejected = (
+        CommandSpec(
+            command_id="postgres.m1_m8",
+            stage="postgres",
+            argv=("fixed",),
+            cwd="root",
+            timeout_seconds=10,
+            allowed_environment=frozenset(),
+            require_zero_skips=True,
+        ),
+    )
+    allowed_root = tmp_path / "allowed"
+    rejected_root = tmp_path / "rejected"
+    allowed_root.mkdir()
+    rejected_root.mkdir()
+    allowed_evidence = await _runner(
+        allowed_root,
+        commands=allowed,
+        executor=SkipExecutor(),
+    ).run()
+    rejected_evidence = await _runner(
+        rejected_root,
+        commands=rejected,
+        executor=SkipExecutor(),
+    ).run()
+    assert allowed_evidence.status == "candidate_ready"
+    assert rejected_evidence.status == "failed"
 
 
 @pytest.mark.asyncio

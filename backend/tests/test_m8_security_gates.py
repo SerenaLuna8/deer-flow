@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -161,6 +163,26 @@ def test_directory_scans_reject_symlinks_and_cover_evidence_and_support_bundle(t
     support_findings = scanner.scan_directory(support, scope="support_bundle")
     assert "JWT" in {finding.rule for finding in evidence_findings}
     assert {"DatabaseURL", "UNSCANNED_NON_REGULAR"} <= {finding.rule for finding in support_findings}
+
+
+def test_support_bundle_zip_scans_members_and_rejects_archive_symlinks(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "support-bundle.zip"
+    link = zipfile.ZipInfo("escape")
+    link.create_system = 3
+    link.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("nested/result.txt", _provider_token())
+        archive.writestr(link, "nested/result.txt")
+
+    findings = SecretScanner().scan_zip_archive(
+        archive_path,
+        relative_path="support-bundle.zip",
+    )
+
+    assert {"ProviderToken", "UNSCANNED_NON_REGULAR"} <= {finding.rule for finding in findings}
+    assert _provider_token() not in json.dumps([finding.model_dump(mode="json") for finding in findings])
 
 
 def test_runtime_log_scan_reads_only_bytes_appended_after_start_offset(tmp_path: Path) -> None:

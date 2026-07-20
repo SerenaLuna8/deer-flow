@@ -479,6 +479,7 @@ def test_cross_platform_release_runner_requires_url_and_fails_a_real_child_skip(
     assert "POSTGRES_TEST_URL is required for the PostgreSQL release gate" in (missing_url.stdout + missing_url.stderr)
 
     environment["POSTGRES_TEST_URL"] = "postgresql://release.invalid/postgres"
+    environment["DEER_FLOW_RELEASE_GATE_LABEL"] = "M1-M7"
     result = subprocess.run(
         [sys.executable, str(runner), "test_skip.py", "-q"],
         cwd=child,
@@ -491,7 +492,7 @@ def test_cross_platform_release_runner_requires_url_and_fails_a_real_child_skip(
 
     output = result.stdout + result.stderr
     assert result.returncode != 0
-    assert "collected=1 passed=0 skipped=1" in output
+    assert "M1-M7 release stats: collected=1 passed=0 failed=0 skipped=1" in output
 
 
 def test_removed_database_migration_clis_do_not_return() -> None:

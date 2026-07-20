@@ -12,6 +12,7 @@ from pydantic import Field, model_validator
 
 from scripts.release_acceptance.contracts import canonical_digest
 from scripts.release_acceptance.models import (
+    M8_REVIEW_BASE_COMMIT,
     SecuritySummary,
     StageId,
     StageSummary,
@@ -21,14 +22,47 @@ from scripts.release_acceptance.models import (
 
 _COMMAND_ID = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_SAFE_BASE_ENVIRONMENT = frozenset({"HOME", "LANG", "LC_ALL", "PATH", "TMPDIR", "TZ"})
+_SAFE_BASE_ENVIRONMENT = frozenset({"HOME", "LANG", "LC_ALL", "PATH", "PWD", "TMPDIR", "TZ"})
+_DETERMINISTIC_MODEL_KEY = "m8-deterministic-placeholder"
+_DETERMINISTIC_DATABASE_URL = "postgresql://m8-deterministic@127.0.0.1:5432/m8-deterministic"
+_BACKEND_TEST_ENVIRONMENT = frozenset(
+    {
+        "AUTH_JWT_SECRET",
+        "CI",
+        "DATABASE_URL",
+        "DEEPSEEK_API_KEY",
+        "DEER_FLOW_AUDIT_ACTIVE_KEY_ID",
+        "DEER_FLOW_AUDIT_KEYRING_JSON",
+        "DEER_FLOW_BACKUP_KEY",
+        "DEER_FLOW_CONFIG_PATH",
+        "DEER_FLOW_HOME",
+    }
+)
 _OUTPUT_LIMIT = 128 * 1024
 _PYTEST_COUNT = re.compile(r"(?P<count>\d+)\s+(?P<kind>passed|failed|skipped|xfailed|xpassed|error|errors)\b")
+_RELEASE_STATS = re.compile(
+    r"M1-M[78] release stats: collected=(?P<collected>\d+) "
+    r"passed=(?P<passed>\d+) failed=(?P<failed>\d+) skipped=(?P<skipped>\d+)"
+)
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _VITEST_TESTS = re.compile(
-    r"Tests\s+(?:(?P<failed>\d+)\s+failed(?:\s*\|\s*)?)?"
-    r"(?:(?P<passed>\d+)\s+passed(?:\s*\|\s*)?)?"
-    r"(?:(?P<skipped>\d+)\s+skipped)?"
+    r"^[ \t]*Tests[ \t]+(?=\d+[ \t]+(?:failed|passed|skipped)\b)"
+    r"(?:(?P<failed>\d+)[ \t]+failed(?:[ \t]*\|[ \t]*)?)?"
+    r"(?:(?P<passed>\d+)[ \t]+passed(?:[ \t]*\|[ \t]*)?)?"
+    r"(?:(?P<skipped>\d+)[ \t]+skipped)?[ \t]*$",
+    re.MULTILINE,
+)
+SUPPORT_BUNDLE_OUTPUT_TOKEN = "{runtime_root}/support-bundle.zip"
+SUPPORT_BUNDLE_ARGV = (
+    "uv",
+    "run",
+    "--directory",
+    "backend",
+    "python",
+    "../scripts/support_bundle.py",
+    "--include-doctor",
+    "--out",
+    SUPPORT_BUNDLE_OUTPUT_TOKEN,
 )
 
 
@@ -41,6 +75,10 @@ class CommandSpec:
     timeout_seconds: int
     allowed_environment: frozenset[str]
     summary_parser: Literal["pytest", "vitest", "security", "exit_code"] = "pytest"
+    execution: Literal["subprocess", "host", "cleanup"] = "subprocess"
+    fixed_environment: tuple[tuple[str, str], ...] = ()
+    removed_environment: frozenset[str] = frozenset()
+    require_zero_skips: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "stage", StageId(self.stage))
@@ -51,6 +89,16 @@ class CommandSpec:
         if self.timeout_seconds < 1 or self.timeout_seconds > 7200:
             raise ValueError("COMMAND_TIMEOUT_INVALID")
         if any(_ENVIRONMENT_NAME.fullmatch(name) is None for name in self.allowed_environment):
+            raise ValueError("COMMAND_ENVIRONMENT_INVALID")
+        fixed_names = tuple(name for name, _value in self.fixed_environment)
+        if (
+            len(fixed_names) != len(set(fixed_names))
+            or any(_ENVIRONMENT_NAME.fullmatch(name) is None for name in fixed_names)
+            or any(not value or "\0" in value for _name, value in self.fixed_environment)
+            or any(_ENVIRONMENT_NAME.fullmatch(name) is None for name in self.removed_environment)
+            or set(fixed_names) & self.removed_environment
+            or not set(fixed_names).issubset(self.allowed_environment)
+        ):
             raise ValueError("COMMAND_ENVIRONMENT_INVALID")
 
 
@@ -82,10 +130,35 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec(
         command_id="contracts.schemas",
         stage=StageId.CONTRACTS,
-        argv=("uv", "run", "pytest", "tests/test_m8_acceptance_contract.py", "tests/test_m8_evidence.py", "-q"),
+        argv=("uv", "run", "pytest", "tests/test_m8_acceptance_contract.py", "tests/test_m8_evidence.py", "-q", "-k", "schema"),
         cwd="backend",
         timeout_seconds=600,
         allowed_environment=frozenset(),
+    ),
+    CommandSpec(
+        command_id="contracts.matrix",
+        stage=StageId.CONTRACTS,
+        argv=("uv", "run", "pytest", "tests/test_m8_acceptance_contract.py", "-q", "-k", "contract_authorities"),
+        cwd="backend",
+        timeout_seconds=600,
+        allowed_environment=frozenset(),
+    ),
+    CommandSpec(
+        command_id="contracts.docs",
+        stage=StageId.CONTRACTS,
+        argv=("uv", "run", "pytest", "tests/test_m8_release_gate_postgres.py", "-q", "-k", "runbook"),
+        cwd="backend",
+        timeout_seconds=600,
+        allowed_environment=frozenset(),
+    ),
+    CommandSpec(
+        command_id="contracts.git_diff",
+        stage=StageId.CONTRACTS,
+        argv=("git", "diff", "--check"),
+        cwd="root",
+        timeout_seconds=300,
+        allowed_environment=frozenset(),
+        summary_parser="exit_code",
     ),
     CommandSpec(
         command_id="postgres.m1_m8",
@@ -93,7 +166,12 @@ COMMANDS: tuple[CommandSpec, ...] = (
         argv=("make", "test-project-saas-postgres"),
         cwd="root",
         timeout_seconds=3600,
-        allowed_environment=frozenset({"POSTGRES_TEST_URL"}),
+        allowed_environment=frozenset({"DATABASE_URL", "DEEPSEEK_API_KEY", "POSTGRES_TEST_URL"}),
+        fixed_environment=(
+            ("DATABASE_URL", _DETERMINISTIC_DATABASE_URL),
+            ("DEEPSEEK_API_KEY", _DETERMINISTIC_MODEL_KEY),
+        ),
+        require_zero_skips=True,
     ),
     CommandSpec(
         command_id="backend.full",
@@ -101,7 +179,55 @@ COMMANDS: tuple[CommandSpec, ...] = (
         argv=("uv", "run", "pytest", "-q"),
         cwd="backend",
         timeout_seconds=3600,
+        allowed_environment=_BACKEND_TEST_ENVIRONMENT,
+        fixed_environment=(
+            ("CI", "1"),
+            ("DATABASE_URL", _DETERMINISTIC_DATABASE_URL),
+            ("DEEPSEEK_API_KEY", _DETERMINISTIC_MODEL_KEY),
+        ),
+        removed_environment=frozenset({"DEER_FLOW_CONFIG_PATH", "POSTGRES_TEST_URL", "POSTGRES_ADMIN_URL"}),
+    ),
+    CommandSpec(
+        command_id="backend.blocking_io",
+        stage=StageId.BACKEND,
+        argv=("uv", "run", "pytest", "tests/blocking_io", "-q"),
+        cwd="backend",
+        timeout_seconds=1800,
+        allowed_environment=_BACKEND_TEST_ENVIRONMENT,
+        fixed_environment=(
+            ("CI", "1"),
+            ("DATABASE_URL", _DETERMINISTIC_DATABASE_URL),
+            ("DEEPSEEK_API_KEY", _DETERMINISTIC_MODEL_KEY),
+        ),
+        removed_environment=frozenset({"DEER_FLOW_CONFIG_PATH", "POSTGRES_TEST_URL", "POSTGRES_ADMIN_URL"}),
+    ),
+    CommandSpec(
+        command_id="backend.format",
+        stage=StageId.BACKEND,
+        argv=("uvx", "ruff", "format", "--check", "."),
+        cwd="backend",
+        timeout_seconds=900,
         allowed_environment=frozenset(),
+        summary_parser="exit_code",
+    ),
+    CommandSpec(
+        command_id="backend.lint",
+        stage=StageId.BACKEND,
+        argv=("uvx", "ruff", "check", "."),
+        cwd="backend",
+        timeout_seconds=900,
+        allowed_environment=frozenset(),
+        summary_parser="exit_code",
+    ),
+    CommandSpec(
+        command_id="frontend.install_frozen",
+        stage=StageId.FRONTEND,
+        argv=("pnpm", "install", "--frozen-lockfile"),
+        cwd="frontend",
+        timeout_seconds=1800,
+        allowed_environment=frozenset({"CI"}),
+        fixed_environment=(("CI", "1"),),
+        summary_parser="exit_code",
     ),
     CommandSpec(
         command_id="frontend.unit",
@@ -110,17 +236,107 @@ COMMANDS: tuple[CommandSpec, ...] = (
         cwd="frontend",
         timeout_seconds=1800,
         allowed_environment=frozenset({"CI"}),
+        fixed_environment=(("CI", "1"),),
         summary_parser="vitest",
     ),
     CommandSpec(
-        command_id="security.full",
+        command_id="frontend.check",
+        stage=StageId.FRONTEND,
+        argv=("pnpm", "check"),
+        cwd="frontend",
+        timeout_seconds=1800,
+        allowed_environment=frozenset({"CI"}),
+        fixed_environment=(("CI", "1"),),
+        summary_parser="exit_code",
+    ),
+    CommandSpec(
+        command_id="frontend.e2e_deterministic",
+        stage=StageId.FRONTEND,
+        argv=("pnpm", "test:e2e:m8:deterministic"),
+        cwd="frontend",
+        timeout_seconds=1800,
+        allowed_environment=frozenset({"CI", "SKIP_ENV_VALIDATION"}),
+        fixed_environment=(("CI", "1"), ("SKIP_ENV_VALIDATION", "1")),
+        summary_parser="exit_code",
+    ),
+    CommandSpec(
+        command_id="frontend.build_production",
+        stage=StageId.FRONTEND,
+        argv=("pnpm", "build:production"),
+        cwd="frontend",
+        timeout_seconds=1800,
+        allowed_environment=frozenset({"CI", "SKIP_ENV_VALIDATION"}),
+        fixed_environment=(("CI", "1"), ("SKIP_ENV_VALIDATION", "1")),
+        summary_parser="exit_code",
+    ),
+    CommandSpec(
+        command_id="frontend.build_static",
+        stage=StageId.FRONTEND,
+        argv=("pnpm", "build:static"),
+        cwd="frontend",
+        timeout_seconds=1800,
+        allowed_environment=frozenset({"CI", "SKIP_ENV_VALIDATION"}),
+        fixed_environment=(("CI", "1"), ("SKIP_ENV_VALIDATION", "1")),
+        summary_parser="exit_code",
+    ),
+    CommandSpec(
+        command_id="security.python_dependencies",
         stage=StageId.SECURITY,
-        argv=("uv", "run", "python", "-m", "scripts.release_acceptance.security", "--scope", "tracked-tree", "--scope", "git-history"),
+        argv=("uv", "run", "python", "-m", "scripts.release_acceptance.security", "--scope", "dependencies-backend"),
         cwd="backend",
         timeout_seconds=1800,
         allowed_environment=frozenset(),
         summary_parser="security",
     ),
+    CommandSpec(
+        command_id="security.frontend_dependencies",
+        stage=StageId.SECURITY,
+        argv=("uv", "run", "python", "-m", "scripts.release_acceptance.security", "--scope", "dependencies-frontend"),
+        cwd="backend",
+        timeout_seconds=1800,
+        allowed_environment=frozenset(),
+        summary_parser="security",
+    ),
+    CommandSpec(
+        command_id="security.tracked_tree",
+        stage=StageId.SECURITY,
+        argv=("uv", "run", "python", "-m", "scripts.release_acceptance.security", "--scope", "tracked-tree"),
+        cwd="backend",
+        timeout_seconds=1800,
+        allowed_environment=frozenset(),
+        summary_parser="security",
+    ),
+    CommandSpec(
+        command_id="security.review_diff",
+        stage=StageId.SECURITY,
+        argv=("uv", "run", "python", "-m", "scripts.release_acceptance.security", "--scope", "review-diff", "--review-base", M8_REVIEW_BASE_COMMIT),
+        cwd="backend",
+        timeout_seconds=1800,
+        allowed_environment=frozenset(),
+        summary_parser="security",
+    ),
+    CommandSpec(
+        command_id="security.git_history",
+        stage=StageId.SECURITY,
+        argv=("uv", "run", "python", "-m", "scripts.release_acceptance.security", "--scope", "git-history"),
+        cwd="backend",
+        timeout_seconds=1800,
+        allowed_environment=frozenset(),
+        summary_parser="security",
+    ),
+    CommandSpec(command_id="host.setup_db", stage=StageId.HOST_SETUP, argv=("make", "setup-db"), cwd="root", timeout_seconds=900, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+    CommandSpec(command_id="host.check_db", stage=StageId.HOST_SETUP, argv=("make", "check-db"), cwd="root", timeout_seconds=300, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+    CommandSpec(command_id="host.doctor", stage=StageId.HOST_SETUP, argv=("make", "doctor"), cwd="root", timeout_seconds=300, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+    CommandSpec(command_id="host.make_help", stage=StageId.HOST_SETUP, argv=("make", "help"), cwd="root", timeout_seconds=300, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+    CommandSpec(command_id="host.support_bundle", stage=StageId.HOST_SETUP, argv=SUPPORT_BUNDLE_ARGV, cwd="root", timeout_seconds=300, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+    CommandSpec(command_id="host.make_start", stage=StageId.HOST_SETUP, argv=("make", "start"), cwd="root", timeout_seconds=900, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+    CommandSpec(command_id="chromium.host_journey", stage=StageId.CHROMIUM, argv=("internal", "chromium-host-journey"), cwd="root", timeout_seconds=1800, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+    CommandSpec(command_id="deepseek.live_journey", stage=StageId.DEEPSEEK, argv=("internal", "deepseek-live-journey"), cwd="root", timeout_seconds=1800, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+    CommandSpec(command_id="recovery.full_switch", stage=StageId.RECOVERY, argv=("internal", "recovery-full-switch"), cwd="root", timeout_seconds=3600, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
+    CommandSpec(
+        command_id="cleanup.evidence_log_security", stage=StageId.CLEANUP, argv=("internal", "evidence-log-security"), cwd="root", timeout_seconds=600, allowed_environment=frozenset(), summary_parser="exit_code", execution="cleanup"
+    ),
+    CommandSpec(command_id="cleanup.residual_audit", stage=StageId.CLEANUP, argv=("internal", "residual-audit"), cwd="root", timeout_seconds=600, allowed_environment=frozenset(), summary_parser="exit_code", execution="cleanup"),
 )
 
 DIAGNOSTIC_STAGE_SEQUENCES: tuple[tuple[StageId, ...], ...] = (
@@ -154,6 +370,10 @@ def manifest_digest(commands: tuple[CommandSpec, ...]) -> str:
                 "timeout_seconds": command.timeout_seconds,
                 "allowed_environment": sorted(command.allowed_environment),
                 "summary_parser": command.summary_parser,
+                "execution": command.execution,
+                "fixed_environment": [list(item) for item in command.fixed_environment],
+                "removed_environment": sorted(command.removed_environment),
+                "require_zero_skips": command.require_zero_skips,
             }
             for command in commands
         ]
@@ -181,7 +401,9 @@ class AsyncCommandExecutor:
 
     def _child_environment(self, command: CommandSpec) -> dict[str, str]:
         permitted = _SAFE_BASE_ENVIRONMENT | command.allowed_environment
-        return {name: value for name, value in self._env.items() if name in permitted}
+        values = {name: value for name, value in self._env.items() if name in permitted and name not in command.removed_environment}
+        values.update(command.fixed_environment)
+        return values
 
     @staticmethod
     async def _bounded_read(stream: asyncio.StreamReader) -> bytes:
@@ -195,22 +417,29 @@ class AsyncCommandExecutor:
     @staticmethod
     def _test_summary(output: bytes, *, returncode: int) -> CommandOutcome:
         text = output.decode("utf-8", errors="replace")
-        counts = {"passed": 0, "failed": 0, "skipped": 0}
-        for match in _PYTEST_COUNT.finditer(text):
-            kind = match.group("kind")
-            count = int(match.group("count"))
-            if kind == "passed":
-                counts["passed"] += count
-            elif kind == "skipped":
-                counts["skipped"] += count
-            else:
-                counts["failed"] += count
+        release_matches = tuple(_RELEASE_STATS.finditer(text))
+        if release_matches:
+            release = release_matches[-1]
+            counts = {name: int(release.group(name)) for name in ("passed", "failed", "skipped")}
+            collected = int(release.group("collected"))
+        else:
+            counts = {"passed": 0, "failed": 0, "skipped": 0}
+            for match in _PYTEST_COUNT.finditer(text):
+                kind = match.group("kind")
+                count = int(match.group("count"))
+                if kind == "passed":
+                    counts["passed"] += count
+                elif kind == "skipped":
+                    counts["skipped"] += count
+                else:
+                    counts["failed"] += count
+            collected = sum(counts.values())
         if returncode and counts["failed"] == 0:
             counts["failed"] = 1
         if not returncode and counts["passed"] == counts["failed"] == counts["skipped"] == 0:
             counts["failed"] = 1
         summary = TestSummary(
-            collected=sum(counts.values()),
+            collected=collected,
             passed=counts["passed"],
             failed=counts["failed"],
             skipped=counts["skipped"],
@@ -276,7 +505,7 @@ class AsyncCommandExecutor:
         findings = 1 if returncode else 0
         try:
             payload = json.loads(output.decode("utf-8"))
-            scanned = sum(int(item.get("scanned", 0)) for item in payload.get("results", []))
+            scanned = sum(int(item.get("scanned", item.get("scanned_packages", 0))) for item in payload.get("results", []))
             findings = int(payload["effective_findings"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, UnicodeError):
             if returncode == 0:

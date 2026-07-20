@@ -136,7 +136,15 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
             "project_id": "forged-command-project",
         }
     }
-    assert set(captured.kwargs) == {"input", "config", "command"}
+    assert set(captured.kwargs) == {
+        "input",
+        "config",
+        "command",
+        "stream_mode",
+        "stream_subgraphs",
+    }
+    assert captured.kwargs["stream_mode"] == ["values"]
+    assert captured.kwargs["stream_subgraphs"] is False
     assert captured_server_context is None
     assert record.run_id == run_id
     assert record.status is RunStatus.pending
