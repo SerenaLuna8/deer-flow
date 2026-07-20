@@ -230,6 +230,35 @@ async def test_operations_requires_current_system_admin_and_returns_only_aggrega
                     reserved=7,
                 )
             )
+
+        async def authority_snapshot() -> tuple[object, ...]:
+            async with seed.factory() as session:
+                return (
+                    await session.scalar(select(func.count()).select_from(AuditLogRow)),
+                    await session.scalar(select(func.count()).select_from(JobRow)),
+                    await session.scalar(select(func.count()).select_from(DeadJobRow)),
+                    tuple(
+                        (
+                            row.project_id,
+                            row.dimension,
+                            row.bucket,
+                            row.used,
+                            row.reserved,
+                        )
+                        for row in (
+                            await session.execute(
+                                select(ProjectUsageCounterRow).order_by(
+                                    ProjectUsageCounterRow.project_id,
+                                    ProjectUsageCounterRow.dimension,
+                                    ProjectUsageCounterRow.bucket,
+                                )
+                            )
+                        ).scalars()
+                    ),
+                    tuple((row.id, row.system_role, row.token_version) for row in (await session.execute(select(UserRow).order_by(UserRow.id))).scalars()),
+                )
+
+        authority_before_reads = await authority_snapshot()
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
@@ -311,6 +340,8 @@ async def test_operations_requires_current_system_admin_and_returns_only_aggrega
             assert private_field not in encoded
         _assert_public_not_found(ordinary)
         assert unauthenticated.status_code == 401
+        assert unauthenticated.json()["detail"]["code"] == "NOT_AUTHENTICATED"
+        assert await authority_snapshot() == authority_before_reads
     finally:
         await seed.engine.dispose()
 

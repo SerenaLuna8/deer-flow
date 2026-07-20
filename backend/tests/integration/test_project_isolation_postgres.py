@@ -113,6 +113,60 @@ async def test_project_api_and_repository_enforce_account_isolation(
             )
             assert updated.status_code == 200
             assert updated.json()["display_name"] == "Alpha Updated"
+
+            async def authority_snapshot(project_id: uuid.UUID) -> tuple[object, ...]:
+                async with engine.connect() as connection:
+                    project = (
+                        await connection.execute(
+                            text(
+                                """SELECT display_name,status,is_suspended,membership_version,updated_at
+                                FROM projects WHERE id=:project_id"""
+                            ),
+                            {"project_id": project_id},
+                        )
+                    ).one()
+                    memberships = (
+                        await connection.execute(
+                            text(
+                                """SELECT user_id,role,status,version,is_pinned,last_entered_at,updated_at
+                                FROM project_memberships WHERE project_id=:project_id
+                                ORDER BY user_id"""
+                            ),
+                            {"project_id": project_id},
+                        )
+                    ).all()
+                    audit_count = (
+                        await connection.execute(
+                            text("SELECT count(*) FROM audit_logs WHERE project_id=:project_id"),
+                            {"project_id": project_id},
+                        )
+                    ).scalar_one()
+                    project_count = (await connection.execute(text("SELECT count(*) FROM projects"))).scalar_one()
+                return tuple(project), tuple(tuple(row) for row in memberships), audit_count, project_count
+
+            authority_before_denials = await authority_snapshot(alpha_id)
+            forged_create = await client.post(
+                "/api/projects",
+                headers=headers("alpha_admin"),
+                json={
+                    "slug": "forged-authority",
+                    "display_name": "Forged Authority",
+                    "created_by_user_id": str(users["beta_admin"]),
+                    "owner_user_id": str(users["beta_admin"]),
+                },
+            )
+            forged_patch = await client.patch(
+                f"/api/projects/{alpha_id}",
+                headers=headers("alpha_admin"),
+                json={
+                    "display_name": "Forged Authority",
+                    "project_id": str(beta_id),
+                    "owner_user_id": str(users["beta_admin"]),
+                },
+            )
+            for rejected in (forged_create, forged_patch):
+                assert rejected.status_code == 422
+                assert rejected.json()["detail"]["code"] == "PROJECT_VALIDATION_FAILED"
             forbidden = await client.patch(
                 f"/api/projects/{alpha_id}",
                 headers=headers("alpha_viewer"),
@@ -138,6 +192,7 @@ async def test_project_api_and_repository_enforce_account_isolation(
                 for hidden in hidden_responses:
                     assert hidden.status_code == 404
                     assert hidden.json()["detail"]["code"] == "PROJECT_NOT_FOUND"
+            assert await authority_snapshot(alpha_id) == authority_before_denials
 
             entered = await client.post(f"/api/projects/{alpha_id}/enter", headers=headers("alpha_viewer"))
             pinned = await client.put(
@@ -157,15 +212,74 @@ async def test_project_api_and_repository_enforce_account_isolation(
             )
             assert created_by_outsider.status_code == 201
             assert created_by_outsider.json()["role"] == "admin"
+            gamma_id = uuid.UUID(created_by_outsider.json()["id"])
 
-        async with factory() as session:
-            context = await resolve_project_context(session, users["alpha_viewer"], alpha_id, "context-ok")
-        async with factory() as session:
-            with pytest.raises(ProjectNotFound):
-                await resolve_project_context(session, users["beta_admin"], alpha_id, "context-hidden")
-        forged = replace(context, user_id=users["beta_admin"], request_id="forged")
-        async with factory() as session:
-            with pytest.raises(ProjectNotFound):
-                await ProjectRepository(session).get(forged)
+            async with factory() as session:
+                context = await resolve_project_context(session, users["alpha_viewer"], alpha_id, "context-ok")
+            async with factory() as session:
+                with pytest.raises(ProjectNotFound):
+                    await resolve_project_context(session, users["beta_admin"], alpha_id, "context-hidden")
+            forged = replace(context, user_id=users["beta_admin"], request_id="forged")
+            async with factory() as session:
+                with pytest.raises(ProjectNotFound):
+                    await ProjectRepository(session).get(forged)
+
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("UPDATE project_memberships SET version=version+1 WHERE id=:membership_id"),
+                    {"membership_id": context.membership_id},
+                )
+            stale_snapshot = await authority_snapshot(alpha_id)
+            async with factory() as session:
+                with pytest.raises(ProjectNotFound):
+                    await ProjectRepository(session).get(context)
+            assert await authority_snapshot(alpha_id) == stale_snapshot
+
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("UPDATE project_memberships SET status='removed' WHERE id=:membership_id"),
+                    {"membership_id": context.membership_id},
+                )
+            removed_snapshot = await authority_snapshot(alpha_id)
+            removed_response = await client.get(f"/api/projects/{alpha_id}", headers=headers("alpha_viewer"))
+            assert removed_response.status_code == 404
+            assert removed_response.json()["detail"]["code"] == "PROJECT_NOT_FOUND"
+            assert await authority_snapshot(alpha_id) == removed_snapshot
+
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """UPDATE project_memberships SET status='left'
+                        WHERE project_id=:project_id AND user_id=:user_id"""
+                    ),
+                    {"project_id": alpha_id, "user_id": str(users["alpha_admin"])},
+                )
+            left_snapshot = await authority_snapshot(alpha_id)
+            left_response = await client.get(f"/api/projects/{alpha_id}", headers=headers("alpha_admin"))
+            assert left_response.status_code == 404
+            assert left_response.json()["detail"]["code"] == "PROJECT_NOT_FOUND"
+            assert await authority_snapshot(alpha_id) == left_snapshot
+
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("UPDATE projects SET is_suspended=true WHERE id=:project_id"),
+                    {"project_id": beta_id},
+                )
+            suspended_snapshot = await authority_snapshot(beta_id)
+            suspended_response = await client.get(f"/api/projects/{beta_id}", headers=headers("beta_admin"))
+            assert suspended_response.status_code == 404
+            assert suspended_response.json()["detail"]["code"] == "PROJECT_NOT_FOUND"
+            assert await authority_snapshot(beta_id) == suspended_snapshot
+
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text("UPDATE projects SET status='pending_deletion' WHERE id=:project_id"),
+                    {"project_id": gamma_id},
+                )
+            pending_snapshot = await authority_snapshot(gamma_id)
+            pending_response = await client.get(f"/api/projects/{gamma_id}", headers=headers("outsider"))
+            assert pending_response.status_code == 404
+            assert pending_response.json()["detail"]["code"] == "PROJECT_NOT_FOUND"
+            assert await authority_snapshot(gamma_id) == pending_snapshot
     finally:
         await engine.dispose()

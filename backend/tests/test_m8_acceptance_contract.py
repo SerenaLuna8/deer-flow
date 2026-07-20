@@ -244,11 +244,12 @@ def test_committed_json_schemas_match_models_byte_for_byte(model: type[object], 
     assert (_CONTRACTS / filename).read_bytes() == schema_bytes(model)
 
 
-def test_seed_contracts_are_closed_empty_authorities() -> None:
+def test_committed_contract_authorities_are_closed() -> None:
     matrix = json.loads((_CONTRACTS / "m8_isolation_matrix.json").read_text(encoding="utf-8"))
     allowlist = json.loads((_CONTRACTS / "m8_secret_allowlist.json").read_text(encoding="utf-8"))
     assert matrix["schema_version"] == 1
     assert matrix["dimensions"] == _EXPECTED_MATRIX_DIMENSIONS
-    assert matrix["cases"] == []
-    assert set(matrix) == {"schema_version", "dimensions", "cases"}
+    assert matrix["cases"]
+    assert set(matrix) == {"schema_version", "dimensions", "surface_manifest", "cases"}
+    assert set(matrix["surface_manifest"]) == {"count", "sha256"}
     assert allowlist == {"schema_version": 1, "entries": []}
