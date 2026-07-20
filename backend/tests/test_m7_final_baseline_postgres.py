@@ -103,12 +103,12 @@ def _schema_digest_sql() -> str:
     return """
         SELECT md5(COALESCE(string_agg(item, E'\n' ORDER BY item), ''))
         FROM (
-            SELECT 'r:' || c.relkind || ':' || n.nspname || ':' || c.relname AS item
+            SELECT 'r:' || c.relkind::text || ':' || n.nspname || ':' || c.relname AS item
             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'v', 'm', 'S')
             UNION ALL
-            SELECT 'a:' || c.relname || ':' || a.attnum || ':' || a.attname || ':' ||
-                   pg_catalog.format_type(a.atttypid, a.atttypmod) || ':' || a.attnotnull
+            SELECT 'a:' || c.relname || ':' || a.attnum::text || ':' || a.attname || ':' ||
+                   pg_catalog.format_type(a.atttypid, a.atttypmod) || ':' || a.attnotnull::text
             FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
             JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = current_schema() AND a.attnum > 0 AND NOT a.attisdropped
@@ -127,7 +127,7 @@ def _schema_digest_sql() -> str:
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE n.nspname = current_schema()
             UNION ALL
-            SELECT 't:' || t.typname || ':' || t.typtype || ':' ||
+            SELECT 't:' || t.typname || ':' || t.typtype::text || ':' ||
                    COALESCE(array_to_string(ARRAY(
                        SELECT e.enumlabel FROM pg_enum e
                        WHERE e.enumtypid=t.oid ORDER BY e.enumsortorder
