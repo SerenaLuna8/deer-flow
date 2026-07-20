@@ -454,7 +454,7 @@ class AsyncpgHostDatabaseManager:
         target_url = urlunsplit((parsed.scheme, parsed.netloc, f"/{name}", parsed.query, parsed.fragment))
         target = await asyncpg.connect(target_url, timeout=10)
         try:
-            await target.execute(f"GRANT USAGE ON SCHEMA public TO {role_identifier}")
+            await target.execute(f"GRANT USAGE, CREATE ON SCHEMA public TO {role_identifier}")
             await target.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role_identifier}")
             await target.execute(f"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {role_identifier}")
             await target.execute(f"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO {role_identifier}")

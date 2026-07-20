@@ -57,6 +57,34 @@ async def test_host_database_creation_uses_pristine_template0() -> None:
     assert ('CREATE DATABASE "deerflow_test_111111" OWNER "deerflow_app" TEMPLATE template0 ENCODING \'UTF8\'') in statements
 
 
+@pytest.mark.asyncio
+async def test_restore_runtime_grant_includes_schema_create(monkeypatch: pytest.MonkeyPatch) -> None:
+    maintenance = AsyncMock()
+    maintenance.fetchrow.return_value = {
+        "rolcanlogin": True,
+        "rolsuper": False,
+        "rolcreatedb": False,
+        "rolcreaterole": False,
+        "rolreplication": False,
+        "rolbypassrls": False,
+    }
+    target = AsyncMock()
+    manager = AsyncpgHostDatabaseManager(_ADMIN_DATABASE_URL)
+    manager._connect = AsyncMock(return_value=maintenance)  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "scripts.release_acceptance.host_stack.asyncpg.connect",
+        AsyncMock(return_value=target),
+    )
+
+    await manager.grant_runtime_access(
+        name="deerflow_restore_12345_11111111111141118111111111111111",
+        app_role="deerflow_app",
+    )
+
+    statements = [call.args[0] for call in target.execute.await_args_list]
+    assert 'GRANT USAGE, CREATE ON SCHEMA public TO "deerflow_app"' in statements
+
+
 class FakeDatabaseManager:
     def __init__(self) -> None:
         self.created: list[tuple[str, str, str]] = []
