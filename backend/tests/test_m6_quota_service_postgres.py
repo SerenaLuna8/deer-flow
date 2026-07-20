@@ -214,17 +214,20 @@ async def test_concurrent_reservations_never_exceed_limit_and_release_compensate
             1,
             "run:held",
         )
-        results = await asyncio.gather(
-            *(
-                service.reserve_new_session(
-                    seed.owner_a,
-                    "concurrent_runs",
-                    1,
-                    f"run:{index}",
-                )
-                for index in range(5)
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                *(
+                    service.reserve_new_session(
+                        seed.owner_a,
+                        "concurrent_runs",
+                        1,
+                        f"run:{index}",
+                    )
+                    for index in range(5)
+                ),
+                return_exceptions=True,
             ),
-            return_exceptions=True,
+            timeout=10,
         )
         accepted = [item for item in results if not isinstance(item, Exception)]
         rejected = [item for item in results if isinstance(item, Exception)]

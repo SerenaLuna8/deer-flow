@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, text
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 import deerflow.persistence.jobs.sql as jobs_sql
@@ -225,9 +225,12 @@ async def test_twenty_concurrent_claims_have_exactly_one_owner(seed: JobSeed) ->
                     lease_seconds=90,
                 )
 
-        first, second = await asyncio.gather(
-            claim(seed.worker_a),
-            claim(seed.worker_b),
+        first, second = await asyncio.wait_for(
+            asyncio.gather(
+                claim(seed.worker_a),
+                claim(seed.worker_b),
+            ),
+            timeout=10,
         )
         claims = [item for item in (first, second) if item is not None]
         assert len(claims) == 1
@@ -236,6 +239,20 @@ async def test_twenty_concurrent_claims_have_exactly_one_owner(seed: JobSeed) ->
             repository = JobRepository(session)
             assert await repository.mark_running(winner.job_id, lease_token=winner.lease_token)
             assert await repository.settle_success(winner.job_id, lease_token=winner.lease_token)
+
+    async with seed.data.factory() as session:
+        terminal_state = (
+            await session.execute(
+                text(
+                    """SELECT
+                         (SELECT count(*) FROM jobs WHERE status='succeeded'),
+                         (SELECT coalesce(sum(attempt_count),0) FROM jobs),
+                         (SELECT count(*) FROM job_attempts),
+                         (SELECT count(*) FROM job_attempts WHERE outcome='succeeded')"""
+                )
+            )
+        ).one()
+    assert tuple(terminal_state) == (20, 20, 20, 20)
 
 
 @pytest.mark.postgres

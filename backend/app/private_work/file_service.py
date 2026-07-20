@@ -417,30 +417,45 @@ class PrivateFileService:
                 )
             chunk_index += 1
 
-        async for incoming in chunks:
-            if not isinstance(incoming, bytes):
-                raise PrivateWorkInvalid(context.request_id)
-            if not incoming:
-                continue
-            file_size += len(incoming)
-            request_total += len(incoming)
-            if file_size > limits.max_file_size or request_total > limits.max_total_size:
-                raise PrivateWorkTooLarge(context.request_id)
-            whole.update(incoming)
-            offset = 0
-            if carry:
-                take = min(PRIVATE_FILE_CHUNK_SIZE - len(carry), len(incoming))
-                carry.extend(incoming[:take])
-                offset = take
-                if len(carry) == PRIVATE_FILE_CHUNK_SIZE:
-                    await persist(bytes(carry))
-                    carry.clear()
-            while len(incoming) - offset >= PRIVATE_FILE_CHUNK_SIZE:
-                end = offset + PRIVATE_FILE_CHUNK_SIZE
-                await persist(incoming[offset:end])
-                offset = end
-            if offset < len(incoming):
-                carry.extend(incoming[offset:])
+        iterator = aiter(chunks)
+        stream_error: BaseException | None = None
+        try:
+            async for incoming in iterator:
+                if not isinstance(incoming, bytes):
+                    raise PrivateWorkInvalid(context.request_id)
+                if not incoming:
+                    continue
+                file_size += len(incoming)
+                request_total += len(incoming)
+                if file_size > limits.max_file_size or request_total > limits.max_total_size:
+                    raise PrivateWorkTooLarge(context.request_id)
+                whole.update(incoming)
+                offset = 0
+                if carry:
+                    take = min(PRIVATE_FILE_CHUNK_SIZE - len(carry), len(incoming))
+                    carry.extend(incoming[:take])
+                    offset = take
+                    if len(carry) == PRIVATE_FILE_CHUNK_SIZE:
+                        await persist(bytes(carry))
+                        carry.clear()
+                while len(incoming) - offset >= PRIVATE_FILE_CHUNK_SIZE:
+                    end = offset + PRIVATE_FILE_CHUNK_SIZE
+                    await persist(incoming[offset:end])
+                    offset = end
+                if offset < len(incoming):
+                    carry.extend(incoming[offset:])
+        except BaseException as exc:
+            stream_error = exc
+            raise
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    if stream_error is None:
+                        raise
+                    logger.warning("Private upload input stream close failed after stream rejection")
         if carry:
             await persist(bytes(carry))
         return file_size, whole.hexdigest(), request_total

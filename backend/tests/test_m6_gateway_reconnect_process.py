@@ -11,6 +11,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
@@ -314,6 +315,25 @@ async def test_last_event_id_replays_after_formal_gateway_process_replacement(
             assert foreign_registration.status_code == 201
             denied = await foreign.get(path)
         assert denied.status_code == 404
+        async with factory() as session:
+            persisted_frames = (
+                await session.execute(
+                    text(
+                        """SELECT count(*),
+                                  count(*) FILTER (WHERE event_type='stream.end')
+                           FROM run_events
+                           WHERE project_id=:project_id AND owner_user_id=:owner_user_id
+                             AND thread_id=:thread_id AND run_id=:run_id"""
+                    ),
+                    {
+                        "project_id": project_id,
+                        "owner_user_id": user_id,
+                        "thread_id": thread_id,
+                        "run_id": run_id,
+                    },
+                )
+            ).one()
+        assert tuple(persisted_frames) == (3, 1)
     finally:
         if first is not None and first_log is not None:
             _stop_process(first, first_log)

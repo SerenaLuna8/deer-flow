@@ -295,7 +295,10 @@ async def _exercise_matrix(database_url: str) -> GovernanceMatrixResult:
         await asyncio.wait_for(both_redeemers_ready.wait(), timeout=5)
         assert redeem_ready == 2
         release_redeemers.set()
-        redeem_results = await asyncio.gather(*redeem_tasks, return_exceptions=True)
+        redeem_results = await asyncio.wait_for(
+            asyncio.gather(*redeem_tasks, return_exceptions=True),
+            timeout=10,
+        )
         invitation_successes = sum(not isinstance(result, BaseException) for result in redeem_results)
         invitation_failures = [result for result in redeem_results if isinstance(result, BaseException)]
         assert len(invitation_failures) == 1
@@ -328,7 +331,10 @@ async def _exercise_matrix(database_url: str) -> GovernanceMatrixResult:
         await asyncio.wait_for(both_demotions_ready.wait(), timeout=5)
         assert demotion_ready == 2
         release_demotions.set()
-        demotion_results = await asyncio.gather(*demotion_tasks, return_exceptions=True)
+        demotion_results = await asyncio.wait_for(
+            asyncio.gather(*demotion_tasks, return_exceptions=True),
+            timeout=10,
+        )
         assert sum(not isinstance(result, BaseException) for result in demotion_results) == 1
         demotion_failures = [result for result in demotion_results if isinstance(result, BaseException)]
         assert len(demotion_failures) == 1
@@ -353,7 +359,17 @@ async def _exercise_matrix(database_url: str) -> GovernanceMatrixResult:
                     {"project_id": alpha_id, "user_id": str(users["invitee"])},
                 )
             ).scalar_one()
+            redeemed_invitation = (
+                await connection.execute(
+                    text(
+                        """SELECT status,version FROM project_invitations
+                        WHERE id=:invitation_id"""
+                    ),
+                    {"invitation_id": redeem_invitation.invitation.id},
+                )
+            ).one()
         assert invitee_membership_count == 1
+        assert tuple(redeemed_invitation) == ("redeemed", 2)
 
         cross_project_reads = sum(response.status_code != 404 for response in hidden_reads)
         cross_project_mutations = int(beta_membership_after != beta_membership_before) + int(beta_invitation_after != beta_invitation_before)

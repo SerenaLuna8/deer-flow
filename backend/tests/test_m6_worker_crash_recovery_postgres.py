@@ -490,7 +490,10 @@ async def test_expired_ambiguous_job_becomes_dead_and_is_never_replayed(
             projection = (
                 await session.execute(
                     text(
-                        """SELECT j.status,j.attempt_count,j.public_error_code,r.status
+                        """SELECT j.status,j.attempt_count,j.public_error_code,r.status,
+                                  (SELECT count(*) FROM job_attempts a WHERE a.job_id=j.id),
+                                  (SELECT count(*) FROM job_attempts a WHERE a.job_id=j.id AND a.outcome='dead'),
+                                  (SELECT count(*) FROM run_events e WHERE e.run_id=r.run_id)
                            FROM jobs j JOIN runs r ON r.job_id=j.id
                            WHERE j.id=:job_id"""
                     ),
@@ -502,6 +505,9 @@ async def test_expired_ambiguous_job_becomes_dead_and_is_never_replayed(
             1,
             "SIDE_EFFECT_STATE_UNKNOWN",
             "error",
+            1,
+            1,
+            0,
         )
     finally:
         if first is not None and first_log is not None:
