@@ -281,21 +281,15 @@ class OwnershipLedger:
             self._process_probe.signal_group(owned.pgid, signal.SIGTERM)
             for _ in range(20):
                 time.sleep(0.1)
-                current = self._process_probe.start_identity(owned.pid)
                 members = self._process_probe.group_members(owned.pgid)
-                if current is None and not members:
+                if not members:
                     return CleanupAction(status="removed")
-                if current is not None and (current != owned.start_identity or self._process_probe.process_group(owned.pid) != owned.pgid):
-                    return CleanupAction(status="identity_mismatch")
             self._process_probe.signal_group(owned.pgid, signal.SIGKILL)
             for _ in range(20):
                 time.sleep(0.05)
-                current = self._process_probe.start_identity(owned.pid)
                 members = self._process_probe.group_members(owned.pgid)
-                if current is None and not members:
+                if not members:
                     return CleanupAction(status="removed")
-                if current is not None and (current != owned.start_identity or self._process_probe.process_group(owned.pid) != owned.pgid):
-                    return CleanupAction(status="identity_mismatch")
         except (OSError, ValueError):
             return CleanupAction(status="failed")
         return CleanupAction(status="failed")

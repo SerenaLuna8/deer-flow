@@ -95,6 +95,39 @@ def test_cleanup_stops_owned_group_after_leader_exits(tmp_path: Path) -> None:
     assert process.signals == [(41003, 15)]
 
 
+def test_cleanup_waits_for_owned_group_when_verified_leader_exits_after_signal(tmp_path: Path) -> None:
+    class ReusedLeaderProbe(FakeProcessProbe):
+        def __init__(self) -> None:
+            super().__init__()
+            self.signalled = False
+            self.member_polls = 0
+
+        def start_identity(self, _pid: int) -> str | None:
+            return "second" if self.signalled else "first"
+
+        def process_group(self, _pid: int) -> int | None:
+            return 99999 if self.signalled else 41005
+
+        def group_members(self, _pgid: int) -> tuple[int, ...]:
+            if not self.signalled:
+                return (41005, 41006)
+            self.member_polls += 1
+            return (41006,) if self.member_polls == 1 else ()
+
+        def signal_group(self, pgid: int, signal_number: int) -> None:
+            self.signals.append((pgid, signal_number))
+            self.signalled = True
+
+    process = ReusedLeaderProbe()
+    ledger = _ledger(tmp_path, process=process)
+    owned = ledger.register_process(pid=41005, pgid=41005, start_identity="first")
+
+    result = ledger.stop_process(owned)
+
+    assert result.status == "removed"
+    assert process.signals == [(41005, 15)]
+
+
 def test_host_process_identity_ignores_command_transition(monkeypatch: pytest.MonkeyPatch) -> None:
     outputs = iter(
         (
