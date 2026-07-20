@@ -681,7 +681,7 @@ export async function expectToolResultVisible(
   live: PinnedLiveAgent,
 ): Promise<void> {
   expect(live.summary?.tool_call_count).toBeGreaterThanOrEqual(1);
-  await expect(page.getByText(live.outputPath, { exact: false })).toBeVisible({
+  await expect(page.getByText(live.outputPath, { exact: true })).toBeVisible({
     timeout: 30_000,
   });
 }
