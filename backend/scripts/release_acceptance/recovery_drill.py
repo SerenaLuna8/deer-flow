@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -212,6 +213,15 @@ def _inventory_digest(authority: RecoverySessionAuthority) -> str:
     return hashlib.sha256(b"deerflow-m8-inventory-v1\0" + encoded).hexdigest()
 
 
+def _restore_database_name(*, process_id: int, nonce: str) -> str:
+    if process_id < 1 or re.fullmatch(r"[0-9a-f]{32}", nonce) is None:
+        raise ValueError("RESTORE_DATABASE_NAME_INVALID")
+    suffix = f"{process_id}{nonce}"
+    if len(suffix) > 64:
+        raise ValueError("RESTORE_DATABASE_NAME_INVALID")
+    return f"deerflow_restore_{suffix}"
+
+
 class PostgresRecoveryOperations:
     """Real archive, journal-first purge, restore switch, and source back-switch."""
 
@@ -248,7 +258,10 @@ class PostgresRecoveryOperations:
             raise ValueError("RECOVERY_SOURCE_DATABASE_MISMATCH")
         self._source_owned = source_host.owned_database
         self._source_operator_url = _database_url(postgres_admin_url, source_name)
-        self._target_name = f"deerflow_restore_{os.getpid()}_{uuid.uuid4().hex}"
+        self._target_name = _restore_database_name(
+            process_id=os.getpid(),
+            nonce=uuid.uuid4().hex,
+        )
         self._target_operator_url = _database_url(postgres_admin_url, self._target_name)
         self._target_app_url = _database_url(source_app_url, self._target_name)
         self._archive_path = self._recovery_root / "archive.dfba"

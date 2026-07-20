@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from scripts.release_acceptance import recovery_drill as recovery_module
 from scripts.release_acceptance.recovery_drill import (
     ArchivePoint,
     ExpectedInventory,
@@ -75,6 +76,15 @@ class _FakeOperations:
 
     def monotonic_ns(self) -> int:
         return self.now_ns
+
+
+def test_restore_database_name_matches_owned_database_contract() -> None:
+    name = recovery_module._restore_database_name(
+        process_id=12345,
+        nonce="11111111111141118111111111111111",
+    )
+
+    assert name == "deerflow_restore_1234511111111111141118111111111111111"
 
 
 @pytest.mark.anyio
