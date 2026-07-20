@@ -189,8 +189,16 @@ test("host release boundaries survive account and project transitions", async ({
     if (process.env.M8_CAPTURE_RECOVERY_AUTHORITY === "1") {
       expect(liveAuthority).not.toBeNull();
       await submitRecoveryAuthority({
-        admin: accountAdminCredentials,
-        outsider: outsiderCredentials,
+        admin: {
+          user_id: accountAdminCredentials.userId,
+          email: accountAdminCredentials.email,
+          password: accountAdminCredentials.password,
+        },
+        outsider: {
+          user_id: outsiderCredentials.userId,
+          email: outsiderCredentials.email,
+          password: outsiderCredentials.password,
+        },
         purge_project: { project_id: projectA.id, slug: projectA.slug },
         purge_thread_id: adminPrivate.threadId,
         purge_file_id: adminPrivate.fileId,

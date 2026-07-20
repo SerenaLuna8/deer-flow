@@ -168,8 +168,8 @@ export interface PinnedLiveAgent {
 }
 
 export interface RecoveryAuthorityHandoff {
-  admin: AccountFixture;
-  outsider: AccountFixture;
+  admin: { user_id: string; email: string; password: string };
+  outsider: { user_id: string; email: string; password: string };
   purge_project: { project_id: string; slug: string };
   purge_thread_id: string;
   purge_file_id: string;
