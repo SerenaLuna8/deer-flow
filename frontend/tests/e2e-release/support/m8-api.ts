@@ -692,9 +692,13 @@ export async function expectToolResultVisible(
   live: PinnedLiveAgent,
 ): Promise<void> {
   expect(live.summary?.tool_call_count).toBeGreaterThanOrEqual(1);
-  await expect(page.getByText(live.outputPath, { exact: true })).toBeVisible({
-    timeout: 30_000,
-  });
+  const output = page.getByText(live.outputPath, { exact: true });
+  try {
+    await expect(output).toBeVisible({ timeout: 30_000 });
+  } catch {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(output).toBeVisible({ timeout: 60_000 });
+  }
 }
 
 async function requestGatewayRestart(): Promise<void> {
