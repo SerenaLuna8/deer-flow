@@ -153,6 +153,19 @@ class FakeReadiness:
             raise RuntimeError("raw readiness body")
 
 
+class SequencedMarkerCommandRunner(FakeCommandRunner):
+    def __init__(self, marker_sequence: tuple[frozenset[str], ...]) -> None:
+        super().__init__()
+        self.marker_sequence = marker_sequence
+        self.marker_calls = 0
+
+    def startup_markers(self, process: HostProcess) -> frozenset[str]:
+        del process
+        index = min(self.marker_calls, len(self.marker_sequence) - 1)
+        self.marker_calls += 1
+        return self.marker_sequence[index]
+
+
 def _host(
     tmp_path: Path,
     *,
@@ -183,6 +196,8 @@ def _host(
         port_probe=ports or FakePortProbe(),
         process_inspector=processes or FakeProcessInspector(),
         scheduler_enabled=scheduler_enabled,
+        startup_marker_attempts=2,
+        startup_marker_interval_seconds=0,
     )
     return host, command_runner, ledger, database
 
@@ -244,6 +259,19 @@ async def test_missing_bounded_startup_marker_fails_and_stops_group(tmp_path: Pa
     with pytest.raises(RuntimeError, match="HOST_READINESS_FAILED"):
         await host.start(_APP_DATABASE_URL)
     assert ledger.signalled_groups == [(51001, signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
+async def test_host_stack_waits_for_late_startup_markers(tmp_path: Path) -> None:
+    commands = SequencedMarkerCommandRunner(
+        (
+            frozenset({"gateway", "worker"}),
+            frozenset({"gateway", "worker", "frontend", "nginx"}),
+        )
+    )
+    host, _commands, _ledger, _database = _host(tmp_path, commands=commands)
+    await host.start(_APP_DATABASE_URL)
+    assert commands.marker_calls == 2
 
 
 @pytest.mark.asyncio

@@ -495,6 +495,8 @@ class OwnedHostStack:
         port_probe: PortProbe | None = None,
         process_inspector: ProcessInspector | None = None,
         scheduler_enabled: bool,
+        startup_marker_attempts: int = 100,
+        startup_marker_interval_seconds: float = 0.05,
     ) -> None:
         self._repository = repository.resolve()
         self._env = dict(env)
@@ -507,6 +509,8 @@ class OwnedHostStack:
         self._port_probe = port_probe or SocketPortProbe()
         self._process_inspector = process_inspector or SystemProcessInspector()
         self._scheduler_enabled = scheduler_enabled
+        self._startup_marker_attempts = startup_marker_attempts
+        self._startup_marker_interval_seconds = startup_marker_interval_seconds
         self._owned_process: OwnedProcess | None = None
         self._host_process: HostProcess | None = None
         self._gateway_process: HostProcess | None = None
@@ -514,6 +518,14 @@ class OwnedHostStack:
         self._last_pgid: int | None = None
         self._database_url: str | None = None
         self._inventory: HostInventory | None = None
+
+    async def _wait_startup_markers(self, process: HostProcess, expected: set[str]) -> None:
+        for attempt in range(self._startup_marker_attempts):
+            if expected.issubset(self._command_runner.startup_markers(process)):
+                return
+            if attempt + 1 < self._startup_marker_attempts:
+                await asyncio.sleep(self._startup_marker_interval_seconds)
+        raise RuntimeError("HOST_STARTUP_MARKERS_MISSING")
 
     @property
     def pgid(self) -> int:
@@ -566,8 +578,7 @@ class OwnedHostStack:
             expected_markers = {"gateway", "worker", "frontend", "nginx"}
             if self._scheduler_enabled:
                 expected_markers.add("scheduler")
-            if not expected_markers.issubset(self._command_runner.startup_markers(process)):
-                raise RuntimeError("HOST_STARTUP_MARKERS_MISSING")
+            await self._wait_startup_markers(process, expected_markers)
             self._inventory = await asyncio.to_thread(
                 self._process_inspector.discover,
                 pgid=process.pgid,
