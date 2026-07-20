@@ -174,7 +174,12 @@ export interface RecoveryAuthorityHandoff {
   purge_thread_id: string;
   purge_file_id: string;
   live_project: { project_id: string; slug: string };
-  live: LivePublicHandle;
+  live: {
+    project_id: string;
+    thread_id: string;
+    run_id: string;
+    artifact_id: string;
+  };
 }
 
 export function syntheticAccount(label: string): AccountFixture {

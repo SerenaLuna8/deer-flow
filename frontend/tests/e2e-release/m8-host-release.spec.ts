@@ -203,7 +203,12 @@ test("host release boundaries survive account and project transitions", async ({
         purge_thread_id: adminPrivate.threadId,
         purge_file_id: adminPrivate.fileId,
         live_project: { project_id: projectB.id, slug: projectB.slug },
-        live: liveAuthority!,
+        live: {
+          project_id: liveAuthority!.projectId,
+          thread_id: liveAuthority!.threadId,
+          run_id: liveAuthority!.runId,
+          artifact_id: liveAuthority!.artifactId,
+        },
       });
     }
 
