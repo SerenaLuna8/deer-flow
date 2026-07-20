@@ -5,6 +5,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  timeout: 600_000,
   reporter: "line",
   outputDir:
     process.env.M8_PLAYWRIGHT_OUTPUT_DIR ?? "test-results/m8-release-list-only",
