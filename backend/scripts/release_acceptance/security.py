@@ -238,24 +238,25 @@ class SecretScanner:
     def _detect(self, data: bytes, *, filename: str = "m8-in-memory") -> tuple[_DetectedSecret, ...]:
         text = data.decode("utf-8", errors="replace")
         detected: dict[tuple[str, str, int | None], _DetectedSecret] = {}
-        custom_lines: set[int] = set()
+        custom_digests_by_line: dict[int, set[str]] = {}
         for rule, pattern in _CUSTOM_RULES:
             for match in pattern.finditer(text):
                 line = self._line_number(text, match.start())
-                custom_lines.add(line)
                 secret = match.group(0)
                 item = _DetectedSecret(rule=rule, value_sha256=value_digest(secret), line=line)
+                custom_digests_by_line.setdefault(line, set()).add(item.value_sha256)
                 detected[(item.rule, item.value_sha256, item.line)] = item
         if _PLUGIN_PREFILTER.search(text) is None:
             return tuple(detected[key] for key in sorted(detected))
         with self._detection_session():
             lines = list(enumerate(text.splitlines(), start=1))
             for secret in _process_line_based_plugins(lines=lines, filename=filename):
-                if secret.line_number in custom_lines:
+                digest = value_digest(secret.secret_value)
+                if digest in custom_digests_by_line.get(secret.line_number, set()):
                     continue
                 item = _DetectedSecret(
                     rule=re.sub(r"[^A-Za-z0-9_.-]", "_", secret.type)[:128] or "DetectSecrets",
-                    value_sha256=value_digest(secret.secret_value),
+                    value_sha256=digest,
                     line=secret.line_number,
                 )
                 detected[(item.rule, item.value_sha256, item.line)] = item

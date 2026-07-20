@@ -135,6 +135,19 @@ def test_secret_shapes_are_detected_without_value_echo(rule: str, value: str) ->
     assert value not in json.dumps([finding.model_dump(mode="json") for finding in findings])
 
 
+def test_two_different_secret_shapes_on_one_line_are_both_detected() -> None:
+    provider = _provider_token()
+    aws = "AK" + "IA" + "B" * 16
+    findings = SecretScanner().scan_bytes(
+        f"provider={provider} cloud={aws}".encode(),
+        scope="evidence",
+        locator="generated/two-secrets.txt",
+    )
+    assert {"ProviderToken", "AWS_Access_Key"} <= {finding.rule for finding in findings}
+    encoded = json.dumps([finding.model_dump(mode="json") for finding in findings])
+    assert provider not in encoded and aws not in encoded
+
+
 def test_directory_scans_reject_symlinks_and_cover_evidence_and_support_bundle(tmp_path: Path) -> None:
     evidence = tmp_path / ".release-evidence"
     support = tmp_path / "support"
