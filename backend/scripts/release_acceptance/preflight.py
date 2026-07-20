@@ -193,6 +193,27 @@ class HostToolProbe:
         value = completed.stdout.strip().splitlines()
         return value[-1][:128] if value else None
 
+    @staticmethod
+    def _executable_path(argv: tuple[str, ...], *, cwd: Path) -> str | None:
+        if shutil.which(argv[0]) is None:
+            return None
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=cwd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        value = completed.stdout.strip().splitlines()
+        if not value or len(value[-1]) > 4096:
+            return None
+        return value[-1]
+
     def snapshot(self, repository: Path) -> ToolchainState:
         versions: dict[str, str] = {
             "python": platform.python_version(),
@@ -208,7 +229,7 @@ class HostToolProbe:
                 versions[name] = version
         frontend = repository / "frontend"
         chromium = self._version(("pnpm", "exec", "playwright", "--version"), cwd=frontend)
-        executable = self._version(
+        executable = self._executable_path(
             (
                 "node",
                 "-e",

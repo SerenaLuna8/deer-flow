@@ -12,6 +12,7 @@ from scripts.release_acceptance.preflight import (
     AcceptanceModel,
     DatabaseAuthorityState,
     GitState,
+    HostToolProbe,
     Preflight,
     SubprocessGitProbe,
     ToolchainState,
@@ -196,6 +197,24 @@ def test_real_git_probe_reports_detached_head(tmp_path: Path) -> None:
     state = SubprocessGitProbe().snapshot(tmp_path)
     assert state.detached is True
     assert state.clean is True
+
+
+def test_host_tool_probe_preserves_long_chromium_executable_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    executable = tmp_path / ("a" * 80) / ("b" * 80) / "chromium"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("binary", encoding="utf-8")
+    executable.chmod(0o700)
+    assert len(str(executable)) > 128
+
+    def fake_run(argv, **_kwargs):
+        output = str(executable) if tuple(argv[:2]) == ("node", "-e") else "version"
+        return subprocess.CompletedProcess(argv, 0, stdout=output)
+
+    monkeypatch.setattr("scripts.release_acceptance.preflight.shutil.which", lambda _name: "/synthetic/tool")
+    monkeypatch.setattr("scripts.release_acceptance.preflight.subprocess.run", fake_run)
+
+    state = HostToolProbe().snapshot(tmp_path)
+    assert "chromium" not in state.missing
 
 
 def test_default_config_loader_surfaces_removed_key_without_resolving_secrets(tmp_path: Path) -> None:
