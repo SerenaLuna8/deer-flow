@@ -123,6 +123,18 @@ COMMANDS: tuple[CommandSpec, ...] = (
     ),
 )
 
+DIAGNOSTIC_STAGE_SEQUENCES: tuple[tuple[StageId, ...], ...] = (
+    (StageId.HOST_SETUP,),
+    (StageId.HOST_SETUP, StageId.CHROMIUM),
+)
+
+
+def diagnostic_stages(values: tuple[str, ...]) -> tuple[StageId, ...]:
+    stages = tuple(StageId(value) for value in values)
+    if stages not in DIAGNOSTIC_STAGE_SEQUENCES:
+        raise ValueError("DIAGNOSTIC_STAGE_SEQUENCE_INVALID")
+    return stages
+
 
 def manifest_digest(commands: tuple[CommandSpec, ...]) -> str:
     return canonical_digest(

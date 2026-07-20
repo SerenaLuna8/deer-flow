@@ -186,3 +186,17 @@ def test_cli_rejects_resume_and_arbitrary_command() -> None:
         _parse_args(["--resume"])
     with pytest.raises(SystemExit):
         _parse_args(["--command", "make", "stop"])
+
+
+def test_cli_accepts_only_fixed_diagnostic_stage_prefixes() -> None:
+    from scripts.run_release_acceptance import _parse_args
+
+    assert _parse_args(["--stage", "host_setup"]).stage == ["host_setup"]
+    assert _parse_args(["--stage", "host_setup", "--stage", "chromium"]).stage == [
+        "host_setup",
+        "chromium",
+    ]
+    with pytest.raises(SystemExit):
+        _parse_args(["--stage", "chromium"])
+    with pytest.raises(SystemExit):
+        _parse_args(["--stage", "backend"])

@@ -102,8 +102,9 @@ class PrivateMemoryService:
         *,
         namespace: str,
         expected_version: int,
+        capability: Capability = Capability.PRIVATE_WORK_CREATE,
     ) -> ProjectMemorySnapshot:
-        context = await self._require(context, Capability.PRIVATE_WORK_CREATE)
+        context = await self._require(context, capability)
         try:
             return await self._storage.save(
                 memory_data,
@@ -219,7 +220,7 @@ class PrivateMemoryService:
         expected_version: int,
     ) -> ProjectMemorySnapshot:
         if fact_id is None:
-            context = await self._require(context, Capability.PRIVATE_WORK_CREATE)
+            context = await self._require(context, Capability.PRIVATE_WORK_READ_OWN)
             try:
                 return await self._storage.clear(
                     scope=context.resource_scope,
@@ -243,4 +244,5 @@ class PrivateMemoryService:
             memory_data,
             namespace=namespace,
             expected_version=expected_version,
+            capability=Capability.PRIVATE_WORK_READ_OWN,
         )

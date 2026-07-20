@@ -6,22 +6,56 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from scripts.release_acceptance.commands import diagnostic_stages
 from scripts.release_acceptance.models import ReleaseEvidence
 from scripts.release_acceptance.preflight import PreflightFailure
-from scripts.release_acceptance.runner import ReleaseRunner
+from scripts.release_acceptance.runner import DiagnosticResult, ReleaseRunner, run_host_diagnostic
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the fixed M8 host release acceptance manifest")
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--stage",
+        action="append",
+        choices=("host_setup", "chromium"),
+        help="Run a fixed non-sealing diagnostic stage prefix",
+    )
+    args = parser.parse_args(argv)
+    if args.stage:
+        try:
+            diagnostic_stages(tuple(args.stage))
+        except ValueError:
+            parser.error("diagnostic stages must be the fixed host_setup[/chromium] prefix")
+    return args
 
 
-async def _run() -> int:
+async def _run(args: argparse.Namespace) -> int:
     repository = Path(__file__).resolve().parents[2]
-    result = await ReleaseRunner.default(repository).run()
+    if args.stage:
+        result = await run_host_diagnostic(
+            repository=repository,
+            stages=diagnostic_stages(tuple(args.stage)),
+        )
+    else:
+        result = await ReleaseRunner.default(repository).run()
     if isinstance(result, PreflightFailure):
         print(json.dumps({"status": "failed", "code": result.code}, sort_keys=True))
         return 1
+    if isinstance(result, DiagnosticResult):
+        print(
+            json.dumps(
+                {
+                    "status": result.status,
+                    "code": result.code,
+                    "host_setup_passed": result.host_setup_passed,
+                    "chromium_passed": result.chromium.passed if result.chromium else 0,
+                    "cleanup": result.cleanup.model_dump(),
+                    "sealed": False,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0 if result.status == "passed" else 1
     assert isinstance(result, ReleaseEvidence)
     print(
         json.dumps(
@@ -37,8 +71,8 @@ async def _run() -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    _parse_args(argv)
-    return asyncio.run(_run())
+    args = _parse_args(argv)
+    return asyncio.run(_run(args))
 
 
 if __name__ == "__main__":

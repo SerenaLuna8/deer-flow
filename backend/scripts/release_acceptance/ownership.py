@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import os
 import re
@@ -288,13 +289,23 @@ class OwnershipLedger:
 
     @staticmethod
     def _port_is_free(port: int) -> bool:
-        handle = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            handle.bind(("127.0.0.1", port))
-        except OSError:
-            return False
-        finally:
-            handle.close()
+        for family, address in (
+            (socket.AF_INET, ("0.0.0.0", port)),
+            (socket.AF_INET6, ("::", port, 0, 0)),
+        ):
+            try:
+                handle = socket.socket(family, socket.SOCK_STREAM)
+            except OSError as exc:
+                if exc.errno in {errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT}:
+                    continue
+                return False
+            try:
+                handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+                handle.bind(address)
+            except OSError:
+                return False
+            finally:
+                handle.close()
         return True
 
     async def cleanup(self) -> CleanupSummary:

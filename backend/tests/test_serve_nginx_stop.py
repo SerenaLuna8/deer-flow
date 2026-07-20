@@ -109,3 +109,25 @@ def test_repo_nginx_pid_rejects_unowned_or_non_nginx_processes(
         repo_root=tmp_path / "deer-flow",
         deerflow_pid=deerflow_pid,
     )
+
+
+def test_ordinary_start_does_not_call_broad_stop_all() -> None:
+    text = SERVE_SH.read_text(encoding="utf-8")
+    start_routing = text[text.index('if [ "$ACTION" = "stop" ]') : text.index("# ── Config check")]
+    assert 'if [ "$ACTION" = "stop" ]' in start_routing
+    assert 'if [ "$ACTION" = "restart" ]' in start_routing
+    assert "ALREADY_STOPPED" not in start_routing
+
+
+def test_foreground_cleanup_stops_only_invocation_started_processes() -> None:
+    cleanup = _extract_shell_function("cleanup")
+    assert "stop_started" in cleanup
+    assert "stop_all" not in cleanup
+
+
+def test_broad_stop_is_reachable_only_from_explicit_stop_or_restart() -> None:
+    text = SERVE_SH.read_text(encoding="utf-8")
+    routing = text[text.index("# ── Action routing") : text.index("# Mode label for banner")]
+    assert routing.count("stop_all") == 2
+    assert 'ACTION" = "stop"' in routing
+    assert 'ACTION" = "restart"' in routing

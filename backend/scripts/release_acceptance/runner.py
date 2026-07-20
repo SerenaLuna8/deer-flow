@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import subprocess
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
+from urllib.parse import unquote, urlsplit
 
 from scripts.release_acceptance.commands import (
     COMMANDS,
@@ -17,12 +19,19 @@ from scripts.release_acceptance.commands import (
     manifest_digest,
 )
 from scripts.release_acceptance.evidence import EvidenceWriter
+from scripts.release_acceptance.host_stack import (
+    AsyncpgHostDatabaseManager,
+    OwnedHostStack,
+    SubprocessHostCommandRunner,
+)
+from scripts.release_acceptance.live_probe import ChromiumJourneyRunner
 from scripts.release_acceptance.models import (
     CleanupSummary,
     ReleaseEvidence,
     SecuritySummary,
     StageEvidence,
     StageId,
+    StrictModel,
     TestSummary,
 )
 from scripts.release_acceptance.ownership import OwnershipLedger
@@ -63,6 +72,120 @@ class SubprocessRunnerGitProbe:
             stderr=subprocess.DEVNULL,
         )
         return commit, not status and branch.returncode == 0
+
+
+class DiagnosticResult(StrictModel):
+    status: Literal["passed", "failed"]
+    code: str
+    host_setup_passed: bool
+    chromium: TestSummary | None = None
+    cleanup: CleanupSummary
+
+
+def _has_residual(cleanup: CleanupSummary) -> bool:
+    return any(
+        (
+            cleanup.residual_processes,
+            cleanup.residual_ports,
+            cleanup.residual_databases,
+            cleanup.residual_paths,
+        )
+    )
+
+
+async def run_host_diagnostic(
+    *,
+    repository: Path,
+    stages: tuple[StageId, ...],
+    env: dict[str, str] | None = None,
+) -> DiagnosticResult | PreflightFailure:
+    repository = repository.resolve()
+    environment = dict(os.environ if env is None else env)
+    preflight = Preflight(repository=repository, env=environment)
+    preflight_result = await preflight.check()
+    if not isinstance(preflight_result, PreflightSuccess):
+        return preflight_result
+
+    run_id = uuid.uuid4()
+    runtime_root = repository / f".m8-runtime-{run_id.hex}"
+    frontend_runtime_root = repository / "frontend" / f".m8-next-{run_id.hex}"
+    admin_url = environment.get("POSTGRES_ADMIN_URL", "")
+    database_url = environment.get("DATABASE_URL", "")
+    parsed = urlsplit(database_url.replace("postgresql+asyncpg://", "postgresql://", 1))
+    app_role = unquote(parsed.username or "")
+    database = AsyncpgHostDatabaseManager(admin_url)
+    ledger = OwnershipLedger(
+        repository=repository,
+        acceptance_run_id=run_id,
+        database_probe=database,
+    )
+    host: OwnedHostStack | None = None
+    browser_summary: TestSummary | None = None
+    host_passed = False
+    code = "HOST_DIAGNOSTIC_FAILED"
+    try:
+        await asyncio.to_thread(runtime_root.mkdir, mode=0o700)
+        ledger.register_path(runtime_root, disposition="temporary")
+        await asyncio.to_thread(frontend_runtime_root.mkdir, mode=0o700)
+        ledger.register_path(frontend_runtime_root, disposition="temporary")
+        child_environment = dict(environment)
+        child_environment.update(
+            {
+                "DEER_FLOW_HOME": str(runtime_root / "deer-flow-home"),
+                "DEER_FLOW_RUNTIME_ROOT": str(runtime_root),
+                "DEER_FLOW_NEXT_DIST_DIR": f"{frontend_runtime_root.name}/.next",
+            }
+        )
+        from deerflow.config import get_app_config
+
+        scheduler_enabled = await asyncio.to_thread(lambda: bool(get_app_config().scheduler.enabled))
+        command_runner = SubprocessHostCommandRunner(repository=repository, ledger=ledger)
+        host = OwnedHostStack(
+            repository=repository,
+            env=child_environment,
+            acceptance_run_id=run_id,
+            app_role=app_role,
+            ledger=ledger,
+            database_manager=database,
+            command_runner=command_runner,
+            scheduler_enabled=scheduler_enabled,
+        )
+        await host.start(database_url)
+        host_passed = True
+        if StageId.CHROMIUM in stages:
+            browser_summary = await ChromiumJourneyRunner(
+                command_runner=command_runner,
+                environment=child_environment,
+                runtime_root=runtime_root,
+            ).run()
+        code = "OK"
+    except BaseException:
+        code = "HOST_DIAGNOSTIC_FAILED"
+    finally:
+        if host is not None:
+            try:
+                await host.stop()
+            except BaseException:
+                code = "HOST_STOP_FAILED"
+        try:
+            cleanup = await asyncio.shield(ledger.cleanup())
+        except BaseException:
+            cleanup = CleanupSummary(
+                residual_processes=1,
+                residual_ports=1,
+                residual_databases=1,
+                residual_paths=1,
+                retained_evidence=0,
+            )
+        if _has_residual(cleanup):
+            code = "HOST_CLEANUP_FAILED"
+    return DiagnosticResult(
+        status="passed" if code == "OK" else "failed",
+        code=code,
+        host_setup_passed=host_passed,
+        chromium=browser_summary,
+        cleanup=cleanup,
+    )
 
 
 def _stage_evidence(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import platform
 import shutil
@@ -125,14 +126,28 @@ class SocketPortProbe:
     def busy_ports(self, ports: tuple[int, ...]) -> tuple[int, ...]:
         busy: list[int] = []
         for port in ports:
-            handle = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
-                handle.bind(("127.0.0.1", port))
-            except OSError:
+            free = True
+            for family, address in (
+                (socket.AF_INET, ("0.0.0.0", port)),
+                (socket.AF_INET6, ("::", port, 0, 0)),
+            ):
+                try:
+                    handle = socket.socket(family, socket.SOCK_STREAM)
+                except OSError as exc:
+                    if exc.errno in {errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT}:
+                        continue
+                    free = False
+                    break
+                try:
+                    handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+                    handle.bind(address)
+                except OSError:
+                    free = False
+                    break
+                finally:
+                    handle.close()
+            if not free:
                 busy.append(port)
-            finally:
-                handle.close()
         return tuple(busy)
 
 

@@ -8,6 +8,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import update
 from support.m4_private_threads import (
     M4ThreadSeed,
     install_open_project_cutover_guard,
@@ -16,7 +17,9 @@ from support.m4_private_threads import (
 
 from app.gateway.deps import get_current_user_from_request, project_session
 from app.private_work.memory_service import PrivateMemoryService
+from app.projects.models import ProjectRole
 from deerflow.agents.memory.storage import create_empty_memory
+from deerflow.persistence.projects import ProjectMembershipRow
 
 
 @pytest_asyncio.fixture()
@@ -187,3 +190,46 @@ async def test_project_memory_routes_enforce_context_capabilities_and_strict_inp
         outsider = await client.get(base)
         assert outsider.status_code == 404
         assert outsider.json()["detail"]["code"] == "PRIVATE_WORK_NOT_FOUND"
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_viewer_can_delete_own_memory_fact_but_cannot_modify_memory(
+    seed: M4ThreadSeed,
+) -> None:
+    identity = {"user_id": seed.owner_a.user_id}
+    app = _app(seed, identity)
+    base = f"/api/projects/{seed.owner_a.project_id}/memory"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        initial = await client.get(base)
+        imported = await client.post(
+            f"{base}/import",
+            json={
+                "expected_version": initial.json()["version"],
+                "memory": _memory("Viewer-owned memory", fact="Delete this fact."),
+            },
+        )
+        fact_id = imported.json()["memory"]["facts"][0]["id"]
+        async with seed.factory() as session, session.begin():
+            await session.execute(update(ProjectMembershipRow).where(ProjectMembershipRow.id == seed.owner_a.membership_id).values(role=ProjectRole.VIEWER.value))
+
+        denied = await client.patch(
+            f"{base}/facts/{fact_id}",
+            json={
+                "expected_version": imported.json()["version"],
+                "content": "Viewer may not modify this fact.",
+            },
+        )
+        deleted = await client.request(
+            "DELETE",
+            f"{base}/facts/{fact_id}",
+            json={"expected_version": imported.json()["version"]},
+        )
+
+    assert denied.status_code == 403
+    assert deleted.status_code == 200
+    assert deleted.json()["memory"]["facts"] == []

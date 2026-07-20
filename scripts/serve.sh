@@ -115,8 +115,8 @@ _is_deerflow_pid() {
     return 1
 }
 
-# Report ports about to be reclaimed from a *different* worktree, so stopping
-# (or starting, which stops first) isn't silently killing someone else's run.
+# Report ports about to be reclaimed from a *different* worktree, so explicit
+# stop/restart actions do not silently kill someone else's run.
 _report_reclaimed_ports() {
     local port pid files root owner
     for port in 8001 3000 2026; do
@@ -277,11 +277,9 @@ if [ "$ACTION" = "stop" ]; then
     exit 0
 fi
 
-ALREADY_STOPPED=false
 if [ "$ACTION" = "restart" ]; then
     stop_all
     sleep 1
-    ALREADY_STOPPED=true
 fi
 
 # Mode label for banner
@@ -344,13 +342,6 @@ else
 fi
 export GATEWAY_WORKERS
 
-# ── Stop existing services (skip if restart already did it) ──────────────────
-
-if ! $ALREADY_STOPPED; then
-    stop_all
-    sleep 1
-fi
-
 # ── Config check ─────────────────────────────────────────────────────────────
 
 if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]; then
@@ -363,6 +354,33 @@ if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]; then
 else
     export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"
 fi
+
+# M8 release acceptance gives every generated log/temp/pid file an
+# invocation-owned root. Ordinary operator launches retain the historical
+# repository root default.
+if [ -n "${DEER_FLOW_RUNTIME_ROOT:-}" ]; then
+    case "$DEER_FLOW_RUNTIME_ROOT" in
+        *[!A-Za-z0-9_./-]*)
+            echo "✗ DEER_FLOW_RUNTIME_ROOT contains unsupported characters."
+            exit 1
+            ;;
+    esac
+    if [ ! -d "$DEER_FLOW_RUNTIME_ROOT" ]; then
+        echo "✗ DEER_FLOW_RUNTIME_ROOT must name an existing directory."
+        exit 1
+    fi
+    RUNTIME_ROOT="$(cd "$DEER_FLOW_RUNTIME_ROOT" && pwd -P)"
+    case "$RUNTIME_ROOT/" in
+        "$REPO_ROOT"/*) ;;
+        *)
+            echo "✗ DEER_FLOW_RUNTIME_ROOT must be inside this worktree."
+            exit 1
+            ;;
+    esac
+else
+    RUNTIME_ROOT="$REPO_ROOT"
+fi
+LOG_ROOT="$RUNTIME_ROOT/logs"
 
 if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
     echo "✗ No DeerFlow config file found."
@@ -472,7 +490,7 @@ cleanup() {
     local status="${1:-0}"
     trap - INT TERM
     echo ""
-    stop_all
+    stop_started
     exit "$status"
 }
 
@@ -504,7 +522,7 @@ run_service() {
     remember_started_pid "$!"
 
     ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
-        local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
+        local logfile="$LOG_ROOT/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
         [ -f "$logfile" ] && tail -20 "$logfile"
         startup_failure 1
@@ -538,35 +556,35 @@ run_process() {
 
 # ── Start services ───────────────────────────────────────────────────────────
 
-mkdir -p logs
-mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
+mkdir -p "$LOG_ROOT"
+mkdir -p "$RUNTIME_ROOT/temp/client_body_temp" "$RUNTIME_ROOT/temp/proxy_temp" "$RUNTIME_ROOT/temp/fastcgi_temp" "$RUNTIME_ROOT/temp/uwsgi_temp" "$RUNTIME_ROOT/temp/scgi_temp"
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && exec env PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && exec env PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > '$LOG_ROOT/gateway.log' 2>&1" \
     8001 30
 
 # 2. Required durable Worker
 run_process "Worker" \
-    "cd backend && exec env PYTHONPATH=. uv run python -m app.worker.app > ../logs/worker.log 2>&1" \
-    "logs/worker.log"
+    "cd backend && exec env PYTHONPATH=. uv run python -m app.worker.app > '$LOG_ROOT/worker.log' 2>&1" \
+    "$LOG_ROOT/worker.log"
 
 # 3. Optional independent Scheduler. The application config property is
 # scheduler.enabled; disabled mode is legal and intentionally starts no owner.
 if [ "$SCHEDULER_ENABLED" = "true" ]; then
     run_process "Scheduler" \
-        "cd backend && exec env PYTHONPATH=. uv run python -m app.scheduler.app > ../logs/scheduler.log 2>&1" \
-        "logs/scheduler.log"
+        "cd backend && exec env PYTHONPATH=. uv run python -m app.scheduler.app > '$LOG_ROOT/scheduler.log' 2>&1" \
+        "$LOG_ROOT/scheduler.log"
 fi
 
 # 4. Frontend
 run_service "Frontend" \
-    "cd frontend && exec $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
+    "cd frontend && exec $FRONTEND_CMD > '$LOG_ROOT/frontend.log' 2>&1" \
     3000 120
 
 # 5. Nginx
 run_service "Nginx" \
-    "exec nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
+    "exec nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$RUNTIME_ROOT' > '$LOG_ROOT/nginx.log' 2>&1" \
     2026 10
 
 # ── Ready ────────────────────────────────────────────────────────────────────
@@ -581,7 +599,7 @@ echo ""
 echo "  Routing: Frontend → Nginx → Gateway"
 echo "  API:     /api/*  →  Gateway REST API (8001)"
 echo ""
-echo "  📋 Logs: logs/{gateway,worker,scheduler,frontend,nginx}.log"
+echo "  📋 Logs: $LOG_ROOT/{gateway,worker,scheduler,frontend,nginx}.log"
 echo ""
 
 if $DAEMON_MODE; then
