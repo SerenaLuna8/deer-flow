@@ -29,6 +29,8 @@ _SAFE_HOST_ENV = frozenset(
         "CI",
         "DATABASE_URL",
         "DEEPSEEK_API_KEY",
+        "DEER_FLOW_AUDIT_ACTIVE_KEY_ID",
+        "DEER_FLOW_AUDIT_KEYRING_JSON",
         "DEER_FLOW_BACKUP_KEY",
         "DEER_FLOW_CONFIG_PATH",
         "DEER_FLOW_HOME",

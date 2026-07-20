@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.release_acceptance.runner as runner_module
 from scripts.release_acceptance.commands import CommandOutcome, CommandSpec, manifest_digest
 from scripts.release_acceptance.models import CleanupSummary
 from scripts.release_acceptance.models import TestSummary as AcceptanceTestSummary
@@ -221,3 +222,12 @@ def test_cli_direct_script_entrypoint_bootstraps_backend_imports() -> None:
     )
     assert completed.returncode == 0, completed.stdout
     assert "ModuleNotFoundError" not in completed.stdout
+
+
+def test_owned_frontend_tsconfig_extends_tracked_configuration(tmp_path: Path) -> None:
+    runtime_root = tmp_path / ".m8-next-11111111111111111111111111111111"
+    runtime_root.mkdir()
+    writer = getattr(runner_module, "_write_owned_frontend_tsconfig", None)
+    assert writer is not None
+    writer(runtime_root)
+    assert json.loads((runtime_root / "tsconfig.json").read_text(encoding="utf-8")) == {"extends": "../tsconfig.json"}

@@ -15,6 +15,10 @@ if (
 ) {
   throw new Error("DEER_FLOW_NEXT_DIST_DIR_INVALID");
 }
+const acceptanceTsconfigPath = acceptanceDistDir?.replace(
+  /\/\.next$/u,
+  "/tsconfig.json",
+);
 
 process.env.NEXT_PUBLIC_BUILD_MODE = buildMode;
 await import("./src/env.js");
@@ -33,6 +37,9 @@ const withNextra = nextra({});
 const config = {
   distDir:
     acceptanceDistDir ?? (buildMode === "static" ? ".next-static" : ".next"),
+  typescript: acceptanceTsconfigPath
+    ? { tsconfigPath: acceptanceTsconfigPath }
+    : undefined,
   env: {
     NEXT_PUBLIC_BUILD_MODE: buildMode,
   },

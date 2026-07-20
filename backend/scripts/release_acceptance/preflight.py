@@ -343,6 +343,8 @@ class Preflight:
             return self._failure("DEEPSEEK_MODEL_NOT_UNIQUE")
         if not self._env.get("DEEPSEEK_API_KEY", "").strip():
             return self._failure("DEEPSEEK_API_KEY_MISSING")
+        if not self._env.get("DEER_FLOW_AUDIT_ACTIVE_KEY_ID", "").strip() or not self._env.get("DEER_FLOW_AUDIT_KEYRING_JSON", "").strip():
+            return self._failure("AUDIT_KEYRING_MISSING")
         try:
             toolchain = await asyncio.to_thread(self._tool_probe.snapshot, self._repository)
         except Exception:

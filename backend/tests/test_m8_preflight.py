@@ -82,6 +82,8 @@ def _env() -> dict[str, str]:
     return {
         "M8_LIVE_ACCEPTANCE": "1",
         "DEEPSEEK_API_KEY": "present-but-never-serialized",
+        "DEER_FLOW_AUDIT_ACTIVE_KEY_ID": "m8-audit-v1",
+        "DEER_FLOW_AUDIT_KEYRING_JSON": "present-but-never-serialized",
         "POSTGRES_ADMIN_URL": "postgresql://admin:secret@127.0.0.1/postgres",
         "DATABASE_URL": "postgresql://app:secret@127.0.0.1/deerflow",
     }
@@ -176,6 +178,16 @@ async def test_missing_secret_binary_busy_port_and_unsafe_role_are_bounded(tmp_p
     assert (await _preflight(tmp_path, ports=FakePortProbe((2026,))).check()).code == "REQUIRED_PORT_BUSY"
     unsafe = replace(DatabaseAuthorityState(maintenance_can_create_database=True, app_role_safe=True), app_role_safe=False)
     assert (await _preflight(tmp_path, database=FakeDatabaseProbe(unsafe)).check()).code == "DATABASE_APP_ROLE_UNSAFE"
+
+
+@pytest.mark.asyncio
+async def test_missing_audit_keyring_fails_before_database_side_effect(tmp_path: Path) -> None:
+    environment = _env()
+    environment.pop("DEER_FLOW_AUDIT_KEYRING_JSON")
+    database = FakeDatabaseProbe()
+    result = await _preflight(tmp_path, env=environment, database=database).check()
+    assert result.code == "AUDIT_KEYRING_MISSING"
+    assert database.connect_calls == 0
 
 
 @pytest.mark.asyncio

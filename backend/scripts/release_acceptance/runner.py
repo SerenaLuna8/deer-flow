@@ -93,6 +93,11 @@ def _has_residual(cleanup: CleanupSummary) -> bool:
     )
 
 
+def _write_owned_frontend_tsconfig(frontend_runtime_root: Path) -> None:
+    with (frontend_runtime_root / "tsconfig.json").open("x", encoding="utf-8") as handle:
+        handle.write('{"extends":"../tsconfig.json"}\n')
+
+
 async def run_host_diagnostic(
     *,
     repository: Path,
@@ -128,6 +133,7 @@ async def run_host_diagnostic(
         ledger.register_path(runtime_root, disposition="temporary")
         await asyncio.to_thread(frontend_runtime_root.mkdir, mode=0o700)
         ledger.register_path(frontend_runtime_root, disposition="temporary")
+        await asyncio.to_thread(_write_owned_frontend_tsconfig, frontend_runtime_root)
         child_environment = dict(environment)
         child_environment.update(
             {

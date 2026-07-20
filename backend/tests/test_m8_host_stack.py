@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
+import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,6 +157,7 @@ def _host(
     tmp_path: Path,
     *,
     commands: FakeCommandRunner | None = None,
+    environment: dict[str, str] | None = None,
     readiness: FakeReadiness | None = None,
     ports: FakePortProbe | None = None,
     processes: FakeProcessInspector | None = None,
@@ -163,12 +166,14 @@ def _host(
     command_runner = commands or FakeCommandRunner()
     ledger = FakeLedger()
     database = FakeDatabaseManager()
+    host_environment = {
+        "POSTGRES_ADMIN_URL": _ADMIN_DATABASE_URL,
+        "DEER_FLOW_CONFIG_PATH": str(tmp_path / "config.yaml"),
+    }
+    host_environment.update(environment or {})
     host = OwnedHostStack(
         repository=tmp_path,
-        env={
-            "POSTGRES_ADMIN_URL": _ADMIN_DATABASE_URL,
-            "DEER_FLOW_CONFIG_PATH": str(tmp_path / "config.yaml"),
-        },
+        env=host_environment,
         acceptance_run_id=uuid.UUID("11111111-1111-4111-8111-111111111111"),
         app_role="deerflow_app",
         ledger=ledger,
@@ -196,6 +201,23 @@ async def test_host_stack_invokes_only_certified_setup_start_path(tmp_path: Path
     assert ledger.processes == [OwnedProcess(pid=51001, pgid=51001, start_identity="owned-start-51001")]
     assert ledger.ports == [2026, 3000, 8001]
     assert all("deerflow_test_" in environment["DATABASE_URL"] for environment in command_probe.environments)
+
+
+@pytest.mark.asyncio
+async def test_host_stack_forwards_required_audit_keyring_only_to_owned_processes(tmp_path: Path) -> None:
+    host, command_probe, _ledger, _database = _host(
+        tmp_path,
+        environment={
+            "DEER_FLOW_AUDIT_ACTIVE_KEY_ID": "m8-audit-v1",
+            "DEER_FLOW_AUDIT_KEYRING_JSON": "synthetic-keyring-json",
+            "M8_UNSAFE_EXTRA": "must-not-pass",
+        },
+    )
+    await host.start(_APP_DATABASE_URL)
+    for environment in command_probe.environments:
+        assert environment["DEER_FLOW_AUDIT_ACTIVE_KEY_ID"] == "m8-audit-v1"
+        assert environment["DEER_FLOW_AUDIT_KEYRING_JSON"] == "synthetic-keyring-json"
+        assert "M8_UNSAFE_EXTRA" not in environment
 
 
 @pytest.mark.asyncio
@@ -320,6 +342,34 @@ def test_host_port_probe_detects_ipv6_only_listener(
         host_stack_module.socket.AF_INET,
         host_stack_module.socket.AF_INET6,
     ]
+
+
+def test_acceptance_next_config_uses_invocation_owned_tsconfig() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    frontend = repository / "frontend"
+    token = "1" * 32
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "DEER_FLOW_NEXT_DIST_DIR": f".m8-next-{token}/.next",
+            "SKIP_ENV_VALIDATION": "1",
+        }
+    )
+    completed = subprocess.run(
+        (
+            "node",
+            "-e",
+            "import('./next.config.js').then(({default:config})=>process.stdout.write(String(config.typescript?.tsconfigPath ?? 'missing')))",
+        ),
+        cwd=frontend,
+        env=environment,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=10,
+    )
+    assert completed.stdout.endswith(f".m8-next-{token}/tsconfig.json")
 
 
 class FakeBrowserCommandRunner:
