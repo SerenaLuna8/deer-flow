@@ -405,7 +405,7 @@ class SubprocessHostCommandRunner:
     @staticmethod
     async def _drain(stream: asyncio.StreamReader, markers: set[str]) -> set[str]:
         while line := await stream.readline():
-            bounded = line[:512].decode("utf-8", errors="replace")
+            bounded = (line[:512] + line[-512:]).decode("utf-8", errors="replace")
             for label, marker in _STARTUP_MARKERS.items():
                 if f"{label} started" in bounded or f"{label} started on" in bounded:
                     markers.add(marker)
@@ -497,6 +497,8 @@ class OwnedHostStack:
         scheduler_enabled: bool,
         startup_marker_attempts: int = 100,
         startup_marker_interval_seconds: float = 0.05,
+        shutdown_port_attempts: int = 100,
+        shutdown_port_interval_seconds: float = 0.05,
     ) -> None:
         self._repository = repository.resolve()
         self._env = dict(env)
@@ -511,6 +513,8 @@ class OwnedHostStack:
         self._scheduler_enabled = scheduler_enabled
         self._startup_marker_attempts = startup_marker_attempts
         self._startup_marker_interval_seconds = startup_marker_interval_seconds
+        self._shutdown_port_attempts = shutdown_port_attempts
+        self._shutdown_port_interval_seconds = shutdown_port_interval_seconds
         self._owned_process: OwnedProcess | None = None
         self._host_process: HostProcess | None = None
         self._gateway_process: HostProcess | None = None
@@ -526,6 +530,15 @@ class OwnedHostStack:
             if attempt + 1 < self._startup_marker_attempts:
                 await asyncio.sleep(self._startup_marker_interval_seconds)
         raise RuntimeError("HOST_STARTUP_MARKERS_MISSING")
+
+    async def _wait_ports_free(self) -> None:
+        for attempt in range(self._shutdown_port_attempts):
+            free = await asyncio.gather(*(asyncio.to_thread(self._port_probe.is_free, port) for port in _HOST_PORTS))
+            if all(free):
+                return
+            if attempt + 1 < self._shutdown_port_attempts:
+                await asyncio.sleep(self._shutdown_port_interval_seconds)
+        raise RuntimeError("HOST_PORT_RESIDUAL")
 
     @property
     def pgid(self) -> int:
@@ -635,8 +648,6 @@ class OwnedHostStack:
         try:
             if self._inventory is not None:
                 await asyncio.to_thread(self._process_inspector.assert_absent, self._inventory)
-            free = await asyncio.gather(*(asyncio.to_thread(self._port_probe.is_free, port) for port in _HOST_PORTS))
-            if not all(free):
-                raise RuntimeError("HOST_PORT_RESIDUAL")
+            await self._wait_ports_free()
         except BaseException:
             raise RuntimeError("HOST_STOP_RESIDUAL") from None

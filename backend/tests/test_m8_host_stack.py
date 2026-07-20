@@ -17,6 +17,7 @@ from scripts.release_acceptance.host_stack import (
     OwnedHostStack,
     ServiceProcessTree,
     SocketPortProbe,
+    SubprocessHostCommandRunner,
 )
 from scripts.release_acceptance.live_probe import ChromiumJourneyRunner, HostReadiness, M8BrowserResult
 from scripts.release_acceptance.ownership import CleanupAction, OwnedDatabase, OwnedProcess
@@ -64,6 +65,16 @@ class FakePortProbe:
 
     def is_free(self, port: int) -> bool:
         return port not in self.busy
+
+
+class DelayedReleasePortProbe(FakePortProbe):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: dict[int, int] = {}
+
+    def is_free(self, port: int) -> bool:
+        self.calls[port] = self.calls.get(port, 0) + 1
+        return not (port == 2026 and self.calls[port] == 2)
 
 
 def _tree(role: str, pid: int, pgid: int = 51001) -> ServiceProcessTree:
@@ -153,6 +164,18 @@ class FakeReadiness:
             raise RuntimeError("raw readiness body")
 
 
+@pytest.mark.asyncio
+async def test_startup_marker_drain_checks_bounded_line_suffix() -> None:
+    lines = iter((b"x" * 700 + b"Frontend started on localhost:3000\n", b""))
+
+    class Reader:
+        async def readline(self) -> bytes:
+            return next(lines)
+
+    markers: set[str] = set()
+    assert await SubprocessHostCommandRunner._drain(Reader(), markers) == {"frontend"}
+
+
 class SequencedMarkerCommandRunner(FakeCommandRunner):
     def __init__(self, marker_sequence: tuple[frozenset[str], ...]) -> None:
         super().__init__()
@@ -198,6 +221,8 @@ def _host(
         scheduler_enabled=scheduler_enabled,
         startup_marker_attempts=2,
         startup_marker_interval_seconds=0,
+        shutdown_port_attempts=2,
+        shutdown_port_interval_seconds=0,
     )
     return host, command_runner, ledger, database
 
@@ -242,6 +267,15 @@ async def test_host_stop_never_calls_broad_make_stop(tmp_path: Path) -> None:
     await host.stop()
     assert ledger.signalled_groups == [(host.pgid, signal.SIGTERM)]
     assert ("make", "stop") not in command_probe.argv
+
+
+@pytest.mark.asyncio
+async def test_host_stop_waits_for_ports_to_become_reusable(tmp_path: Path) -> None:
+    ports = DelayedReleasePortProbe()
+    host, _commands, _ledger, _database = _host(tmp_path, ports=ports)
+    await host.start(_APP_DATABASE_URL)
+    await host.stop()
+    assert ports.calls[2026] == 3
 
 
 @pytest.mark.asyncio
