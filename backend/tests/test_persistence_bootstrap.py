@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.engine import make_url
 
 from deerflow.persistence import bootstrap
 from deerflow.persistence.final_schema_contract import ALEMBIC_INDEXES, FINAL_APP_SEQUENCES
@@ -73,3 +76,43 @@ def test_migration_graph_has_one_final_head() -> None:
 async def test_bootstrap_requires_an_async_engine() -> None:
     with pytest.raises(TypeError, match="AsyncEngine"):
         await bootstrap.bootstrap_schema(object())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_postgres_lock_preserves_password_bearing_engine_url(monkeypatch) -> None:
+    source_url = make_url("postgresql+asyncpg://release_user:fake%40password@127.0.0.1/release_db")
+    captured_urls: list[object] = []
+
+    class FakeConnection:
+        async def execute(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def scalar(self, statement, *_args, **_kwargs):
+            sql = str(statement)
+            if "idle_session_timeout" in sql:
+                return None
+            if "pg_try_advisory_lock" in sql:
+                return True
+            if "pg_advisory_unlock" in sql:
+                return True
+            raise AssertionError(sql)
+
+    class FakeLockEngine:
+        @asynccontextmanager
+        async def connect(self):
+            yield FakeConnection()
+
+        async def dispose(self) -> None:
+            return None
+
+    def create_lock_engine(url, **_kwargs):
+        captured_urls.append(url)
+        return FakeLockEngine()
+
+    monkeypatch.setattr(bootstrap, "create_async_engine", create_lock_engine)
+
+    async with bootstrap._postgres_lock(SimpleNamespace(url=source_url)):
+        pass
+
+    assert len(captured_urls) == 1
+    assert make_url(captured_urls[0]).password == "fake@password"

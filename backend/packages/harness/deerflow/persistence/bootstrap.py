@@ -110,7 +110,7 @@ async def _postgres_lock(engine: AsyncEngine) -> AsyncIterator[None]:
     """Serialize classification and upgrade on a dedicated PostgreSQL session."""
 
     lock_engine = create_async_engine(
-        str(engine.url),
+        engine.url,
         poolclass=NullPool,
         isolation_level="AUTOCOMMIT",
     )
