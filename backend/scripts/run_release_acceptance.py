@@ -1,10 +1,17 @@
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import sys
 from collections.abc import Sequence
 from pathlib import Path
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 
 from scripts.release_acceptance.commands import diagnostic_stages
 from scripts.release_acceptance.models import ReleaseEvidence

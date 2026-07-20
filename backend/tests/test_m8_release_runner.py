@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -200,3 +203,21 @@ def test_cli_accepts_only_fixed_diagnostic_stage_prefixes() -> None:
         _parse_args(["--stage", "chromium"])
     with pytest.raises(SystemExit):
         _parse_args(["--stage", "backend"])
+
+
+def test_cli_direct_script_entrypoint_bootstraps_backend_imports() -> None:
+    backend = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        (sys.executable, "scripts/run_release_acceptance.py", "--help"),
+        cwd=backend,
+        env=environment,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stdout
+    assert "ModuleNotFoundError" not in completed.stdout
