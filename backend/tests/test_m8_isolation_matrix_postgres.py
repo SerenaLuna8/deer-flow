@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ def test_final_scoped_surface_has_matrix_authority(matrix) -> None:
     assert matrix.surface_manifest.count == len(discovered)
     assert matrix.surface_manifest.sha256 == matrix.discovered_surface_digest(discovered)
     assert matrix.unmapped_surface(discovered) == ()
+    assert matrix.orphaned_surface_cases(discovered) == ()
 
 
 def test_discovered_surface_classification_is_closed() -> None:
@@ -56,3 +58,19 @@ def test_denial_cases_require_zero_database_delta_and_database_evidence(matrix) 
         assert case.expected_db_delta == 0, case.case_id
         assert "database" in case.layers, case.case_id
         assert any(selector.startswith("pytest::") and "postgres.py::" in selector for selector in case.evidence_selectors), case.case_id
+
+
+def test_matrix_covers_release_relevant_denial_statuses(matrix) -> None:
+    assert {401, 403, 404, 409, 422, 429, 503} <= {case.expected_status for case in matrix.cases}
+
+
+def test_selector_paths_cannot_escape_the_test_roots(tmp_path: Path) -> None:
+    payload = json.loads(_MATRIX_PATH.read_text(encoding="utf-8"))
+    payload["cases"][0]["evidence_selectors"] = [
+        "pytest::tests/../../outside_postgres.py::test_escape",
+    ]
+    malicious = tmp_path / "matrix.json"
+    malicious.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid matrix evidence selector"):
+        load_isolation_matrix(malicious)

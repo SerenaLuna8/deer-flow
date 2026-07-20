@@ -32,7 +32,17 @@ async def test_project_api_and_repository_enforce_account_isolation(
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    users = {name: uuid.uuid4() for name in ("alpha_admin", "alpha_viewer", "beta_admin", "outsider")}
+    users = {
+        name: uuid.uuid4()
+        for name in (
+            "alpha_admin",
+            "alpha_editor",
+            "alpha_runner",
+            "alpha_viewer",
+            "beta_admin",
+            "outsider",
+        )
+    }
     app = FastAPI()
     app.include_router(projects.router)
 
@@ -85,26 +95,42 @@ async def test_project_api_and_repository_enforce_account_isolation(
             beta_id = uuid.UUID(beta_response.json()["id"])
 
             async with engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        """INSERT INTO project_memberships
-                        (id,project_id,user_id,role) VALUES (:id,:project,:user,'viewer')"""
-                    ),
-                    {"id": uuid.uuid4(), "project": alpha_id, "user": str(users["alpha_viewer"])},
-                )
+                for name, role in (
+                    ("alpha_editor", "editor"),
+                    ("alpha_runner", "runner"),
+                    ("alpha_viewer", "viewer"),
+                ):
+                    await connection.execute(
+                        text(
+                            """INSERT INTO project_memberships
+                            (id,project_id,user_id,role) VALUES (:id,:project,:user,:role)"""
+                        ),
+                        {
+                            "id": uuid.uuid4(),
+                            "project": alpha_id,
+                            "user": str(users[name]),
+                            "role": role,
+                        },
+                    )
 
-            alpha_admin, alpha_viewer, beta_admin, outsider = await asyncio.gather(
+            alpha_admin, alpha_editor, alpha_runner, alpha_viewer, beta_admin, outsider = await asyncio.gather(
                 client.get("/api/projects", headers=headers("alpha_admin")),
+                client.get("/api/projects", headers=headers("alpha_editor")),
+                client.get("/api/projects", headers=headers("alpha_runner")),
                 client.get("/api/projects", headers=headers("alpha_viewer")),
                 client.get("/api/projects", headers=headers("beta_admin")),
                 client.get("/api/projects", headers=headers("outsider")),
             )
             assert [item["id"] for item in alpha_admin.json()["items"]] == [str(alpha_id)]
+            assert [item["id"] for item in alpha_editor.json()["items"]] == [str(alpha_id)]
+            assert [item["id"] for item in alpha_runner.json()["items"]] == [str(alpha_id)]
             assert [item["id"] for item in alpha_viewer.json()["items"]] == [str(alpha_id)]
             assert [item["id"] for item in beta_admin.json()["items"]] == [str(beta_id)]
             assert outsider.json()["items"] == []
 
             assert (await client.get(f"/api/projects/{alpha_id}", headers=headers("alpha_admin"))).status_code == 200
+            assert (await client.get(f"/api/projects/{alpha_id}", headers=headers("alpha_editor"))).status_code == 200
+            assert (await client.get(f"/api/projects/{alpha_id}", headers=headers("alpha_runner"))).status_code == 200
             assert (await client.get(f"/api/projects/{alpha_id}", headers=headers("alpha_viewer"))).status_code == 200
             updated = await client.patch(
                 f"/api/projects/{alpha_id}",

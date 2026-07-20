@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -285,6 +285,10 @@ class IsolationMatrix(_ClosedModel):
         covered = {(case.resource_family, case.operation, layer) for case in self.cases for layer in case.layers}
         return tuple(sorted(surface.surface_id for surface in discovered if (surface.resource_family, surface.operation, surface.layer) not in covered))
 
+    def orphaned_surface_cases(self, discovered: Iterable[SurfaceRef]) -> tuple[str, ...]:
+        available = {(surface.resource_family, surface.operation, surface.layer) for surface in discovered}
+        return tuple(sorted(case.case_id for case in self.cases if case.case_id.startswith("surface.") and not any((case.resource_family, case.operation, layer) in available for layer in case.layers)))
+
 
 @dataclass(frozen=True, slots=True, order=True)
 class SurfaceRef:
@@ -460,11 +464,18 @@ def discover_scoped_surface(repository_root: Path) -> tuple[SurfaceRef, ...]:
 
 
 def _selector_kind(selector: str) -> str | None:
-    if _PYTEST_SELECTOR.fullmatch(selector):
+    pytest_match = _PYTEST_SELECTOR.fullmatch(selector)
+    if pytest_match and _is_canonical_test_path(pytest_match.group("path")):
         return "pytest"
-    if _PLAYWRIGHT_SELECTOR.fullmatch(selector):
+    playwright_match = _PLAYWRIGHT_SELECTOR.fullmatch(selector)
+    if playwright_match and _is_canonical_test_path(playwright_match.group("path")):
         return "playwright"
     return None
+
+
+def _is_canonical_test_path(value: str) -> bool:
+    path = PurePosixPath(value)
+    return str(path) == value and not any(part in {".", ".."} for part in path.parts)
 
 
 def _python_test_inventory(path: Path) -> tuple[set[str], set[str], set[str]]:
@@ -585,10 +596,11 @@ def _resource_family(value: str) -> str:
         ("run", ("run", "subtask", "task")),
         ("file", ("file", "upload", "workspace_change", "workspacechange")),
         ("admin", ("system_asset_catalog", "systemassetcatalog")),
-        ("agent", ("shared_asset", "sharedasset", "asset", "agent")),
+        ("agent", ("agent",)),
         ("skill", ("skill",)),
         ("mcp", ("mcp",)),
         ("version", ("version",)),
+        ("agent", ("shared_asset", "sharedasset", "asset")),
         ("result", ("result",)),
         ("admin", ("admin", "operation")),
         ("auth", ("auth", "session")),

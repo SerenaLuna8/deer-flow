@@ -133,7 +133,7 @@
   },
   "surface_manifest": {
     "count": 459,
-    "sha256": "3f963b9e873bb08826f5e0b04867f8fc3232ae02bdff67c8066b495f940ae9ab"
+    "sha256": "3a9ca6a619d5da48cff8a80364692db4cf6e3b4b54be17216ff20b43b83476c5"
   },
   "cases": [
     {
@@ -253,7 +253,7 @@
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
+        "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation"
       ]
     },
     {
@@ -397,7 +397,7 @@
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_run_event_feedback_happy_path_is_scope_isolated"
+        "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation"
       ]
     },
     {
@@ -449,15 +449,15 @@
       ]
     },
     {
-      "case_id": "actor.system_admin_with_membership.project_get",
+      "case_id": "actor.system_admin_with_membership.operations_get",
       "actor": "system_admin_with_membership",
       "account_relationship": "same_account",
       "project_relationship": "same_project",
       "membership_state": "active_admin",
       "platform_role": "system_admin",
-      "resource_family": "project",
-      "scope": "project_governance",
-      "ownership": "not_applicable",
+      "resource_family": "admin",
+      "scope": "system_governance",
+      "ownership": "server_owned",
       "operation": "get",
       "expected_status": 200,
       "expected_code": null,
@@ -473,15 +473,15 @@
       ]
     },
     {
-      "case_id": "actor.system_admin_without_membership.project_get",
+      "case_id": "actor.system_admin_without_membership.automation_get",
       "actor": "system_admin_without_membership",
       "account_relationship": "same_account",
       "project_relationship": "project_outsider",
       "membership_state": "none",
       "platform_role": "system_admin",
-      "resource_family": "project",
-      "scope": "project_governance",
-      "ownership": "not_applicable",
+      "resource_family": "automation",
+      "scope": "project_private",
+      "ownership": "other_owner",
       "operation": "get",
       "expected_status": 404,
       "expected_code": "PROJECT_NOT_FOUND",
@@ -497,15 +497,15 @@
       ]
     },
     {
-      "case_id": "actor.unauthenticated.project_get",
+      "case_id": "actor.unauthenticated.operations_get",
       "actor": "unauthenticated",
       "account_relationship": "unauthenticated",
       "project_relationship": "none",
       "membership_state": "none",
       "platform_role": "user",
-      "resource_family": "project",
-      "scope": "project_governance",
-      "ownership": "not_applicable",
+      "resource_family": "admin",
+      "scope": "system_governance",
+      "ownership": "server_owned",
       "operation": "get",
       "expected_status": 401,
       "expected_code": "NOT_AUTHENTICATED",
@@ -541,7 +541,7 @@
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider"
+        "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation"
       ]
     },
     {
@@ -594,32 +594,6 @@
       "evidence_selectors": [
         "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation",
         "playwright::tests/e2e/project-private-work-isolation.spec.ts::Link project switch drops a late previous-project Thread response"
-      ]
-    },
-    {
-      "case_id": "operation.automatic.automation",
-      "actor": "runner",
-      "account_relationship": "same_account",
-      "project_relationship": "same_project",
-      "membership_state": "active_runner",
-      "platform_role": "user",
-      "resource_family": "automation",
-      "scope": "project_governance",
-      "ownership": "not_applicable",
-      "operation": "automatic",
-      "expected_status": 200,
-      "expected_code": null,
-      "expected_db_delta": 1,
-      "layers": [
-        "api",
-        "service",
-        "repository",
-        "database",
-        "worker",
-        "scheduler"
-      ],
-      "evidence_selectors": [
-        "pytest::tests/integration/test_m5_project_automation_postgres.py::test_project_api_is_project_owner_and_capability_scoped"
       ]
     },
     {
@@ -692,6 +666,32 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation"
+      ]
+    },
+    {
+      "case_id": "operation.automatic.automation",
+      "actor": "runner",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_runner",
+      "platform_role": "user",
+      "resource_family": "automation",
+      "scope": "project_governance",
+      "ownership": "not_applicable",
+      "operation": "automatic",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
+        "api",
+        "service",
+        "repository",
+        "database",
+        "worker",
+        "scheduler"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_m5_project_automation_postgres.py::test_project_api_is_project_owner_and_capability_scoped"
       ]
     },
     {
@@ -773,57 +773,6 @@
       ]
     },
     {
-      "case_id": "unavailable.automation.manual",
-      "actor": "runner",
-      "account_relationship": "same_account",
-      "project_relationship": "same_project",
-      "membership_state": "active_runner",
-      "platform_role": "user",
-      "resource_family": "automation",
-      "scope": "project_governance",
-      "ownership": "own",
-      "operation": "manual",
-      "expected_status": 503,
-      "expected_code": "AUTOMATION_UNAVAILABLE",
-      "expected_db_delta": 0,
-      "layers": [
-        "frontend",
-        "api",
-        "service",
-        "repository",
-        "database",
-        "scheduler"
-      ],
-      "evidence_selectors": [
-        "pytest::tests/integration/test_m5_project_automation_postgres.py::test_m6_head_keeps_m4_ready_and_scheduler_ownership_is_exclusive",
-        "playwright::tests/e2e/project-automations.spec.ts::manual retry reuses one Idempotency-Key after a safe 503 response"
-      ]
-    },
-    {
-      "case_id": "validation.project.mass_assignment",
-      "actor": "admin",
-      "account_relationship": "same_account",
-      "project_relationship": "same_project",
-      "membership_state": "active_admin",
-      "platform_role": "user",
-      "resource_family": "project",
-      "scope": "project_governance",
-      "ownership": "not_applicable",
-      "operation": "create",
-      "expected_status": 422,
-      "expected_code": "PROJECT_VALIDATION_FAILED",
-      "expected_db_delta": 0,
-      "layers": [
-        "api",
-        "service",
-        "repository",
-        "database"
-      ],
-      "evidence_selectors": [
-        "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation"
-      ]
-    },
-    {
       "case_id": "resource.archive.restore",
       "actor": "system_admin_without_membership",
       "account_relationship": "same_account",
@@ -844,31 +793,6 @@
       ],
       "evidence_selectors": [
         "pytest::tests/test_m6_restore_postgres.py::test_live_archive_restore_replays_tombstone_runs_probes_and_writes_proof"
-      ]
-    },
-    {
-      "case_id": "resource.occurrence.get",
-      "actor": "viewer",
-      "account_relationship": "same_account",
-      "project_relationship": "same_project",
-      "membership_state": "active_viewer",
-      "platform_role": "user",
-      "resource_family": "occurrence",
-      "scope": "project_governance",
-      "ownership": "server_owned",
-      "operation": "get",
-      "expected_status": 200,
-      "expected_code": null,
-      "expected_db_delta": 0,
-      "layers": [
-        "api",
-        "service",
-        "repository",
-        "database",
-        "scheduler"
-      ],
-      "evidence_selectors": [
-        "pytest::tests/integration/test_m5_project_automation_postgres.py::test_project_api_is_project_owner_and_capability_scoped"
       ]
     },
     {
@@ -942,6 +866,31 @@
       ],
       "evidence_selectors": [
         "pytest::tests/test_m6_retention_purge_postgres.py::test_project_purge_revalidates_pending_deletion_and_preserves_other_project"
+      ]
+    },
+    {
+      "case_id": "resource.occurrence.get",
+      "actor": "viewer",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_viewer",
+      "platform_role": "user",
+      "resource_family": "occurrence",
+      "scope": "project_governance",
+      "ownership": "server_owned",
+      "operation": "get",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 0,
+      "layers": [
+        "api",
+        "service",
+        "repository",
+        "database",
+        "scheduler"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_m5_project_automation_postgres.py::test_project_api_is_project_owner_and_capability_scoped"
       ]
     },
     {
@@ -1110,28 +1059,6 @@
       ]
     },
     {
-      "case_id": "surface.agent.approve",
-      "actor": "editor",
-      "account_relationship": "same_account",
-      "project_relationship": "same_project",
-      "membership_state": "active_editor",
-      "platform_role": "user",
-      "resource_family": "agent",
-      "scope": "project_shared",
-      "ownership": "not_applicable",
-      "operation": "approve",
-      "expected_status": 200,
-      "expected_code": null,
-      "expected_db_delta": 0,
-      "layers": [
-        "frontend"
-      ],
-      "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin authors and publishes every asset kind and manages credential lifecycle"
-      ]
-    },
-    {
       "case_id": "surface.agent.create",
       "actor": "editor",
       "account_relationship": "same_account",
@@ -1146,14 +1073,12 @@
       "expected_code": null,
       "expected_db_delta": 1,
       "layers": [
-        "frontend",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin authors and publishes every asset kind and manages credential lifecycle"
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
       ]
     },
     {
@@ -1202,29 +1127,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin authors and publishes every asset kind and manages credential lifecycle"
-      ]
-    },
-    {
-      "case_id": "surface.agent.publish",
-      "actor": "editor",
-      "account_relationship": "same_account",
-      "project_relationship": "same_project",
-      "membership_state": "active_editor",
-      "platform_role": "user",
-      "resource_family": "agent",
-      "scope": "project_shared",
-      "ownership": "not_applicable",
-      "operation": "publish",
-      "expected_status": 200,
-      "expected_code": null,
-      "expected_db_delta": 0,
-      "layers": [
-        "frontend"
-      ],
-      "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin authors and publishes every asset kind and manages credential lifecycle"
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -1249,7 +1152,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin authors and publishes every asset kind and manages credential lifecycle"
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -1556,7 +1459,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin authors and publishes every asset kind and manages credential lifecycle"
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -1774,7 +1677,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_mcp_credentials_postgres.py::test_project_mcp_direct_publish_and_credential_approval_are_scope_safe",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin authors and publishes every asset kind and manages credential lifecycle"
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -1796,7 +1699,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_mcp_credentials_postgres.py::test_project_mcp_direct_publish_and_credential_approval_are_scope_safe",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin authors and publishes every asset kind and manages credential lifecycle"
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -1822,7 +1725,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_mcp_credentials_postgres.py::test_project_mcp_direct_publish_and_credential_approval_are_scope_safe",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin authors and publishes every asset kind and manages credential lifecycle"
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -1868,7 +1771,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_mcp_credentials_postgres.py::test_project_mcp_direct_publish_and_credential_approval_are_scope_safe",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin authors and publishes every asset kind and manages credential lifecycle"
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -2307,6 +2210,28 @@
       ]
     },
     {
+      "case_id": "surface.mcp.approve",
+      "actor": "editor",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_editor",
+      "platform_role": "user",
+      "resource_family": "mcp",
+      "scope": "project_shared",
+      "ownership": "not_applicable",
+      "operation": "approve",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 0,
+      "layers": [
+        "frontend"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_m3_mcp_credentials_postgres.py::test_project_mcp_direct_publish_and_credential_approval_are_scope_safe",
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
+      ]
+    },
+    {
       "case_id": "surface.mcp.create",
       "actor": "editor",
       "account_relationship": "same_account",
@@ -2321,12 +2246,14 @@
       "expected_code": null,
       "expected_db_delta": 1,
       "layers": [
+        "frontend",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m3_mcp_credentials_postgres.py::test_project_mcp_direct_publish_and_credential_approval_are_scope_safe"
+        "pytest::tests/integration/test_m3_mcp_credentials_postgres.py::test_project_mcp_direct_publish_and_credential_approval_are_scope_safe",
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -2367,6 +2294,7 @@
       "expected_code": null,
       "expected_db_delta": 0,
       "layers": [
+        "api",
         "service",
         "repository",
         "database"
@@ -3311,6 +3239,30 @@
       "expected_code": null,
       "expected_db_delta": 0,
       "layers": [
+        "api",
+        "service",
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
+      ]
+    },
+    {
+      "case_id": "surface.skill.update",
+      "actor": "editor",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_editor",
+      "platform_role": "user",
+      "resource_family": "skill",
+      "scope": "project_shared",
+      "ownership": "not_applicable",
+      "operation": "update",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
         "service",
         "repository",
         "database"
@@ -3542,6 +3494,28 @@
       ]
     },
     {
+      "case_id": "surface.version.publish",
+      "actor": "editor",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_editor",
+      "platform_role": "user",
+      "resource_family": "version",
+      "scope": "project_shared",
+      "ownership": "not_applicable",
+      "operation": "publish",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 0,
+      "layers": [
+        "frontend"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
+      ]
+    },
+    {
       "case_id": "surface.version.update",
       "actor": "editor",
       "account_relationship": "same_account",
@@ -3556,12 +3530,65 @@
       "expected_code": null,
       "expected_db_delta": 1,
       "layers": [
+        "frontend",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
+      ]
+    },
+    {
+      "case_id": "unavailable.automation.manual",
+      "actor": "runner",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_runner",
+      "platform_role": "user",
+      "resource_family": "automation",
+      "scope": "project_governance",
+      "ownership": "own",
+      "operation": "manual",
+      "expected_status": 503,
+      "expected_code": "AUTOMATION_UNAVAILABLE",
+      "expected_db_delta": 0,
+      "layers": [
+        "frontend",
+        "api",
+        "service",
+        "repository",
+        "database",
+        "scheduler"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_m5_project_automation_postgres.py::test_m6_head_keeps_m4_ready_and_scheduler_ownership_is_exclusive",
+        "playwright::tests/e2e/project-automations.spec.ts::manual retry reuses one Idempotency-Key after a safe 503 response"
+      ]
+    },
+    {
+      "case_id": "validation.project.mass_assignment",
+      "actor": "admin",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_admin",
+      "platform_role": "user",
+      "resource_family": "project",
+      "scope": "project_governance",
+      "ownership": "not_applicable",
+      "operation": "create",
+      "expected_status": 422,
+      "expected_code": "PROJECT_VALIDATION_FAILED",
+      "expected_db_delta": 0,
+      "layers": [
+        "api",
+        "service",
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation"
       ]
     }
   ]
