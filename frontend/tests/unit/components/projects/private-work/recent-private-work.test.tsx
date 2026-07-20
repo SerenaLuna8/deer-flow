@@ -46,6 +46,7 @@ function thread(threadId: string, title: string): AgentThread {
     thread_id: threadId,
     created_at: "2026-07-15T00:00:00Z",
     updated_at: "2026-07-15T01:00:00Z",
+    state_updated_at: "2026-07-15T01:00:00Z",
     metadata: {},
     status: "idle",
     values: { title, messages: [] },

@@ -150,6 +150,7 @@ function mapPrivateThread(
     thread_id: value.thread_id,
     created_at: timestamp,
     updated_at: timestamp,
+    state_updated_at: timestamp,
     metadata: {
       ...value.metadata,
       agent_asset_id: value.agent_asset_id,

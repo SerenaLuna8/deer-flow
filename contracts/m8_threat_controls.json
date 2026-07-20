@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "threat_id": "M8-T01",
+      "family": "scoped_identifier_authority",
+      "attack_surface": "identifier guessing, mass assignment, IDOR, cross-scope search/page/export",
+      "prevention_controls": [
+        "server-issued project and owner context",
+        "project_id plus owner_user_id repository predicates",
+        "composite database constraints"
+      ],
+      "detective_controls": [
+        "closed isolation matrix surface manifest",
+        "zero-delta PostgreSQL denial assertions"
+      ],
+      "matrix_case_ids": [
+        "actor.different_account.project_get",
+        "validation.project.mass_assignment"
+      ],
+      "test_selectors": [
+        "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation"
+      ],
+      "operator_response": "Disable admission, preserve audit evidence, and investigate the affected account and project scopes."
+    },
+    {
+      "threat_id": "M8-T02",
+      "family": "stale_runtime_authority",
+      "attack_surface": "stale membership, TOCTOU, lease theft, duplicate delivery, runtime snapshot substitution",
+      "prevention_controls": [
+        "membership version revalidation at side-effect boundaries",
+        "hashed lease token authority",
+        "exact admitted runtime snapshots"
+      ],
+      "detective_controls": [
+        "Worker takeover terminal uniqueness",
+        "stale membership zero-delta matrix evidence"
+      ],
+      "matrix_case_ids": [
+        "actor.stale_membership.project_get",
+        "surface.job.requeue"
+      ],
+      "test_selectors": [
+        "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation",
+        "pytest::tests/test_m6_job_repository_postgres.py::test_project_only_scope_cannot_list_or_requeue_private_dead_job"
+      ],
+      "operator_response": "Drain affected workers, retain job and audit rows, rotate lease authority, and replay only safe jobs."
+    },
+    {
+      "threat_id": "M8-T03",
+      "family": "credential_secret_containment",
+      "attack_surface": "Credential envelope, grant or slot confusion, secret in prompt, checkpoint, event, log, audit, or cache",
+      "prevention_controls": [
+        "envelope encryption with domain-separated keys",
+        "exact Credential grant and slot revalidation",
+        "imperative secret-bearing APIs outside client caches"
+      ],
+      "detective_controls": [
+        "Credential replacement race and ciphertext assertions",
+        "release secret and audit redaction scanners"
+      ],
+      "matrix_case_ids": [
+        "conflict.credential.concurrent_replace",
+        "surface.credential.update"
+      ],
+      "test_selectors": [
+        "pytest::tests/integration/test_m3_mcp_credentials_postgres.py::test_concurrent_credential_replace_has_one_stable_conflict",
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
+      ],
+      "operator_response": "Stop external calls, rotate the affected Credential, revoke grants, and retain only redacted finding metadata."
+    },
+    {
+      "threat_id": "M8-T04",
+      "family": "web_session_boundary",
+      "attack_surface": "CSRF, cookie flags, open redirect, unauthenticated admin or project routes, and error detail",
+      "prevention_controls": [
+        "server session and CSRF validation",
+        "same-origin project API routes",
+        "public stable error contracts"
+      ],
+      "detective_controls": [
+        "account transition cache invalidation",
+        "unauthenticated operations denial evidence"
+      ],
+      "matrix_case_ids": [
+        "actor.unauthenticated.operations_get",
+        "client.transition.account_switch"
+      ],
+      "test_selectors": [
+        "pytest::tests/test_m6_system_operations_api_postgres.py::test_operations_requires_current_system_admin_and_returns_only_aggregate_public_health",
+        "playwright::tests/e2e/project-automations.spec.ts::AuthProvider account transition aborts the old list and cannot reuse its cache"
+      ],
+      "operator_response": "Invalidate active sessions, preserve bounded access logs, and verify public error responses before reopening traffic."
+    },
+    {
+      "threat_id": "M8-T05",
+      "family": "file_archive_sandbox_boundary",
+      "attack_surface": "file path traversal, symlink, archive traversal, temporary file identity race, and sandbox escape boundary",
+      "prevention_controls": [
+        "normalized project-private logical paths",
+        "regular-file and inode identity validation",
+        "authenticated archive coordinates"
+      ],
+      "detective_controls": [
+        "private file scope matrix",
+        "archive restore proof probes"
+      ],
+      "matrix_case_ids": [
+        "surface.file.get",
+        "resource.archive.restore"
+      ],
+      "test_selectors": [
+        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider",
+        "pytest::tests/test_m6_restore_postgres.py::test_live_archive_restore_replays_tombstone_runs_probes_and_writes_proof"
+      ],
+      "operator_response": "Quarantine the owned path or archive, do not follow links, and require a fresh identity-checked recovery run."
+    },
+    {
+      "threat_id": "M8-T06",
+      "family": "durable_stream_boundary",
+      "attack_surface": "SSE cursor injection, cross-scope replay, terminal duplication, and Gateway restart",
+      "prevention_controls": [
+        "scoped durable frame queries",
+        "lease-authorized stream writes",
+        "single terminal database constraint"
+      ],
+      "detective_controls": [
+        "cursor scope rejection",
+        "Gateway replacement replay count assertions"
+      ],
+      "matrix_case_ids": [
+        "surface.run_event.stream",
+        "client.transition.project_switch"
+      ],
+      "test_selectors": [
+        "pytest::tests/test_m6_durable_stream_postgres.py::test_stream_read_is_strictly_scoped_and_rejects_invalid_contract",
+        "playwright::tests/e2e/project-private-work-isolation.spec.ts::Link project switch drops a late previous-project Thread response"
+      ],
+      "operator_response": "Stop the affected Gateway, retain frame metadata, and restart from the last verified scoped cursor."
+    },
+    {
+      "threat_id": "M8-T07",
+      "family": "automation_scheduler_boundary",
+      "attack_surface": "Scheduler singleton ownership, manual or automatic admission race, and revoked automation principal",
+      "prevention_controls": [
+        "PostgreSQL Scheduler ownership lock",
+        "atomic occurrence and Run admission",
+        "current capability revalidation"
+      ],
+      "detective_controls": [
+        "manual idempotency and global cap race",
+        "Scheduler ownership readiness evidence"
+      ],
+      "matrix_case_ids": [
+        "quota.automation.concurrent_limit",
+        "unavailable.automation.manual"
+      ],
+      "test_selectors": [
+        "pytest::tests/integration/test_m5_project_automation_postgres.py::test_manual_idempotency_and_global_cap_are_serialized_across_sessions",
+        "playwright::tests/e2e/project-automations.spec.ts::manual retry reuses one Idempotency-Key after a safe 503 response"
+      ],
+      "operator_response": "Disable Scheduler admission, verify the ownership lock, and reconcile occurrences before reenabling it."
+    },
+    {
+      "threat_id": "M8-T08",
+      "family": "recovery_integrity",
+      "attack_surface": "backup tamper, wrong key, journal gap or reorder, source mismatch, restore proof substitution, and deleted-data revival",
+      "prevention_controls": [
+        "authenticated version-7 archive",
+        "hash-chained external tombstone journal",
+        "distinct nonexistent restore target"
+      ],
+      "detective_controls": [
+        "exact schema and source identity probes",
+        "restore proof and deleted-data replay assertions"
+      ],
+      "matrix_case_ids": [
+        "resource.archive.restore",
+        "resource.restore_proof.get"
+      ],
+      "test_selectors": [
+        "pytest::tests/test_m6_restore_postgres.py::test_live_archive_restore_replays_tombstone_runs_probes_and_writes_proof"
+      ],
+      "operator_response": "Reject the restore target, preserve source and journal evidence, rotate compromised keys, and rerun from a new target."
+    },
+    {
+      "threat_id": "M8-T09",
+      "family": "system_governance_observability",
+      "attack_surface": "system-admin privilege confusion, support bundle leakage, and readiness metadata enumeration",
+      "prevention_controls": [
+        "system-admin route guard independent of project membership",
+        "bounded aggregate operations metadata",
+        "recursive support bundle redaction"
+      ],
+      "detective_controls": [
+        "ordinary user public not-found evidence",
+        "operations response allowlist assertions"
+      ],
+      "matrix_case_ids": [
+        "actor.system_admin_with_membership.operations_get",
+        "surface.admin.get"
+      ],
+      "test_selectors": [
+        "pytest::tests/test_m6_system_operations_api_postgres.py::test_operations_requires_current_system_admin_and_returns_only_aggregate_public_health",
+        "playwright::tests/e2e/admin-assets.spec.ts::system admin creates an asset and MCP credential slots require approval"
+      ],
+      "operator_response": "Disable the affected admin surface, regenerate a redacted bundle, and verify role and metadata boundaries before access resumes."
+    }
+  ]
+}
