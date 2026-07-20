@@ -10,11 +10,13 @@ import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
 
 from scripts.release_acceptance.host_stack import (
+    AsyncpgHostDatabaseManager,
     HostInventory,
     HostProcess,
     OwnedHostStack,
@@ -28,6 +30,31 @@ from scripts.release_acceptance.preflight import AcceptanceModel
 
 _ADMIN_DATABASE_URL = "postgresql://admin:synthetic@127.0.0.1/postgres"
 _APP_DATABASE_URL = "postgresql://deerflow_app:synthetic@127.0.0.1/deerflow"
+
+
+@pytest.mark.asyncio
+async def test_host_database_creation_uses_pristine_template0() -> None:
+    connection = AsyncMock()
+    connection.fetchval.return_value = None
+    connection.fetchrow.return_value = {
+        "rolcanlogin": True,
+        "rolsuper": False,
+        "rolcreatedb": False,
+        "rolcreaterole": False,
+        "rolreplication": False,
+        "rolbypassrls": False,
+    }
+    manager = AsyncpgHostDatabaseManager(_ADMIN_DATABASE_URL)
+    manager._connect = AsyncMock(return_value=connection)  # type: ignore[method-assign]
+
+    await manager.create(
+        name="deerflow_test_111111",
+        owner="deerflow_app",
+        marker_digest="a" * 64,
+    )
+
+    statements = [call.args[0] for call in connection.execute.await_args_list]
+    assert ('CREATE DATABASE "deerflow_test_111111" OWNER "deerflow_app" TEMPLATE template0 ENCODING \'UTF8\'') in statements
 
 
 class FakeDatabaseManager:

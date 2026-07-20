@@ -367,7 +367,7 @@ class AsyncpgHostDatabaseManager:
             )
             if not role or not role["rolcanlogin"] or any(role[field] for field in ("rolsuper", "rolcreatedb", "rolcreaterole", "rolreplication", "rolbypassrls")):
                 raise RuntimeError("DATABASE_APP_ROLE_UNSAFE")
-            await connection.execute(f"CREATE DATABASE {database_identifier} OWNER {owner_identifier}")
+            await connection.execute(f"CREATE DATABASE {database_identifier} OWNER {owner_identifier} TEMPLATE template0 ENCODING 'UTF8'")
             created = True
             await connection.execute(f"COMMENT ON DATABASE {database_identifier} IS 'deerflow-m8:{marker_digest}'")
         except BaseException:
