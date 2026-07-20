@@ -14,6 +14,7 @@ import type { M8LiveBrowserResult, M8LiveModelSummary } from "./m8-result";
 
 const BASE_URL = "http://127.0.0.1:2026";
 const ORIGIN_HEADERS = { Origin: BASE_URL } as const;
+const LIVE_PROOF_CONTENT = "M8 synthetic live proof";
 
 const uuidSchema = z.string().uuid();
 
@@ -619,7 +620,7 @@ export async function submitSyntheticToolPrompt(
   );
   const prompt = [
     "First call write_file exactly once.",
-    `Write the exact text M8 synthetic live proof to ${live.outputPath}.`,
+    `Write the exact text ${LIVE_PROOF_CONTENT} to ${live.outputPath}.`,
     "Then call present_files exactly once for that same path.",
     "Do not call any other tool. After both tools succeed, finish with a short confirmation.",
   ].join(" ");
@@ -697,13 +698,20 @@ export async function expectToolResultVisible(
   live: PinnedLiveAgent,
 ): Promise<void> {
   expect(live.summary?.tool_call_count).toBeGreaterThanOrEqual(1);
-  const output = page.getByText(live.outputPath, { exact: true });
-  try {
-    await expect(output).toBeVisible({ timeout: 30_000 });
-  } catch {
-    await page.reload({ waitUntil: "domcontentloaded" });
-    await expect(output).toBeVisible({ timeout: 60_000 });
-  }
+  await expectPersistedArtifactContent(page, live);
+}
+
+async function expectPersistedArtifactContent(
+  page: Page,
+  live: PinnedLiveAgent,
+): Promise<void> {
+  const response = await page
+    .context()
+    .request.get(
+      `/api/projects/${live.project.id}/private-work/artifacts/${live.publicHandle.artifactId}?thread_id=${live.threadId}`,
+    );
+  await expectStatus(response, 200);
+  expect(await response.text()).toBe(LIVE_PROOF_CONTENT);
 }
 
 async function requestGatewayRestart(): Promise<void> {
@@ -891,9 +899,8 @@ export async function reloadAndResumeFromLastCursor(
 ): Promise<void> {
   await requestGatewayRestart();
   await page.reload({ waitUntil: "domcontentloaded" });
-  await expect(page.getByText(live.outputPath, { exact: true })).toBeVisible({
-    timeout: 60_000,
-  });
+  await expect(page.getByPlaceholder(/how can i assist you/i)).toBeEnabled();
+  await expectPersistedArtifactContent(page, live);
   const cursor = live.frameIds[0];
   if (cursor === undefined) {
     throw new Error("M8_LIVE_CURSOR_REQUIRED");
