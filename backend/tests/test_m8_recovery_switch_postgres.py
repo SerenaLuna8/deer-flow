@@ -84,7 +84,7 @@ def test_restore_database_name_matches_owned_database_contract() -> None:
         nonce="11111111111141118111111111111111",
     )
 
-    assert name == "deerflow_restore_1234511111111111141118111111111111111"
+    assert name == "deerflow_restore_12345_11111111111141118111111111111111"
 
 
 @pytest.mark.anyio

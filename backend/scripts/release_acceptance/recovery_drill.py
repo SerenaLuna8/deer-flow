@@ -216,7 +216,7 @@ def _inventory_digest(authority: RecoverySessionAuthority) -> str:
 def _restore_database_name(*, process_id: int, nonce: str) -> str:
     if process_id < 1 or re.fullmatch(r"[0-9a-f]{32}", nonce) is None:
         raise ValueError("RESTORE_DATABASE_NAME_INVALID")
-    suffix = f"{process_id}{nonce}"
+    suffix = f"{process_id}_{nonce}"
     if len(suffix) > 64:
         raise ValueError("RESTORE_DATABASE_NAME_INVALID")
     return f"deerflow_restore_{suffix}"

@@ -19,7 +19,8 @@ from typing import Literal, Protocol
 
 from scripts.release_acceptance.models import CleanupSummary
 
-_DATABASE_NAME = re.compile(r"^deerflow_(?:test|restore)_[a-z0-9]{6,64}$")
+_TEST_DATABASE_NAME = re.compile(r"^deerflow_test_[a-z0-9]{6,64}$")
+_RESTORE_DATABASE_NAME = re.compile(r"^deerflow_restore_[0-9]+_[0-9a-f]{32}$")
 _ROLE_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,62}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -187,7 +188,7 @@ class OwnershipLedger:
         return owned
 
     def register_database(self, *, name: str, owner: str, marker_digest: str) -> OwnedDatabase:
-        if _DATABASE_NAME.fullmatch(name) is None:
+        if _TEST_DATABASE_NAME.fullmatch(name) is None and _RESTORE_DATABASE_NAME.fullmatch(name) is None:
             raise OwnershipError("OWNED_DATABASE_NAME_INVALID")
         if _ROLE_NAME.fullmatch(owner) is None or _SHA256.fullmatch(marker_digest) is None:
             raise OwnershipError("OWNED_DATABASE_IDENTITY_INVALID")

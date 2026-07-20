@@ -259,6 +259,12 @@ def test_database_name_and_retained_path_are_strict(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path)
     with pytest.raises(OwnershipError, match="OWNED_DATABASE_NAME_INVALID"):
         ledger.register_database(name="deerflow", owner="postgres", marker_digest="a" * 64)
+    restored = ledger.register_database(
+        name="deerflow_restore_12345_11111111111141118111111111111111",
+        owner="postgres",
+        marker_digest="b" * 64,
+    )
+    assert restored.name == "deerflow_restore_12345_11111111111141118111111111111111"
     other = tmp_path / "keep"
     other.mkdir()
     with pytest.raises(OwnershipError, match="RETAINED_PATH_NOT_EVIDENCE"):
@@ -366,7 +372,11 @@ async def test_cleanup_counts_only_exact_owned_resources(tmp_path: Path) -> None
     evidence = tmp_path / ".release-evidence" / str(ledger.acceptance_run_id)
     evidence.mkdir(parents=True)
     ledger.register_path(evidence, disposition="retained_evidence")
-    owned_database = ledger.register_database(name="deerflow_restore_abc123", owner="deerflow_app", marker_digest="c" * 64)
+    owned_database = ledger.register_database(
+        name="deerflow_restore_12345_11111111111141118111111111111111",
+        owner="deerflow_app",
+        marker_digest="c" * 64,
+    )
     database.identities[owned_database.name] = DatabaseIdentity(owner=owned_database.owner, marker_digest=owned_database.marker_digest)
     ledger.reserve_port(2026)
 

@@ -21,7 +21,8 @@ import asyncpg
 from scripts.release_acceptance.live_probe import HostReadiness
 from scripts.release_acceptance.ownership import CleanupAction, DatabaseIdentity, OwnedDatabase, OwnedProcess, OwnershipLedger
 
-_DATABASE_NAME = re.compile(r"^deerflow_(?:test|restore)_[a-z0-9]{6,64}$")
+_TEST_DATABASE_NAME = re.compile(r"^deerflow_test_[a-z0-9]{6,64}$")
+_RESTORE_DATABASE_NAME = re.compile(r"^deerflow_restore_[0-9]+_[0-9a-f]{32}$")
 _ROLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 _SAFE_HOST_ENV = frozenset(
     {
@@ -352,7 +353,7 @@ class AsyncpgHostDatabaseManager:
         return await asyncpg.connect(self._admin_url, timeout=10)
 
     async def create(self, *, name: str, owner: str, marker_digest: str) -> None:
-        if _DATABASE_NAME.fullmatch(name) is None or re.fullmatch(r"[0-9a-f]{64}", marker_digest) is None:
+        if _TEST_DATABASE_NAME.fullmatch(name) is None or re.fullmatch(r"[0-9a-f]{64}", marker_digest) is None:
             raise RuntimeError("OWNED_DATABASE_IDENTITY_INVALID")
         database_identifier = _quote_identifier(name)
         owner_identifier = _quote_identifier(owner)
@@ -400,7 +401,7 @@ class AsyncpgHostDatabaseManager:
         name: str,
         marker_digest: str,
     ) -> DatabaseIdentity:
-        if _DATABASE_NAME.fullmatch(name) is None or not name.startswith("deerflow_restore_") or re.fullmatch(r"[0-9a-f]{64}", marker_digest) is None:
+        if _RESTORE_DATABASE_NAME.fullmatch(name) is None or re.fullmatch(r"[0-9a-f]{64}", marker_digest) is None:
             raise RuntimeError("OWNED_DATABASE_IDENTITY_INVALID")
         database_identifier = _quote_identifier(name)
         connection = await self._connect()
@@ -421,7 +422,7 @@ class AsyncpgHostDatabaseManager:
             await connection.close()
 
     async def grant_runtime_access(self, *, name: str, app_role: str) -> None:
-        if _DATABASE_NAME.fullmatch(name) is None or _ROLE_NAME.fullmatch(app_role) is None:
+        if (_TEST_DATABASE_NAME.fullmatch(name) is None and _RESTORE_DATABASE_NAME.fullmatch(name) is None) or _ROLE_NAME.fullmatch(app_role) is None:
             raise RuntimeError("RESTORE_DATABASE_GRANT_REJECTED")
         database_identifier = _quote_identifier(name)
         role_identifier = _quote_identifier(app_role)
@@ -461,7 +462,7 @@ class AsyncpgHostDatabaseManager:
             await target.close()
 
     async def drop(self, owned: OwnedDatabase) -> None:
-        if _DATABASE_NAME.fullmatch(owned.name) is None:
+        if _TEST_DATABASE_NAME.fullmatch(owned.name) is None and _RESTORE_DATABASE_NAME.fullmatch(owned.name) is None:
             raise RuntimeError("OWNED_DATABASE_NAME_INVALID")
         database_identifier = _quote_identifier(owned.name)
         connection = await self._connect()
