@@ -1326,7 +1326,7 @@ async def test_governance_and_dispatch_failure_settlement_follow_one_lock_order(
         )
     assert persisted_task is not None
     assert persisted_task.status == "paused"
-    assert persisted_task.frozen_at == NOW
+    assert persisted_task.frozen_at is None
     assert persisted_occurrence is not None
     assert persisted_occurrence.status == "running"
     assert persisted_occurrence.thread_id == thread_id

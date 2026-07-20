@@ -723,6 +723,15 @@ async def test_governance_downgrade_remove_leave_and_pending_delete_freeze_autom
         assert occurrence.status == "cancelled", name
         assert occurrence.error_code == "AUTOMATION_AUTHORIZATION_REVOKED", name
 
+    def assert_viewer_restricted(name: str, task_rows, occurrence_rows) -> None:
+        task = task_rows[targets[name].id]
+        occurrence = occurrence_rows[occurrences[name].id]
+        assert task.status == "paused", name
+        assert task.frozen_at is None, name
+        assert task.next_run_at is None, name
+        assert occurrence.status == "cancelled", name
+        assert occurrence.error_code == "AUTOMATION_AUTHORIZATION_REVOKED", name
+
     def assert_not_revoked(name: str, task_rows, occurrence_rows) -> None:
         task = task_rows[targets[name].id]
         occurrence = occurrence_rows[occurrences[name].id]
@@ -743,7 +752,7 @@ async def test_governance_downgrade_remove_leave_and_pending_delete_freeze_autom
             expected_version=1,
         )
     task_rows, occurrence_rows = await read_state()
-    assert_revoked("owner_b", task_rows, occurrence_rows)
+    assert_viewer_restricted("owner_b", task_rows, occurrence_rows)
     for untouched in ("owner_a", "viewer", "project_b_owner", "owner_a_project_b"):
         assert_not_revoked(untouched, task_rows, occurrence_rows)
 
@@ -757,8 +766,8 @@ async def test_governance_downgrade_remove_leave_and_pending_delete_freeze_autom
             expected_version=1,
         )
     task_rows, occurrence_rows = await read_state()
-    for revoked in ("owner_b", "viewer"):
-        assert_revoked(revoked, task_rows, occurrence_rows)
+    assert_viewer_restricted("owner_b", task_rows, occurrence_rows)
+    assert_revoked("viewer", task_rows, occurrence_rows)
     for untouched in ("owner_a", "project_b_owner", "owner_a_project_b"):
         assert_not_revoked(untouched, task_rows, occurrence_rows)
 
@@ -771,7 +780,8 @@ async def test_governance_downgrade_remove_leave_and_pending_delete_freeze_autom
             expected_version=1,
         )
     task_rows, occurrence_rows = await read_state()
-    for revoked in ("owner_b", "viewer", "project_b_owner"):
+    assert_viewer_restricted("owner_b", task_rows, occurrence_rows)
+    for revoked in ("viewer", "project_b_owner"):
         assert_revoked(revoked, task_rows, occurrence_rows)
     for untouched in ("owner_a", "owner_a_project_b"):
         assert_not_revoked(untouched, task_rows, occurrence_rows)

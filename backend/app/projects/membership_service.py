@@ -122,7 +122,7 @@ class MembershipService:
                 await self.repository.require_another_active_admin(project.id, target.id)
             if target_role is not ProjectRole.VIEWER and role is ProjectRole.VIEWER:
                 revoked_at = self._clock()
-                await self._retention.freeze_owner(
+                await self._retention.restrict_owner_to_viewer(
                     self.repository.session,
                     project_id=project.id,
                     owner_user_id=target.user_id,

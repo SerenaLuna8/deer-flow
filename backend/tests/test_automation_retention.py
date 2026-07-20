@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from app.automations.occurrences import (
@@ -192,6 +192,7 @@ async def test_freeze_pauses_scoped_definitions_and_cancels_only_queued_occurren
     )
 
     async with seed.factory() as session, session.begin():
+        expected_updated_at = await session.scalar(select(func.now()))
         change = await PrivateWorkRetentionService.freeze_owner(
             session,
             project_id=seed.owner_a.project_id,
@@ -210,7 +211,7 @@ async def test_freeze_pauses_scoped_definitions_and_cancels_only_queued_occurren
     assert target.next_run_at is None
     assert target.frozen_at == NOW
     assert target.version == task.version + 1
-    assert target.updated_at == NOW
+    assert target.updated_at == expected_updated_at
     assert task_rows[other_owner.id].status == "enabled"
     assert task_rows[other_owner.id].frozen_at is None
     assert task_rows[other_project.id].status == "enabled"
@@ -240,6 +241,7 @@ async def test_restore_unfreezes_without_resuming_then_explicit_resume_replans(
     async with seed.factory() as session, session.begin():
         await session.execute(ScheduledTaskRow.__table__.update().where(ScheduledTaskRow.id == deleted.id).values(deleted_at=RESTORED_AT))
     async with seed.factory() as session, session.begin():
+        expected_updated_at = await session.scalar(select(func.now()))
         restored = await PrivateWorkRetentionService.restore_owner(
             session,
             project_id=seed.owner_a.project_id,
@@ -255,7 +257,7 @@ async def test_restore_unfreezes_without_resuming_then_explicit_resume_replans(
     assert active_row.status == "paused"
     assert active_row.frozen_at is None
     assert active_row.next_run_at is None
-    assert active_row.updated_at == RESTORED_AT
+    assert active_row.updated_at == expected_updated_at
     assert active_row.version == active.version + 1
     assert deleted_row.frozen_at == NOW
 
@@ -320,7 +322,7 @@ async def test_freeze_wins_concurrent_claim_before_commit(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_viewer_downgrade_freezes_definition_and_active_run_settles_safely(
+async def test_viewer_downgrade_preserves_readable_definition_and_active_run_settles_safely(
     retention_seed: M4ThreadSeed,
 ) -> None:
     seed = retention_seed
@@ -366,7 +368,7 @@ async def test_viewer_downgrade_freezes_definition_and_active_run_settles_safely
     assert run.authorization_cancel_requested_at == NOW
     assert run.authorization_cancel_reason == AUTHORIZATION_REVOKED_REASON
     assert task is not None and task.status == "paused"
-    assert task.frozen_at == NOW
+    assert task.frozen_at is None
     assert task.next_run_at is None
     assert occurrence is not None and occurrence.status == "running"
 
@@ -401,7 +403,7 @@ async def test_viewer_downgrade_freezes_definition_and_active_run_settles_safely
     assert settled_occurrence.error_code == "AUTOMATION_RUN_INTERRUPTED"
     assert settled_task is not None
     assert settled_task.status == "paused"
-    assert settled_task.frozen_at == NOW
+    assert settled_task.frozen_at is None
     assert settled_task.run_count == 1
 
 

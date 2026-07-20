@@ -49,6 +49,77 @@ class PrivateWorkRetentionService:
         return await purger.purge(candidate, now=now)
 
     @staticmethod
+    async def restrict_owner_to_viewer(
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        now: datetime | None = None,
+    ) -> RetentionChange:
+        """Stop executable Automations while preserving the active member's readable data."""
+
+        restricted_at = now or datetime.now(UTC)
+        automation_ids = tuple(
+            sorted(
+                (
+                    await session.execute(
+                        update(ScheduledTaskRow)
+                        .where(
+                            ScheduledTaskRow.project_id == project_id,
+                            ScheduledTaskRow.owner_user_id == owner_user_id,
+                            ScheduledTaskRow.deleted_at.is_(None),
+                            ScheduledTaskRow.frozen_at.is_(None),
+                        )
+                        .values(
+                            status="paused",
+                            next_run_at=None,
+                            version=ScheduledTaskRow.version + 1,
+                            updated_at=restricted_at,
+                        )
+                        .returning(ScheduledTaskRow.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
+        occurrence_ids: tuple[str, ...] = ()
+        if automation_ids:
+            occurrence_ids = tuple(
+                sorted(
+                    (
+                        await session.execute(
+                            update(ScheduledTaskRunRow)
+                            .where(
+                                ScheduledTaskRunRow.project_id == project_id,
+                                ScheduledTaskRunRow.owner_user_id == owner_user_id,
+                                ScheduledTaskRunRow.task_id.in_(automation_ids),
+                                ScheduledTaskRunRow.status == "queued",
+                            )
+                            .values(
+                                status="cancelled",
+                                error_code=AUTOMATION_AUTHORIZATION_REVOKED_ERROR_CODE,
+                                error_message=None,
+                                finished_at=restricted_at,
+                                lease_owner=None,
+                                lease_expires_at=None,
+                                updated_at=restricted_at,
+                            )
+                            .returning(ScheduledTaskRunRow.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            )
+        return RetentionChange(
+            thread_ids=(),
+            connection_ids=(),
+            automation_ids=automation_ids,
+            occurrence_ids=occurrence_ids,
+        )
+
+    @staticmethod
     async def freeze_owner(
         session: AsyncSession,
         *,

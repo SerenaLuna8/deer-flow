@@ -280,7 +280,7 @@ async def test_executable_role_downgrade_keeps_active_runs(new_role: ProjectRole
 
 
 @pytest.mark.asyncio
-async def test_viewer_downgrade_marks_runs_in_governance_transaction() -> None:
+async def test_viewer_downgrade_revokes_runs_without_freezing_existing_private_data() -> None:
     events: list[str] = []
     repository = _repository()
 
@@ -303,10 +303,10 @@ async def test_viewer_downgrade_marks_runs_in_governance_transaction() -> None:
 
     authorization.mark_revoked.side_effect = mark_revoked
 
-    async def freeze_owner(*_args, **_kwargs):
-        events.append("retention-freeze")
+    async def restrict_owner(*_args, **_kwargs):
+        events.append("retention-restrict")
 
-    retention.freeze_owner.side_effect = freeze_owner
+    retention.restrict_owner_to_viewer.side_effect = restrict_owner
 
     await MembershipService(
         repository,
@@ -317,21 +317,22 @@ async def test_viewer_downgrade_marks_runs_in_governance_transaction() -> None:
 
     assert events == [
         "transaction-enter",
-        "retention-freeze",
+        "retention-restrict",
         "authorization-mark",
         "transaction-commit",
     ]
     authorization.mark_revoked.assert_awaited_once()
-    retention.freeze_owner.assert_awaited_once_with(
+    retention.restrict_owner_to_viewer.assert_awaited_once_with(
         repository.session,
         project_id=context.project_id,
         owner_user_id=target.user_id,
         now=NOW,
     )
+    retention.freeze_owner.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_viewer_downgrade_retention_failure_prevents_role_change_and_revocation() -> None:
+async def test_viewer_downgrade_never_uses_departed_member_retention() -> None:
     repository = _repository()
     context = _context()
     target = _member(role=ProjectRole.RUNNER)
@@ -343,21 +344,26 @@ async def test_viewer_downgrade_retention_failure_prevents_role_change_and_revoc
     authorization.mark_revoked.return_value = ("run-1",)
     retention = AsyncMock()
     retention.freeze_owner.side_effect = RuntimeError("retention unavailable")
-    with pytest.raises(RuntimeError, match="retention unavailable"):
-        await MembershipService(
-            repository,
-            clock=lambda: NOW,
-            authorization=authorization,
-            retention=retention,
-        ).change_role(
-            context,
-            target.id,
-            ProjectRole.VIEWER,
-            expected_version=1,
-        )
+    await MembershipService(
+        repository,
+        clock=lambda: NOW,
+        authorization=authorization,
+        retention=retention,
+    ).change_role(
+        context,
+        target.id,
+        ProjectRole.VIEWER,
+        expected_version=1,
+    )
 
-    repository.set_role.assert_not_awaited()
-    authorization.mark_revoked.assert_not_awaited()
+    repository.set_role.assert_awaited_once_with(
+        repository.lock_project_and_member.return_value[0],
+        target,
+        ProjectRole.VIEWER,
+    )
+    authorization.mark_revoked.assert_awaited_once()
+    retention.restrict_owner_to_viewer.assert_awaited_once()
+    retention.freeze_owner.assert_not_awaited()
 
 
 @pytest.mark.asyncio
