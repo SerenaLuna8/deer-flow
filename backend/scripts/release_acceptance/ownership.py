@@ -89,7 +89,19 @@ class HostProcessProbe:
     def start_identity(self, pid: int) -> str | None:
         try:
             completed = subprocess.run(
-                ("ps", "-o", "lstart=", "-o", "pgid=", "-o", "command=", "-p", str(pid)),
+                (
+                    "ps",
+                    "-o",
+                    "state=",
+                    "-o",
+                    "lstart=",
+                    "-o",
+                    "pgid=",
+                    "-o",
+                    "command=",
+                    "-p",
+                    str(pid),
+                ),
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -100,8 +112,16 @@ class HostProcessProbe:
             raise OwnershipError("PROCESS_IDENTITY_PROBE_FAILED") from None
         if completed.returncode not in {0, 1}:
             raise OwnershipError("PROCESS_IDENTITY_PROBE_FAILED")
-        identity = completed.stdout.strip()
-        return hashlib.sha256(identity.encode()).hexdigest() if identity else None
+        output = completed.stdout.strip()
+        if not output:
+            return None
+        values = output.split(maxsplit=7)
+        if len(values) < 7:
+            raise OwnershipError("PROCESS_IDENTITY_PROBE_FAILED")
+        if values[0].startswith("Z"):
+            return None
+        identity = " ".join(values[1:7])
+        return hashlib.sha256(identity.encode()).hexdigest()
 
     def process_group(self, pid: int) -> int | None:
         try:
@@ -114,7 +134,7 @@ class HostProcessProbe:
     def group_members(self, pgid: int) -> tuple[int, ...]:
         try:
             completed = subprocess.run(
-                ("ps", "-axo", "pid=,pgid="),
+                ("ps", "-axo", "pid=,pgid=,state="),
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -126,7 +146,7 @@ class HostProcessProbe:
         members = []
         for row in completed.stdout.splitlines():
             values = row.split()
-            if len(values) == 2 and values[1] == str(pgid):
+            if len(values) == 3 and values[1] == str(pgid) and not values[2].startswith("Z"):
                 members.append(int(values[0]))
         return tuple(sorted(members))
 

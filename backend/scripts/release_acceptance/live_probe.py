@@ -90,7 +90,12 @@ class HostReadiness:
 
     async def wait_ready(self, *, scheduler_enabled: bool) -> None:
         del scheduler_enabled  # Process-role readiness is checked after the admin session exists.
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=3.0, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            base_url=self._base_url,
+            timeout=3.0,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
             for _attempt in range(self._attempts):
                 try:
                     health = await client.get("/health")

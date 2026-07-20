@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 
 from scripts.release_acceptance.ownership import (
     DatabaseIdentity,
+    HostProcessProbe,
     OwnershipError,
     OwnershipLedger,
 )
@@ -91,6 +93,46 @@ def test_cleanup_stops_owned_group_after_leader_exits(tmp_path: Path) -> None:
     result = ledger.stop_process(owned)
     assert result.status == "removed"
     assert process.signals == [(41003, 15)]
+
+
+def test_host_process_identity_ignores_command_transition(monkeypatch: pytest.MonkeyPatch) -> None:
+    outputs = iter(
+        (
+            "S Mon Jul 21 01:00:00 2026 41001 /usr/bin/make start\n",
+            "S Mon Jul 21 01:00:00 2026 41001 /usr/bin/python worker.py\n",
+        )
+    )
+
+    def fake_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=next(outputs))
+
+    monkeypatch.setattr("scripts.release_acceptance.ownership.subprocess.run", fake_run)
+    probe = HostProcessProbe()
+    assert probe.start_identity(41001) == probe.start_identity(41001)
+
+
+def test_host_process_identity_treats_zombie_as_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="Z Mon Jul 21 01:00:00 2026 41001 <defunct>\n",
+        )
+
+    monkeypatch.setattr("scripts.release_acceptance.ownership.subprocess.run", fake_run)
+    assert HostProcessProbe().start_identity(41001) is None
+
+
+def test_host_process_group_excludes_zombie_members(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="41001 41001 Z\n41002 41001 S\n41003 99999 S\n",
+        )
+
+    monkeypatch.setattr("scripts.release_acceptance.ownership.subprocess.run", fake_run)
+    assert HostProcessProbe().group_members(41001) == (41002,)
 
 
 def test_path_cleanup_refuses_inode_replacement(tmp_path: Path) -> None:

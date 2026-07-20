@@ -18,7 +18,7 @@ from scripts.release_acceptance.host_stack import (
     ServiceProcessTree,
     SocketPortProbe,
 )
-from scripts.release_acceptance.live_probe import ChromiumJourneyRunner, M8BrowserResult
+from scripts.release_acceptance.live_probe import ChromiumJourneyRunner, HostReadiness, M8BrowserResult
 from scripts.release_acceptance.ownership import CleanupAction, OwnedDatabase, OwnedProcess
 
 _ADMIN_DATABASE_URL = "postgresql://admin:synthetic@127.0.0.1/postgres"
@@ -370,6 +370,38 @@ def test_acceptance_next_config_uses_invocation_owned_tsconfig() -> None:
         timeout=10,
     )
     assert completed.stdout.endswith(f".m8-next-{token}/tsconfig.json")
+
+
+@pytest.mark.asyncio
+async def test_host_readiness_never_uses_proxy_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __init__(self, status_code: int, payload: dict[str, str] | None = None) -> None:
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class Client:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def get(self, path: str):
+            if path == "/health":
+                return Response(200, {"status": "healthy", "service": "deer-flow-gateway"})
+            return Response(401)
+
+    monkeypatch.setattr("scripts.release_acceptance.live_probe.httpx.AsyncClient", Client)
+    await HostReadiness(attempts=1, interval_seconds=0).wait_ready(scheduler_enabled=False)
+    assert captured["trust_env"] is False
 
 
 class FakeBrowserCommandRunner:
