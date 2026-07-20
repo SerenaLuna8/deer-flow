@@ -723,7 +723,7 @@ export async function reloadAndResumeFromLastCursor(
 ): Promise<void> {
   await requestGatewayRestart();
   await page.reload({ waitUntil: "domcontentloaded" });
-  await expect(page.getByText(live.outputPath, { exact: false })).toBeVisible({
+  await expect(page.getByText(live.outputPath, { exact: true })).toBeVisible({
     timeout: 60_000,
   });
   const cursor = live.frameIds[0];
