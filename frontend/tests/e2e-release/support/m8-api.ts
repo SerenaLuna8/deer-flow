@@ -273,6 +273,40 @@ export async function bindExecutableSystemAgent(
   context: BrowserContext,
   projectId: string,
 ): Promise<string> {
+  for (const [segment, bindingKind] of [
+    ["skills", "skill"],
+    ["mcp-servers", "mcp"],
+  ] as const) {
+    const dependencies = await context.request.get(
+      `/api/projects/${projectId}/${segment}`,
+    );
+    await expectStatus(dependencies, 200);
+    const dependencyPage = assetPageSchema.parse(await dependencies.json());
+    for (const dependency of dependencyPage.system_items) {
+      const versionId = dependency.current_published_version_id;
+      if (
+        versionId === null ||
+        (dependency.binding?.enabled === true &&
+          dependency.binding.version_id === versionId)
+      ) {
+        continue;
+      }
+      const bound = await context.request.post(
+        `/api/projects/${projectId}/system-${bindingKind}-bindings`,
+        {
+          data: {
+            asset_id: dependency.id,
+            version_id: versionId,
+            ...(dependency.binding === null
+              ? {}
+              : { expected_binding_version: dependency.binding.version }),
+          },
+          headers: await csrfHeaders(context),
+        },
+      );
+      await expectStatus(bound, 201);
+    }
+  }
   const listed = await context.request.get(`/api/projects/${projectId}/agents`);
   await expectStatus(listed, 200);
   const page = assetPageSchema.parse(await listed.json());
