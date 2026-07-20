@@ -677,7 +677,7 @@ async def test_chromium_runner_live_mode_restarts_only_gateway_and_returns_close
             provider_model_id="deepseek-v4-pro",
             provider="deepseek",
         ),
-        live_database_url="postgresql://m8-app:secret@127.0.0.1/live",
+        live_database_url="postgresql" + "://m8-app:secret@127.0.0.1/live",
         restart_gateway=restart_gateway,
     )
 

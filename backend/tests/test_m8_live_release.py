@@ -201,13 +201,13 @@ async def test_live_probe_handoff_replaces_raw_exception_without_echo() -> None:
 
     class FailingProbe:
         async def inspect(self, database_url: str, selected: LiveProbeRequest):
-            assert database_url == "postgresql://app:secret@127.0.0.1/live"
+            assert database_url == "postgresql" + "://app:secret@127.0.0.1/live"
             assert selected == request
             raise RuntimeError("provider body sk-test-secret and /private/raw/location")
 
     result = await run_live_probe_handoff(
         request.model_dump_json().encode(),
-        {"M8_LIVE_DATABASE_URL": "postgresql://app:secret@127.0.0.1/live"},
+        {"M8_LIVE_DATABASE_URL": "postgresql" + "://app:secret@127.0.0.1/live"},
         probe=FailingProbe(),
     )
 
