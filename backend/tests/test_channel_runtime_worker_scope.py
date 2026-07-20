@@ -21,6 +21,7 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.reliability.execution import PrivateRunExecution, RunAgentPrivateExecutor
 from app.reliability.jobs import AdmittedJobRecord, JobClaim, JobScope
+from deerflow.runtime import DisconnectMode
 
 
 def _context() -> PrivateWorkContext:
@@ -90,6 +91,15 @@ async def test_channel_admission_uses_resolved_project_scope_not_message_authori
 
     body = PrivateRunCreateRequest(
         input={"messages": [{"role": "user", "content": "hello"}]},
+        checkpoint={
+            "checkpoint_ns": "",
+            "checkpoint_id": "checkpoint-1",
+            "checkpoint_map": None,
+        },
+        on_disconnect="continue",
+        stream_mode=["values", "messages-tuple", "custom"],
+        stream_resumable=True,
+        stream_subgraphs=True,
         context={
             "channel_name": "slack",
             "channel_user_id": "external-user",
@@ -110,6 +120,10 @@ async def test_channel_admission_uses_resolved_project_scope_not_message_authori
 
     assert captured is not None
     assert captured.kwargs["config"]["context"] == {"thread_id": thread_id}
+    assert captured.kwargs["config"]["configurable"]["checkpoint_id"] == "checkpoint-1"
+    assert captured.kwargs["stream_mode"] == ["values", "messages-tuple", "custom"]
+    assert captured.kwargs["stream_subgraphs"] is True
+    assert record.on_disconnect is DisconnectMode.continue_
     assert record.scope == context.resource_scope
     assert record.user_id == str(context.user_id)
     assert record.store_only is True

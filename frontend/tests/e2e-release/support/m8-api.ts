@@ -611,7 +611,24 @@ export async function submitSyntheticToolPrompt(
   await composer.fill(prompt);
   await page.getByLabel("Submit").click();
   const response = await responsePromise;
-  expect(response.status()).toBe(200);
+  if (response.status() !== 200) {
+    let publicCode = "UNKNOWN";
+    try {
+      const payload: unknown = await response.json();
+      if (typeof payload === "object" && payload !== null) {
+        const detail = Reflect.get(payload, "detail");
+        if (typeof detail === "object" && detail !== null) {
+          const code = Reflect.get(detail, "code");
+          if (typeof code === "string" && /^[A-Z0-9_]+$/u.test(code)) {
+            publicCode = code;
+          }
+        }
+      }
+    } catch {
+      publicCode = "UNKNOWN";
+    }
+    throw new Error(`M8_LIVE_RUN_HTTP_${response.status()}_${publicCode}`);
+  }
   const contentLocation = response.headers()["content-location"] ?? "";
   const runId = /\/runs\/([0-9a-f-]{36})$/iu.exec(contentLocation)?.[1];
   expect(runId).toBeTruthy();

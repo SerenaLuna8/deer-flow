@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.private_work.context import strip_private_client_fields
 from app.private_work.error_mapping import private_work_http_exception
@@ -26,6 +26,25 @@ class StrictPrivateWorkResponse(StrictPrivateWorkModel):
     pass
 
 
+PrivateRunStreamMode = Literal[
+    "values",
+    "messages",
+    "messages-tuple",
+    "updates",
+    "events",
+    "debug",
+    "tasks",
+    "checkpoints",
+    "custom",
+]
+
+
+class PrivateRunCheckpoint(StrictPrivateWorkRequest):
+    checkpoint_ns: Literal[""] = ""
+    checkpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
+    checkpoint_map: None = None
+
+
 class PrivateRunCreateRequest(StrictPrivateWorkRequest):
     assistant_id: str | None = None
     input: dict[str, object] | list[object] | str | None = None
@@ -34,6 +53,32 @@ class PrivateRunCreateRequest(StrictPrivateWorkRequest):
     context: dict[str, object] = Field(default_factory=dict)
     metadata: dict[str, object] = Field(default_factory=dict)
     multitask_strategy: Literal["reject", "interrupt", "rollback"] = "reject"
+    checkpoint: PrivateRunCheckpoint | None = None
+    on_disconnect: Literal["cancel", "continue"] = "cancel"
+    stream_mode: list[PrivateRunStreamMode] = Field(
+        default_factory=lambda: ["values"],
+        min_length=1,
+        max_length=9,
+    )
+    stream_resumable: bool = False
+    stream_subgraphs: bool = False
+
+    @field_validator("stream_mode", mode="before")
+    @classmethod
+    def normalize_stream_mode(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @field_validator("stream_mode")
+    @classmethod
+    def reject_duplicate_stream_modes(
+        cls,
+        value: list[PrivateRunStreamMode],
+    ) -> list[PrivateRunStreamMode]:
+        if len(value) != len(set(value)):
+            raise ValueError("stream modes must be unique")
+        return value
 
     @model_validator(mode="after")
     def strip_nested_client_authority(self) -> PrivateRunCreateRequest:
@@ -96,6 +141,7 @@ def strip_client_authority_fields(
 
 
 __all__ = [
+    "PrivateRunCheckpoint",
     "PrivateRunCreateRequest",
     "PrivateThreadTokenUsageResponse",
     "PrivateWorkRoute",

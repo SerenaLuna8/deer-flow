@@ -11,14 +11,14 @@ import pytest_asyncio
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
+from pydantic import ValidationError
 from sqlalchemy import text
 from support.m4_private_threads import (
     M4ThreadSeed,
-    install_open_project_cutover_guard,
     seed_m4_thread_database,
 )
 
-from app.gateway.deps import private_work_context
+from app.gateway.deps import private_work_context, project_session
 from app.gateway.routers import private_work as private_work_router
 from app.private_work.checkpointer import PRIVATE_SCOPE_MARKER, ProjectScopedCheckpointer
 from app.private_work.run_admission import PrivateRunAdmissionService
@@ -84,7 +84,6 @@ async def harness(seed: M4ThreadSeed) -> _Harness:
         ReliabilityHTTPException,
         reliability_http_exception_handler,
     )
-    install_open_project_cutover_guard(app)
     app.include_router(private_work_router.router)
     app.state.private_run_service = PrivateRunService(seed.factory)
     app.state.project_scoped_checkpointer = scoped
@@ -104,7 +103,12 @@ async def harness(seed: M4ThreadSeed) -> _Harness:
             return seed.viewer
         raise HTTPException(status_code=404)
 
+    async def request_session():
+        async with seed.factory() as session:
+            yield session
+
     app.dependency_overrides[private_work_context] = context_override
+    app.dependency_overrides[project_session] = request_session
     return _Harness(seed=seed, app=app, raw=raw, scoped=scoped)
 
 
@@ -196,6 +200,26 @@ def test_public_private_run_strips_non_interactive() -> None:
     assert request.config == {"context": {"thinking_enabled": True}}
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"checkpoint": {"checkpoint_ns": "subgraph"}},
+        {"checkpoint": {"checkpoint_map": {"forged": "checkpoint"}}},
+        {"on_disconnect": "detach"},
+        {"stream_mode": ["values", "values"]},
+        {"stream_mode": ["tools"]},
+    ],
+)
+def test_public_private_run_rejects_unsupported_sdk_stream_controls(
+    override: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        private_work_router.PrivateRunCreateRequest(
+            input={"messages": []},
+            **override,
+        )
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_start_run_strips_nested_authority_and_serializes_no_private_coordinates(
@@ -223,6 +247,21 @@ async def test_start_run_strips_nested_authority_and_serializes_no_private_coord
             "metadata": {"safe": "value", "project_id": "forged"},
             "config": {"context": {"membership_id": "forged", "thinking_enabled": True}},
             "context": {"user_id": "forged", "thinking_enabled": False},
+            "checkpoint": {
+                "checkpoint_ns": "",
+                "checkpoint_id": None,
+                "checkpoint_map": None,
+            },
+            "on_disconnect": "continue",
+            "stream_mode": [
+                "values",
+                "messages-tuple",
+                "updates",
+                "events",
+                "custom",
+            ],
+            "stream_resumable": True,
+            "stream_subgraphs": True,
         },
     )
 
@@ -236,6 +275,17 @@ async def test_start_run_strips_nested_authority_and_serializes_no_private_coord
     assert body.metadata == {"safe": "value"}
     assert body.config == {"context": {"thinking_enabled": True}}
     assert body.context == {"thinking_enabled": False}
+    assert body.checkpoint.checkpoint_id is None
+    assert body.on_disconnect == "continue"
+    assert body.stream_mode == [
+        "values",
+        "messages-tuple",
+        "updates",
+        "events",
+        "custom",
+    ]
+    assert body.stream_resumable is True
+    assert body.stream_subgraphs is True
     payload = response.json()
     assert payload["run_id"] == record.run_id
     assert payload["thread_id"] == thread_id

@@ -74,8 +74,14 @@ async def start_private_run(
         "context": persisted_context,
         "configurable": dict(config.get("configurable", {})),
     }
+    checkpoint = getattr(body, "checkpoint", None)
+    checkpoint_id = getattr(checkpoint, "checkpoint_id", None)
+    if isinstance(checkpoint_id, str) and checkpoint_id:
+        persisted_config["configurable"]["checkpoint_id"] = checkpoint_id
     raw_command = getattr(body, "command", None)
     persisted_command = copy.deepcopy(raw_command) if isinstance(raw_command, Mapping) else None
+    raw_stream_mode = getattr(body, "stream_mode", None)
+    stream_mode = list(raw_stream_mode) if isinstance(raw_stream_mode, list) else ["values"]
     create_request = PrivateRunCreate(
         run_id=run_id or str(uuid.uuid4()),
         assistant_id=None,
@@ -84,6 +90,8 @@ async def start_private_run(
             "input": copy.deepcopy(getattr(body, "input", None)),
             "config": redact_config_secrets(persisted_config),
             "command": persisted_command,
+            "stream_mode": stream_mode,
+            "stream_subgraphs": getattr(body, "stream_subgraphs", False) is True,
         },
         multitask_strategy=getattr(body, "multitask_strategy", "reject"),
     )
@@ -106,7 +114,9 @@ async def start_private_run(
         thread_id=admitted.thread_id,
         assistant_id=admitted.run.assistant_id,
         status=RunStatus(admitted.run.status),
-        on_disconnect=DisconnectMode.cancel,
+        on_disconnect=DisconnectMode(
+            getattr(body, "on_disconnect", DisconnectMode.cancel.value),
+        ),
         multitask_strategy=admitted.run.multitask_strategy,
         metadata=admitted.run.metadata,
         kwargs=admitted.run.kwargs,
