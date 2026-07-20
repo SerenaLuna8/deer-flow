@@ -174,24 +174,30 @@ _kill_repo_port() {
 }
 
 _is_port_listening() {
-    local port=$1
+    local port=$1 status
 
     if command -v lsof >/dev/null 2>&1; then
         if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0
+        else
+            status=$?
         fi
+        [ "$status" -eq 1 ] && return 1
+        return 0
     fi
 
     if command -v ss >/dev/null 2>&1; then
         if ss -ltn "( sport = :$port )" 2>/dev/null | tail -n +2 | grep -q .; then
             return 0
         fi
+        return 1
     fi
 
     if command -v netstat >/dev/null 2>&1; then
         if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"; then
             return 0
         fi
+        return 1
     fi
 
     return 1

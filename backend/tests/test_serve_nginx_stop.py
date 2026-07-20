@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -123,6 +124,31 @@ def test_foreground_cleanup_stops_only_invocation_started_processes() -> None:
     cleanup = _extract_shell_function("cleanup")
     assert "stop_started" in cleanup
     assert "stop_all" not in cleanup
+
+
+def test_port_probe_trusts_available_lsof_before_fallbacks(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise serve.sh helpers")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    lsof = binary / "lsof"
+    lsof.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    lsof.chmod(0o755)
+    ss = binary / "ss"
+    ss.write_text(
+        "#!/bin/sh\nprintf 'State Local Address:Port\\nLISTEN 127.0.0.1:8001\\n'\n",
+        encoding="utf-8",
+    )
+    ss.chmod(0o755)
+
+    result = subprocess.run(
+        [bash, "-c", f"{_extract_shell_function('_is_port_listening')}\n_is_port_listening 8001"],
+        env={**os.environ, "PATH": f"{binary}:{os.environ['PATH']}"},
+        check=False,
+    )
+
+    assert result.returncode == 1
 
 
 def test_broad_stop_is_reachable_only_from_explicit_stop_or_restart() -> None:
