@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import os
 import shutil
 import sys
@@ -11,7 +14,7 @@ from typing import Literal, Protocol
 
 import asyncpg
 import httpx
-from pydantic import Field
+from pydantic import Field, SecretStr, field_validator
 
 from scripts.release_acceptance.models import (
     LiveModelSummary,
@@ -210,6 +213,48 @@ class ChromiumJourneyResult(StrictModel):
         return self.tests.skipped
 
 
+class RecoveryAccountAuthority(StrictModel):
+    user_id: uuid.UUID
+    email: str = Field(min_length=3, max_length=254)
+    password: SecretStr
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        if value.count("@") != 1 or any(character.isspace() for character in value):
+            raise ValueError("invalid synthetic account email")
+        return value
+
+
+class RecoveryProjectAuthority(StrictModel):
+    project_id: uuid.UUID
+    slug: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$", max_length=64)
+
+
+class RecoveryLiveAuthority(StrictModel):
+    project_id: uuid.UUID
+    thread_id: uuid.UUID
+    run_id: uuid.UUID
+    artifact_id: uuid.UUID
+
+
+class RecoverySessionAuthority(StrictModel):
+    admin: RecoveryAccountAuthority
+    outsider: RecoveryAccountAuthority
+    purge_project: RecoveryProjectAuthority
+    purge_thread_id: uuid.UUID
+    purge_file_id: uuid.UUID
+    live_project: RecoveryProjectAuthority
+    live: RecoveryLiveAuthority
+
+
+class M8RecoveryBrowserResult(StrictModel):
+    schema_version: Literal[1] = 1
+    phase: Literal["restore", "source"]
+    boundaries_passed: int = Field(gt=0)
+    failures: int = Field(ge=0)
+
+
 class BrowserCommandRunner(Protocol):
     async def run(
         self,
@@ -227,9 +272,13 @@ GatewayRestart = Callable[[], Awaitable[None]]
 class GatewayControl(Protocol):
     port: int | None
     restart_count: int
+    authority_count: int
 
     @property
     def token(self) -> str: ...
+
+    @property
+    def recovery_authority(self) -> RecoverySessionAuthority | None: ...
 
     async def start(self) -> None: ...
 
@@ -250,6 +299,8 @@ class GatewayRestartControl:
         self._token = uuid.uuid4().hex
         self.port: int | None = None
         self.restart_count = 0
+        self.authority_count = 0
+        self._recovery_authority: RecoverySessionAuthority | None = None
 
     async def _handle(
         self,
@@ -259,11 +310,24 @@ class GatewayRestartControl:
         response = b"failed\n"
         try:
             command = await asyncio.wait_for(reader.readline(), timeout=10)
+            if len(command) > 32 * 1024:
+                raise ValueError("M8_GATEWAY_CONTROL_COMMAND_TOO_LARGE")
             expected = f"restart_gateway {self._token}\n".encode()
             if command == expected and self.restart_count == 0:
                 self.restart_count = 1
                 await self._restart_gateway()
                 response = b"ok\n"
+            else:
+                prefix = f"recovery_authority {self._token} ".encode()
+                if command.startswith(prefix) and command.endswith(b"\n") and self.authority_count == 0:
+                    encoded = command[len(prefix) : -1]
+                    raw = base64.b64decode(encoded, validate=True)
+                    payload = json.loads(raw)
+                    self._recovery_authority = RecoverySessionAuthority.model_validate(payload)
+                    self.authority_count = 1
+                    response = b"ok\n"
+        except (binascii.Error, json.JSONDecodeError, ValueError, TypeError):
+            response = b"failed\n"
         except BaseException:
             response = b"failed\n"
         finally:
@@ -294,6 +358,10 @@ class GatewayRestartControl:
     def token(self) -> str:
         return self._token
 
+    @property
+    def recovery_authority(self) -> RecoverySessionAuthority | None:
+        return self._recovery_authority
+
     async def close(self) -> None:
         if self._server is not None:
             self._server.close()
@@ -319,6 +387,13 @@ class ChromiumJourneyRunner:
                 restart_gateway=callback,
             )
         )
+        self._recovery_authority: RecoverySessionAuthority | None = None
+
+    @property
+    def recovery_authority(self) -> RecoverySessionAuthority:
+        if self._recovery_authority is None:
+            raise RuntimeError("M8_RECOVERY_AUTHORITY_MISSING")
+        return self._recovery_authority
 
     async def run(
         self,
@@ -326,6 +401,7 @@ class ChromiumJourneyRunner:
         live_model: LiveModelRef | None = None,
         live_database_url: str | None = None,
         restart_gateway: GatewayRestart | None = None,
+        capture_recovery_authority: bool = False,
     ) -> ChromiumJourneyResult:
         output = self._runtime_root / "playwright"
         result_path = self._runtime_root / "browser-result.json"
@@ -358,6 +434,8 @@ class ChromiumJourneyRunner:
                         "M8_GATEWAY_CONTROL_TOKEN": control.token,
                     }
                 )
+                if capture_recovery_authority:
+                    environment["M8_CAPTURE_RECOVERY_AUTHORITY"] = "1"
             await self._command_runner.run(
                 "chromium.journey",
                 ("pnpm", "--dir", "frontend", "test:e2e:m8"),
@@ -386,6 +464,11 @@ class ChromiumJourneyRunner:
                 or result.live_model.summary.provider_model_id != live_model.provider_model_id
             ):
                 raise RuntimeError("M8_BROWSER_RESULT_FAILED")
+            if capture_recovery_authority:
+                authority = getattr(control, "recovery_authority", None)
+                if authority is None or getattr(control, "authority_count", 0) != 1:
+                    raise RuntimeError("M8_RECOVERY_AUTHORITY_MISSING")
+                self._recovery_authority = authority
             return ChromiumJourneyResult(
                 tests=tests,
                 live_model=result.live_model.summary,
@@ -393,6 +476,66 @@ class ChromiumJourneyRunner:
         finally:
             if control is not None:
                 await control.close()
+            if await asyncio.to_thread(output.exists):
+                await asyncio.to_thread(shutil.rmtree, output)
+            try:
+                await asyncio.to_thread(os.unlink, result_path)
+            except FileNotFoundError:
+                pass
+
+
+class RecoveryBrowserProbe:
+    def __init__(
+        self,
+        *,
+        command_runner: BrowserCommandRunner,
+        environment: Mapping[str, str],
+        runtime_root: Path,
+        authority: RecoverySessionAuthority,
+    ) -> None:
+        self._command_runner = command_runner
+        self._environment = dict(environment)
+        self._runtime_root = runtime_root.resolve()
+        self._authority = authority
+
+    async def run(self, phase: Literal["restore", "source"]) -> int:
+        output = self._runtime_root / f"recovery-playwright-{phase}"
+        result_path = self._runtime_root / f"recovery-browser-{phase}.json"
+        await asyncio.to_thread(output.mkdir, parents=True, mode=0o700, exist_ok=False)
+        authority = self._authority
+        environment = {name: value for name, value in self._environment.items() if name in {"CI", "HOME", "LANG", "LC_ALL", "PATH", "TMPDIR", "TZ"}}
+        environment.update(
+            {
+                "M8_BROWSER_OUTPUT_ROOT": str(self._runtime_root),
+                "M8_BROWSER_RESULT_PATH": str(result_path),
+                "M8_PLAYWRIGHT_OUTPUT_DIR": str(output),
+                "M8_RECOVERY_PROBE": "1",
+                "M8_RECOVERY_PHASE": phase,
+                "M8_RECOVERY_ADMIN_EMAIL": authority.admin.email,
+                "M8_RECOVERY_ADMIN_PASSWORD": authority.admin.password.get_secret_value(),
+                "M8_RECOVERY_OUTSIDER_EMAIL": authority.outsider.email,
+                "M8_RECOVERY_OUTSIDER_PASSWORD": authority.outsider.password.get_secret_value(),
+                "M8_RECOVERY_PURGE_PROJECT_ID": str(authority.purge_project.project_id),
+                "M8_RECOVERY_PURGE_THREAD_ID": str(authority.purge_thread_id),
+                "M8_RECOVERY_PURGE_FILE_ID": str(authority.purge_file_id),
+                "M8_RECOVERY_LIVE_PROJECT_ID": str(authority.live_project.project_id),
+                "M8_RECOVERY_LIVE_THREAD_ID": str(authority.live.thread_id),
+                "M8_RECOVERY_LIVE_RUN_ID": str(authority.live.run_id),
+                "M8_RECOVERY_LIVE_ARTIFACT_ID": str(authority.live.artifact_id),
+            }
+        )
+        try:
+            await self._command_runner.run(
+                f"chromium.recovery_{phase}",
+                ("pnpm", "--dir", "frontend", "test:e2e:m8"),
+                environment,
+                timeout_seconds=600,
+            )
+            result = await asyncio.to_thread(load_recovery_browser_result, result_path)
+            if result.phase != phase or result.failures != 0:
+                raise RuntimeError("M8_RECOVERY_BROWSER_RESULT_FAILED")
+            return result.boundaries_passed
+        finally:
             if await asyncio.to_thread(output.exists):
                 await asyncio.to_thread(shutil.rmtree, output)
             try:
@@ -440,6 +583,19 @@ def load_browser_result(path: Path) -> M8BrowserResult:
         return M8BrowserResult.model_validate_json(data)
     except ValueError:
         raise RuntimeError("M8_BROWSER_RESULT_INVALID") from None
+
+
+def load_recovery_browser_result(path: Path) -> M8RecoveryBrowserResult:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        raise RuntimeError("M8_RECOVERY_BROWSER_RESULT_MISSING") from None
+    if len(data) > 4 * 1024:
+        raise RuntimeError("M8_RECOVERY_BROWSER_RESULT_INVALID")
+    try:
+        return M8RecoveryBrowserResult.model_validate_json(data)
+    except ValueError:
+        raise RuntimeError("M8_RECOVERY_BROWSER_RESULT_INVALID") from None
 
 
 if __name__ == "__main__":

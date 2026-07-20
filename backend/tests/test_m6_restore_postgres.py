@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -140,8 +141,13 @@ async def _seed_deleted_file(seed) -> uuid.UUID:
 
 async def _archive_then_purge(source_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AUTH_JWT_SECRET", "task17-distinct-auth-secret")
-    postgres_bin = "/opt/homebrew/Cellar/postgresql@14/14.19/bin"
-    monkeypatch.setenv("PATH", f"{postgres_bin}:{os.environ.get('PATH', '')}")
+    pg_dump = shutil.which("pg_dump")
+    if pg_dump is None:
+        raise RuntimeError("POSTGRES_CLIENT_TOOLS_REQUIRED")
+    monkeypatch.setenv(
+        "PATH",
+        f"{Path(pg_dump).parent}:{os.environ.get('PATH', '')}",
+    )
     # A valid M7 source includes the LangGraph-owned checkpoint and Store
     # schemas in the same database; ORM bootstrap intentionally does not own
     # these tables.

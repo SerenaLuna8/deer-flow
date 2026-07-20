@@ -216,6 +216,24 @@ def test_cli_accepts_only_fixed_diagnostic_stage_prefixes() -> None:
         ]
     ).stage == ["host_setup", "chromium", "deepseek"]
     assert diagnostic_stages(("host_setup", "chromium", "deepseek")) == (StageId.HOST_SETUP, StageId.CHROMIUM, StageId.DEEPSEEK)
+    assert _parse_args(
+        [
+            "--stage",
+            "host_setup",
+            "--stage",
+            "chromium",
+            "--stage",
+            "deepseek",
+            "--stage",
+            "recovery",
+        ]
+    ).stage == ["host_setup", "chromium", "deepseek", "recovery"]
+    assert diagnostic_stages(("host_setup", "chromium", "deepseek", "recovery")) == (
+        StageId.HOST_SETUP,
+        StageId.CHROMIUM,
+        StageId.DEEPSEEK,
+        StageId.RECOVERY,
+    )
     with pytest.raises(SystemExit):
         _parse_args(["--stage", "chromium"])
     with pytest.raises(SystemExit):

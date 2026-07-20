@@ -4,6 +4,7 @@ import { createConnection } from "node:net";
 import {
   expect,
   type APIResponse,
+  type Browser,
   type BrowserContext,
   type Page,
 } from "@playwright/test";
@@ -164,6 +165,16 @@ export interface PinnedLiveAgent {
   summary: M8LiveModelSummary | null;
   replayPassed: boolean;
   privateDenials: number;
+}
+
+export interface RecoveryAuthorityHandoff {
+  admin: AccountFixture;
+  outsider: AccountFixture;
+  purge_project: { project_id: string; slug: string };
+  purge_thread_id: string;
+  purge_file_id: string;
+  live_project: { project_id: string; slug: string };
+  live: LivePublicHandle;
 }
 
 export function syntheticAccount(label: string): AccountFixture {
@@ -715,6 +726,154 @@ async function requestGatewayRestart(): Promise<void> {
       reject(new Error("M8_GATEWAY_RESTART_FAILED"));
     });
   });
+}
+
+export async function submitRecoveryAuthority(
+  authority: RecoveryAuthorityHandoff,
+): Promise<void> {
+  const port = Number(process.env.M8_GATEWAY_CONTROL_PORT);
+  const token = process.env.M8_GATEWAY_CONTROL_TOKEN;
+  if (!Number.isSafeInteger(port) || port < 1 || !token) {
+    throw new Error("M8_GATEWAY_CONTROL_REQUIRED");
+  }
+  const encoded = Buffer.from(JSON.stringify(authority), "utf8").toString(
+    "base64",
+  );
+  if (encoded.length > 30_000) {
+    throw new Error("M8_RECOVERY_AUTHORITY_TOO_LARGE");
+  }
+  await new Promise<void>((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    let response = "";
+    socket.setTimeout(10_000);
+    socket.on("connect", () => {
+      socket.write(`recovery_authority ${token} ${encoded}\n`);
+    });
+    socket.on("data", (chunk: Buffer) => {
+      response += chunk.toString("utf8");
+      if (response.length > 16) socket.destroy();
+    });
+    socket.on("end", () => {
+      if (response === "ok\n") resolve();
+      else reject(new Error("M8_RECOVERY_AUTHORITY_FAILED"));
+    });
+    socket.on("timeout", () => {
+      socket.destroy();
+      reject(new Error("M8_RECOVERY_AUTHORITY_TIMEOUT"));
+    });
+    socket.on("error", () => {
+      reject(new Error("M8_RECOVERY_AUTHORITY_FAILED"));
+    });
+  });
+}
+
+const recoveryProbeEnvironmentSchema = z
+  .object({
+    phase: z.enum(["restore", "source"]),
+    adminEmail: z.string().email(),
+    adminPassword: z.string().min(1),
+    outsiderEmail: z.string().email(),
+    outsiderPassword: z.string().min(1),
+    purgeProjectId: uuidSchema,
+    purgeThreadId: uuidSchema,
+    purgeFileId: uuidSchema,
+    liveProjectId: uuidSchema,
+    liveThreadId: uuidSchema,
+    liveRunId: uuidSchema,
+    liveArtifactId: uuidSchema,
+  })
+  .strict();
+
+function recoveryProbeEnvironment() {
+  return recoveryProbeEnvironmentSchema.parse({
+    phase: process.env.M8_RECOVERY_PHASE,
+    adminEmail: process.env.M8_RECOVERY_ADMIN_EMAIL,
+    adminPassword: process.env.M8_RECOVERY_ADMIN_PASSWORD,
+    outsiderEmail: process.env.M8_RECOVERY_OUTSIDER_EMAIL,
+    outsiderPassword: process.env.M8_RECOVERY_OUTSIDER_PASSWORD,
+    purgeProjectId: process.env.M8_RECOVERY_PURGE_PROJECT_ID,
+    purgeThreadId: process.env.M8_RECOVERY_PURGE_THREAD_ID,
+    purgeFileId: process.env.M8_RECOVERY_PURGE_FILE_ID,
+    liveProjectId: process.env.M8_RECOVERY_LIVE_PROJECT_ID,
+    liveThreadId: process.env.M8_RECOVERY_LIVE_THREAD_ID,
+    liveRunId: process.env.M8_RECOVERY_LIVE_RUN_ID,
+    liveArtifactId: process.env.M8_RECOVERY_LIVE_ARTIFACT_ID,
+  });
+}
+
+async function loginRecoveryAccount(
+  context: BrowserContext,
+  email: string,
+  password: string,
+): Promise<void> {
+  const response = await context.request.post("/api/v1/auth/login/local", {
+    data: { email, password },
+    headers: ORIGIN_HEADERS,
+  });
+  await expectStatus(response, 200);
+}
+
+export async function runRecoveryBrowserProbe(
+  browser: Browser,
+): Promise<{ phase: "restore" | "source"; boundariesPassed: number }> {
+  const authority = recoveryProbeEnvironment();
+  const admin = await browser.newContext();
+  const outsider = await browser.newContext();
+  try {
+    await loginRecoveryAccount(
+      admin,
+      authority.adminEmail,
+      authority.adminPassword,
+    );
+    await loginRecoveryAccount(
+      outsider,
+      authority.outsiderEmail,
+      authority.outsiderPassword,
+    );
+    const health = await admin.request.get("/health");
+    await expectStatus(health, 200);
+    expect(await health.json()).toEqual({
+      status: "healthy",
+      service: "deer-flow-gateway",
+    });
+    const projects = await listProjects(admin);
+    expect(projects.map(({ id }) => id)).toContain(authority.liveProjectId);
+    const liveProject = await admin.request.get(
+      `/api/projects/${authority.liveProjectId}`,
+    );
+    await expectStatus(liveProject, 200);
+    const thread = await admin.request.get(
+      `/api/projects/${authority.liveProjectId}/private-work/threads/${authority.liveThreadId}`,
+    );
+    await expectStatus(thread, 200);
+    if (authority.phase === "source") {
+      return { phase: "source", boundariesPassed: 4 };
+    }
+    const run = await admin.request.get(
+      `/api/projects/${authority.liveProjectId}/private-work/threads/${authority.liveThreadId}/runs/${authority.liveRunId}`,
+    );
+    await expectStatus(run, 200);
+    const artifact = await admin.request.get(
+      `/api/projects/${authority.liveProjectId}/private-work/artifacts/${authority.liveArtifactId}?thread_id=${authority.liveThreadId}`,
+    );
+    await expectStatus(artifact, 200);
+    await assertSharedAssetsAreSafe(admin, authority.liveProjectId);
+    const purged = await admin.request.get(
+      `/api/projects/${authority.purgeProjectId}/private-work/threads/${authority.purgeThreadId}/files/${authority.purgeFileId}`,
+    );
+    await expectStatus(purged, 404);
+    await expectProjectNotFound(outsider, authority.liveProjectId);
+    const denials = await expectPrivateRunNotFound(outsider, {
+      projectId: authority.liveProjectId,
+      threadId: authority.liveThreadId,
+      runId: authority.liveRunId,
+      artifactId: authority.liveArtifactId,
+    });
+    expect(denials).toBe(4);
+    return { phase: "restore", boundariesPassed: 12 };
+  } finally {
+    await Promise.all([admin.close(), outsider.close()]);
+  }
 }
 
 export async function reloadAndResumeFromLastCursor(

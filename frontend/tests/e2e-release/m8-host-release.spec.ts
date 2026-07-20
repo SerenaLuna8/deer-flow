@@ -23,16 +23,29 @@ import {
   listProjects,
   registerAccount,
   reloadAndResumeFromLastCursor,
+  runRecoveryBrowserProbe,
   submitSyntheticToolPrompt,
+  submitRecoveryAuthority,
 } from "./support/m8-api";
 import {
   type M8LiveBrowserResult,
   writeBrowserResult,
+  writeRecoveryBrowserResult,
 } from "./support/m8-result";
 
 test("host release boundaries survive account and project transitions", async ({
   browser,
 }) => {
+  if (process.env.M8_RECOVERY_PROBE === "1") {
+    const recovery = await runRecoveryBrowserProbe(browser);
+    await writeRecoveryBrowserResult({
+      schema_version: 1,
+      phase: recovery.phase,
+      boundaries_passed: recovery.boundariesPassed,
+      failures: 0,
+    });
+    return;
+  }
   const systemAdmin = await browser.newContext();
   const accountAdmin = await browser.newContext();
   const editor = await browser.newContext();
@@ -48,10 +61,19 @@ test("host release boundaries survive account and project transitions", async ({
     outsider,
   ];
   let liveModel: M8LiveBrowserResult | null = null;
+  let liveAuthority: {
+    projectId: string;
+    threadId: string;
+    runId: string;
+    artifactId: string;
+  } | null = null;
   try {
     await initializeAdmin(systemAdmin);
-    await registerAccount(accountAdmin, "project-admin");
-    await registerAccount(outsider, "outsider");
+    const accountAdminCredentials = await registerAccount(
+      accountAdmin,
+      "project-admin",
+    );
+    const outsiderCredentials = await registerAccount(outsider, "outsider");
     const projectA = await createProject(accountAdmin, "alpha");
     const projectB = await createProject(accountAdmin, "beta");
     const agentId = await bindExecutableSystemAgent(accountAdmin, projectA.id);
@@ -160,7 +182,21 @@ test("host release boundaries survive account and project transitions", async ({
         live.publicHandle,
       );
       liveModel = liveBrowserResult(live);
+      liveAuthority = live.publicHandle;
       await livePage.close();
+    }
+
+    if (process.env.M8_CAPTURE_RECOVERY_AUTHORITY === "1") {
+      expect(liveAuthority).not.toBeNull();
+      await submitRecoveryAuthority({
+        admin: accountAdminCredentials,
+        outsider: outsiderCredentials,
+        purge_project: { project_id: projectA.id, slug: projectA.slug },
+        purge_thread_id: adminPrivate.threadId,
+        purge_file_id: adminPrivate.fileId,
+        live_project: { project_id: projectB.id, slug: projectB.slug },
+        live: liveAuthority!,
+      });
     }
 
     await writeBrowserResult({

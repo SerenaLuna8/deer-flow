@@ -91,6 +91,8 @@ class HostInventory:
 class HostDatabaseManager(Protocol):
     async def create(self, *, name: str, owner: str, marker_digest: str) -> None: ...
 
+    async def identity(self, name: str) -> DatabaseIdentity | None: ...
+
 
 class HostCommandRunner(Protocol):
     async def run(self, command_id: str, argv: tuple[str, ...], environment: dict[str, str], *, timeout_seconds: int) -> None: ...
@@ -392,6 +394,72 @@ class AsyncpgHostDatabaseManager:
             return None
         return DatabaseIdentity(owner=row["owner"], marker_digest=row["marker"].removeprefix("deerflow-m8:"))
 
+    async def claim_verified_restore(
+        self,
+        *,
+        name: str,
+        marker_digest: str,
+    ) -> DatabaseIdentity:
+        if _DATABASE_NAME.fullmatch(name) is None or not name.startswith("deerflow_restore_") or re.fullmatch(r"[0-9a-f]{64}", marker_digest) is None:
+            raise RuntimeError("OWNED_DATABASE_IDENTITY_INVALID")
+        database_identifier = _quote_identifier(name)
+        connection = await self._connect()
+        try:
+            row = await connection.fetchrow(
+                """SELECT owner.rolname AS owner,
+                          shobj_description(database.oid, 'pg_database') AS marker
+                     FROM pg_database AS database
+                     JOIN pg_roles AS owner ON owner.oid = database.datdba
+                    WHERE database.datname = $1""",
+                name,
+            )
+            if not row or row["marker"] is not None:
+                raise RuntimeError("RESTORE_DATABASE_CLAIM_REJECTED")
+            await connection.execute(f"COMMENT ON DATABASE {database_identifier} IS 'deerflow-m8:{marker_digest}'")
+            return DatabaseIdentity(owner=row["owner"], marker_digest=marker_digest)
+        finally:
+            await connection.close()
+
+    async def grant_runtime_access(self, *, name: str, app_role: str) -> None:
+        if _DATABASE_NAME.fullmatch(name) is None or _ROLE_NAME.fullmatch(app_role) is None:
+            raise RuntimeError("RESTORE_DATABASE_GRANT_REJECTED")
+        database_identifier = _quote_identifier(name)
+        role_identifier = _quote_identifier(app_role)
+        maintenance = await self._connect()
+        try:
+            role = await maintenance.fetchrow(
+                "SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = $1",
+                app_role,
+            )
+            if (
+                not role
+                or not role["rolcanlogin"]
+                or any(
+                    role[field]
+                    for field in (
+                        "rolsuper",
+                        "rolcreatedb",
+                        "rolcreaterole",
+                        "rolreplication",
+                        "rolbypassrls",
+                    )
+                )
+            ):
+                raise RuntimeError("DATABASE_APP_ROLE_UNSAFE")
+            await maintenance.execute(f"GRANT CONNECT, TEMPORARY ON DATABASE {database_identifier} TO {role_identifier}")
+        finally:
+            await maintenance.close()
+        parsed = urlsplit(self._admin_url)
+        target_url = urlunsplit((parsed.scheme, parsed.netloc, f"/{name}", parsed.query, parsed.fragment))
+        target = await asyncpg.connect(target_url, timeout=10)
+        try:
+            await target.execute(f"GRANT USAGE ON SCHEMA public TO {role_identifier}")
+            await target.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role_identifier}")
+            await target.execute(f"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {role_identifier}")
+            await target.execute(f"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO {role_identifier}")
+        finally:
+            await target.close()
+
     async def drop(self, owned: OwnedDatabase) -> None:
         if _DATABASE_NAME.fullmatch(owned.name) is None:
             raise RuntimeError("OWNED_DATABASE_NAME_INVALID")
@@ -541,7 +609,10 @@ class OwnedHostStack:
         self._gateway_owned_process: OwnedProcess | None = None
         self._last_pgid: int | None = None
         self._database_url: str | None = None
+        self._application_url_template: str | None = None
+        self._owned_database: OwnedDatabase | None = None
         self._inventory: HostInventory | None = None
+        self._ports_reserved = False
 
     async def _wait_startup_markers(self, process: HostProcess, expected: set[str]) -> None:
         for attempt in range(self._startup_marker_attempts):
@@ -580,6 +651,18 @@ class OwnedHostStack:
             raise RuntimeError("HOST_STACK_NOT_STARTED")
         return self._database_url
 
+    @property
+    def owned_database(self) -> OwnedDatabase:
+        if self._owned_database is None:
+            raise RuntimeError("HOST_STACK_NOT_STARTED")
+        return self._owned_database
+
+    def url_for_owned(self, owned: OwnedDatabase) -> str:
+        if self._application_url_template is None:
+            raise RuntimeError("HOST_STACK_NOT_STARTED")
+        parsed = urlsplit(self._application_url_template)
+        return urlunsplit((parsed.scheme, parsed.netloc, f"/{owned.name}", parsed.query, parsed.fragment))
+
     def _environment(self, database_url: str) -> dict[str, str]:
         values = {name: value for name, value in self._env.items() if name in _SAFE_HOST_ENV}
         values["DATABASE_URL"] = database_url
@@ -593,21 +676,20 @@ class OwnedHostStack:
         source_url = urlunsplit((parsed.scheme, parsed.netloc, f"/{name}", parsed.query, parsed.fragment))
         return name, source_url
 
-    async def start(self, database_url: str) -> None:
-        if self._owned_process is not None:
-            raise RuntimeError("HOST_STACK_ALREADY_STARTED")
+    async def _reserve_and_check_ports(self) -> None:
         for port in _HOST_PORTS:
             if not await asyncio.to_thread(self._port_probe.is_free, port):
                 raise RuntimeError("HOST_PORT_BUSY")
-            self._ledger.reserve_port(port)
-        name, source_url = self._source_database(database_url)
-        marker = hashlib.sha256(f"deerflow-m8-database\0{self._acceptance_run_id}\0{name}\0{self._app_role}".encode()).hexdigest()
-        await self._database_manager.create(name=name, owner=self._app_role, marker_digest=marker)
-        self._ledger.register_database(name=name, owner=self._app_role, marker_digest=marker)
-        self._database_url = source_url
-        environment = self._environment(source_url)
+            if not self._ports_reserved:
+                self._ledger.reserve_port(port)
+        self._ports_reserved = True
+
+    async def _start_process(self, database_url: str, *, setup: bool) -> None:
+        self._database_url = database_url
+        environment = self._environment(database_url)
         try:
-            await self._command_runner.run("host.setup_db", ("make", "setup-db"), environment, timeout_seconds=900)
+            if setup:
+                await self._command_runner.run("host.setup_db", ("make", "setup-db"), environment, timeout_seconds=900)
             await self._command_runner.run("host.check_db", ("make", "check-db"), environment, timeout_seconds=300)
             process = await self._command_runner.start("host.make_start", ("make", "start"), environment)
             self._host_process = process
@@ -627,6 +709,32 @@ class OwnedHostStack:
             if self._owned_process is not None:
                 await self.stop()
             raise RuntimeError("HOST_READINESS_FAILED") from None
+
+    async def start(self, database_url: str) -> None:
+        if self._owned_process is not None:
+            raise RuntimeError("HOST_STACK_ALREADY_STARTED")
+        await self._reserve_and_check_ports()
+        name, source_url = self._source_database(database_url)
+        marker = hashlib.sha256(f"deerflow-m8-database\0{self._acceptance_run_id}\0{name}\0{self._app_role}".encode()).hexdigest()
+        await self._database_manager.create(name=name, owner=self._app_role, marker_digest=marker)
+        self._owned_database = self._ledger.register_database(name=name, owner=self._app_role, marker_digest=marker)
+        self._application_url_template = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        await self._start_process(source_url, setup=True)
+
+    async def start_existing(self, database_url: str, owned: OwnedDatabase) -> None:
+        if self._owned_process is not None:
+            raise RuntimeError("HOST_STACK_ALREADY_STARTED")
+        parsed = urlsplit(database_url.replace("postgresql+asyncpg://", "postgresql://", 1))
+        if parsed.scheme != "postgresql" or unquote(parsed.username or "") != self._app_role or parsed.path != f"/{owned.name}":
+            raise RuntimeError("DATABASE_APP_ROLE_MISMATCH")
+        identity = await self._database_manager.identity(owned.name)
+        if identity != DatabaseIdentity(owner=owned.owner, marker_digest=owned.marker_digest):
+            raise RuntimeError("OWNED_DATABASE_IDENTITY_MISMATCH")
+        await self._reserve_and_check_ports()
+        if self._application_url_template is None:
+            self._application_url_template = database_url
+        self._owned_database = owned
+        await self._start_process(database_url, setup=False)
 
     async def restart_gateway(self) -> None:
         if self._inventory is None or self._database_url is None or self._gateway_owned_process is not None:

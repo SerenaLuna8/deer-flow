@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import signal
@@ -21,8 +22,8 @@ from scripts.release_acceptance.host_stack import (
     SocketPortProbe,
     SubprocessHostCommandRunner,
 )
-from scripts.release_acceptance.live_probe import ChromiumJourneyRunner, HostReadiness, M8BrowserResult
-from scripts.release_acceptance.ownership import CleanupAction, OwnedDatabase, OwnedProcess
+from scripts.release_acceptance.live_probe import ChromiumJourneyRunner, GatewayRestartControl, HostReadiness, M8BrowserResult, RecoverySessionAuthority
+from scripts.release_acceptance.ownership import CleanupAction, DatabaseIdentity, OwnedDatabase, OwnedProcess
 from scripts.release_acceptance.preflight import AcceptanceModel
 
 _ADMIN_DATABASE_URL = "postgresql://admin:synthetic@127.0.0.1/postgres"
@@ -32,9 +33,14 @@ _APP_DATABASE_URL = "postgresql://deerflow_app:synthetic@127.0.0.1/deerflow"
 class FakeDatabaseManager:
     def __init__(self) -> None:
         self.created: list[tuple[str, str, str]] = []
+        self.identities: dict[str, DatabaseIdentity] = {}
 
     async def create(self, *, name: str, owner: str, marker_digest: str) -> None:
         self.created.append((name, owner, marker_digest))
+        self.identities[name] = DatabaseIdentity(owner=owner, marker_digest=marker_digest)
+
+    async def identity(self, name: str) -> DatabaseIdentity | None:
+        return self.identities.get(name)
 
 
 class FakeLedger:
@@ -279,6 +285,63 @@ async def test_host_stop_waits_for_ports_to_become_reusable(tmp_path: Path) -> N
     await host.start(_APP_DATABASE_URL)
     await host.stop()
     assert ports.calls[2026] == 3
+
+
+@pytest.mark.asyncio
+async def test_existing_owned_database_switch_skips_setup_and_reuses_ports(tmp_path: Path) -> None:
+    host, commands, ledger, database = _host(tmp_path)
+    await host.start(_APP_DATABASE_URL)
+    source = host.owned_database
+    await host.stop()
+    restore = OwnedDatabase(
+        name="deerflow_restore_123456",
+        owner="postgres",
+        marker_digest="a" * 64,
+    )
+    database.identities[restore.name] = DatabaseIdentity(
+        owner=restore.owner,
+        marker_digest=restore.marker_digest,
+    )
+
+    await host.start_existing(
+        "postgresql://deerflow_app:synthetic@127.0.0.1/deerflow_restore_123456",
+        restore,
+    )
+    await host.stop()
+    await host.start_existing(host.url_for_owned(source), source)
+
+    assert commands.command_ids == [
+        "host.setup_db",
+        "host.check_db",
+        "host.make_start",
+        "host.check_db",
+        "host.make_start",
+        "host.check_db",
+        "host.make_start",
+    ]
+    assert ledger.ports == [2026, 3000, 8001]
+
+
+@pytest.mark.asyncio
+async def test_existing_database_identity_mismatch_fails_before_commands(tmp_path: Path) -> None:
+    host, commands, _ledger, database = _host(tmp_path)
+    owned = OwnedDatabase(
+        name="deerflow_restore_123456",
+        owner="postgres",
+        marker_digest="a" * 64,
+    )
+    database.identities[owned.name] = DatabaseIdentity(
+        owner="postgres",
+        marker_digest="b" * 64,
+    )
+
+    with pytest.raises(RuntimeError, match="OWNED_DATABASE_IDENTITY_MISMATCH"):
+        await host.start_existing(
+            "postgresql://deerflow_app:synthetic@127.0.0.1/deerflow_restore_123456",
+            owned,
+        )
+
+    assert commands.command_ids == []
 
 
 @pytest.mark.asyncio
@@ -543,10 +606,12 @@ class FakeBrowserCommandRunner:
         failures: int = 0,
         live: bool = False,
         request_restart=None,
+        request_authority=None,
     ) -> None:
         self.failures = failures
         self.live = live
         self.request_restart = request_restart
+        self.request_authority = request_authority
         self.calls: list[tuple[str, tuple[str, ...]]] = []
         self.environments: list[dict[str, str]] = []
 
@@ -575,6 +640,48 @@ class FakeBrowserCommandRunner:
                 assert await reader.readline() == b"ok\n"
                 writer.close()
                 await writer.wait_closed()
+            if environment.get("M8_CAPTURE_RECOVERY_AUTHORITY") == "1":
+                payload = {
+                    "admin": {
+                        "user_id": "11111111-1111-4111-8111-111111111111",
+                        "email": "admin@example.com",
+                        "password": "Synthetic-Aa9!",
+                    },
+                    "outsider": {
+                        "user_id": "22222222-2222-4222-8222-222222222222",
+                        "email": "outsider@example.com",
+                        "password": "Synthetic-Bb9!",
+                    },
+                    "purge_project": {
+                        "project_id": "33333333-3333-4333-8333-333333333333",
+                        "slug": "m8-alpha",
+                    },
+                    "purge_thread_id": "44444444-4444-4444-8444-444444444444",
+                    "purge_file_id": "55555555-5555-4555-8555-555555555555",
+                    "live_project": {
+                        "project_id": "66666666-6666-4666-8666-666666666666",
+                        "slug": "m8-beta",
+                    },
+                    "live": {
+                        "project_id": "66666666-6666-4666-8666-666666666666",
+                        "thread_id": "77777777-7777-4777-8777-777777777777",
+                        "run_id": "88888888-8888-4888-8888-888888888888",
+                        "artifact_id": "99999999-9999-4999-8999-999999999999",
+                    },
+                }
+                if self.request_authority is not None:
+                    await self.request_authority(payload)
+                else:
+                    encoded = base64.b64encode(json.dumps(payload).encode()).decode()
+                    reader, writer = await asyncio.open_connection(
+                        "127.0.0.1",
+                        int(environment["M8_GATEWAY_CONTROL_PORT"]),
+                    )
+                    writer.write(f"recovery_authority {environment['M8_GATEWAY_CONTROL_TOKEN']} {encoded}\n".encode())
+                    await writer.drain()
+                    assert await reader.readline() == b"ok\n"
+                    writer.close()
+                    await writer.wait_closed()
             live_model = {
                 "summary": {
                     "provider": "deepseek",
@@ -645,6 +752,8 @@ async def test_chromium_runner_live_mode_restarts_only_gateway_and_returns_close
             self.callback = callback
             self.port = 41000
             self.restart_count = 0
+            self.authority_count = 0
+            self.recovery_authority = None
             self.token = "1" * 32
 
         async def start(self) -> None:
@@ -692,3 +801,85 @@ async def test_chromium_runner_live_mode_restarts_only_gateway_and_returns_close
     assert child_environment["M8_LIVE_DATABASE_URL"].endswith("/live")
     assert child_environment["M8_LIVE_PROBE_PYTHON"] == sys.executable
     assert "DEEPSEEK_API_KEY" not in child_environment
+
+
+@pytest.mark.asyncio
+async def test_chromium_runner_captures_recovery_authority_only_in_memory(tmp_path: Path) -> None:
+    class InMemoryRecoveryControl:
+        def __init__(self) -> None:
+            self.port = 41000
+            self.restart_count = 0
+            self.authority_count = 0
+            self.recovery_authority = None
+            self.token = "1" * 32
+
+        async def start(self) -> None:
+            return None
+
+        async def restart(self) -> None:
+            self.restart_count += 1
+
+        async def capture(self, payload) -> None:
+            self.recovery_authority = RecoverySessionAuthority.model_validate(payload)
+            self.authority_count += 1
+
+        async def close(self) -> None:
+            self.port = None
+
+    control = InMemoryRecoveryControl()
+    runner = ChromiumJourneyRunner(
+        command_runner=FakeBrowserCommandRunner(
+            live=True,
+            request_restart=control.restart,
+            request_authority=control.capture,
+        ),
+        environment={"PATH": "/synthetic/bin"},
+        runtime_root=tmp_path,
+        gateway_control_factory=lambda _callback: control,
+    )
+    result = await runner.run(
+        live_model=AcceptanceModel(
+            logical_name="release-live",
+            provider_model_id="deepseek-v4-pro",
+            provider="deepseek",
+        ),
+        live_database_url="postgresql://m8-app:secret@127.0.0.1/live",
+        restart_gateway=lambda: asyncio.sleep(0),
+        capture_recovery_authority=True,
+    )
+
+    assert runner.recovery_authority.admin.password.get_secret_value() == "Synthetic-Aa9!"
+    assert "Synthetic-Aa9!" not in repr(runner.recovery_authority)
+    assert "admin" not in result.model_dump()
+    assert not (tmp_path / "browser-result.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_gateway_control_rejects_malformed_recovery_authority() -> None:
+    control = GatewayRestartControl(restart_gateway=lambda: asyncio.sleep(0))
+
+    class Reader:
+        async def readline(self) -> bytes:
+            return f"recovery_authority {control.token} not-base64\n".encode()
+
+    class Writer:
+        def __init__(self) -> None:
+            self.value = b""
+
+        def write(self, value: bytes) -> None:
+            self.value += value
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    writer = Writer()
+    await control._handle(Reader(), writer)
+    assert writer.value == b"failed\n"
+    assert control.recovery_authority is None
+    assert control.authority_count == 0

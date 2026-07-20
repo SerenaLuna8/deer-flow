@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import os
+import secrets
 import signal
 import subprocess
 import uuid
@@ -11,6 +15,8 @@ from pathlib import Path
 from typing import Literal, Protocol
 from urllib.parse import unquote, urlsplit
 
+from app.recovery.archive import load_backup_key
+from app.reliability.owner_refs import AuditHmacKeyring
 from scripts.release_acceptance.commands import (
     COMMANDS,
     AsyncCommandExecutor,
@@ -24,10 +30,11 @@ from scripts.release_acceptance.host_stack import (
     OwnedHostStack,
     SubprocessHostCommandRunner,
 )
-from scripts.release_acceptance.live_probe import ChromiumJourneyRunner
+from scripts.release_acceptance.live_probe import ChromiumJourneyRunner, RecoveryBrowserProbe
 from scripts.release_acceptance.models import (
     CleanupSummary,
     LiveModelSummary,
+    RecoverySummary,
     ReleaseEvidence,
     SecuritySummary,
     StageEvidence,
@@ -37,6 +44,7 @@ from scripts.release_acceptance.models import (
 )
 from scripts.release_acceptance.ownership import OwnershipLedger
 from scripts.release_acceptance.preflight import Preflight, PreflightFailure, PreflightResult, PreflightSuccess
+from scripts.release_acceptance.recovery_drill import PostgresRecoveryOperations, RecoverySwitchDrill
 
 
 class StageExecutor(Protocol):
@@ -81,6 +89,7 @@ class DiagnosticResult(StrictModel):
     host_setup_passed: bool
     chromium: TestSummary | None = None
     deepseek: LiveModelSummary | None = None
+    recovery: RecoverySummary | None = None
     cleanup: CleanupSummary
 
 
@@ -98,6 +107,20 @@ def _has_residual(cleanup: CleanupSummary) -> bool:
 def _write_owned_frontend_tsconfig(frontend_runtime_root: Path) -> None:
     with (frontend_runtime_root / "tsconfig.json").open("x", encoding="utf-8") as handle:
         handle.write('{"extends":"../tsconfig.json"}\n')
+
+
+def _audit_keyring(environment: dict[str, str]) -> AuditHmacKeyring:
+    try:
+        active = environment["DEER_FLOW_AUDIT_ACTIVE_KEY_ID"]
+        raw = json.loads(environment["DEER_FLOW_AUDIT_KEYRING_JSON"])
+        if not isinstance(raw, dict):
+            raise ValueError
+        keys = {key_id: base64.b64decode(value, validate=True) for key_id, value in raw.items() if isinstance(key_id, str) and isinstance(value, str)}
+        if len(keys) != len(raw):
+            raise ValueError
+        return AuditHmacKeyring(active_key_id=active, _keys=keys)
+    except (KeyError, ValueError, TypeError, json.JSONDecodeError, binascii.Error):
+        raise RuntimeError("M8_AUDIT_KEYRING_INVALID") from None
 
 
 async def run_host_diagnostic(
@@ -129,6 +152,7 @@ async def run_host_diagnostic(
     host: OwnedHostStack | None = None
     browser_summary: TestSummary | None = None
     live_summary: LiveModelSummary | None = None
+    recovery_summary: RecoverySummary | None = None
     host_passed = False
     code = "HOST_DIAGNOSTIC_FAILED"
     try:
@@ -162,17 +186,51 @@ async def run_host_diagnostic(
         await host.start(database_url)
         host_passed = True
         if StageId.CHROMIUM in stages:
-            journey = await ChromiumJourneyRunner(
+            journey_runner = ChromiumJourneyRunner(
                 command_runner=command_runner,
                 environment=child_environment,
                 runtime_root=runtime_root,
-            ).run(
+            )
+            journey = await journey_runner.run(
                 live_model=(preflight_result.model if StageId.DEEPSEEK in stages else None),
                 live_database_url=(host.database_url if StageId.DEEPSEEK in stages else None),
                 restart_gateway=(host.restart_gateway if StageId.DEEPSEEK in stages else None),
+                capture_recovery_authority=StageId.RECOVERY in stages,
             )
             browser_summary = journey.tests
             live_summary = journey.live_model
+            if StageId.RECOVERY in stages:
+                source_app_url = host.database_url
+                backup_key = load_backup_key(
+                    environment.get("DEER_FLOW_BACKUP_KEY"),
+                    database_url=source_app_url,
+                )
+                journal_key = secrets.token_bytes(32)
+                while journal_key == backup_key:
+                    journal_key = secrets.token_bytes(32)
+                authority = journey_runner.recovery_authority
+                recovery_browser = RecoveryBrowserProbe(
+                    command_runner=command_runner,
+                    environment=child_environment,
+                    runtime_root=runtime_root,
+                    authority=authority,
+                )
+                recovery_summary = await RecoverySwitchDrill(
+                    PostgresRecoveryOperations(
+                        source_host=host,
+                        database_manager=database,
+                        ledger=ledger,
+                        recovery_browser=recovery_browser,
+                        runtime_root=runtime_root,
+                        source_app_url=source_app_url,
+                        postgres_admin_url=admin_url,
+                        app_role=app_role,
+                        authority=authority,
+                        backup_key=backup_key,
+                        journal_key=journal_key,
+                        keyring=_audit_keyring(environment),
+                    )
+                ).run()
         code = "OK"
     except BaseException:
         code = "HOST_DIAGNOSTIC_FAILED"
@@ -200,6 +258,7 @@ async def run_host_diagnostic(
         host_setup_passed=host_passed,
         chromium=browser_summary,
         deepseek=live_summary,
+        recovery=recovery_summary,
         cleanup=cleanup,
     )
 
