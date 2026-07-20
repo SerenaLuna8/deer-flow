@@ -464,6 +464,12 @@
       "title": "Git Commit",
       "type": "string"
     },
+    "public_config_digest": {
+      "default": "0000000000000000000000000000000000000000000000000000000000000000",
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Public Config Digest",
+      "type": "string"
+    },
     "review": {
       "discriminator": {
         "mapping": {
@@ -504,6 +510,12 @@
     },
     "status": {
       "$ref": "#/$defs/AcceptanceStatus"
+    },
+    "toolchain_digest": {
+      "default": "0000000000000000000000000000000000000000000000000000000000000000",
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Toolchain Digest",
+      "type": "string"
     }
   },
   "required": [

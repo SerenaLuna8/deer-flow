@@ -21,6 +21,7 @@ from scripts.release_acceptance.models import (
 from scripts.release_acceptance.models import (
     TestSummary as AcceptanceTestSummary,
 )
+from scripts.release_acceptance.security import load_secret_allowlist
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONTRACTS = _REPO_ROOT / "contracts"
@@ -246,10 +247,13 @@ def test_committed_json_schemas_match_models_byte_for_byte(model: type[object], 
 
 def test_committed_contract_authorities_are_closed() -> None:
     matrix = json.loads((_CONTRACTS / "m8_isolation_matrix.json").read_text(encoding="utf-8"))
-    allowlist = json.loads((_CONTRACTS / "m8_secret_allowlist.json").read_text(encoding="utf-8"))
+    allowlist = load_secret_allowlist(_CONTRACTS / "m8_secret_allowlist.json")
     assert matrix["schema_version"] == 1
     assert matrix["dimensions"] == _EXPECTED_MATRIX_DIMENSIONS
     assert matrix["cases"]
     assert set(matrix) == {"schema_version", "dimensions", "surface_manifest", "cases"}
     assert set(matrix["surface_manifest"]) == {"count", "sha256"}
-    assert allowlist == {"schema_version": 1, "entries": []}
+    assert allowlist.schema_version == 1
+    assert allowlist.entries
+    assert {entry.reason_kind for entry in allowlist.entries} <= {"test_fake", "documentation_placeholder"}
+    assert len({(entry.scope, entry.path, entry.rule, entry.value_sha256) for entry in allowlist.entries}) == len(allowlist.entries)

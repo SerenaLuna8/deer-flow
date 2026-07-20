@@ -186,6 +186,8 @@ class ReleaseEvidence(StrictModel):
     status: AcceptanceStatus
     git_commit: str = Field(pattern=_GIT_COMMIT.pattern)
     stage_manifest_digest: str = Field(pattern=_SHA256.pattern)
+    public_config_digest: str = Field(default="0" * 64, pattern=_SHA256.pattern)
+    toolchain_digest: str = Field(default="0" * 64, pattern=_SHA256.pattern)
     candidate_evidence_digest: str = Field(pattern=_SHA256.pattern)
     stages: tuple[StageEvidence, ...] = Field(min_length=1, max_length=len(STAGE_ORDER))
     review: ReviewState
@@ -199,6 +201,8 @@ class ReleaseEvidence(StrictModel):
             acceptance_run_id=self.acceptance_run_id,
             git_commit=self.git_commit,
             stage_manifest_digest=self.stage_manifest_digest,
+            public_config_digest=self.public_config_digest,
+            toolchain_digest=self.toolchain_digest,
             stages=self.stages,
         )
         if self.candidate_evidence_digest != expected_digest:
@@ -219,11 +223,15 @@ class ReleaseEvidence(StrictModel):
         git_commit: str,
         stage_manifest_digest: str,
         stages: tuple[StageEvidence, ...],
+        public_config_digest: str = "0" * 64,
+        toolchain_digest: str = "0" * 64,
     ) -> ReleaseEvidence:
         digest = _candidate_binding_digest(
             acceptance_run_id=acceptance_run_id,
             git_commit=git_commit,
             stage_manifest_digest=stage_manifest_digest,
+            public_config_digest=public_config_digest,
+            toolchain_digest=toolchain_digest,
             stages=stages,
         )
         return cls(
@@ -231,6 +239,8 @@ class ReleaseEvidence(StrictModel):
             status=AcceptanceStatus.CANDIDATE_READY,
             git_commit=git_commit,
             stage_manifest_digest=stage_manifest_digest,
+            public_config_digest=public_config_digest,
+            toolchain_digest=toolchain_digest,
             candidate_evidence_digest=digest,
             stages=stages,
             review=AwaitingReview(),
@@ -246,10 +256,50 @@ class ReleaseEvidence(StrictModel):
             status=AcceptanceStatus.FINAL_PASS,
             git_commit=candidate.git_commit,
             stage_manifest_digest=candidate.stage_manifest_digest,
+            public_config_digest=candidate.public_config_digest,
+            toolchain_digest=candidate.toolchain_digest,
             candidate_evidence_digest=candidate.candidate_evidence_digest,
             stages=candidate.stages,
             review=review,
         )
+
+    @classmethod
+    def failed(
+        cls,
+        *,
+        acceptance_run_id: uuid.UUID,
+        git_commit: str,
+        stage_manifest_digest: str,
+        stages: tuple[StageEvidence, ...],
+        public_config_digest: str = "0" * 64,
+        toolchain_digest: str = "0" * 64,
+    ) -> ReleaseEvidence:
+        digest = _candidate_binding_digest(
+            acceptance_run_id=acceptance_run_id,
+            git_commit=git_commit,
+            stage_manifest_digest=stage_manifest_digest,
+            public_config_digest=public_config_digest,
+            toolchain_digest=toolchain_digest,
+            stages=stages,
+        )
+        return cls(
+            acceptance_run_id=acceptance_run_id,
+            status=AcceptanceStatus.FAILED,
+            git_commit=git_commit,
+            stage_manifest_digest=stage_manifest_digest,
+            public_config_digest=public_config_digest,
+            toolchain_digest=toolchain_digest,
+            candidate_evidence_digest=digest,
+            stages=stages,
+            review=AwaitingReview(),
+        )
+
+    @property
+    def cleanup(self) -> CleanupSummary:
+        for stage in reversed(self.stages):
+            if stage.stage is StageId.CLEANUP and isinstance(stage.summary, CleanupSummary):
+                return stage.summary
+        raise ValueError("CLEANUP_EVIDENCE_MISSING")
 
 
 def _candidate_binding_digest(
@@ -257,6 +307,8 @@ def _candidate_binding_digest(
     acceptance_run_id: uuid.UUID,
     git_commit: str,
     stage_manifest_digest: str,
+    public_config_digest: str,
+    toolchain_digest: str,
     stages: tuple[StageEvidence, ...],
 ) -> str:
     payload = {
@@ -264,6 +316,8 @@ def _candidate_binding_digest(
         "acceptance_run_id": str(acceptance_run_id),
         "git_commit": git_commit,
         "stage_manifest_digest": stage_manifest_digest,
+        "public_config_digest": public_config_digest,
+        "toolchain_digest": toolchain_digest,
         "stages": [stage.model_dump(mode="json") for stage in stages],
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")

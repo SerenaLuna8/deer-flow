@@ -96,6 +96,10 @@ class EvidenceWriter:
     def run_directory(self) -> Path:
         return self.output_root / str(self.acceptance_run_id)
 
+    def prepare(self) -> Path:
+        run_directory, _created = self._prepare_run_directory()
+        return run_directory
+
     def write(self, evidence: BaseModel, *, name: str = "manifest.json") -> EvidenceArtifact:
         return self.write_json(name, evidence)
 
