@@ -24,6 +24,104 @@ from scripts.release_acceptance.models import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONTRACTS = _REPO_ROOT / "contracts"
+_EXPECTED_MATRIX_DIMENSIONS = {
+    "actors": [
+        "unauthenticated",
+        "project_outsider",
+        "admin",
+        "editor",
+        "runner",
+        "viewer",
+        "different_owner",
+        "different_project",
+        "different_account",
+        "removed_membership",
+        "left_membership",
+        "stale_membership",
+        "pending_deletion_project",
+        "suspended_project",
+        "system_admin_with_membership",
+        "system_admin_without_membership",
+        "ordinary_platform_user",
+    ],
+    "account_relationships": ["unauthenticated", "same_account", "different_account"],
+    "project_relationships": ["none", "same_project", "different_project", "project_outsider"],
+    "membership_states": [
+        "none",
+        "active_admin",
+        "active_editor",
+        "active_runner",
+        "active_viewer",
+        "removed",
+        "left",
+        "stale_version",
+        "pending_deletion",
+        "suspended",
+    ],
+    "platform_roles": ["user", "system_admin"],
+    "resource_families": [
+        "auth",
+        "project",
+        "membership",
+        "invite",
+        "lifecycle",
+        "agent",
+        "skill",
+        "mcp",
+        "version",
+        "binding",
+        "credential",
+        "thread",
+        "message",
+        "run",
+        "run_event",
+        "checkpoint",
+        "file",
+        "artifact",
+        "memory",
+        "connection",
+        "automation",
+        "occurrence",
+        "result",
+        "job",
+        "dead_job",
+        "quota",
+        "usage",
+        "audit",
+        "retention",
+        "admin",
+        "channel",
+        "archive",
+        "journal",
+        "restore_proof",
+    ],
+    "scopes": ["account", "workspace", "project_shared", "project_private", "project_governance", "system_governance", "recovery"],
+    "ownerships": ["not_applicable", "own", "other_owner", "server_owned"],
+    "operations": [
+        "create",
+        "list",
+        "search",
+        "page",
+        "get",
+        "export",
+        "update",
+        "delete",
+        "publish",
+        "bind",
+        "approve",
+        "run",
+        "stop",
+        "stream",
+        "reconnect",
+        "manual",
+        "automatic",
+        "retry",
+        "requeue",
+        "restore",
+        "purge",
+    ],
+    "layers": ["frontend", "api", "service", "repository", "database", "worker", "scheduler"],
+}
 
 
 def _stage(stage: StageId = StageId.CONTRACTS) -> StageEvidence:
@@ -150,7 +248,7 @@ def test_seed_contracts_are_closed_empty_authorities() -> None:
     matrix = json.loads((_CONTRACTS / "m8_isolation_matrix.json").read_text(encoding="utf-8"))
     allowlist = json.loads((_CONTRACTS / "m8_secret_allowlist.json").read_text(encoding="utf-8"))
     assert matrix["schema_version"] == 1
-    assert matrix["dimensions"]
+    assert matrix["dimensions"] == _EXPECTED_MATRIX_DIMENSIONS
     assert matrix["cases"] == []
     assert set(matrix) == {"schema_version", "dimensions", "cases"}
     assert allowlist == {"schema_version": 1, "entries": []}
