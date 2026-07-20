@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import signal
 import subprocess
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +23,7 @@ from scripts.release_acceptance.host_stack import (
 )
 from scripts.release_acceptance.live_probe import ChromiumJourneyRunner, HostReadiness, M8BrowserResult
 from scripts.release_acceptance.ownership import CleanupAction, OwnedDatabase, OwnedProcess
+from scripts.release_acceptance.preflight import AcceptanceModel
 
 _ADMIN_DATABASE_URL = "postgresql://admin:synthetic@127.0.0.1/postgres"
 _APP_DATABASE_URL = "postgresql://deerflow_app:synthetic@127.0.0.1/deerflow"
@@ -534,9 +537,18 @@ async def test_host_readiness_never_uses_proxy_environment(monkeypatch: pytest.M
 
 
 class FakeBrowserCommandRunner:
-    def __init__(self, *, failures: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        failures: int = 0,
+        live: bool = False,
+        request_restart=None,
+    ) -> None:
         self.failures = failures
+        self.live = live
+        self.request_restart = request_restart
         self.calls: list[tuple[str, tuple[str, ...]]] = []
+        self.environments: list[dict[str, str]] = []
 
     async def run(
         self,
@@ -548,6 +560,36 @@ class FakeBrowserCommandRunner:
     ) -> None:
         del timeout_seconds
         self.calls.append((command_id, argv))
+        self.environments.append(environment)
+        live_model = None
+        if self.live:
+            if self.request_restart is not None:
+                await self.request_restart()
+            else:
+                reader, writer = await asyncio.open_connection(
+                    "127.0.0.1",
+                    int(environment["M8_GATEWAY_CONTROL_PORT"]),
+                )
+                writer.write((f"restart_gateway {environment['M8_GATEWAY_CONTROL_TOKEN']}\n").encode())
+                await writer.drain()
+                assert await reader.readline() == b"ok\n"
+                writer.close()
+                await writer.wait_closed()
+            live_model = {
+                "summary": {
+                    "provider": "deepseek",
+                    "logical_model_name": environment["M8_LOGICAL_MODEL_NAME"],
+                    "provider_model_id": "deepseek-v4-pro",
+                    "outcome": "completed",
+                    "frame_count": 5,
+                    "tool_call_count": 1,
+                    "terminal_count": 1,
+                    "cursor_count": 5,
+                    "duration_ms": 1200,
+                },
+                "replay_passed": True,
+                "private_denials": 4,
+            }
         Path(environment["M8_BROWSER_RESULT_PATH"]).write_text(
             json.dumps(
                 {
@@ -557,6 +599,7 @@ class FakeBrowserCommandRunner:
                     "contexts": 6,
                     "projects": 2,
                     "private_denials": 4,
+                    "live_model": live_model,
                 }
             ),
             encoding="utf-8",
@@ -585,3 +628,67 @@ async def test_chromium_runner_fails_closed_on_failed_result(tmp_path: Path) -> 
             environment={"PATH": "/synthetic/bin"},
             runtime_root=tmp_path,
         ).run()
+
+
+@pytest.mark.asyncio
+async def test_chromium_runner_live_mode_restarts_only_gateway_and_returns_closed_summary(
+    tmp_path: Path,
+) -> None:
+    restarts = 0
+
+    async def restart_gateway() -> None:
+        nonlocal restarts
+        restarts += 1
+
+    class InMemoryGatewayControl:
+        def __init__(self, callback) -> None:
+            self.callback = callback
+            self.port = 41000
+            self.restart_count = 0
+            self.token = "1" * 32
+
+        async def start(self) -> None:
+            return None
+
+        async def request(self) -> None:
+            self.restart_count += 1
+            await self.callback()
+
+        async def close(self) -> None:
+            self.port = None
+
+    control = InMemoryGatewayControl(restart_gateway)
+    command_runner = FakeBrowserCommandRunner(
+        live=True,
+        request_restart=control.request,
+    )
+
+    result = await ChromiumJourneyRunner(
+        command_runner=command_runner,
+        environment={
+            "PATH": "/synthetic/bin",
+            "DEEPSEEK_API_KEY": "must-not-pass-to-playwright",
+        },
+        runtime_root=tmp_path,
+        gateway_control_factory=lambda _callback: control,
+    ).run(
+        live_model=AcceptanceModel(
+            logical_name="release-live",
+            provider_model_id="deepseek-v4-pro",
+            provider="deepseek",
+        ),
+        live_database_url="postgresql://m8-app:secret@127.0.0.1/live",
+        restart_gateway=restart_gateway,
+    )
+
+    assert result.passed == 8
+    assert result.live_model is not None
+    assert result.live_model.provider == "deepseek"
+    assert result.live_model.logical_model_name == "release-live"
+    assert result.live_model.tool_call_count == 1
+    assert restarts == 1
+    child_environment = command_runner.environments[0]
+    assert child_environment["M8_DEEPSEEK_LIVE"] == "1"
+    assert child_environment["M8_LIVE_DATABASE_URL"].endswith("/live")
+    assert child_environment["M8_LIVE_PROBE_PYTHON"] == sys.executable
+    assert "DEEPSEEK_API_KEY" not in child_environment

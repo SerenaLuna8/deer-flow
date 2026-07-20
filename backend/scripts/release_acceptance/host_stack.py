@@ -574,6 +574,12 @@ class OwnedHostStack:
             raise RuntimeError("HOST_STACK_NOT_STARTED")
         return self._inventory
 
+    @property
+    def database_url(self) -> str:
+        if self._database_url is None:
+            raise RuntimeError("HOST_STACK_NOT_STARTED")
+        return self._database_url
+
     def _environment(self, database_url: str) -> dict[str, str]:
         values = {name: value for name, value in self._env.items() if name in _SAFE_HOST_ENV}
         values["DATABASE_URL"] = database_url

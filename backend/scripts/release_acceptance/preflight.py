@@ -33,17 +33,26 @@ _TOOL_COMMANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-class AcceptanceModel(StrictModel):
+_DEEPSEEK_PROVIDER_CLASS = "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
+
+
+class LiveModelRef(StrictModel):
     logical_name: str = Field(min_length=1, max_length=128)
     provider_model_id: str = Field(min_length=1, max_length=128)
     provider: Literal["deepseek"]
+
+
+# Retain the Task 5 name for callers that construct deterministic preflight
+# fixtures. Task 7 makes the live-model meaning explicit without widening the
+# accepted provider contract.
+AcceptanceModel = LiveModelRef
 
 
 @dataclass(frozen=True, slots=True)
 class AcceptanceConfig:
     version: int
     current_version: int
-    models: tuple[AcceptanceModel, ...]
+    models: tuple[LiveModelRef, ...]
     removed_keys: tuple[str, ...] = ()
     public_digest: str | None = None
 
@@ -247,6 +256,25 @@ class HostToolProbe:
 ConfigLoader = Callable[[Path, Mapping[str, str]], AcceptanceConfig]
 
 
+def _live_model_refs(config: AppConfig) -> tuple[LiveModelRef, ...]:
+    return tuple(
+        LiveModelRef(
+            logical_name=model.name,
+            provider_model_id=model.model,
+            provider="deepseek",
+        )
+        for model in config.models
+        if model.model == "deepseek-v4-pro" and model.use == _DEEPSEEK_PROVIDER_CLASS
+    )
+
+
+def resolve_live_model(config: AppConfig) -> LiveModelRef:
+    matches = _live_model_refs(config)
+    if len(matches) != 1:
+        raise ValueError("DEEPSEEK_MODEL_NOT_UNIQUE")
+    return matches[0]
+
+
 def _resolve_environment(value: object, env: Mapping[str, str]) -> object:
     if isinstance(value, str) and value.startswith("$") and len(value) > 1:
         return env.get(value[1:], value)
@@ -286,7 +314,7 @@ def load_acceptance_config(repository: Path, env: Mapping[str, str]) -> Acceptan
         return AcceptanceConfig(version=version, current_version=current_version, models=(), removed_keys=removed)
     resolved = _resolve_environment(raw, env)
     validated = AppConfig.model_validate(resolved)
-    models = tuple(AcceptanceModel(logical_name=model.name, provider_model_id=model.model, provider="deepseek") for model in validated.models if model.model == "deepseek-v4-pro" and "deepseek" in model.use.casefold())
+    models = _live_model_refs(validated)
     return AcceptanceConfig(
         version=version,
         current_version=current_version,

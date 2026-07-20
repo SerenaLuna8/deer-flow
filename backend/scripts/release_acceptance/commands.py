@@ -126,6 +126,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
 DIAGNOSTIC_STAGE_SEQUENCES: tuple[tuple[StageId, ...], ...] = (
     (StageId.HOST_SETUP,),
     (StageId.HOST_SETUP, StageId.CHROMIUM),
+    (StageId.HOST_SETUP, StageId.CHROMIUM, StageId.DEEPSEEK),
 )
 
 

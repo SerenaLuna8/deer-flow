@@ -7,18 +7,28 @@ import {
   assertViewerBoundaries,
   bindExecutableSystemAgent,
   changeMemberRole,
+  createPinnedLiveAgent,
   createProject,
   createPrivateFixture,
   enterProject,
   expectCapabilities,
+  expectPrivateRunNotFound,
   expectProjectNotFound,
   expectRole,
+  expectRunTerminal,
+  expectToolResultVisible,
   initializeAdmin,
   inviteRole,
+  liveBrowserResult,
   listProjects,
   registerAccount,
+  reloadAndResumeFromLastCursor,
+  submitSyntheticToolPrompt,
 } from "./support/m8-api";
-import { writeBrowserResult } from "./support/m8-result";
+import {
+  type M8LiveBrowserResult,
+  writeBrowserResult,
+} from "./support/m8-result";
 
 test("host release boundaries survive account and project transitions", async ({
   browser,
@@ -37,6 +47,7 @@ test("host release boundaries survive account and project transitions", async ({
     viewer,
     outsider,
   ];
+  let liveModel: M8LiveBrowserResult | null = null;
   try {
     await initializeAdmin(systemAdmin);
     await registerAccount(accountAdmin, "project-admin");
@@ -132,6 +143,26 @@ test("host release boundaries survive account and project transitions", async ({
       new RegExp(`/projects/${projectB.slug}$`, "u"),
     );
 
+    if (process.env.M8_DEEPSEEK_LIVE === "1") {
+      const modelRef = process.env.M8_LOGICAL_MODEL_NAME;
+      expect(modelRef).toBeTruthy();
+      const live = await createPinnedLiveAgent(accountAdmin, projectB, {
+        modelRef: modelRef!,
+        toolGroups: ["file:read", "file:write"],
+      });
+      const livePage = await accountAdmin.newPage();
+      await submitSyntheticToolPrompt(livePage, live);
+      await expectRunTerminal(livePage, live);
+      await expectToolResultVisible(livePage, live);
+      await reloadAndResumeFromLastCursor(livePage, live);
+      live.privateDenials += await expectPrivateRunNotFound(
+        outsider,
+        live.publicHandle,
+      );
+      liveModel = liveBrowserResult(live);
+      await livePage.close();
+    }
+
     await writeBrowserResult({
       schema_version: 1,
       boundaries_passed: 32,
@@ -139,6 +170,7 @@ test("host release boundaries survive account and project transitions", async ({
       contexts: contexts.length,
       projects: 2,
       private_denials: 12,
+      live_model: liveModel,
     });
   } finally {
     await Promise.all(contexts.map((context) => context.close()));

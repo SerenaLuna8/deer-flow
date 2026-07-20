@@ -12,8 +12,13 @@ from pathlib import Path
 import pytest
 
 import scripts.release_acceptance.runner as runner_module
-from scripts.release_acceptance.commands import CommandOutcome, CommandSpec, manifest_digest
-from scripts.release_acceptance.models import CleanupSummary
+from scripts.release_acceptance.commands import (
+    CommandOutcome,
+    CommandSpec,
+    diagnostic_stages,
+    manifest_digest,
+)
+from scripts.release_acceptance.models import CleanupSummary, StageId
 from scripts.release_acceptance.models import TestSummary as AcceptanceTestSummary
 from scripts.release_acceptance.preflight import AcceptanceModel, PreflightSuccess
 from scripts.release_acceptance.runner import ReleaseRunner
@@ -200,8 +205,21 @@ def test_cli_accepts_only_fixed_diagnostic_stage_prefixes() -> None:
         "host_setup",
         "chromium",
     ]
+    assert _parse_args(
+        [
+            "--stage",
+            "host_setup",
+            "--stage",
+            "chromium",
+            "--stage",
+            "deepseek",
+        ]
+    ).stage == ["host_setup", "chromium", "deepseek"]
+    assert diagnostic_stages(("host_setup", "chromium", "deepseek")) == (StageId.HOST_SETUP, StageId.CHROMIUM, StageId.DEEPSEEK)
     with pytest.raises(SystemExit):
         _parse_args(["--stage", "chromium"])
+    with pytest.raises(SystemExit):
+        _parse_args(["--stage", "deepseek"])
     with pytest.raises(SystemExit):
         _parse_args(["--stage", "backend"])
 

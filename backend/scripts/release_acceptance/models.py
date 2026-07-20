@@ -73,6 +73,12 @@ class LiveModelSummary(StrictModel):
     cursor_count: int = Field(ge=0)
     duration_ms: int = Field(ge=0)
 
+    @model_validator(mode="after")
+    def validate_completed_proof(self) -> Self:
+        if self.outcome == "completed" and (self.frame_count <= 1 or self.tool_call_count < 1 or self.terminal_count != 1 or self.cursor_count < self.frame_count):
+            raise ValueError("completed live model summary lacks durable tool proof")
+        return self
+
 
 class RecoverySummary(StrictModel):
     kind: Literal["recovery"] = "recovery"

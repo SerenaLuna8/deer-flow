@@ -24,7 +24,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--stage",
         action="append",
-        choices=("host_setup", "chromium"),
+        choices=("host_setup", "chromium", "deepseek"),
         help="Run a fixed non-sealing diagnostic stage prefix",
     )
     args = parser.parse_args(argv)
@@ -32,7 +32,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         try:
             diagnostic_stages(tuple(args.stage))
         except ValueError:
-            parser.error("diagnostic stages must be the fixed host_setup[/chromium] prefix")
+            parser.error("diagnostic stages must be the fixed host_setup[/chromium[/deepseek]] prefix")
     return args
 
 
@@ -56,6 +56,7 @@ async def _run(args: argparse.Namespace) -> int:
                     "code": result.code,
                     "host_setup_passed": result.host_setup_passed,
                     "chromium_passed": result.chromium.passed if result.chromium else 0,
+                    "deepseek": (result.deepseek.model_dump() if result.deepseek is not None else None),
                     "cleanup": result.cleanup.model_dump(),
                     "sealed": False,
                 },

@@ -27,6 +27,7 @@ from scripts.release_acceptance.host_stack import (
 from scripts.release_acceptance.live_probe import ChromiumJourneyRunner
 from scripts.release_acceptance.models import (
     CleanupSummary,
+    LiveModelSummary,
     ReleaseEvidence,
     SecuritySummary,
     StageEvidence,
@@ -79,6 +80,7 @@ class DiagnosticResult(StrictModel):
     code: str
     host_setup_passed: bool
     chromium: TestSummary | None = None
+    deepseek: LiveModelSummary | None = None
     cleanup: CleanupSummary
 
 
@@ -126,6 +128,7 @@ async def run_host_diagnostic(
     )
     host: OwnedHostStack | None = None
     browser_summary: TestSummary | None = None
+    live_summary: LiveModelSummary | None = None
     host_passed = False
     code = "HOST_DIAGNOSTIC_FAILED"
     try:
@@ -159,11 +162,17 @@ async def run_host_diagnostic(
         await host.start(database_url)
         host_passed = True
         if StageId.CHROMIUM in stages:
-            browser_summary = await ChromiumJourneyRunner(
+            journey = await ChromiumJourneyRunner(
                 command_runner=command_runner,
                 environment=child_environment,
                 runtime_root=runtime_root,
-            ).run()
+            ).run(
+                live_model=(preflight_result.model if StageId.DEEPSEEK in stages else None),
+                live_database_url=(host.database_url if StageId.DEEPSEEK in stages else None),
+                restart_gateway=(host.restart_gateway if StageId.DEEPSEEK in stages else None),
+            )
+            browser_summary = journey.tests
+            live_summary = journey.live_model
         code = "OK"
     except BaseException:
         code = "HOST_DIAGNOSTIC_FAILED"
@@ -190,6 +199,7 @@ async def run_host_diagnostic(
         code=code,
         host_setup_passed=host_passed,
         chromium=browser_summary,
+        deepseek=live_summary,
         cleanup=cleanup,
     )
 

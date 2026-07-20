@@ -9,6 +9,26 @@ export interface M8BrowserResult {
   contexts: number;
   projects: number;
   private_denials: number;
+  live_model: M8LiveBrowserResult | null;
+}
+
+export interface M8LiveModelSummary {
+  kind?: "live_model";
+  provider: "deepseek";
+  logical_model_name: string;
+  provider_model_id: "deepseek-v4-pro";
+  outcome: "completed" | "provider_rejected" | "failed";
+  frame_count: number;
+  tool_call_count: number;
+  terminal_count: number;
+  cursor_count: number;
+  duration_ms: number;
+}
+
+export interface M8LiveBrowserResult {
+  summary: M8LiveModelSummary;
+  replay_passed: true;
+  private_denials: number;
 }
 
 export async function writeBrowserResult(

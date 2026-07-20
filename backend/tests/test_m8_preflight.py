@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ModelConfig
 from scripts.release_acceptance.preflight import (
     AcceptanceConfig,
     AcceptanceModel,
@@ -17,6 +19,7 @@ from scripts.release_acceptance.preflight import (
     SubprocessGitProbe,
     ToolchainState,
     load_acceptance_config,
+    resolve_live_model,
 )
 
 
@@ -89,6 +92,25 @@ def _env() -> dict[str, str]:
     }
 
 
+def _app_config(*models: ModelConfig) -> AppConfig:
+    return AppConfig.model_validate(
+        {
+            "models": [model.model_dump() for model in models],
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "database": {"url": "postgresql://m8-app@127.0.0.1/m8"},
+        }
+    )
+
+
+def _deepseek_model(
+    *,
+    name: str = "release-live",
+    model: str = "deepseek-v4-pro",
+    use: str = "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+) -> ModelConfig:
+    return ModelConfig(name=name, use=use, model=model)
+
+
 def _preflight(
     tmp_path: Path,
     *,
@@ -128,6 +150,29 @@ async def test_provider_model_id_is_unique_but_logical_name_may_differ(tmp_path:
     assert result.model.logical_name == "deepseek-live"
     assert result.model.provider_model_id == "deepseek-v4-pro"
     assert result.secret_present is True
+
+
+def test_live_model_resolves_by_provider_model_id_not_logical_name() -> None:
+    ref = resolve_live_model(_app_config(_deepseek_model(name="release-live")))
+    assert ref.logical_name == "release-live"
+    assert ref.provider == "deepseek"
+    assert ref.provider_model_id == "deepseek-v4-pro"
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        (),
+        (_deepseek_model(name="first"), _deepseek_model(name="second")),
+        (_deepseek_model(use="langchain_openai:ChatOpenAI"),),
+        (_deepseek_model(model="deepseek-chat"),),
+    ],
+)
+def test_live_model_resolution_fails_closed_for_zero_duplicate_or_wrong_provider(
+    models: tuple[ModelConfig, ...],
+) -> None:
+    with pytest.raises(ValueError, match="DEEPSEEK_MODEL_NOT_UNIQUE"):
+        resolve_live_model(_app_config(*models))
 
 
 @pytest.mark.asyncio

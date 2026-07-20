@@ -1,12 +1,24 @@
+import { spawn } from "node:child_process";
+import { createConnection } from "node:net";
+
 import {
   expect,
   type APIResponse,
   type BrowserContext,
+  type Page,
 } from "@playwright/test";
 import { z } from "zod";
 
+import type { M8LiveBrowserResult, M8LiveModelSummary } from "./m8-result";
+
 const BASE_URL = "http://127.0.0.1:2026";
 const ORIGIN_HEADERS = { Origin: BASE_URL } as const;
+
+const uuidSchema = z.string().uuid();
+
+const accountResponseSchema = z
+  .object({ id: uuidSchema, email: z.string().email() })
+  .passthrough();
 
 const projectSchema = z
   .object({
@@ -85,9 +97,42 @@ const automationSchema = z
   .object({ id: z.string().min(1), version: z.number().int().positive() })
   .passthrough();
 
+const assetMutationSchema = z
+  .object({
+    item: z
+      .object({ id: uuidSchema, version: z.number().int().positive() })
+      .passthrough(),
+  })
+  .passthrough();
+
+const agentVersionMutationSchema = z
+  .object({
+    data: z
+      .object({
+        id: uuidSchema,
+        workflow_status: z.enum(["draft", "published", "archived"]),
+        model_ref: z.string(),
+        tool_groups: z.array(z.string()),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+const liveProbeHandoffSchema = z
+  .object({
+    status: z.literal("passed"),
+    frame_count: z.number().int().min(2),
+    tool_call_count: z.number().int().min(1),
+    terminal_count: z.literal(1),
+    cursor_count: z.number().int().min(2),
+    artifact_id: uuidSchema,
+  })
+  .strict();
+
 export type ProjectRef = z.infer<typeof projectSchema>;
 
 export interface AccountFixture {
+  userId: string;
   email: string;
   password: string;
 }
@@ -101,9 +146,30 @@ export interface PrivateFixture {
   automationId: string;
 }
 
+export interface LivePublicHandle {
+  projectId: string;
+  threadId: string;
+  runId: string;
+  artifactId: string;
+}
+
+export interface PinnedLiveAgent {
+  ownerUserId: string;
+  project: ProjectRef;
+  agentId: string;
+  threadId: string;
+  outputPath: string;
+  publicHandle: LivePublicHandle;
+  frameIds: number[];
+  summary: M8LiveModelSummary | null;
+  replayPassed: boolean;
+  privateDenials: number;
+}
+
 export function syntheticAccount(label: string): AccountFixture {
   const nonce = crypto.randomUUID().replaceAll("-", "");
   return {
+    userId: "",
     email: `m8-${label}-${nonce}@example.com`,
     password: `M8-${label}-${nonce}-Aa9!`,
   };
@@ -149,6 +215,7 @@ export async function initializeAdmin(
     headers: ORIGIN_HEADERS,
   });
   await expectStatus(response, 201);
+  credentials.userId = accountResponseSchema.parse(await response.json()).id;
   return credentials;
 }
 
@@ -162,6 +229,7 @@ export async function registerAccount(
     headers: ORIGIN_HEADERS,
   });
   await expectStatus(response, 201);
+  credentials.userId = accountResponseSchema.parse(await response.json()).id;
   return credentials;
 }
 
@@ -325,6 +393,379 @@ export async function bindExecutableSystemAgent(
   );
   await expectStatus(bound, 201);
   return selected!.id;
+}
+
+export async function createPinnedLiveAgent(
+  context: BrowserContext,
+  project: ProjectRef,
+  options: { modelRef: string; toolGroups: ["file:read", "file:write"] },
+): Promise<PinnedLiveAgent> {
+  expect(options.modelRef).toBeTruthy();
+  expect(options.toolGroups).toEqual(["file:read", "file:write"]);
+  const current = await context.request.get("/api/v1/auth/me");
+  await expectStatus(current, 200);
+  const owner = accountResponseSchema.parse(await current.json());
+  const suffix = crypto.randomUUID().replaceAll("-", "");
+  const created = await context.request.post(
+    `/api/projects/${project.id}/agents`,
+    {
+      data: {
+        slug: `m8-live-${suffix.slice(0, 16)}`,
+        display_name: "M8 live synthetic Agent",
+      },
+      headers: await csrfHeaders(context),
+    },
+  );
+  await expectStatus(created, 201);
+  const asset = assetMutationSchema.parse(await created.json()).item;
+  const versionResponse = await context.request.post(
+    `/api/projects/${project.id}/agents/${asset.id}/versions`,
+    {
+      data: {
+        description: "M8 bounded live release Agent",
+        soul: "Follow the synthetic request and use only the approved file tools.",
+        model_ref: options.modelRef,
+        tool_groups: options.toolGroups,
+        skill_version_ids: [],
+        mcp_version_ids: [],
+        expected_asset_version: asset.version,
+      },
+      headers: await csrfHeaders(context),
+    },
+  );
+  await expectStatus(versionResponse, 201);
+  const version = agentVersionMutationSchema.parse(
+    await versionResponse.json(),
+  ).data;
+  expect(version.model_ref).toBe(options.modelRef);
+  expect(version.tool_groups).toEqual(options.toolGroups);
+  const publishedResponse = await context.request.post(
+    `/api/projects/${project.id}/agents/${asset.id}/versions/${version.id}/publish`,
+    {
+      data: { expected_asset_version: asset.version + 1 },
+      headers: await csrfHeaders(context),
+    },
+  );
+  await expectStatus(publishedResponse, 200);
+  const published = agentVersionMutationSchema.parse(
+    await publishedResponse.json(),
+  ).data;
+  expect(published.id).toBe(version.id);
+  expect(published.workflow_status).toBe("published");
+
+  const threadId = crypto.randomUUID();
+  const threadResponse = await context.request.post(
+    `/api/projects/${project.id}/private-work/threads`,
+    {
+      data: {
+        thread_id: threadId,
+        agent_asset_id: asset.id,
+        agent_scope: "project",
+        display_name: "M8 live synthetic thread",
+        metadata: {},
+      },
+      headers: await csrfHeaders(context),
+    },
+  );
+  await expectStatus(threadResponse, 201);
+  threadSchema.parse(await threadResponse.json());
+  return {
+    ownerUserId: owner.id,
+    project,
+    agentId: asset.id,
+    threadId,
+    outputPath: `/mnt/user-data/outputs/m8-${suffix}.txt`,
+    publicHandle: {
+      projectId: project.id,
+      threadId,
+      runId: "",
+      artifactId: "",
+    },
+    frameIds: [],
+    summary: null,
+    replayPassed: false,
+    privateDenials: 0,
+  };
+}
+
+interface ParsedSseFrame {
+  id: number;
+  event: string;
+}
+
+function parseBoundedSse(body: string): ParsedSseFrame[] {
+  if (Buffer.byteLength(body, "utf8") > 512 * 1024) {
+    throw new Error("M8_LIVE_STREAM_TOO_LARGE");
+  }
+  const frames: ParsedSseFrame[] = [];
+  for (const block of body.replaceAll("\r\n", "\n").split("\n\n")) {
+    let id: number | null = null;
+    let event = "";
+    for (const line of block.split("\n")) {
+      if (line.startsWith("id:")) {
+        const value = line.slice(3).trim();
+        if (/^[1-9][0-9]*$/u.test(value)) id = Number(value);
+      } else if (line.startsWith("event:")) {
+        event = line.slice(6).trim();
+      }
+    }
+    if (id !== null && Number.isSafeInteger(id) && event) {
+      frames.push({ id, event });
+    }
+  }
+  return frames;
+}
+
+async function runLiveDatabaseProbe(
+  live: PinnedLiveAgent,
+): Promise<z.infer<typeof liveProbeHandoffSchema>> {
+  const python = process.env.M8_LIVE_PROBE_PYTHON;
+  const databaseUrl = process.env.M8_LIVE_DATABASE_URL;
+  const backendRoot = process.env.M8_LIVE_PROBE_CWD;
+  if (!python || !databaseUrl || !backendRoot) {
+    throw new Error("M8_LIVE_PROBE_CONFIG_REQUIRED");
+  }
+  const environment: NodeJS.ProcessEnv = {
+    NODE_ENV: process.env.NODE_ENV ?? "production",
+  };
+  for (const name of ["HOME", "LANG", "LC_ALL", "PATH", "TMPDIR", "TZ"]) {
+    if (process.env[name]) environment[name] = process.env[name];
+  }
+  environment.M8_LIVE_DATABASE_URL = databaseUrl;
+  return await new Promise((resolve, reject) => {
+    const child = spawn(
+      python,
+      ["-m", "scripts.release_acceptance.live_probe"],
+      {
+        cwd: backendRoot,
+        env: environment,
+        stdio: ["pipe", "pipe", "ignore"],
+      },
+    );
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error("M8_LIVE_PROBE_TIMEOUT"));
+    }, 30_000);
+    child.on("error", () => {
+      clearTimeout(timeout);
+      reject(new Error("M8_LIVE_PROBE_FAILED"));
+    });
+    child.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 4096) {
+        child.kill("SIGTERM");
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0 || size > 4096) {
+        reject(new Error("M8_LIVE_PROBE_FAILED"));
+        return;
+      }
+      try {
+        resolve(
+          liveProbeHandoffSchema.parse(
+            JSON.parse(Buffer.concat(chunks).toString("utf8")),
+          ),
+        );
+      } catch {
+        reject(new Error("M8_LIVE_PROBE_FAILED"));
+      }
+    });
+    child.stdin.end(
+      JSON.stringify({
+        project_id: live.project.id,
+        owner_user_id: live.ownerUserId,
+        thread_id: live.threadId,
+        run_id: live.publicHandle.runId,
+      }),
+    );
+  });
+}
+
+export async function submitSyntheticToolPrompt(
+  page: Page,
+  live: PinnedLiveAgent,
+): Promise<void> {
+  const startedAt = performance.now();
+  await page.goto(`/projects/${live.project.slug}/chats/${live.threadId}`);
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith(
+        `/threads/${live.threadId}/runs/stream`,
+      ),
+    { timeout: 300_000 },
+  );
+  const prompt = [
+    "First call write_file exactly once.",
+    `Write the exact text M8 synthetic live proof to ${live.outputPath}.`,
+    "Then call present_files exactly once for that same path.",
+    "Do not call any other tool. After both tools succeed, finish with a short confirmation.",
+  ].join(" ");
+  const composer = page.getByPlaceholder(/how can i assist you/i);
+  await composer.fill(prompt);
+  await page.getByLabel("Submit").click();
+  const response = await responsePromise;
+  expect(response.status()).toBe(200);
+  const contentLocation = response.headers()["content-location"] ?? "";
+  const runId = /\/runs\/([0-9a-f-]{36})$/iu.exec(contentLocation)?.[1];
+  expect(runId).toBeTruthy();
+  const frames = parseBoundedSse(await response.text());
+  const frameIds = frames.map(({ id }) => id);
+  expect(frameIds.length).toBeGreaterThan(1);
+  expect(new Set(frameIds).size).toBe(frameIds.length);
+  expect(frames.filter(({ event }) => event === "end")).toHaveLength(1);
+  live.publicHandle.runId = uuidSchema.parse(runId);
+  live.frameIds = frameIds;
+  const probe = await runLiveDatabaseProbe(live);
+  expect(probe.frame_count).toBeGreaterThan(1);
+  expect(probe.terminal_count).toBe(1);
+  live.publicHandle.artifactId = probe.artifact_id;
+  live.summary = {
+    provider: "deepseek",
+    logical_model_name: process.env.M8_LOGICAL_MODEL_NAME!,
+    provider_model_id: "deepseek-v4-pro",
+    outcome: "completed",
+    frame_count: probe.frame_count,
+    tool_call_count: probe.tool_call_count,
+    terminal_count: probe.terminal_count,
+    cursor_count: probe.cursor_count,
+    duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+  };
+}
+
+export async function expectRunTerminal(
+  page: Page,
+  live: PinnedLiveAgent,
+): Promise<void> {
+  expect(live.summary?.terminal_count).toBe(1);
+  const response = await page
+    .context()
+    .request.get(
+      `/api/projects/${live.project.id}/private-work/threads/${live.threadId}/runs/${live.publicHandle.runId}`,
+    );
+  await expectStatus(response, 200);
+  expect(
+    z
+      .object({ status: z.literal("success") })
+      .passthrough()
+      .parse(await response.json()).status,
+  ).toBe("success");
+  await expect(page.getByPlaceholder(/how can i assist you/i)).toBeEnabled();
+}
+
+export async function expectToolResultVisible(
+  page: Page,
+  live: PinnedLiveAgent,
+): Promise<void> {
+  expect(live.summary?.tool_call_count).toBeGreaterThanOrEqual(1);
+  await expect(page.getByText(live.outputPath, { exact: false })).toBeVisible({
+    timeout: 30_000,
+  });
+}
+
+async function requestGatewayRestart(): Promise<void> {
+  const port = Number(process.env.M8_GATEWAY_CONTROL_PORT);
+  const token = process.env.M8_GATEWAY_CONTROL_TOKEN;
+  if (!Number.isSafeInteger(port) || port < 1 || !token) {
+    throw new Error("M8_GATEWAY_CONTROL_REQUIRED");
+  }
+  await new Promise<void>((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    let response = "";
+    socket.setTimeout(90_000);
+    socket.on("connect", () => {
+      socket.write(`restart_gateway ${token}\n`);
+    });
+    socket.on("data", (chunk: Buffer) => {
+      response += chunk.toString("utf8");
+      if (response.length > 16) socket.destroy();
+    });
+    socket.on("end", () => {
+      if (response === "ok\n") resolve();
+      else reject(new Error("M8_GATEWAY_RESTART_FAILED"));
+    });
+    socket.on("timeout", () => {
+      socket.destroy();
+      reject(new Error("M8_GATEWAY_RESTART_TIMEOUT"));
+    });
+    socket.on("error", () => {
+      reject(new Error("M8_GATEWAY_RESTART_FAILED"));
+    });
+  });
+}
+
+export async function reloadAndResumeFromLastCursor(
+  page: Page,
+  live: PinnedLiveAgent,
+): Promise<void> {
+  await requestGatewayRestart();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByText(live.outputPath, { exact: false })).toBeVisible({
+    timeout: 60_000,
+  });
+  const cursor = live.frameIds[0];
+  if (cursor === undefined) {
+    throw new Error("M8_LIVE_CURSOR_REQUIRED");
+  }
+  expect(cursor).toBeGreaterThan(0);
+  const replay = await page
+    .context()
+    .request.get(
+      `/api/projects/${live.project.id}/private-work/threads/${live.threadId}/runs/${live.publicHandle.runId}/stream`,
+      { headers: { "Last-Event-ID": String(cursor) }, timeout: 60_000 },
+    );
+  await expectStatus(replay, 200);
+  const frames = parseBoundedSse(await replay.text());
+  expect(frames.length).toBeGreaterThan(0);
+  expect(frames.every(({ id }) => id > cursor)).toBe(true);
+  expect(new Set(frames.map(({ id }) => id)).size).toBe(frames.length);
+  expect(frames.filter(({ event }) => event === "end")).toHaveLength(1);
+  live.replayPassed = true;
+}
+
+export async function expectPrivateRunNotFound(
+  context: BrowserContext,
+  handle: LivePublicHandle,
+): Promise<number> {
+  liveHandleSchema.parse(handle);
+  const paths = [
+    `/api/projects/${handle.projectId}/private-work/threads/${handle.threadId}`,
+    `/api/projects/${handle.projectId}/private-work/threads/${handle.threadId}/runs/${handle.runId}`,
+    `/api/projects/${handle.projectId}/private-work/threads/${handle.threadId}/runs/${handle.runId}/events`,
+    `/api/projects/${handle.projectId}/private-work/artifacts/${handle.artifactId}?thread_id=${handle.threadId}`,
+  ];
+  for (const path of paths) {
+    const response = await context.request.get(path);
+    await expectStatus(response, 404);
+  }
+  return paths.length;
+}
+
+const liveHandleSchema = z
+  .object({
+    projectId: uuidSchema,
+    threadId: uuidSchema,
+    runId: uuidSchema,
+    artifactId: uuidSchema,
+  })
+  .strict();
+
+export function liveBrowserResult(live: PinnedLiveAgent): M8LiveBrowserResult {
+  const summary = live.summary;
+  if (!summary || !live.replayPassed || live.privateDenials < 4) {
+    throw new Error("M8_LIVE_BROWSER_RESULT_INCOMPLETE");
+  }
+  return {
+    summary,
+    replay_passed: true,
+    private_denials: live.privateDenials,
+  };
 }
 
 export async function assertSharedAssetsAreSafe(
