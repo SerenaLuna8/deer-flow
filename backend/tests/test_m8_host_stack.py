@@ -382,18 +382,27 @@ def test_host_port_probe_detects_ipv6_only_listener(
     import scripts.release_acceptance.host_stack as host_stack_module
 
     attempts: list[int] = []
+    reuse_values: list[int] = []
+    monkeypatch.setattr(
+        host_stack_module.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1, stdout=""),
+    )
 
     class FakeSocket:
         def __init__(self, family: int, _kind: int) -> None:
             self.family = family
 
-        def setsockopt(self, *_args) -> None:
-            return None
+        def setsockopt(self, _level: int, _option: int, value: int) -> None:
+            reuse_values.append(value)
 
         def bind(self, _address) -> None:
             attempts.append(self.family)
             if self.family == host_stack_module.socket.AF_INET6:
                 raise OSError("synthetic IPv6 listener")
+
+        def listen(self, _backlog: int) -> None:
+            return None
 
         def close(self) -> None:
             return None
@@ -404,6 +413,64 @@ def test_host_port_probe_detects_ipv6_only_listener(
         host_stack_module.socket.AF_INET,
         host_stack_module.socket.AF_INET6,
     ]
+    assert reuse_values == [1, 1]
+
+
+def test_host_port_probe_requires_reusable_listen(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.release_acceptance.host_stack as host_stack_module
+
+    monkeypatch.setattr(
+        host_stack_module.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1, stdout=""),
+    )
+
+    class FakeSocket:
+        def __init__(self, _family: int, _kind: int) -> None:
+            pass
+
+        def setsockopt(self, _level: int, _option: int, _value: int) -> None:
+            return None
+
+        def bind(self, _address) -> None:
+            return None
+
+        def listen(self, _backlog: int) -> None:
+            raise OSError("synthetic active listener")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(host_stack_module.socket, "socket", FakeSocket)
+    assert SocketPortProbe().is_free(2026) is False
+
+
+def test_host_port_probe_rejects_lsof_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.release_acceptance.host_stack as host_stack_module
+
+    class FakeSocket:
+        def __init__(self, _family: int, _kind: int) -> None:
+            pass
+
+        def setsockopt(self, _level: int, _option: int, _value: int) -> None:
+            return None
+
+        def bind(self, _address) -> None:
+            return None
+
+        def listen(self, _backlog: int) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        host_stack_module.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, stdout="41001\n"),
+    )
+    monkeypatch.setattr(host_stack_module.socket, "socket", FakeSocket)
+    assert SocketPortProbe().is_free(2026) is False
 
 
 def test_acceptance_next_config_uses_invocation_owned_tsconfig() -> None:

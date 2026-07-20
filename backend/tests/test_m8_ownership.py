@@ -178,6 +178,94 @@ def test_database_name_and_retained_path_are_strict(tmp_path: Path) -> None:
         ledger.register_path(other, disposition="retained_evidence")
 
 
+def test_cleanup_port_probe_matches_reusable_server_bind(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.release_acceptance.ownership as ownership_module
+
+    reuse_values: list[int] = []
+    monkeypatch.setattr(
+        ownership_module.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1, stdout=""),
+    )
+
+    class FakeSocket:
+        def __init__(self, _family: int, _kind: int) -> None:
+            pass
+
+        def setsockopt(self, _level: int, _option: int, value: int) -> None:
+            reuse_values.append(value)
+
+        def bind(self, _address) -> None:
+            return None
+
+        def listen(self, _backlog: int) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ownership_module.socket, "socket", FakeSocket)
+    assert OwnershipLedger._port_is_free(2026) is True
+    assert reuse_values == [1, 1]
+
+
+def test_cleanup_port_probe_requires_reusable_listen(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.release_acceptance.ownership as ownership_module
+
+    monkeypatch.setattr(
+        ownership_module.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1, stdout=""),
+    )
+
+    class FakeSocket:
+        def __init__(self, _family: int, _kind: int) -> None:
+            pass
+
+        def setsockopt(self, _level: int, _option: int, _value: int) -> None:
+            return None
+
+        def bind(self, _address) -> None:
+            return None
+
+        def listen(self, _backlog: int) -> None:
+            raise OSError("synthetic active listener")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ownership_module.socket, "socket", FakeSocket)
+    assert OwnershipLedger._port_is_free(2026) is False
+
+
+def test_cleanup_port_probe_rejects_lsof_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.release_acceptance.ownership as ownership_module
+
+    class FakeSocket:
+        def __init__(self, _family: int, _kind: int) -> None:
+            pass
+
+        def setsockopt(self, _level: int, _option: int, _value: int) -> None:
+            return None
+
+        def bind(self, _address) -> None:
+            return None
+
+        def listen(self, _backlog: int) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        ownership_module.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, stdout="41001\n"),
+    )
+    monkeypatch.setattr(ownership_module.socket, "socket", FakeSocket)
+    assert OwnershipLedger._port_is_free(2026) is False
+
+
 @pytest.mark.asyncio
 async def test_cleanup_counts_only_exact_owned_resources(tmp_path: Path) -> None:
     process = FakeProcessProbe()

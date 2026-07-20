@@ -119,7 +119,26 @@ class ProcessInspector(Protocol):
 
 
 class SocketPortProbe:
+    @staticmethod
+    def _has_listener(port: int) -> bool:
+        try:
+            completed = subprocess.run(
+                ("lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"),
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        if completed.returncode == 0:
+            return bool(completed.stdout.strip())
+        return completed.returncode != 1
+
     def is_free(self, port: int) -> bool:
+        if self._has_listener(port):
+            return False
         for family, address in (
             (socket.AF_INET, ("0.0.0.0", port)),
             (socket.AF_INET6, ("::", port, 0, 0)),
@@ -131,8 +150,9 @@ class SocketPortProbe:
                     continue
                 return False
             try:
-                handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+                handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 handle.bind(address)
+                handle.listen(1)
             except OSError:
                 return False
             finally:
