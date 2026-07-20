@@ -33,28 +33,37 @@ elapsed=0
 interval=1
 
 is_port_listening() {
+    local status
+
     if command -v powershell.exe >/dev/null 2>&1; then
         if WAIT_FOR_PORT_PORT="$PORT" powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "\$ErrorActionPreference='SilentlyContinue'; \$Port = [int]\$env:WAIT_FOR_PORT_PORT; if (Get-NetTCPConnection -LocalPort \$Port -State Listen) { exit 0 } else { exit 1 }" >/dev/null 2>&1; then
             return 0
         fi
+        return 1
     fi
 
     if command -v lsof >/dev/null 2>&1; then
         if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0
+        else
+            status=$?
         fi
+        [ "$status" -eq 1 ] && return 1
+        return 0
     fi
 
     if command -v ss >/dev/null 2>&1; then
         if ss -ltn "( sport = :$PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
             return 0
         fi
+        return 1
     fi
 
     if command -v netstat >/dev/null 2>&1; then
         if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${PORT}$"; then
             return 0
         fi
+        return 1
     fi
 
     return 1

@@ -12,10 +12,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SERVE_SH = REPO_ROOT / "scripts" / "serve.sh"
+WAIT_FOR_PORT_SH = REPO_ROOT / "scripts" / "wait-for-port.sh"
 
 
-def _extract_shell_function(name: str) -> str:
-    text = SERVE_SH.read_text(encoding="utf-8")
+def _extract_shell_function(name: str, path: Path = SERVE_SH) -> str:
+    text = path.read_text(encoding="utf-8")
     marker = f"{name}() {{"
     start = text.index(marker)
     depth = 0
@@ -144,6 +145,36 @@ def test_port_probe_trusts_available_lsof_before_fallbacks(tmp_path: Path) -> No
 
     result = subprocess.run(
         [bash, "-c", f"{_extract_shell_function('_is_port_listening')}\n_is_port_listening 8001"],
+        env={**os.environ, "PATH": f"{binary}:{os.environ['PATH']}"},
+        check=False,
+    )
+
+    assert result.returncode == 1
+
+
+def test_wait_for_port_trusts_available_lsof_before_fallbacks(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise wait-for-port.sh helpers")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    for name, body in (
+        ("lsof", "#!/bin/sh\nexit 1\n"),
+        (
+            "ss",
+            "#!/bin/sh\nprintf 'State Local Address:Port\\nLISTEN 127.0.0.1:3000\\n'\n",
+        ),
+    ):
+        command = binary / name
+        command.write_text(body, encoding="utf-8")
+        command.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            f"{_extract_shell_function('is_port_listening', WAIT_FOR_PORT_SH)}\nPORT=3000\nis_port_listening",
+        ],
         env={**os.environ, "PATH": f"{binary}:{os.environ['PATH']}"},
         check=False,
     )
