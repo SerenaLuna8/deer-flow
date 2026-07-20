@@ -824,7 +824,7 @@ async function loginRecoveryAccount(
   password: string,
 ): Promise<void> {
   const response = await context.request.post("/api/v1/auth/login/local", {
-    data: { email, password },
+    form: { username: email, password },
     headers: ORIGIN_HEADERS,
   });
   await expectStatus(response, 200);
