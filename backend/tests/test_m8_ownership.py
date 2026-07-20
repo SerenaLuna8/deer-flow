@@ -157,6 +157,93 @@ def test_path_registration_rejects_symlink_to_in_repository_target(tmp_path: Pat
     assert target.read_text(encoding="utf-8") == "keep"
 
 
+def test_path_registration_rejects_repository_root(tmp_path: Path) -> None:
+    with pytest.raises(OwnershipError, match="OWNED_PATH_TOKEN_INVALID"):
+        _ledger(tmp_path).register_path(tmp_path, disposition="temporary")
+
+
+def test_external_recovery_path_requires_exact_run_root_and_inode(tmp_path: Path) -> None:
+    run_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    repository = tmp_path / "repository"
+    external = tmp_path / "external"
+    repository.mkdir()
+    external.mkdir()
+    ledger = OwnershipLedger(
+        repository=repository,
+        acceptance_run_id=run_id,
+        process_probe=FakeProcessProbe(),
+        database_probe=FakeDatabaseProbe(),
+        external_temp_root=external,
+    )
+    recovery = external / f"deerflow-m8-recovery-{run_id.hex}"
+    recovery.mkdir()
+    owned = ledger.register_external_path(recovery)
+    recovery.rmdir()
+    recovery.mkdir()
+
+    result = ledger.remove_path(owned)
+
+    assert result.status == "identity_mismatch"
+    assert recovery.is_dir()
+
+
+def test_external_recovery_path_rejects_sibling_or_symlink(tmp_path: Path) -> None:
+    run_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    repository = tmp_path / "repository"
+    external = tmp_path / "external"
+    repository.mkdir()
+    external.mkdir()
+    ledger = OwnershipLedger(
+        repository=repository,
+        acceptance_run_id=run_id,
+        process_probe=FakeProcessProbe(),
+        database_probe=FakeDatabaseProbe(),
+        external_temp_root=external,
+    )
+    sibling = external / "not-owned"
+    sibling.mkdir()
+    with pytest.raises(OwnershipError, match="OWNED_EXTERNAL_PATH_INVALID"):
+        ledger.register_external_path(sibling)
+    recovery = external / f"deerflow-m8-recovery-{run_id.hex}"
+    recovery.mkdir()
+    target = recovery / "target"
+    target.mkdir()
+    link = recovery / "link"
+    link.symlink_to(target)
+    with pytest.raises(OwnershipError, match="OWNED_PATH_SYMLINK_REJECTED"):
+        ledger.register_external_path(link)
+
+
+@pytest.mark.asyncio
+async def test_external_recovery_cleanup_removes_only_registered_run_tree(tmp_path: Path) -> None:
+    run_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    repository = tmp_path / "repository"
+    external = tmp_path / "external"
+    repository.mkdir()
+    external.mkdir()
+    sibling = external / "keep"
+    sibling.write_text("keep", encoding="utf-8")
+    recovery = external / f"deerflow-m8-recovery-{run_id.hex}"
+    recovery.mkdir()
+    child = recovery / "archive.dfba"
+    child.write_text("owned", encoding="utf-8")
+    ledger = OwnershipLedger(
+        repository=repository,
+        acceptance_run_id=run_id,
+        process_probe=FakeProcessProbe(),
+        database_probe=FakeDatabaseProbe(),
+        external_temp_root=external,
+    )
+    ledger.register_external_path(recovery)
+    ledger.register_external_path(child)
+
+    summary = await ledger.cleanup()
+
+    assert summary.residual_paths == 0
+    assert not recovery.exists()
+    assert sibling.read_text(encoding="utf-8") == "keep"
+
+
 @pytest.mark.asyncio
 async def test_database_cleanup_refuses_marker_or_owner_mismatch(tmp_path: Path) -> None:
     database = FakeDatabaseProbe()

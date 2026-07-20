@@ -222,7 +222,7 @@ class PostgresRecoveryOperations:
         database_manager: AsyncpgHostDatabaseManager,
         ledger: OwnershipLedger,
         recovery_browser: RecoveryBrowserProbe,
-        runtime_root: Path,
+        recovery_root: Path,
         source_app_url: str,
         postgres_admin_url: str,
         app_role: str,
@@ -237,7 +237,7 @@ class PostgresRecoveryOperations:
         self._database_manager = database_manager
         self._ledger = ledger
         self._browser = recovery_browser
-        self._runtime_root = runtime_root.resolve()
+        self._recovery_root = recovery_root.resolve()
         self._source_app_url = source_app_url
         self._app_role = app_role
         self._authority = authority
@@ -251,7 +251,6 @@ class PostgresRecoveryOperations:
         self._target_name = f"deerflow_restore_{os.getpid()}_{uuid.uuid4().hex}"
         self._target_operator_url = _database_url(postgres_admin_url, self._target_name)
         self._target_app_url = _database_url(source_app_url, self._target_name)
-        self._recovery_root = self._runtime_root / "recovery"
         self._archive_path = self._recovery_root / "archive.dfba"
         self._journal_directory = self._recovery_root / "journal"
         self._journal_path = self._journal_directory / "tombstones.jsonl"
@@ -271,13 +270,9 @@ class PostgresRecoveryOperations:
     async def _prepare_workspace(self) -> None:
         if self._workspace_ready:
             return
-        for path in (
-            self._recovery_root,
-            self._journal_directory,
-            self._proof_directory,
-        ):
+        for path in (self._journal_directory, self._proof_directory):
             await asyncio.to_thread(path.mkdir, mode=0o700)
-            self._ledger.register_path(path, disposition="temporary")
+            self._ledger.register_external_path(path)
         self._workspace_ready = True
 
     async def _live_inventory(self, database_url: str) -> tuple[int, int, int, int]:
@@ -351,7 +346,7 @@ class PostgresRecoveryOperations:
                 archive_id=str(uuid.uuid4()),
             )
         )
-        self._ledger.register_path(self._archive_path, disposition="temporary")
+        self._ledger.register_external_path(self._archive_path)
         return ArchivePoint(
             archive_schema_version=manifest.archive_schema_version,
             schema_revision=manifest.schema_revision,
@@ -403,7 +398,7 @@ class PostgresRecoveryOperations:
             )
         finally:
             await engine.dispose()
-        self._ledger.register_path(self._journal_path, disposition="temporary")
+        self._ledger.register_external_path(self._journal_path)
         return receipt.sequence
 
     async def post_backup_row(self) -> None:

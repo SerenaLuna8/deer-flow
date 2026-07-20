@@ -10,6 +10,7 @@ import signal
 import socket
 import stat
 import subprocess
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ class DatabaseIdentity:
 
 @dataclass(frozen=True, slots=True)
 class OwnedPath:
+    anchor: Literal["repository", "external_temp"]
     relative_token: str
     device: int
     inode: int
@@ -162,8 +164,10 @@ class OwnershipLedger:
         acceptance_run_id: uuid.UUID,
         process_probe: ProcessProbe | None = None,
         database_probe: DatabaseProbe | None = None,
+        external_temp_root: Path | None = None,
     ) -> None:
         self.repository = repository.resolve()
+        self.external_temp_root = (external_temp_root or Path(tempfile.gettempdir())).resolve()
         self.acceptance_run_id = acceptance_run_id
         self._process_probe = process_probe or HostProcessProbe()
         self._database_probe = database_probe or NullDatabaseProbe()
@@ -193,17 +197,29 @@ class OwnershipLedger:
         self._databases.append(owned)
         return owned
 
-    def register_path(self, path: Path, *, disposition: Literal["temporary", "retained_evidence"]) -> OwnedPath:
-        candidate = path if path.is_absolute() else self.repository / path
+    def _register_anchored_path(
+        self,
+        path: Path,
+        *,
+        anchor: Literal["repository", "external_temp"],
+        disposition: Literal["temporary", "retained_evidence"],
+    ) -> OwnedPath:
+        root = self.repository if anchor == "repository" else self.external_temp_root
+        candidate = path if path.is_absolute() else root / path
         absolute = Path(os.path.abspath(candidate))
         try:
-            relative = absolute.relative_to(self.repository).as_posix()
+            relative = absolute.relative_to(root).as_posix()
         except ValueError:
-            raise OwnershipError("OWNED_PATH_OUTSIDE_REPOSITORY") from None
+            code = "OWNED_PATH_OUTSIDE_REPOSITORY" if anchor == "repository" else "OWNED_EXTERNAL_PATH_INVALID"
+            raise OwnershipError(code) from None
         token = PurePosixPath(relative)
-        if str(token) != relative or any(part in {"", ".", ".."} for part in token.parts):
+        if relative in {"", "."} or str(token) != relative or any(part in {"", ".", ".."} for part in token.parts):
             raise OwnershipError("OWNED_PATH_TOKEN_INVALID")
-        current = self.repository
+        if anchor == "external_temp":
+            expected_root = f"deerflow-m8-recovery-{self.acceptance_run_id.hex}"
+            if disposition != "temporary" or not token.parts or token.parts[0] != expected_root:
+                raise OwnershipError("OWNED_EXTERNAL_PATH_INVALID")
+        current = root
         for part in token.parts:
             current /= part
             info = os.lstat(current)
@@ -222,16 +238,31 @@ class OwnershipLedger:
         else:
             raise OwnershipError("OWNED_PATH_KIND_INVALID")
         owned = OwnedPath(
+            anchor=anchor,
             relative_token=relative,
             device=info.st_dev,
             inode=info.st_ino,
             kind=kind,
             disposition=disposition,
         )
-        if any(item.relative_token == relative for item in self._paths):
+        if any(item.anchor == anchor and item.relative_token == relative for item in self._paths):
             raise OwnershipError("OWNED_PATH_DUPLICATE")
         self._paths.append(owned)
         return owned
+
+    def register_path(self, path: Path, *, disposition: Literal["temporary", "retained_evidence"]) -> OwnedPath:
+        return self._register_anchored_path(
+            path,
+            anchor="repository",
+            disposition=disposition,
+        )
+
+    def register_external_path(self, path: Path) -> OwnedPath:
+        return self._register_anchored_path(
+            path,
+            anchor="external_temp",
+            disposition="temporary",
+        )
 
     def reserve_port(self, port: int) -> None:
         if port < 1 or port > 65535 or port in self._ports:
@@ -269,8 +300,15 @@ class OwnershipLedger:
         return CleanupAction(status="failed")
 
     def remove_path(self, owned: OwnedPath) -> CleanupAction:
-        target = self.repository / owned.relative_token
+        root = self.repository if owned.anchor == "repository" else self.external_temp_root
+        target = root / owned.relative_token
+        current = root
         try:
+            for part in PurePosixPath(owned.relative_token).parts:
+                current /= part
+                current_info = os.lstat(current)
+                if stat.S_ISLNK(current_info.st_mode):
+                    return CleanupAction(status="identity_mismatch")
             info = os.lstat(target)
         except FileNotFoundError:
             return CleanupAction(status="absent")

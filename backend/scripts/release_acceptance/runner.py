@@ -8,6 +8,7 @@ import os
 import secrets
 import signal
 import subprocess
+import tempfile
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -139,6 +140,7 @@ async def run_host_diagnostic(
     run_id = uuid.uuid4()
     runtime_root = repository / f".m8-runtime-{run_id.hex}"
     frontend_runtime_root = repository / "frontend" / f".m8-next-{run_id.hex}"
+    recovery_root = Path(tempfile.gettempdir()).resolve() / f"deerflow-m8-recovery-{run_id.hex}"
     admin_url = environment.get("POSTGRES_ADMIN_URL", "")
     database_url = environment.get("DATABASE_URL", "")
     parsed = urlsplit(database_url.replace("postgresql+asyncpg://", "postgresql://", 1))
@@ -160,6 +162,9 @@ async def run_host_diagnostic(
         ledger.register_path(runtime_root, disposition="temporary")
         await asyncio.to_thread(frontend_runtime_root.mkdir, mode=0o700)
         ledger.register_path(frontend_runtime_root, disposition="temporary")
+        if StageId.RECOVERY in stages:
+            await asyncio.to_thread(recovery_root.mkdir, mode=0o700)
+            ledger.register_external_path(recovery_root)
         await asyncio.to_thread(_write_owned_frontend_tsconfig, frontend_runtime_root)
         child_environment = dict(environment)
         child_environment.update(
@@ -221,7 +226,7 @@ async def run_host_diagnostic(
                         database_manager=database,
                         ledger=ledger,
                         recovery_browser=recovery_browser,
-                        runtime_root=runtime_root,
+                        recovery_root=recovery_root,
                         source_app_url=source_app_url,
                         postgres_admin_url=admin_url,
                         app_role=app_role,
