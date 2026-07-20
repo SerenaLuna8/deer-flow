@@ -101,10 +101,10 @@ export interface PrivateFixture {
   automationId: string;
 }
 
-function account(label: string): AccountFixture {
+export function syntheticAccount(label: string): AccountFixture {
   const nonce = crypto.randomUUID().replaceAll("-", "");
   return {
-    email: `m8-${label}-${nonce}@example.invalid`,
+    email: `m8-${label}-${nonce}@example.com`,
     password: `M8-${label}-${nonce}-Aa9!`,
   };
 }
@@ -143,7 +143,7 @@ async function csrfHeaders(
 export async function initializeAdmin(
   context: BrowserContext,
 ): Promise<AccountFixture> {
-  const credentials = account("system-admin");
+  const credentials = syntheticAccount("system-admin");
   const response = await context.request.post("/api/v1/auth/initialize", {
     data: credentials,
     headers: ORIGIN_HEADERS,
@@ -156,7 +156,7 @@ export async function registerAccount(
   context: BrowserContext,
   label: string,
 ): Promise<AccountFixture> {
-  const credentials = account(label);
+  const credentials = syntheticAccount(label);
   const response = await context.request.post("/api/v1/auth/register", {
     data: credentials,
     headers: ORIGIN_HEADERS,
