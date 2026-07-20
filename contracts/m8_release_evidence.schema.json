@@ -1,0 +1,520 @@
+{
+  "$defs": {
+    "AcceptanceStatus": {
+      "enum": [
+        "failed",
+        "candidate_ready",
+        "final_pass"
+      ],
+      "title": "AcceptanceStatus",
+      "type": "string"
+    },
+    "AwaitingReview": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "awaiting_review",
+          "default": "awaiting_review",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "title": "AwaitingReview",
+      "type": "object"
+    },
+    "CleanupSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "cleanup",
+          "default": "cleanup",
+          "title": "Kind",
+          "type": "string"
+        },
+        "residual_databases": {
+          "minimum": 0,
+          "title": "Residual Databases",
+          "type": "integer"
+        },
+        "residual_paths": {
+          "minimum": 0,
+          "title": "Residual Paths",
+          "type": "integer"
+        },
+        "residual_ports": {
+          "minimum": 0,
+          "title": "Residual Ports",
+          "type": "integer"
+        },
+        "residual_processes": {
+          "minimum": 0,
+          "title": "Residual Processes",
+          "type": "integer"
+        },
+        "retained_evidence": {
+          "minimum": 0,
+          "title": "Retained Evidence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "residual_processes",
+        "residual_ports",
+        "residual_databases",
+        "residual_paths",
+        "retained_evidence"
+      ],
+      "title": "CleanupSummary",
+      "type": "object"
+    },
+    "LiveModelSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor_count": {
+          "minimum": 0,
+          "title": "Cursor Count",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "frame_count": {
+          "minimum": 0,
+          "title": "Frame Count",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "live_model",
+          "default": "live_model",
+          "title": "Kind",
+          "type": "string"
+        },
+        "logical_model_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Logical Model Name",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "provider_rejected",
+            "failed"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "provider": {
+          "const": "deepseek",
+          "title": "Provider",
+          "type": "string"
+        },
+        "provider_model_id": {
+          "const": "deepseek-v4-pro",
+          "title": "Provider Model Id",
+          "type": "string"
+        },
+        "terminal_count": {
+          "minimum": 0,
+          "title": "Terminal Count",
+          "type": "integer"
+        },
+        "tool_call_count": {
+          "minimum": 0,
+          "title": "Tool Call Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "logical_model_name",
+        "provider_model_id",
+        "outcome",
+        "frame_count",
+        "tool_call_count",
+        "terminal_count",
+        "cursor_count",
+        "duration_ms"
+      ],
+      "title": "LiveModelSummary",
+      "type": "object"
+    },
+    "RecoverySummary": {
+      "additionalProperties": false,
+      "properties": {
+        "archive_schema_version": {
+          "const": 7,
+          "title": "Archive Schema Version",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "recovery",
+          "default": "recovery",
+          "title": "Kind",
+          "type": "string"
+        },
+        "restored_count": {
+          "minimum": 0,
+          "title": "Restored Count",
+          "type": "integer"
+        },
+        "rpo_outcome": {
+          "enum": [
+            "archive_point_confirmed",
+            "failed"
+          ],
+          "title": "Rpo Outcome",
+          "type": "string"
+        },
+        "rto_ms": {
+          "minimum": 0,
+          "title": "Rto Ms",
+          "type": "integer"
+        },
+        "schema_revision": {
+          "const": "0001_project_saas_baseline",
+          "title": "Schema Revision",
+          "type": "string"
+        },
+        "tombstone_count": {
+          "minimum": 0,
+          "title": "Tombstone Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "archive_schema_version",
+        "schema_revision",
+        "tombstone_count",
+        "rto_ms",
+        "rpo_outcome",
+        "restored_count"
+      ],
+      "title": "RecoverySummary",
+      "type": "object"
+    },
+    "ReviewReport": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_commit": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Candidate Commit",
+          "type": "string"
+        },
+        "candidate_evidence_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Evidence Digest",
+          "type": "string"
+        },
+        "critical": {
+          "minimum": 0,
+          "title": "Critical",
+          "type": "integer"
+        },
+        "important": {
+          "minimum": 0,
+          "title": "Important",
+          "type": "integer"
+        },
+        "minor": {
+          "minimum": 0,
+          "title": "Minor",
+          "type": "integer"
+        },
+        "review_base_commit": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Review Base Commit",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "stage_manifest_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Stage Manifest Digest",
+          "type": "string"
+        },
+        "status": {
+          "const": "reviewed",
+          "default": "reviewed",
+          "title": "Status",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "passed",
+            "findings_present"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "verdict",
+        "candidate_commit",
+        "stage_manifest_digest",
+        "candidate_evidence_digest",
+        "review_base_commit",
+        "critical",
+        "important",
+        "minor"
+      ],
+      "title": "ReviewReport",
+      "type": "object"
+    },
+    "SecuritySummary": {
+      "additionalProperties": false,
+      "properties": {
+        "effective_findings": {
+          "minimum": 0,
+          "title": "Effective Findings",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "security",
+          "default": "security",
+          "title": "Kind",
+          "type": "string"
+        },
+        "scanned": {
+          "minimum": 0,
+          "title": "Scanned",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scanned",
+        "effective_findings"
+      ],
+      "title": "SecuritySummary",
+      "type": "object"
+    },
+    "StageEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$",
+          "title": "Command Id",
+          "type": "string"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "failed": {
+          "minimum": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "finished_at": {
+          "format": "date-time",
+          "title": "Finished At",
+          "type": "string"
+        },
+        "passed": {
+          "minimum": 0,
+          "title": "Passed",
+          "type": "integer"
+        },
+        "skipped": {
+          "minimum": 0,
+          "title": "Skipped",
+          "type": "integer"
+        },
+        "stage": {
+          "$ref": "#/$defs/StageId"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "summary": {
+          "discriminator": {
+            "mapping": {
+              "cleanup": "#/$defs/CleanupSummary",
+              "live_model": "#/$defs/LiveModelSummary",
+              "recovery": "#/$defs/RecoverySummary",
+              "security": "#/$defs/SecuritySummary",
+              "tests": "#/$defs/TestSummary"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TestSummary"
+            },
+            {
+              "$ref": "#/$defs/SecuritySummary"
+            },
+            {
+              "$ref": "#/$defs/LiveModelSummary"
+            },
+            {
+              "$ref": "#/$defs/RecoverySummary"
+            },
+            {
+              "$ref": "#/$defs/CleanupSummary"
+            }
+          ],
+          "title": "Summary"
+        }
+      },
+      "required": [
+        "stage",
+        "command_id",
+        "status",
+        "started_at",
+        "finished_at",
+        "duration_ms",
+        "passed",
+        "failed",
+        "skipped",
+        "summary"
+      ],
+      "title": "StageEvidence",
+      "type": "object"
+    },
+    "StageId": {
+      "enum": [
+        "preflight",
+        "contracts",
+        "postgres",
+        "backend",
+        "frontend",
+        "security",
+        "host_setup",
+        "chromium",
+        "deepseek",
+        "recovery",
+        "cleanup"
+      ],
+      "title": "StageId",
+      "type": "string"
+    },
+    "TestSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "collected": {
+          "minimum": 0,
+          "title": "Collected",
+          "type": "integer"
+        },
+        "failed": {
+          "minimum": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "tests",
+          "default": "tests",
+          "title": "Kind",
+          "type": "string"
+        },
+        "passed": {
+          "minimum": 0,
+          "title": "Passed",
+          "type": "integer"
+        },
+        "skipped": {
+          "minimum": 0,
+          "title": "Skipped",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "collected",
+        "passed",
+        "failed",
+        "skipped"
+      ],
+      "title": "TestSummary",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "acceptance_run_id": {
+      "format": "uuid",
+      "title": "Acceptance Run Id",
+      "type": "string"
+    },
+    "candidate_evidence_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Candidate Evidence Digest",
+      "type": "string"
+    },
+    "git_commit": {
+      "pattern": "^[0-9a-f]{40,64}$",
+      "title": "Git Commit",
+      "type": "string"
+    },
+    "review": {
+      "discriminator": {
+        "mapping": {
+          "awaiting_review": "#/$defs/AwaitingReview",
+          "reviewed": "#/$defs/ReviewReport"
+        },
+        "propertyName": "status"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AwaitingReview"
+        },
+        {
+          "$ref": "#/$defs/ReviewReport"
+        }
+      ],
+      "title": "Review"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "stage_manifest_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Stage Manifest Digest",
+      "type": "string"
+    },
+    "stages": {
+      "items": {
+        "$ref": "#/$defs/StageEvidence"
+      },
+      "maxItems": 11,
+      "minItems": 1,
+      "title": "Stages",
+      "type": "array"
+    },
+    "status": {
+      "$ref": "#/$defs/AcceptanceStatus"
+    }
+  },
+  "required": [
+    "acceptance_run_id",
+    "status",
+    "git_commit",
+    "stage_manifest_digest",
+    "candidate_evidence_digest",
+    "stages",
+    "review"
+  ],
+  "title": "ReleaseEvidence",
+  "type": "object"
+}

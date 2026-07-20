@@ -1,0 +1,72 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "candidate_commit": {
+      "pattern": "^[0-9a-f]{40,64}$",
+      "title": "Candidate Commit",
+      "type": "string"
+    },
+    "candidate_evidence_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Candidate Evidence Digest",
+      "type": "string"
+    },
+    "critical": {
+      "minimum": 0,
+      "title": "Critical",
+      "type": "integer"
+    },
+    "important": {
+      "minimum": 0,
+      "title": "Important",
+      "type": "integer"
+    },
+    "minor": {
+      "minimum": 0,
+      "title": "Minor",
+      "type": "integer"
+    },
+    "review_base_commit": {
+      "pattern": "^[0-9a-f]{40,64}$",
+      "title": "Review Base Commit",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "stage_manifest_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Stage Manifest Digest",
+      "type": "string"
+    },
+    "status": {
+      "const": "reviewed",
+      "default": "reviewed",
+      "title": "Status",
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "passed",
+        "findings_present"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    }
+  },
+  "required": [
+    "verdict",
+    "candidate_commit",
+    "stage_manifest_digest",
+    "candidate_evidence_digest",
+    "review_base_commit",
+    "critical",
+    "important",
+    "minor"
+  ],
+  "title": "ReviewReport",
+  "type": "object"
+}

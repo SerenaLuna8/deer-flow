@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "dimensions": {
+    "actors": [
+      "unauthenticated",
+      "project_outsider",
+      "admin",
+      "editor",
+      "runner",
+      "viewer",
+      "different_owner",
+      "different_project",
+      "different_account",
+      "removed_membership",
+      "stale_membership",
+      "system_admin"
+    ],
+    "scopes": [
+      "public",
+      "project_shared",
+      "project_private",
+      "project_governance",
+      "system_governance"
+    ],
+    "resource_families": [
+      "auth",
+      "project",
+      "membership",
+      "shared_asset",
+      "credential",
+      "thread",
+      "run",
+      "run_event",
+      "file",
+      "artifact",
+      "memory",
+      "automation",
+      "job",
+      "quota",
+      "audit",
+      "recovery"
+    ],
+    "operations": [
+      "create",
+      "list",
+      "get",
+      "update",
+      "delete",
+      "publish",
+      "bind",
+      "approve",
+      "run",
+      "stop",
+      "stream",
+      "reconnect",
+      "restore",
+      "purge"
+    ],
+    "layers": [
+      "frontend",
+      "api",
+      "service",
+      "repository",
+      "database",
+      "worker",
+      "scheduler"
+    ]
+  },
+  "cases": []
+}
