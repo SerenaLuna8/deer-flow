@@ -60,7 +60,7 @@ _VITEST_TESTS = re.compile(
     re.MULTILINE,
 )
 _PLAYWRIGHT_TESTS = re.compile(
-    r"^[ \t]*(?P<count>\d+)[ \t]+(?P<kind>passed|failed|skipped)"
+    r"^[ \t]*(?P<count>\d+)[ \t]+(?P<kind>passed|failed|skipped|flaky)"
     r"(?:[ \t]+\([^\r\n]+\))?[ \t]*$",
     re.MULTILINE,
 )
@@ -568,7 +568,8 @@ class AsyncCommandExecutor:
         text = _ANSI_ESCAPE.sub("", output.decode("utf-8", errors="replace"))
         counts = {"passed": 0, "failed": 0, "skipped": 0}
         for match in _PLAYWRIGHT_TESTS.finditer(text):
-            counts[match.group("kind")] += int(match.group("count"))
+            kind = match.group("kind")
+            counts["failed" if kind == "flaky" else kind] += int(match.group("count"))
         if returncode and counts["failed"] == 0:
             counts["failed"] = 1
         if not returncode and sum(counts.values()) == 0:

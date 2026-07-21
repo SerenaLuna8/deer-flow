@@ -521,6 +521,7 @@ test("409 refreshes the version and 429 leaves a safe explicit retry", async ({
   await dialog.getByRole("button", { name: "保存修改" }).click();
   await expect(dialog.getByText("状态已更新，请刷新后重试。")).toBeVisible();
   await dialog.getByRole("button", { name: "刷新" }).click();
+  await expect(page.getByText("版本 2")).toBeVisible();
   await dialog
     .getByRole("textbox", { name: "Title" })
     .fill("Concurrent task edited");

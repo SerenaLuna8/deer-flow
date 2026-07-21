@@ -202,6 +202,20 @@ def test_playwright_summary_records_the_complete_test_inventory() -> None:
     )
 
 
+def test_playwright_summary_rejects_retry_flakes_even_with_zero_exit() -> None:
+    output = b"Running 79 tests using 7 workers\n  1 flaky\n  78 passed (41.5s)\n"
+
+    outcome = AsyncCommandExecutor._playwright_summary(output, returncode=0)
+
+    assert outcome.status == "failed"
+    assert outcome.summary == AcceptanceTestSummary(
+        collected=79,
+        passed=78,
+        failed=1,
+        skipped=0,
+    )
+
+
 def test_deterministic_command_output_is_secret_scanned_in_memory() -> None:
     assert AsyncCommandExecutor._runtime_log_is_safe(b"ordinary bounded test output")
     assert not AsyncCommandExecutor._runtime_log_is_safe(b"provider returned sk-" + b"a" * 32)
