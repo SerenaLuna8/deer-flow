@@ -132,8 +132,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
      -e POSTGRES_DB=postgres postgres:17-alpine
    docker exec deerflow-postgres psql -U postgres -d postgres \
      -c "CREATE ROLE deerflow LOGIN PASSWORD '<app-password>'"
-   export POSTGRES_ADMIN_URL='postgresql+asyncpg://postgres:<url-encoded-local-password>@127.0.0.1:5432/postgres'
-   export DATABASE_URL='postgresql+asyncpg://deerflow:<url-encoded-app-password>@127.0.0.1:5432/deerflow'
+   export POSTGRES_ADMIN_URL='<admin-connection-url>'
+   export DATABASE_URL='<application-connection-url>'
    make setup-db
    make check-db
    ```
@@ -151,8 +151,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    迁移命令已删除。
 
    ```bash
-   export POSTGRES_ADMIN_URL="postgresql+asyncpg://postgres:<encoded-password>@127.0.0.1:5432/postgres"
-   export DATABASE_URL="postgresql+asyncpg://deerflow:<encoded-password>@127.0.0.1:5432/deerflow"
+   export POSTGRES_ADMIN_URL='<admin-connection-url>'
+   export DATABASE_URL='<application-connection-url>'
    make setup-db
    make check-db
    make start
