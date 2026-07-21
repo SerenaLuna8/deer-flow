@@ -288,6 +288,8 @@ def test_backend_dependency_auditor_exports_locked_no_dev_graph(monkeypatch: pyt
     report = BackendDependencyAuditor(tmp_path).run()
     assert report.scanned_packages == 1
     assert report.effective_findings == 0
+    assert report.database_timestamp.tzinfo is not None
+    assert report.exclusion_ids == ()
     assert calls[0][:5] == ("uv", "export", "--locked", "--no-dev", "--no-emit-workspace")
     assert "--disable-pip" in calls[1]
 
@@ -311,6 +313,8 @@ def test_frontend_dependency_auditor_reports_closed_metadata(monkeypatch: pytest
     report = FrontendDependencyAuditor(tmp_path).run()
     assert report.scanned_packages == 7
     assert report.effective_findings == 1
+    assert report.database_timestamp.tzinfo is not None
+    assert report.exclusion_ids == ()
     assert report.findings[0].model_dump().keys() == {
         "ecosystem",
         "advisory_id",

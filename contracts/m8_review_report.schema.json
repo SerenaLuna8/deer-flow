@@ -26,6 +26,11 @@
       "title": "Minor",
       "type": "integer"
     },
+    "report_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Report Sha256",
+      "type": "string"
+    },
     "review_base_commit": {
       "pattern": "^[0-9a-f]{40,64}$",
       "title": "Review Base Commit",
@@ -71,7 +76,8 @@
     "review_range",
     "critical",
     "important",
-    "minor"
+    "minor",
+    "report_sha256"
   ],
   "title": "ReviewReport",
   "type": "object"

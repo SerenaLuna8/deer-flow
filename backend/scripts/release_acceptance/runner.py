@@ -11,10 +11,12 @@ import subprocess
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, Protocol
 from urllib.parse import unquote, urlsplit
+
+from pydantic import model_validator
 
 from app.recovery.archive import load_backup_key
 from app.reliability.owner_refs import AuditHmacKeyring
@@ -25,6 +27,7 @@ from scripts.release_acceptance.commands import (
     CommandSpec,
     manifest_digest,
 )
+from scripts.release_acceptance.contracts import canonical_json_bytes
 from scripts.release_acceptance.evidence import EvidenceWriter
 from scripts.release_acceptance.host_stack import (
     AsyncpgHostDatabaseManager,
@@ -35,6 +38,7 @@ from scripts.release_acceptance.live_probe import ChromiumJourneyRunner, Recover
 from scripts.release_acceptance.models import (
     M8_REVIEW_BASE_COMMIT,
     CleanupSummary,
+    HostCommandTiming,
     LiveModelSummary,
     RecoverySummary,
     ReleaseEvidence,
@@ -48,6 +52,7 @@ from scripts.release_acceptance.models import (
 from scripts.release_acceptance.ownership import OwnershipLedger
 from scripts.release_acceptance.preflight import Preflight, PreflightFailure, PreflightResult, PreflightSuccess
 from scripts.release_acceptance.recovery_drill import PostgresRecoveryOperations, RecoverySwitchDrill
+from scripts.release_acceptance.security import SecretScanner, load_secret_allowlist
 
 
 class StageExecutor(Protocol):
@@ -95,6 +100,20 @@ class DiagnosticResult(StrictModel):
     recovery: RecoverySummary | None = None
     evidence_log_security_passed: bool = True
     cleanup: CleanupSummary
+    timings: tuple[HostCommandTiming, ...] = ()
+
+    def timing_for(self, command_id: str) -> HostCommandTiming | None:
+        return next(
+            (item for item in self.timings if item.command_id == command_id),
+            None,
+        )
+
+    @model_validator(mode="after")
+    def validate_unique_timings(self) -> DiagnosticResult:
+        command_ids = [item.command_id for item in self.timings]
+        if len(command_ids) != len(set(command_ids)):
+            raise ValueError("host command timing is duplicated")
+        return self
 
 
 HostAcceptanceRunner = Callable[..., Awaitable[DiagnosticResult | PreflightFailure]]
@@ -162,6 +181,8 @@ async def run_host_diagnostic(
     browser_summary: TestSummary | None = None
     live_summary: LiveModelSummary | None = None
     recovery_summary: RecoverySummary | None = None
+    recovery_timing: HostCommandTiming | None = None
+    command_runner: SubprocessHostCommandRunner | None = None
     host_passed = False
     code = "HOST_DIAGNOSTIC_FAILED"
     evidence_log_security_passed = False
@@ -215,6 +236,7 @@ async def run_host_diagnostic(
             browser_summary = journey.tests
             live_summary = journey.live_model
             if StageId.RECOVERY in stages:
+                recovery_started = datetime.now(UTC)
                 source_app_url = host.database_url
                 backup_key = load_backup_key(
                     environment.get("DEER_FLOW_BACKUP_KEY"),
@@ -246,6 +268,13 @@ async def run_host_diagnostic(
                         keyring=_audit_keyring(environment),
                     )
                 ).run()
+                recovery_finished = datetime.now(UTC)
+                recovery_timing = HostCommandTiming(
+                    command_id="recovery.full_switch",
+                    started_at=recovery_started,
+                    finished_at=recovery_finished,
+                    duration_ms=int((recovery_finished - recovery_started).total_seconds() * 1000),
+                )
         code = "OK"
     except BaseException:
         code = "HOST_DIAGNOSTIC_FAILED"
@@ -256,11 +285,6 @@ async def run_host_diagnostic(
             except BaseException:
                 code = "HOST_STOP_FAILED"
         try:
-            from scripts.release_acceptance.security import (
-                SecretScanner,
-                load_secret_allowlist,
-            )
-
             allowlist = await asyncio.to_thread(
                 load_secret_allowlist,
                 repository / "contracts" / "m8_secret_allowlist.json",
@@ -277,8 +301,8 @@ async def run_host_diagnostic(
                 relative_path="support-bundle.zip",
             )
             findings = (*findings, *support_findings)
-            evidence_log_security_passed = not findings
-            if findings:
+            evidence_log_security_passed = not findings and (command_runner is None or command_runner.logs_security_passed)
+            if not evidence_log_security_passed:
                 code = "HOST_EVIDENCE_SECURITY_FAILED"
         except BaseException:
             evidence_log_security_passed = False
@@ -295,6 +319,27 @@ async def run_host_diagnostic(
             )
         if _has_residual(cleanup):
             code = "HOST_CLEANUP_FAILED"
+    formal_timings: list[HostCommandTiming] = []
+    if command_runner is not None:
+        formal_timings.extend(item for item in command_runner.timings if item.command_id.startswith("host.") and item.command_id != "host.gateway_restart")
+        journey_timing = command_runner.timing_for("chromium.journey")
+        if journey_timing is not None:
+            formal_timings.append(journey_timing.model_copy(update={"command_id": "chromium.host_journey"}))
+            if live_summary is not None:
+                live_started = journey_timing.finished_at - timedelta(milliseconds=live_summary.duration_ms)
+                if live_started < journey_timing.started_at:
+                    code = "HOST_TIMING_FAILED"
+                else:
+                    formal_timings.append(
+                        HostCommandTiming(
+                            command_id="deepseek.live_journey",
+                            started_at=live_started,
+                            finished_at=journey_timing.finished_at,
+                            duration_ms=live_summary.duration_ms,
+                        )
+                    )
+    if recovery_timing is not None:
+        formal_timings.append(recovery_timing)
     return DiagnosticResult(
         status="passed" if code == "OK" else "failed",
         code=code,
@@ -304,6 +349,7 @@ async def run_host_diagnostic(
         recovery=recovery_summary,
         evidence_log_security_passed=evidence_log_security_passed,
         cleanup=cleanup,
+        timings=tuple(formal_timings),
     )
 
 
@@ -313,15 +359,22 @@ def _stage_evidence(
     command_id: str,
     started_at: datetime,
     outcome: CommandOutcome,
+    timing: HostCommandTiming | None = None,
 ) -> StageEvidence:
-    finished_at = datetime.now(UTC)
+    if timing is not None:
+        started_at = timing.started_at
+        finished_at = timing.finished_at
+        duration_ms = timing.duration_ms
+    else:
+        finished_at = datetime.now(UTC)
+        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
     return StageEvidence(
         stage=stage,
         command_id=command_id,
         status=outcome.status,
         started_at=started_at,
         finished_at=finished_at,
-        duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+        duration_ms=duration_ms,
         passed=outcome.passed,
         failed=outcome.failed,
         skipped=outcome.skipped,
@@ -329,12 +382,40 @@ def _stage_evidence(
     )
 
 
-def _failed_outcome(stage: StageId) -> CommandOutcome:
+def _failed_outcome(stage: StageId, command_id: str | None = None) -> CommandOutcome:
     if stage is StageId.SECURITY:
-        summary = SecuritySummary(scanned=0, effective_findings=1)
+        summary = SecuritySummary(
+            scanned=0,
+            effective_findings=1,
+            database_timestamp=datetime.now(UTC),
+            exclusion_ids=(),
+        )
+    elif command_id == "contracts.matrix":
+        from scripts.release_acceptance.models import MatrixSummary
+
+        summary = MatrixSummary(
+            coverage_count=0,
+            uncovered_count=1,
+            selector_count=0,
+        )
     else:
         summary = TestSummary(collected=1, passed=0, failed=1, skipped=0)
     return CommandOutcome(status="failed", passed=0, failed=1, skipped=0, summary=summary)
+
+
+def _sanitized_failed_stages(
+    stages: tuple[StageEvidence, ...],
+) -> tuple[StageEvidence, ...]:
+    sanitized: list[StageEvidence] = []
+    for stage in stages:
+        summary = stage.summary
+        if isinstance(summary, LiveModelSummary):
+            summary = summary.model_copy(update={"logical_model_name": "redacted"})
+        updates: dict[str, object] = {"summary": summary}
+        if stage.stage is StageId.CLEANUP:
+            updates.update({"status": "failed", "passed": 0, "failed": 1})
+        sanitized.append(stage.model_copy(update=updates))
+    return tuple(sanitized)
 
 
 class ReleaseRunner:
@@ -465,8 +546,9 @@ class ReleaseRunner:
                 if command.execution == "cleanup":
                     continue
                 started_at = datetime.now(UTC)
+                timing: HostCommandTiming | None = None
                 if self._cancel_event.is_set():
-                    outcome = _failed_outcome(command.stage)
+                    outcome = _failed_outcome(command.stage, command.command_id)
                 elif command.execution == "host":
                     if host_result is None:
                         try:
@@ -483,17 +565,20 @@ class ReleaseRunner:
                         except BaseException:
                             host_result = None
                     outcome = _host_outcome(command, host_result)
+                    if isinstance(host_result, DiagnosticResult):
+                        timing = host_result.timing_for(command.command_id)
                 else:
                     try:
                         outcome = await self._executor.execute(command, self._cancel_event)
                     except BaseException:
-                        outcome = _failed_outcome(command.stage)
+                        outcome = _failed_outcome(command.stage, command.command_id)
                 stages.append(
                     _stage_evidence(
                         stage=command.stage,
                         command_id=command.command_id,
                         started_at=started_at,
                         outcome=outcome,
+                        timing=timing,
                     )
                 )
                 failed = outcome.status == "failed" or (command.require_zero_skips and outcome.skipped > 0) or self._cancel_event.is_set()
@@ -591,6 +676,30 @@ class ReleaseRunner:
                 stages=tuple(stages),
             )
             evidence = ReleaseEvidence.final(candidate=candidate, review=review) if review is not None else candidate
+        manifest_findings = await asyncio.to_thread(
+            SecretScanner().scan_bytes,
+            canonical_json_bytes(evidence),
+            scope="evidence",
+            locator="manifest.json",
+        )
+        if manifest_findings:
+            sanitized_stages = _sanitized_failed_stages(tuple(stages))
+            evidence = ReleaseEvidence.failed(
+                acceptance_run_id=self._acceptance_run_id,
+                git_commit=preflight_result.git_commit,
+                stage_manifest_digest=digest,
+                public_config_digest=preflight_result.config_digest,
+                toolchain_digest=preflight_result.toolchain_digest,
+                stages=sanitized_stages,
+            )
+            sanitized_findings = await asyncio.to_thread(
+                SecretScanner().scan_bytes,
+                canonical_json_bytes(evidence),
+                scope="evidence",
+                locator="manifest.json",
+            )
+            if sanitized_findings:
+                raise RuntimeError("EVIDENCE_SECURITY_SCAN_FAILED")
         await asyncio.to_thread(writer.write, evidence)
         return evidence
 
@@ -600,7 +709,9 @@ def _host_outcome(
     result: DiagnosticResult | PreflightFailure | None,
 ) -> CommandOutcome:
     if not isinstance(result, DiagnosticResult) or result.status != "passed":
-        return _failed_outcome(command.stage)
+        return _failed_outcome(command.stage, command.command_id)
+    if result.timing_for(command.command_id) is None:
+        return _failed_outcome(command.stage, command.command_id)
     if command.stage is StageId.HOST_SETUP:
         summary = TestSummary(collected=1, passed=1, failed=0, skipped=0)
         return CommandOutcome(
@@ -636,4 +747,4 @@ def _host_outcome(
             skipped=0,
             summary=result.recovery,
         )
-    return _failed_outcome(command.stage)
+    return _failed_outcome(command.stage, command.command_id)

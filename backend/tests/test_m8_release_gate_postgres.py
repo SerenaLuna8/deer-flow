@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -125,6 +126,22 @@ def test_ci_uses_makefile_authority_without_live_or_duplicated_paths() -> None:
     for test_file in EXPECTED_M8_SUFFIX:
         assert test_file not in workflow
     assert not (REPO_ROOT / ".github/workflows/project-foundation-postgres-tests.yml").exists()
+
+
+def test_deterministic_playwright_gate_executes_the_complete_e2e_inventory() -> None:
+    package = json.loads((REPO_ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
+    assert package["scripts"]["test:e2e:m8:deterministic"] == "playwright test"
+    command = next(item for item in COMMANDS if item.command_id == "frontend.e2e_deterministic")
+    assert command.summary_parser == "playwright"
+    for workflow_name in ("e2e-tests.yml", "project-saas-release-gates.yml"):
+        workflow = (REPO_ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+        assert "pnpm test:e2e:m8:deterministic" in workflow
+
+
+def test_matrix_stage_executes_selector_and_surface_validation() -> None:
+    command = next(item for item in COMMANDS if item.command_id == "contracts.matrix")
+    assert "tests/test_m8_isolation_matrix_postgres.py" in command.argv
+    assert command.summary_parser == "matrix"
 
 
 def test_release_gate_plugin_requires_exact_label_and_zero_skips() -> None:

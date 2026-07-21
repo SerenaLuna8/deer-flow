@@ -5,20 +5,27 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
 from pydantic import Field, model_validator
 
-from scripts.release_acceptance.contracts import canonical_digest
+from scripts.release_acceptance.contracts import (
+    canonical_digest,
+    discover_scoped_surface,
+    load_isolation_matrix,
+)
 from scripts.release_acceptance.models import (
     M8_REVIEW_BASE_COMMIT,
+    MatrixSummary,
     SecuritySummary,
     StageId,
     StageSummary,
     StrictModel,
     TestSummary,
 )
+from scripts.release_acceptance.security import SecretScanner
 
 _COMMAND_ID = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -52,6 +59,11 @@ _VITEST_TESTS = re.compile(
     r"(?:(?P<skipped>\d+)[ \t]+skipped)?[ \t]*$",
     re.MULTILINE,
 )
+_PLAYWRIGHT_TESTS = re.compile(
+    r"^[ \t]*(?P<count>\d+)[ \t]+(?P<kind>passed|failed|skipped)"
+    r"(?:[ \t]+\([^\r\n]+\))?[ \t]*$",
+    re.MULTILINE,
+)
 SUPPORT_BUNDLE_OUTPUT_TOKEN = "{runtime_root}/support-bundle.zip"
 SUPPORT_BUNDLE_ARGV = (
     "uv",
@@ -74,7 +86,7 @@ class CommandSpec:
     cwd: Literal["root", "backend", "frontend"]
     timeout_seconds: int
     allowed_environment: frozenset[str]
-    summary_parser: Literal["pytest", "vitest", "security", "exit_code"] = "pytest"
+    summary_parser: Literal["pytest", "vitest", "playwright", "security", "matrix", "exit_code"] = "pytest"
     execution: Literal["subprocess", "host", "cleanup"] = "subprocess"
     fixed_environment: tuple[tuple[str, str], ...] = ()
     removed_environment: frozenset[str] = frozenset()
@@ -138,10 +150,11 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec(
         command_id="contracts.matrix",
         stage=StageId.CONTRACTS,
-        argv=("uv", "run", "pytest", "tests/test_m8_acceptance_contract.py", "-q", "-k", "contract_authorities"),
+        argv=("uv", "run", "pytest", "tests/test_m8_isolation_matrix_postgres.py", "-q"),
         cwd="backend",
         timeout_seconds=600,
         allowed_environment=frozenset(),
+        summary_parser="matrix",
     ),
     CommandSpec(
         command_id="contracts.docs",
@@ -257,7 +270,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
         timeout_seconds=1800,
         allowed_environment=frozenset({"CI", "SKIP_ENV_VALIDATION"}),
         fixed_environment=(("CI", "1"), ("SKIP_ENV_VALIDATION", "1")),
-        summary_parser="exit_code",
+        summary_parser="playwright",
     ),
     CommandSpec(
         command_id="frontend.build_production",
@@ -406,13 +419,25 @@ class AsyncCommandExecutor:
         return values
 
     @staticmethod
-    async def _bounded_read(stream: asyncio.StreamReader) -> bytes:
+    async def _bounded_read(stream: asyncio.StreamReader) -> tuple[bytes, bool]:
         retained = bytearray()
+        overlap = b""
+        safe = True
         while block := await stream.read(64 * 1024):
+            safe = safe and AsyncCommandExecutor._runtime_log_is_safe(overlap + block)
+            overlap = (overlap + block)[-512:]
             retained.extend(block)
             if len(retained) > _OUTPUT_LIMIT:
                 del retained[: len(retained) - _OUTPUT_LIMIT]
-        return bytes(retained)
+        return bytes(retained), safe
+
+    @staticmethod
+    def _runtime_log_is_safe(output: bytes) -> bool:
+        return not SecretScanner().scan_bytes(
+            output,
+            scope="runtime_logs",
+            locator="bounded-command-output",
+        )
 
     @staticmethod
     def _test_summary(output: bytes, *, returncode: int) -> CommandOutcome:
@@ -493,8 +518,12 @@ class AsyncCommandExecutor:
     def _parse_summary(self, command: CommandSpec, output: bytes, *, returncode: int) -> CommandOutcome:
         if command.summary_parser == "security":
             return self._security_summary(output, returncode=returncode)
+        if command.summary_parser == "matrix":
+            return self._matrix_summary(output, returncode=returncode)
         if command.summary_parser == "vitest":
             return self._vitest_summary(output, returncode=returncode)
+        if command.summary_parser == "playwright":
+            return self._playwright_summary(output, returncode=returncode)
         if command.summary_parser == "exit_code":
             return self._exit_code_summary(returncode=returncode)
         return self._test_summary(output, returncode=returncode)
@@ -503,19 +532,88 @@ class AsyncCommandExecutor:
     def _security_summary(output: bytes, *, returncode: int) -> CommandOutcome:
         scanned = 0
         findings = 1 if returncode else 0
+        database_timestamp = datetime.now(UTC)
+        exclusion_ids: tuple[str, ...] = ()
         try:
             payload = json.loads(output.decode("utf-8"))
             scanned = sum(int(item.get("scanned", item.get("scanned_packages", 0))) for item in payload.get("results", []))
             findings = int(payload["effective_findings"])
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError, UnicodeError):
+            database_timestamp = datetime.fromisoformat(str(payload["database_timestamp"]).replace("Z", "+00:00"))
+            exclusion_ids = tuple(sorted(set(payload["exclusion_ids"])))
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            UnicodeError,
+        ):
             if returncode == 0:
                 findings = 1
-        summary = SecuritySummary(scanned=scanned, effective_findings=findings)
+        summary = SecuritySummary(
+            scanned=scanned,
+            effective_findings=findings,
+            database_timestamp=database_timestamp,
+            exclusion_ids=exclusion_ids,
+        )
         return CommandOutcome(
             status="passed" if returncode == 0 and findings == 0 else "failed",
             passed=1 if returncode == 0 and findings == 0 else 0,
             failed=0 if returncode == 0 and findings == 0 else 1,
             skipped=0,
+            summary=summary,
+        )
+
+    @staticmethod
+    def _playwright_summary(output: bytes, *, returncode: int) -> CommandOutcome:
+        text = _ANSI_ESCAPE.sub("", output.decode("utf-8", errors="replace"))
+        counts = {"passed": 0, "failed": 0, "skipped": 0}
+        for match in _PLAYWRIGHT_TESTS.finditer(text):
+            counts[match.group("kind")] += int(match.group("count"))
+        if returncode and counts["failed"] == 0:
+            counts["failed"] = 1
+        if not returncode and sum(counts.values()) == 0:
+            counts["failed"] = 1
+        summary = TestSummary(collected=sum(counts.values()), **counts)
+        return CommandOutcome(
+            status="passed" if returncode == 0 and summary.failed == 0 else "failed",
+            passed=summary.passed,
+            failed=summary.failed,
+            skipped=summary.skipped,
+            summary=summary,
+        )
+
+    def _matrix_summary(self, output: bytes, *, returncode: int) -> CommandOutcome:
+        test_outcome = self._test_summary(output, returncode=returncode)
+        coverage_count = 0
+        selector_count = 0
+        uncovered_count = 1
+        try:
+            matrix = load_isolation_matrix(self._repository / "contracts" / "m8_isolation_matrix.json")
+            discovered = discover_scoped_surface(self._repository)
+            coverage_count = len(matrix.cases)
+            selector_count = len({*matrix.pytest_selectors(), *matrix.playwright_selectors()})
+            uncovered_count = sum(
+                (
+                    len(matrix.uncovered_dimensions()),
+                    len(matrix.unmapped_surface(discovered)),
+                    len(matrix.orphaned_surface_cases(discovered)),
+                    int(matrix.surface_manifest.count != len(discovered)),
+                    int(matrix.surface_manifest.sha256 != matrix.discovered_surface_digest(discovered)),
+                    int(returncode != 0),
+                )
+            )
+        except (OSError, TypeError, ValueError):
+            uncovered_count = 1
+        summary = MatrixSummary(
+            coverage_count=coverage_count,
+            uncovered_count=uncovered_count,
+            selector_count=selector_count,
+        )
+        return CommandOutcome(
+            status="passed" if uncovered_count == 0 else "failed",
+            passed=test_outcome.passed,
+            failed=max(test_outcome.failed, int(uncovered_count > 0)),
+            skipped=test_outcome.skipped,
             summary=summary,
         )
 
@@ -566,7 +664,10 @@ class AsyncCommandExecutor:
                 return self._parse_summary(command, b"", returncode=1)
         cancel_task.cancel()
         await asyncio.gather(cancel_task, return_exceptions=True)
-        stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+        (stdout, stdout_safe), (stderr, stderr_safe) = await asyncio.gather(stdout_task, stderr_task)
         output = stdout + b"\n" + stderr
         returncode = process.returncode if wait_task in done and not cancel_event.is_set() else 1
+        if not stdout_safe or not stderr_safe:
+            returncode = 1
+            output = b""
         return self._parse_summary(command, output, returncode=returncode)

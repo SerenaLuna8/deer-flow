@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import to_jsonable_python
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40,64}$")
@@ -61,6 +62,39 @@ class SecuritySummary(StrictModel):
     kind: Literal["security"] = "security"
     scanned: int = Field(ge=0)
     effective_findings: int = Field(ge=0)
+    database_timestamp: datetime
+    exclusion_ids: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_scan_metadata(self) -> Self:
+        if self.database_timestamp.tzinfo is None:
+            raise ValueError("security database timestamp must be timezone-aware")
+        if len(self.exclusion_ids) != len(set(self.exclusion_ids)):
+            raise ValueError("security exclusion IDs are duplicated")
+        return self
+
+
+class MatrixSummary(StrictModel):
+    kind: Literal["matrix"] = "matrix"
+    coverage_count: int = Field(ge=0)
+    uncovered_count: int = Field(ge=0)
+    selector_count: int = Field(ge=0)
+
+
+class HostCommandTiming(StrictModel):
+    command_id: str = Field(pattern=_COMMAND_ID.pattern, max_length=128)
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> Self:
+        if self.started_at.tzinfo is None or self.finished_at.tzinfo is None or self.finished_at < self.started_at:
+            raise ValueError("invalid host command timestamps")
+        elapsed_ms = int((self.finished_at - self.started_at).total_seconds() * 1000)
+        if abs(elapsed_ms - self.duration_ms) > 1:
+            raise ValueError("host command duration does not match timestamps")
+        return self
 
 
 class LiveModelSummary(StrictModel):
@@ -102,7 +136,10 @@ class CleanupSummary(StrictModel):
     retained_evidence: int = Field(ge=0)
 
 
-StageSummary = Annotated[TestSummary | SecuritySummary | LiveModelSummary | RecoverySummary | CleanupSummary, Field(discriminator="kind")]
+StageSummary = Annotated[
+    TestSummary | MatrixSummary | SecuritySummary | LiveModelSummary | RecoverySummary | CleanupSummary,
+    Field(discriminator="kind"),
+]
 
 
 class StageEvidence(StrictModel):
@@ -130,6 +167,8 @@ class StageEvidence(StrictModel):
             StageId.RECOVERY: "recovery",
             StageId.CLEANUP: "cleanup",
         }.get(self.stage, "tests")
+        if self.command_id == "contracts.matrix":
+            expected_kind = "matrix"
         if self.summary.kind != expected_kind:
             raise ValueError("summary kind does not match stage")
         if isinstance(self.summary, TestSummary) and (self.passed, self.failed, self.skipped) != (self.summary.passed, self.summary.failed, self.summary.skipped):
@@ -157,6 +196,7 @@ class ReviewReport(StrictModel):
     critical: int = Field(ge=0)
     important: int = Field(ge=0)
     minor: int = Field(ge=0)
+    report_sha256: str = Field(pattern=_SHA256.pattern)
 
     @model_validator(mode="after")
     def validate_verdict(self) -> Self:
@@ -166,6 +206,8 @@ class ReviewReport(StrictModel):
         left, right = self.review_range.split("..", 1)
         if left != self.review_base_commit or right != self.candidate_commit:
             raise ValueError("review range does not match review binding")
+        if self.report_sha256 != _self_digest(self, "report_sha256"):
+            raise ValueError("review report SHA-256 mismatch")
         return self
 
     @classmethod
@@ -179,17 +221,20 @@ class ReviewReport(StrictModel):
         important: int,
         minor: int,
     ) -> ReviewReport:
-        return cls(
-            verdict="passed" if critical == important == minor == 0 else "findings_present",
-            candidate_commit=candidate.git_commit,
-            stage_manifest_digest=candidate.stage_manifest_digest,
-            candidate_evidence_digest=candidate.candidate_evidence_digest,
-            review_base_commit=review_base_commit,
-            review_range=review_range,
-            critical=critical,
-            important=important,
-            minor=minor,
-        )
+        values = {
+            "schema_version": 1,
+            "status": "reviewed",
+            "verdict": ("passed" if critical == important == minor == 0 else "findings_present"),
+            "candidate_commit": candidate.git_commit,
+            "stage_manifest_digest": candidate.stage_manifest_digest,
+            "candidate_evidence_digest": candidate.candidate_evidence_digest,
+            "review_base_commit": review_base_commit,
+            "review_range": review_range,
+            "critical": critical,
+            "important": important,
+            "minor": minor,
+        }
+        return cls(**values, report_sha256=_self_digest(values, "report_sha256"))
 
 
 ReviewState = Annotated[AwaitingReview | ReviewReport, Field(discriminator="status")]
@@ -204,6 +249,7 @@ class ReleaseEvidence(StrictModel):
     public_config_digest: str = Field(default="0" * 64, pattern=_SHA256.pattern)
     toolchain_digest: str = Field(default="0" * 64, pattern=_SHA256.pattern)
     candidate_evidence_digest: str = Field(pattern=_SHA256.pattern)
+    manifest_sha256: str = Field(pattern=_SHA256.pattern)
     stages: tuple[StageEvidence, ...] = Field(min_length=1, max_length=64)
     review: ReviewState
 
@@ -225,6 +271,8 @@ class ReleaseEvidence(StrictModel):
         )
         if self.candidate_evidence_digest != expected_digest:
             raise ValueError("candidate evidence digest mismatch")
+        if self.manifest_sha256 != _self_digest(self, "manifest_sha256"):
+            raise ValueError("manifest SHA-256 mismatch")
         if self.status is AcceptanceStatus.CANDIDATE_READY and not isinstance(self.review, AwaitingReview):
             raise ValueError("candidate must await review")
         if self.status is AcceptanceStatus.FINAL_PASS:
@@ -252,34 +300,38 @@ class ReleaseEvidence(StrictModel):
             toolchain_digest=toolchain_digest,
             stages=stages,
         )
-        return cls(
-            acceptance_run_id=acceptance_run_id,
-            status=AcceptanceStatus.CANDIDATE_READY,
-            git_commit=git_commit,
-            stage_manifest_digest=stage_manifest_digest,
-            public_config_digest=public_config_digest,
-            toolchain_digest=toolchain_digest,
-            candidate_evidence_digest=digest,
-            stages=stages,
-            review=AwaitingReview(),
-        )
+        values = {
+            "schema_version": 1,
+            "acceptance_run_id": acceptance_run_id,
+            "status": AcceptanceStatus.CANDIDATE_READY,
+            "git_commit": git_commit,
+            "stage_manifest_digest": stage_manifest_digest,
+            "public_config_digest": public_config_digest,
+            "toolchain_digest": toolchain_digest,
+            "candidate_evidence_digest": digest,
+            "stages": stages,
+            "review": AwaitingReview(),
+        }
+        return cls(**values, manifest_sha256=_self_digest(values, "manifest_sha256"))
 
     @classmethod
     def final(cls, *, candidate: ReleaseEvidence, review: ReviewReport) -> ReleaseEvidence:
         if candidate.status is not AcceptanceStatus.CANDIDATE_READY or not isinstance(candidate.review, AwaitingReview):
             raise ReviewBindingError("REVIEW_CANDIDATE_INVALID")
         _assert_review_binding(candidate, review)
-        return cls(
-            acceptance_run_id=candidate.acceptance_run_id,
-            status=AcceptanceStatus.FINAL_PASS,
-            git_commit=candidate.git_commit,
-            stage_manifest_digest=candidate.stage_manifest_digest,
-            public_config_digest=candidate.public_config_digest,
-            toolchain_digest=candidate.toolchain_digest,
-            candidate_evidence_digest=candidate.candidate_evidence_digest,
-            stages=candidate.stages,
-            review=review,
-        )
+        values = {
+            "schema_version": 1,
+            "acceptance_run_id": candidate.acceptance_run_id,
+            "status": AcceptanceStatus.FINAL_PASS,
+            "git_commit": candidate.git_commit,
+            "stage_manifest_digest": candidate.stage_manifest_digest,
+            "public_config_digest": candidate.public_config_digest,
+            "toolchain_digest": candidate.toolchain_digest,
+            "candidate_evidence_digest": candidate.candidate_evidence_digest,
+            "stages": candidate.stages,
+            "review": review,
+        }
+        return cls(**values, manifest_sha256=_self_digest(values, "manifest_sha256"))
 
     @classmethod
     def failed(
@@ -300,17 +352,19 @@ class ReleaseEvidence(StrictModel):
             toolchain_digest=toolchain_digest,
             stages=stages,
         )
-        return cls(
-            acceptance_run_id=acceptance_run_id,
-            status=AcceptanceStatus.FAILED,
-            git_commit=git_commit,
-            stage_manifest_digest=stage_manifest_digest,
-            public_config_digest=public_config_digest,
-            toolchain_digest=toolchain_digest,
-            candidate_evidence_digest=digest,
-            stages=stages,
-            review=AwaitingReview(),
-        )
+        values = {
+            "schema_version": 1,
+            "acceptance_run_id": acceptance_run_id,
+            "status": AcceptanceStatus.FAILED,
+            "git_commit": git_commit,
+            "stage_manifest_digest": stage_manifest_digest,
+            "public_config_digest": public_config_digest,
+            "toolchain_digest": toolchain_digest,
+            "candidate_evidence_digest": digest,
+            "stages": stages,
+            "review": AwaitingReview(),
+        }
+        return cls(**values, manifest_sha256=_self_digest(values, "manifest_sha256"))
 
     @property
     def cleanup(self) -> CleanupSummary:
@@ -339,6 +393,18 @@ def _candidate_binding_digest(
         "stages": [stage.model_dump(mode="json") for stage in stages],
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _self_digest(value: BaseModel | dict[str, object], field: str) -> str:
+    payload = dict(to_jsonable_python(value))
+    payload.pop(field, None)
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 

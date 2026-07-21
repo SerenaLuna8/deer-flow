@@ -244,6 +244,20 @@ async def test_startup_marker_drain_checks_bounded_line_suffix() -> None:
     assert await SubprocessHostCommandRunner._drain(Reader(), markers) == {"frontend"}
 
 
+@pytest.mark.asyncio
+async def test_host_log_drain_marks_secret_output_without_retaining_it() -> None:
+    lines = iter((b"provider returned sk-" + b"a" * 32 + b"\n", b""))
+
+    class Reader:
+        async def readline(self) -> bytes:
+            return next(lines)
+
+    markers: set[str] = set()
+    failures: list[bool] = []
+    assert await SubprocessHostCommandRunner._drain(Reader(), markers, failures) == set()
+    assert failures == [True]
+
+
 class SequencedMarkerCommandRunner(FakeCommandRunner):
     def __init__(self, marker_sequence: tuple[frozenset[str], ...]) -> None:
         super().__init__()

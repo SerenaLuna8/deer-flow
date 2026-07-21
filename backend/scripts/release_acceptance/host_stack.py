@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -23,7 +24,9 @@ from scripts.release_acceptance.commands import (
     SUPPORT_BUNDLE_OUTPUT_TOKEN,
 )
 from scripts.release_acceptance.live_probe import HostReadiness
+from scripts.release_acceptance.models import HostCommandTiming
 from scripts.release_acceptance.ownership import CleanupAction, DatabaseIdentity, OwnedDatabase, OwnedProcess, OwnershipLedger
+from scripts.release_acceptance.security import SecretScanner
 
 _TEST_DATABASE_NAME = re.compile(r"^deerflow_test_[a-z0-9]{6,64}$")
 _RESTORE_DATABASE_NAME = re.compile(r"^deerflow_restore_[0-9]+_[0-9a-f]{32}$")
@@ -494,10 +497,52 @@ class SubprocessHostCommandRunner:
         self._processes: dict[int, asyncio.subprocess.Process] = {}
         self._drainers: dict[int, asyncio.Task[set[str]]] = {}
         self._markers: dict[int, set[str]] = {}
+        self._timings: dict[str, HostCommandTiming] = {}
+        self._pending_timing_starts: dict[str, datetime] = {}
+        self._log_security_failures: list[bool] = []
+
+    @property
+    def timings(self) -> tuple[HostCommandTiming, ...]:
+        return tuple(self._timings.values())
+
+    def timing_for(self, command_id: str) -> HostCommandTiming | None:
+        return self._timings.get(command_id)
+
+    @property
+    def logs_security_passed(self) -> bool:
+        return not self._log_security_failures
+
+    def _record_timing(self, command_id: str, started_at: datetime, finished_at: datetime) -> None:
+        self._timings.setdefault(
+            command_id,
+            HostCommandTiming(
+                command_id=command_id,
+                started_at=started_at,
+                finished_at=finished_at,
+                duration_ms=int((finished_at - started_at).total_seconds() * 1000),
+            ),
+        )
+
+    def finish_timing(self, command_id: str) -> None:
+        started_at = self._pending_timing_starts.pop(command_id, None)
+        if started_at is not None:
+            self._record_timing(command_id, started_at, datetime.now(UTC))
 
     @staticmethod
-    async def _drain(stream: asyncio.StreamReader, markers: set[str]) -> set[str]:
+    async def _drain(
+        stream: asyncio.StreamReader,
+        markers: set[str],
+        security_failures: list[bool] | None = None,
+    ) -> set[str]:
+        scanner = SecretScanner()
         while line := await stream.readline():
+            if len(line) > 128 * 1024 or scanner.scan_bytes(
+                line,
+                scope="runtime_logs",
+                locator="host-command-output",
+            ):
+                if security_failures is not None:
+                    security_failures.append(True)
             bounded = (line[:512] + line[-512:]).decode("utf-8", errors="replace")
             for label, marker in _STARTUP_MARKERS.items():
                 if f"{label} started" in bounded or f"{label} started on" in bounded:
@@ -528,11 +573,17 @@ class SubprocessHostCommandRunner:
         self._processes[process.pid] = process
         markers: set[str] = set()
         self._markers[process.pid] = markers
-        self._drainers[process.pid] = asyncio.create_task(self._drain(process.stdout, markers))
+        self._drainers[process.pid] = asyncio.create_task(
+            self._drain(
+                process.stdout,
+                markers,
+                self._log_security_failures,
+            )
+        )
         return process, host_process
 
     async def run(self, command_id: str, argv: tuple[str, ...], environment: dict[str, str], *, timeout_seconds: int) -> None:
-        del command_id
+        started_at = datetime.now(UTC)
         process, host_process = await self._spawn(argv, environment)
         owned = self._ledger.register_process(pid=host_process.pid, pgid=host_process.pgid, start_identity=host_process.start_identity)
         try:
@@ -544,11 +595,12 @@ class SubprocessHostCommandRunner:
             await asyncio.gather(self._drainers.pop(process.pid), return_exceptions=True)
             self._processes.pop(process.pid, None)
             self._markers.pop(process.pid, None)
+            self._record_timing(command_id, started_at, datetime.now(UTC))
         if returncode != 0:
             raise RuntimeError("HOST_COMMAND_FAILED")
 
     async def start(self, command_id: str, argv: tuple[str, ...], environment: dict[str, str]) -> HostProcess:
-        del command_id
+        self._pending_timing_starts.setdefault(command_id, datetime.now(UTC))
         process, host_process = await self._spawn(argv, environment)
         await asyncio.sleep(0)
         if process.returncode is not None:
@@ -733,6 +785,10 @@ class OwnedHostStack:
             if self._owned_process is not None:
                 await self.stop()
             raise RuntimeError("HOST_READINESS_FAILED") from None
+        finally:
+            finish_timing = getattr(self._command_runner, "finish_timing", None)
+            if finish_timing is not None:
+                finish_timing("host.make_start")
 
     async def prepare(self, database_url: str) -> None:
         if self._owned_process is not None:

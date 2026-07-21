@@ -156,6 +156,7 @@ class DependencyFinding(SecurityContract):
 
 class DependencyAuditReport(SecurityContract):
     ecosystem: Literal["python", "node"]
+    database_timestamp: datetime
     scanned_packages: int = Field(ge=0)
     findings: tuple[DependencyFinding, ...]
     exclusion_ids: tuple[str, ...] = ()
@@ -163,6 +164,8 @@ class DependencyAuditReport(SecurityContract):
 
     @model_validator(mode="after")
     def validate_counts(self) -> Self:
+        if self.database_timestamp.tzinfo is None:
+            raise ValueError("dependency database timestamp must be timezone-aware")
         if self.effective_findings != len(self.findings):
             raise ValueError("dependency finding count mismatch")
         if self.exclusion_ids:
@@ -212,6 +215,10 @@ class SecretScanner:
     @property
     def candidate_count(self) -> int:
         return self._candidate_count
+
+    @property
+    def matched_exclusion_ids(self) -> tuple[str, ...]:
+        return tuple("secret:" + hashlib.sha256("\0".join(identity).encode("utf-8")).hexdigest() for identity in sorted(self._matched_allowlist_entries))
 
     @staticmethod
     def _line_number(value: str, start: int) -> int:
@@ -722,8 +729,8 @@ class BackendDependencyAuditor:
     def __init__(self, backend_root: Path) -> None:
         self._backend_root = backend_root
 
-    def run(self) -> DependencyAuditReport:
-        scanned_at = datetime.now(UTC)
+    def run(self, *, database_timestamp: datetime | None = None) -> DependencyAuditReport:
+        scanned_at = database_timestamp or datetime.now(UTC)
         with tempfile.TemporaryDirectory(prefix="deerflow-m8-audit-") as directory:
             requirements = Path(directory) / "requirements.txt"
             try:
@@ -773,6 +780,7 @@ class BackendDependencyAuditor:
             raise SecurityGateError("BACKEND_DEPENDENCY_AUDIT_FAILED")
         return DependencyAuditReport(
             ecosystem="python",
+            database_timestamp=scanned_at,
             scanned_packages=len(dependencies),
             findings=findings,
             effective_findings=len(findings),
@@ -783,8 +791,8 @@ class FrontendDependencyAuditor:
     def __init__(self, frontend_root: Path) -> None:
         self._frontend_root = frontend_root
 
-    def run(self) -> DependencyAuditReport:
-        scanned_at = datetime.now(UTC)
+    def run(self, *, database_timestamp: datetime | None = None) -> DependencyAuditReport:
+        scanned_at = database_timestamp or datetime.now(UTC)
         try:
             audited = subprocess.run(
                 ("pnpm", "audit", "--prod", "--audit-level", "low", "--json"),
@@ -817,18 +825,27 @@ class FrontendDependencyAuditor:
             raise SecurityGateError("FRONTEND_DEPENDENCY_AUDIT_FAILED")
         return DependencyAuditReport(
             ecosystem="node",
+            database_timestamp=scanned_at,
             scanned_packages=scanned_packages,
             findings=findings,
             effective_findings=len(findings),
         )
 
 
-def _security_result(findings: Iterable[SecretFinding], *, scanned: int) -> dict[str, object]:
+def _security_result(
+    findings: Iterable[SecretFinding],
+    *,
+    scanned: int,
+    database_timestamp: datetime,
+    exclusion_ids: tuple[str, ...],
+) -> dict[str, object]:
     items = tuple(findings)
     return {
         "schema_version": 1,
+        "database_timestamp": database_timestamp.isoformat(),
         "scanned": scanned,
         "effective_findings": len(items),
+        "exclusion_ids": exclusion_ids,
         "findings": [item.model_dump(mode="json") for item in items],
     }
 
@@ -854,13 +871,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     effective = 0
     outputs: list[dict[str, object]] = []
     scanned_secret_scopes: set[SecretScope] = set()
+    database_timestamp = datetime.now(UTC)
     for scope in args.scope:
         if scope == "dependencies-backend":
-            report = BackendDependencyAuditor(backend_root).run()
+            report = BackendDependencyAuditor(backend_root).run(database_timestamp=database_timestamp)
             outputs.append(report.model_dump(mode="json"))
             effective += report.effective_findings
         elif scope == "dependencies-frontend":
-            report = FrontendDependencyAuditor(repository_root / "frontend").run()
+            report = FrontendDependencyAuditor(repository_root / "frontend").run(database_timestamp=database_timestamp)
             outputs.append(report.model_dump(mode="json"))
             effective += report.effective_findings
         elif scope == "tracked-tree":
@@ -869,6 +887,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _security_result(
                 scanner.scan_tracked_tree(repository_root),
                 scanned=scanner.candidate_count - before,
+                database_timestamp=database_timestamp,
+                exclusion_ids=scanner.matched_exclusion_ids,
             )
             outputs.append(result)
             effective += int(result["effective_findings"])
@@ -878,6 +898,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _security_result(
                 scanner.scan_git_history(repository_root),
                 scanned=scanner.candidate_count - before,
+                database_timestamp=database_timestamp,
+                exclusion_ids=scanner.matched_exclusion_ids,
             )
             outputs.append(result)
             effective += int(result["effective_findings"])
@@ -889,15 +911,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _security_result(
                 scanner.scan_review_diff(repository_root, args.review_base),
                 scanned=scanner.candidate_count - before,
+                database_timestamp=database_timestamp,
+                exclusion_ids=scanner.matched_exclusion_ids,
             )
             outputs.append(result)
             effective += int(result["effective_findings"])
     unused_allowlist = scanner.unused_allowlist_findings(scanned_secret_scopes)
     if unused_allowlist:
-        result = _security_result(unused_allowlist, scanned=0)
+        result = _security_result(
+            unused_allowlist,
+            scanned=0,
+            database_timestamp=database_timestamp,
+            exclusion_ids=scanner.matched_exclusion_ids,
+        )
         outputs.append(result)
         effective += len(unused_allowlist)
-    print(json.dumps({"schema_version": 1, "effective_findings": effective, "results": outputs}, sort_keys=True))
+    dependency_exclusions = {str(exclusion_id) for output in outputs for exclusion_id in output.get("exclusion_ids", ())}
+    exclusion_ids = tuple(sorted(dependency_exclusions | set(scanner.matched_exclusion_ids)))
+    print(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "database_timestamp": database_timestamp.isoformat(),
+                "effective_findings": effective,
+                "exclusion_ids": exclusion_ids,
+                "results": outputs,
+            },
+            sort_keys=True,
+        )
+    )
     return 1 if effective else 0
 
 

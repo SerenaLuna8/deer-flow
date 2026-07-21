@@ -7,6 +7,7 @@ import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,11 @@ from scripts.release_acceptance.models import (
 )
 from scripts.release_acceptance.models import TestSummary as AcceptanceTestSummary
 from scripts.release_acceptance.preflight import AcceptanceModel, PreflightSuccess
-from scripts.release_acceptance.runner import DiagnosticResult, ReleaseRunner
+from scripts.release_acceptance.runner import (
+    DiagnosticResult,
+    HostCommandTiming,
+    ReleaseRunner,
+)
 
 
 class FakePreflight:
@@ -184,14 +189,36 @@ def test_rstest_summary_ignores_run_tests_stack_frames_after_success() -> None:
     )
 
 
+def test_playwright_summary_records_the_complete_test_inventory() -> None:
+    output = b"Running 79 tests using 7 workers\n  79 passed (39.5s)\n"
+
+    outcome = AsyncCommandExecutor._playwright_summary(output, returncode=0)
+
+    assert outcome.summary == AcceptanceTestSummary(
+        collected=79,
+        passed=79,
+        failed=0,
+        skipped=0,
+    )
+
+
+def test_deterministic_command_output_is_secret_scanned_in_memory() -> None:
+    assert AsyncCommandExecutor._runtime_log_is_safe(b"ordinary bounded test output")
+    assert not AsyncCommandExecutor._runtime_log_is_safe(b"provider returned sk-" + b"a" * 32)
+
+
 def test_security_summary_records_dependency_package_count() -> None:
     output = json.dumps(
         {
+            "database_timestamp": "2026-07-21T01:02:03Z",
             "effective_findings": 0,
+            "exclusion_ids": ["GHSA-synthetic-absence-proof"],
             "results": [
                 {
                     "ecosystem": "python",
+                    "database_timestamp": "2026-07-21T01:02:03Z",
                     "effective_findings": 0,
+                    "exclusion_ids": ["GHSA-synthetic-absence-proof"],
                     "findings": [],
                     "scanned_packages": 202,
                 }
@@ -205,6 +232,20 @@ def test_security_summary_records_dependency_package_count() -> None:
     assert outcome.status == "passed"
     assert outcome.summary.scanned == 202
     assert outcome.summary.effective_findings == 0
+    assert outcome.summary.database_timestamp == datetime(2026, 7, 21, 1, 2, 3, tzinfo=UTC)
+    assert outcome.summary.exclusion_ids == ("GHSA-synthetic-absence-proof",)
+
+
+def test_matrix_summary_records_coverage_and_zero_uncovered() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    outcome = AsyncCommandExecutor(repository=repository)._matrix_summary(b"7 passed in 0.31s\n", returncode=0)
+
+    assert outcome.status == "passed"
+    assert outcome.passed == 7
+    assert outcome.failed == 0
+    assert outcome.summary.coverage_count > 0
+    assert outcome.summary.selector_count > 0
+    assert outcome.summary.uncovered_count == 0
 
 
 def _runner(
@@ -242,6 +283,31 @@ async def test_runner_failure_still_cleans_exact_resources_and_redacts_error(tmp
     encoded = evidence.model_dump_json()
     assert "raw private error" not in encoded
     assert json.loads((tmp_path / ".release-evidence" / str(evidence.acceptance_run_id) / "manifest.json").read_text(encoding="utf-8"))["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_generated_manifest_is_scanned_before_atomic_publish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def scan_manifest(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+        nonlocal calls
+        calls += 1
+        return (object(),) if calls == 1 else ()
+
+    monkeypatch.setattr(
+        runner_module.SecretScanner,
+        "scan_bytes",
+        scan_manifest,
+    )
+
+    evidence = await _runner(tmp_path).run()
+
+    assert calls == 2
+    assert evidence.status == "failed"
+    assert evidence.stages[-1].stage is StageId.CLEANUP
+    assert evidence.stages[-1].status == "failed"
+    manifest = tmp_path / ".release-evidence" / str(evidence.acceptance_run_id) / "manifest.json"
+    assert json.loads(manifest.read_text(encoding="utf-8"))["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -366,6 +432,17 @@ async def test_host_manifest_is_dispatched_once_without_executing_internal_comma
 
     async def host_acceptance_runner(**kwargs):
         host_calls.append(kwargs["stages"])
+        started = datetime(2026, 7, 21, 1, 2, 3, tzinfo=UTC)
+
+        def timing(command_id: str, offset: int) -> HostCommandTiming:
+            command_started = started + timedelta(seconds=offset)
+            return HostCommandTiming(
+                command_id=command_id,
+                started_at=command_started,
+                finished_at=command_started + timedelta(milliseconds=250),
+                duration_ms=250,
+            )
+
         return DiagnosticResult(
             status="passed",
             code="OK",
@@ -398,6 +475,13 @@ async def test_host_manifest_is_dispatched_once_without_executing_internal_comma
                 residual_paths=0,
                 retained_evidence=0,
             ),
+            timings=(
+                timing("host.setup_db", 0),
+                timing("host.check_db", 1),
+                timing("chromium.host_journey", 2),
+                timing("deepseek.live_journey", 3),
+                timing("recovery.full_switch", 4),
+            ),
         )
 
     executor = FakeExecutor()
@@ -422,6 +506,9 @@ async def test_host_manifest_is_dispatched_once_without_executing_internal_comma
         "cleanup.evidence_log_security",
         "cleanup.residual_audit",
     )
+    host_evidence = {stage.command_id: stage for stage in evidence.stages if stage.command_id.startswith(("host.", "chromium.", "deepseek.", "recovery."))}
+    assert all(item.duration_ms == 250 for item in host_evidence.values())
+    assert host_evidence["host.setup_db"].started_at != host_evidence["host.check_db"].started_at
 
 
 @pytest.mark.asyncio

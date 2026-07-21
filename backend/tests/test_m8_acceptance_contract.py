@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from scripts.release_acceptance.contracts import canonical_digest, contract_digest, schema_bytes
+from scripts.release_acceptance.evidence import manifest_digest
 from scripts.release_acceptance.models import (
     STAGE_ORDER,
     AcceptanceStatus,
@@ -195,11 +196,15 @@ def test_candidate_and_final_transitions_require_exact_review_binding() -> None:
     assert candidate.status is AcceptanceStatus.CANDIDATE_READY
     assert candidate.review.status == "awaiting_review"
     assert len(candidate.candidate_evidence_digest) == 64
+    assert candidate.manifest_sha256 == manifest_digest(candidate)
 
     report = _review(candidate)
+    assert len(report.report_sha256) == 64
     final = ReleaseEvidence.final(candidate=candidate, review=report)
     assert final.status is AcceptanceStatus.FINAL_PASS
     assert final.review.verdict == "passed"
+    assert final.manifest_sha256 == manifest_digest(final)
+    assert final.manifest_sha256 != candidate.manifest_sha256
 
     mismatched = report.model_copy(update={"candidate_commit": "0" * 40})
     with pytest.raises(ReviewBindingError, match="REVIEW_BINDING_MISMATCH"):
@@ -224,6 +229,15 @@ def test_candidate_digest_is_stable_and_changes_with_binding_fields() -> None:
     )
     assert same.candidate_evidence_digest == candidate.candidate_evidence_digest
     assert changed.candidate_evidence_digest != candidate.candidate_evidence_digest
+
+
+def test_release_and_review_self_hashes_fail_closed_on_substitution() -> None:
+    candidate = _candidate()
+    with pytest.raises(ValidationError, match="manifest SHA-256 mismatch"):
+        ReleaseEvidence.model_validate({**candidate.model_dump(mode="json"), "manifest_sha256": "0" * 64})
+    report = _review(candidate)
+    with pytest.raises(ValidationError, match="review report SHA-256 mismatch"):
+        ReviewReport.model_validate({**report.model_dump(mode="json"), "report_sha256": "0" * 64})
 
 
 def test_canonical_digest_uses_sorted_compact_utf8_json(tmp_path: Path) -> None:

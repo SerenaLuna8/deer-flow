@@ -182,6 +182,31 @@ def test_wait_for_port_trusts_available_lsof_before_fallbacks(tmp_path: Path) ->
     assert result.returncode == 1
 
 
+def test_wait_for_port_does_not_treat_lsof_probe_error_as_ready(
+    tmp_path: Path,
+) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise wait-for-port.sh helpers")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    lsof = binary / "lsof"
+    lsof.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+    lsof.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            f"{_extract_shell_function('is_port_listening', WAIT_FOR_PORT_SH)}\nPORT=3000\nis_port_listening",
+        ],
+        env={**os.environ, "PATH": f"{binary}:{os.environ['PATH']}"},
+        check=False,
+    )
+
+    assert result.returncode == 1
+
+
 def test_broad_stop_is_reachable_only_from_explicit_stop_or_restart() -> None:
     text = SERVE_SH.read_text(encoding="utf-8")
     routing = text[text.index("# ── Action routing") : text.index("# Mode label for banner")]

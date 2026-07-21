@@ -26,8 +26,9 @@ pnpm build:static
 `pnpm check` runs lint and type checking. The M7 production Playwright gate writes to
 `test-results/m7-production`; the static gate builds into `.next-static` and writes to
 `test-results/m7-static`, so normal and static artifacts cannot be reused accidentally.
-`test:e2e:m8:deterministic` 是无 live model 的 CI Chromium matrix；`test:e2e:m8` 只由完整
-宿主机验收在 invocation-owned production stack 上运行，不能单独生成 M8 candidate/final。
+`test:e2e:m8:deterministic` 是不调用 live model 的完整 CI Chromium 测试清单，包含隔离矩阵
+drift contract 和所有现有 Playwright 回归；`test:e2e:m8` 只由完整宿主机验收在
+invocation-owned production stack 上运行，不能单独生成 M8 candidate/final。
 
 ## Final route model
 

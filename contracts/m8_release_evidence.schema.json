@@ -141,6 +141,39 @@
       "title": "LiveModelSummary",
       "type": "object"
     },
+    "MatrixSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage_count": {
+          "minimum": 0,
+          "title": "Coverage Count",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "matrix",
+          "default": "matrix",
+          "title": "Kind",
+          "type": "string"
+        },
+        "selector_count": {
+          "minimum": 0,
+          "title": "Selector Count",
+          "type": "integer"
+        },
+        "uncovered_count": {
+          "minimum": 0,
+          "title": "Uncovered Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "coverage_count",
+        "uncovered_count",
+        "selector_count"
+      ],
+      "title": "MatrixSummary",
+      "type": "object"
+    },
     "RecoverySummary": {
       "additionalProperties": false,
       "properties": {
@@ -229,6 +262,11 @@
           "title": "Minor",
           "type": "integer"
         },
+        "report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Report Sha256",
+          "type": "string"
+        },
         "review_base_commit": {
           "pattern": "^[0-9a-f]{40,64}$",
           "title": "Review Base Commit",
@@ -274,7 +312,8 @@
         "review_range",
         "critical",
         "important",
-        "minor"
+        "minor",
+        "report_sha256"
       ],
       "title": "ReviewReport",
       "type": "object"
@@ -282,10 +321,23 @@
     "SecuritySummary": {
       "additionalProperties": false,
       "properties": {
+        "database_timestamp": {
+          "format": "date-time",
+          "title": "Database Timestamp",
+          "type": "string"
+        },
         "effective_findings": {
           "minimum": 0,
           "title": "Effective Findings",
           "type": "integer"
+        },
+        "exclusion_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclusion Ids",
+          "type": "array"
         },
         "kind": {
           "const": "security",
@@ -301,7 +353,8 @@
       },
       "required": [
         "scanned",
-        "effective_findings"
+        "effective_findings",
+        "database_timestamp"
       ],
       "title": "SecuritySummary",
       "type": "object"
@@ -361,6 +414,7 @@
             "mapping": {
               "cleanup": "#/$defs/CleanupSummary",
               "live_model": "#/$defs/LiveModelSummary",
+              "matrix": "#/$defs/MatrixSummary",
               "recovery": "#/$defs/RecoverySummary",
               "security": "#/$defs/SecuritySummary",
               "tests": "#/$defs/TestSummary"
@@ -370,6 +424,9 @@
           "oneOf": [
             {
               "$ref": "#/$defs/TestSummary"
+            },
+            {
+              "$ref": "#/$defs/MatrixSummary"
             },
             {
               "$ref": "#/$defs/SecuritySummary"
@@ -476,6 +533,11 @@
       "title": "Git Commit",
       "type": "string"
     },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
     "public_config_digest": {
       "default": "0000000000000000000000000000000000000000000000000000000000000000",
       "pattern": "^[0-9a-f]{64}$",
@@ -536,6 +598,7 @@
     "git_commit",
     "stage_manifest_digest",
     "candidate_evidence_digest",
+    "manifest_sha256",
     "stages",
     "review"
   ],

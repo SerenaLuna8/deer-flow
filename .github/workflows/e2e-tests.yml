@@ -50,7 +50,7 @@ jobs:
         working-directory: frontend
         run: npx playwright install chromium --with-deps
 
-      - name: Run deterministic M8 Chromium isolation matrix
+      - name: Run complete deterministic M8 Chromium suite
         working-directory: frontend
         run: pnpm test:e2e:m8:deterministic
         env:
