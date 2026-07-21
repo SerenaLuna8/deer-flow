@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Write a closed independent-review record for one exact M8 candidate."""
 
 from __future__ import annotations
@@ -12,6 +13,10 @@ import sys
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 
 from pydantic import ValidationError
 

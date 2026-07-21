@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,6 +25,20 @@ from scripts.release_acceptance.models import (
 from scripts.release_acceptance.models import (
     TestSummary as AcceptanceTestSummary,
 )
+
+
+def test_documented_review_cli_bootstraps_backend_imports() -> None:
+    backend = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        (sys.executable, "scripts/create_m8_review_report.py", "--help"),
+        cwd=backend,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--candidate-manifest" in result.stdout
 
 
 def _git(repository: Path, *args: str) -> str:
