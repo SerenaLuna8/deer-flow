@@ -28,10 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **release gates:** Pin one cross-platform, zero-skip 22-file M1–M7 PostgreSQL gate
   with real Gateway/Scheduler/Worker process boundaries, Worker-only graph execution,
   Gateway restart replay, exact schema/recovery, and source-absence coverage.
+- **M8 发布验收：** 增加 closed evidence/review contract、142 项隔离矩阵、容量与故障门禁、
+  Python/pnpm 依赖审计、tree/diff/history/evidence 密钥扫描，以及固定 26 文件、0 skip 的
+  M1–M8 PostgreSQL gate。
+- **宿主机认证：** 通过全新 PostgreSQL、`make setup-db` / `make start`、桌面版 Chromium、
+  DeepSeek `deepseek-v4-pro` 真实工具与 durable stream、version-7 restore traffic switch 和
+  invocation-owned cleanup 的 candidate/review/final 双运行链路。
 
-M7 is complete after the full branch passed independent review with 0 Critical, 0 Important,
-and 0 Minor findings. Overall milestone progress is 7/8 (87.5%). M8 full release acceptance
-remains pending, so this is not yet a complete releasable multi-user SaaS.
+M1–M8 已完成，总体里程碑进度为 8/8（100%）。关闭前实现提交通过 0 Critical、0 Important、
+0 Minor 审查；固定 PostgreSQL gate 326 passed/0 skipped，backend 6867 passed/0 failed，frontend
+unit 893 passed，完整 Playwright 79 passed/0 flaky。认证范围不包含 Docker Compose、
+Kubernetes/Helm、Firefox、Safari/WebKit 或其他模型供应商；本次关闭没有创建 tag 或发布制品。
 
 ## [2.0.0] — 2026-06-15
 

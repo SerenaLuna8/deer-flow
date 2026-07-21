@@ -40,7 +40,9 @@ tag, the release is blocked (see [Version gate](#version-gate)).
 
 ## Release procedure
 
-在创建版本提交或 tag 前，宿主机发布候选还必须按
+M8 已在限定宿主机范围完成，项目优先、多用户 SaaS V1 总体进度为 8/8（100%）；里程碑关闭本身
+没有创建版本 tag、推送远端或发布制品。由于后续版本提交会改变 Git identity，在创建版本提交或 tag 前，
+对应的宿主机发布候选仍必须按
 [`docs/operations/m8-host-release-acceptance.md`](docs/operations/m8-host-release-acceptance.md)
 完成 fresh candidate、独立 `0/0/0` review report 和 fresh `final_pass`。该验收只认证全新
 PostgreSQL、`make setup-db` / `make start`、桌面版 Chromium 和 `deepseek-v4-pro`；它不会

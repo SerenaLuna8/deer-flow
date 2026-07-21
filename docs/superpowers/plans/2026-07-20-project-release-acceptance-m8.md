@@ -8,6 +8,11 @@
 
 **Tech Stack:** Python 3.12、Pydantic v2、asyncio、SQLAlchemy async、asyncpg、PostgreSQL 17、pytest/pytest-asyncio、pip-audit、detect-secrets、FastAPI、Next.js 16、React 19、TypeScript 5.8、pnpm 10、Playwright Chromium、Nginx、DeepSeek `deepseek-v4-pro`、现有 version-7 backup/restore/journal authority。
 
+**关闭进度（2026-07-21）：** Task 1–10 实现、修复、完整分支审查和关闭前 candidate/final 已完成；
+实现提交为 `896fe62ec4265a343ab6a6d209453d11508d81a0`，审查为 0 Critical / 0 Important / 0 Minor，
+总体状态更新为 8/8（100%）。下方 Step 7–9 的 authoritative 关闭提交复验与交接在该关闭文档提交之后
+执行；其证据位于 gitignored `.release-evidence`，最终运行后不得为了勾选清单再次修改 tracked file。
+
 ## Global Constraints
 
 - M8 是验收里程碑；只有 RED gate 证明 M1–M7 final behavior 不满足冻结契约时才修改 product runtime，且修复必须最小化。
@@ -1276,7 +1281,7 @@ Review `HEAD^..HEAD` for single-list authority, CI/local responsibility, absence
 - The final post-closure manifest is the authority for exact closure commit/evidence digest; it remains gitignored because a Git commit cannot contain its own commit hash without changing that hash. No repository file changes after the final post-closure run。
 - Final wording is exact: host PostgreSQL setup/start + desktop Chromium is certified; Docker Compose、Kubernetes/Helm、Firefox、Safari/WebKit and other providers are not M8-certified; no tag/push/image/chart/GitHub Release was created。
 
-- [ ] **Step 1: Verify clean implementation candidate preconditions**
+- [x] **Step 1: Verify clean implementation candidate preconditions**
 
 ```bash
 git status --short
@@ -1288,7 +1293,7 @@ make doctor
 
 Expected: clean `codex/m8-release-acceptance`, non-detached exact commit, current config accepted, required tools/ports/DB/model/key presence pass. Fix local config/environment outside Git if preflight reports only an operator prerequisite; never commit secrets。
 
-- [ ] **Step 2: Run first fresh candidate acceptance**
+- [x] **Step 2: Run first fresh candidate acceptance**
 
 ```bash
 M8_LIVE_ACCEPTANCE=1 make release-acceptance
@@ -1296,7 +1301,7 @@ M8_LIVE_ACCEPTANCE=1 make release-acceptance
 
 Expected: every fixed stage passes fresh; status `candidate_ready`, review status `awaiting_review`, M1–M8 PostgreSQL skip count 0, matrix uncovered 0, security effective findings 0, DeepSeek/tool/stream pass, recovery/back-switch pass, cleanup residual 0. Record the evidence-relative candidate manifest locator and digest without copying its contents into Git。
 
-- [ ] **Step 3: Request full independent review and repair loop**
+- [x] **Step 3: Request full independent review and repair loop**
 
 Use `superpowers:requesting-code-review` for `3f574b89..HEAD`, requiring explicit review of:
 
@@ -1312,7 +1317,7 @@ Use `superpowers:requesting-code-review` for `3f574b89..HEAD`, requiring explici
 
 For any finding count >0, use `superpowers:receiving-code-review`: add a failing focused test, minimally fix, run affected gates, commit, rerun the entire candidate command from fresh state, and request a new full-range review. Old candidate/report becomes invalid。
 
-- [ ] **Step 4: Create exact 0/0/0 report and run first fresh final**
+- [x] **Step 4: Create exact 0/0/0 report and run first fresh final**
 
 ```bash
 cd backend
@@ -1328,7 +1333,7 @@ M8_LIVE_ACCEPTANCE=1 M8_REVIEW_REPORT="$M8_REVIEW_REPORT_PATH" make release-acce
 
 `M8_CANDIDATE_MANIFEST` and `M8_REVIEW_REPORT_PATH` are operator-local shell variables pointing inside `.release-evidence`; values contain no secret and are never committed. Expected: second fresh run status `final_pass`, exact commit/report/evidence binding succeeds and all cleanup residuals are 0。
 
-- [ ] **Step 5: Update closure status and human-readable summary**
+- [x] **Step 5: Update closure status and human-readable summary**
 
 Update active docs to 8/8 only now. Record pre-closure certified implementation commit, stage manifest digest, gate counts, RTO/RPO facts and review verdict; do not include local path、UUID、business identifier、prompt/model output or secret. State no version tag/artifact publication occurred。
 
@@ -1339,7 +1344,7 @@ rg -n "8/8|100%|宿主机|Chromium|Docker Compose|Kubernetes|Helm|Firefox|Safari
 
 Expected: first command returns only intentional historical/context statements; second shows exact certified and non-certified scope in active docs。
 
-- [ ] **Step 6: Commit closure docs**
+- [x] **Step 6: Commit closure docs**
 
 ```bash
 git add AGENTS.md backend/AGENTS.md frontend/AGENTS.md README.md CHANGELOG.md RELEASING.md docs

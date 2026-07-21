@@ -631,8 +631,11 @@ PostgreSQL session ownership lock；Gateway 不再持有 poller。关闭轮询�
 手动触发仍使用同一 occurrence/Run/job 原子 admission。独立 Worker、持久化 SSE、通用 jobs/retries、
 配额、审计和通用备份恢复已在 M6 完成。
 
-项目 API 位于 `/api/projects/{project_id}/automations`。M7 当前是等待最终独立分支审查的关闭候选；
-M8 完整发布验收仍未完成，因此当前不能作为完整可发布的多用户 SaaS。
+项目 API 位于 `/api/projects/{project_id}/automations`。M1–M8 已全部完成，总体进度为
+8/8（100%）。DeerFlow 项目优先、多用户 SaaS V1 已通过限定的宿主机部署发布验收：全新
+PostgreSQL 数据库、`make setup-db`、`make start`、桌面版 Chromium 和 DeepSeek
+`deepseek-v4-pro`。Docker Compose、Kubernetes/Helm、Firefox、Safari/WebKit 和其他模型供应商
+未经过 M8 生产认证；本次里程碑关闭也没有创建 tag、推送远端或发布制品。
 
 ## 文档
 

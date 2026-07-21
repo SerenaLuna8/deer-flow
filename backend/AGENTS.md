@@ -276,8 +276,9 @@ Python is 3.12+, Ruff uses double quotes and a 240-character line limit, and all
 interfaces should use precise types. Keep public errors stable and free of SQL, connection,
 credential, private resource, and exception detail.
 
-M7 已完成并通过独立审查；M8 full release acceptance 仍在执行中，因此当前仍不能宣称完整
-multi-user SaaS 已具备发布条件。
+M1–M8 已完成，总体进度为 8/8（100%）。M8 宿主机发布验收的后端 full gate 为 6867 passed、
+0 failed、940 个由专用 live/PostgreSQL 阶段覆盖的 expected skip；固定 M1–M8 PostgreSQL gate 为
+326 passed、0 skipped。认证范围及未认证部署方式见根 `AGENTS.md` 和 operator runbook。
 `M8_RELEASE_POSTGRES_TESTS` 保留该 22 文件前缀并只追加四个 M8 PostgreSQL 文件；最终
 0-skip gate 是根目录 `make test-project-saas-postgres`。完整宿主机验收使用随机自有 source/
 restore 数据库并通过根目录 `make release-acceptance` 执行，candidate/review/final 操作见

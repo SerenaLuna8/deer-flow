@@ -188,5 +188,6 @@ response in the fourth `sendMessage(..., options)` argument under
 Backend base URLs may be set for split-origin development. Leave them unset for the normal
 root `make dev` or Docker flow so all browser calls use same-origin `/api/*` through Nginx.
 
-M7 is complete after independent branch review. M8 full release acceptance
-remains pending, so the frontend must not be described as a complete releasable multi-user SaaS.
+M1–M8 已完成，总体进度为 8/8（100%）。M8 关闭前宿主机验收包含 893 项 frontend unit 和
+79 项完整 Playwright deterministic inventory，均为 0 failed、0 skipped、0 flaky；production/static
+build 与真实桌面版 Chromium journey 同时通过。Firefox 和 Safari/WebKit 仍未经过 M8 生产认证。

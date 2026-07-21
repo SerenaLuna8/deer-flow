@@ -1,7 +1,7 @@
 # M8 项目优先 SaaS 宿主机发布验收设计
 
 - 日期：2026-07-20
-- 状态：设计已确认，实施计划已完成
+- 状态：已完成
 - 前置里程碑：M1–M7 已完成
 - 发布目标：宿主机部署
 - 认证浏览器：桌面版 Chromium
@@ -474,3 +474,28 @@ M8 完成时，DeerFlow 必须以可重复证据证明：项目和 owner 隔离�
 
 只有满足上述全部条件，项目优先、多用户 SaaS 的总体里程碑才从 7/8 更新为 8/8，并在限定的宿主机部署
 范围内标记为可发布。
+
+## 18. 关闭记录
+
+2026-07-21，关闭前实现提交 `896fe62ec4265a343ab6a6d209453d11508d81a0` 完成 fresh
+candidate、完整 `3f574b89..HEAD` 审查和 fresh final。固定 stage manifest digest 为
+`dcda2974d83e9c3ed336e8099e2fc74b219f8fb000044c47a1430327fabe8312`，审查结论为
+0 Critical / 0 Important / 0 Minor。
+
+关闭前 final 的脱敏事实如下：
+
+- M1–M8 PostgreSQL gate：326 passed、0 failed、0 skipped；
+- backend full：6867 passed、0 failed、940 个由专用 live/PostgreSQL 阶段覆盖的 expected skip；
+- frontend unit：893 passed；完整 Playwright：79 passed、0 failed、0 skipped、0 flaky；
+- isolation matrix：142 个 case、29 个 selector、0 uncovered；
+- Python/pnpm dependency audit：分别扫描 202/694 个 package，0 effective finding；
+- DeepSeek `deepseek-v4-pro`：真实 durable stream 完成，2 次工具调用、1 个 terminal；
+- version-7 recovery：恢复 4 项、重放 1 个 tombstone，RPO 为 `archive_point_confirmed`，事实 RTO 为
+  30154 ms；
+- cleanup：process、port、database、path residual 均为 0。
+
+因此 M1–M8 总体进度更新为 8/8（100%）。认证范围仍严格限定为全新 PostgreSQL、
+`make setup-db`、`make start`、桌面版 Chromium 和 DeepSeek `deepseek-v4-pro`。Docker Compose、
+Kubernetes/Helm、Firefox、Safari/WebKit 和其他模型供应商未经过 M8 生产认证。本次关闭没有创建
+版本 tag、推送远端或发布镜像/Chart；关闭文档提交仍必须按第 15 节重新执行 authoritative
+candidate/review/final。

@@ -97,9 +97,11 @@ Recovery accepts only authenticated archive schema version 7 at
 the external tombstone journal, verifies the exact schema, and writes proof before a separate manual
 traffic switch. See [docs/operations/m6-backup-recovery.md](docs/operations/m6-backup-recovery.md).
 
-M7 is complete after a full-branch independent review reported 0 Critical, 0 Important, and
-0 Minor findings. Overall milestone progress is 7/8 (87.5%). M8 full release acceptance remains
-pending, so DeerFlow must not yet be described as a complete releasable multi-user SaaS.
+M1–M8 已完成，总体里程碑进度为 8/8（100%）。M8 的关闭前实现提交
+`896fe62ec4265a343ab6a6d209453d11508d81a0` 已通过完整宿主机 candidate、0 Critical / 0 Important /
+0 Minor 审查和 fresh final。认证范围仅限全新 PostgreSQL 数据库、`make setup-db`、`make start`、
+桌面版 Chromium 和 DeepSeek `deepseek-v4-pro`。Docker Compose、Kubernetes/Helm、Firefox、
+Safari/WebKit 和其他模型供应商仍未经过 M8 生产认证；M8 关闭也没有创建 tag、推送远端或发布制品。
 
 ## Commands: Root vs. Module
 

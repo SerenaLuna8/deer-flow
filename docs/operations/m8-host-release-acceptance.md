@@ -5,6 +5,14 @@
 `make setup-db` / `make start` 宿主机路径、桌面版 Chromium，以及
 `deepseek-v4-pro`。
 
+## 当前认证状态
+
+M8 已完成，项目优先、多用户 SaaS V1 总体进度为 8/8（100%）。关闭前实现提交
+`896fe62ec4265a343ab6a6d209453d11508d81a0` 已通过 fresh candidate、完整分支 0/0/0 审查和
+fresh final；固定 stage manifest digest 为
+`dcda2974d83e9c3ed336e8099e2fc74b219f8fb000044c47a1430327fabe8312`。该记录不替代后续版本提交
+自身的 candidate/review/final，也不表示已经创建 tag、推送远端或发布制品。
+
 M8 验收始终使用本次 invocation 创建的随机 `deerflow_test_*` 数据库和独立
 `deerflow_restore_*` 恢复库。`DATABASE_URL` 只提供普通应用角色和连接模板，
 `POSTGRES_ADMIN_URL` 只提供创建、验证和删除这些受控数据库的维护权限。不要把业务库
