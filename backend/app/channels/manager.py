@@ -769,7 +769,7 @@ class ChannelManager:
     def __init__(
         self,
         bus: MessageBus,
-        store: ChannelStore,
+        store: ChannelStore | None,
         *,
         max_concurrency: int = 5,
         langgraph_url: str = DEFAULT_LANGGRAPH_URL,
@@ -957,8 +957,10 @@ class ChannelManager:
         return policy
 
     def _resolve_available_skill_names(self, msg: InboundMessage) -> set[str] | None:
-        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
-        _, _, run_context = self._resolve_run_params(msg, thread_id)
+        # Skill visibility depends on the admitted Agent configuration, not on
+        # a conversation mapping. Project chat resolution happens later through
+        # the scoped PostgreSQL inbound resolver.
+        _, _, run_context = self._resolve_run_params(msg, "")
         if run_context.get("is_bootstrap"):
             return {"bootstrap"}
 

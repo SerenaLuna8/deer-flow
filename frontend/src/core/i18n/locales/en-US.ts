@@ -313,7 +313,6 @@ export const enUS: Translations = {
           worker_fleet: "Worker fleet",
           scheduler: "Scheduler",
           stream: "Stream",
-          recovery: "Recovery",
           quota: "Quota",
           audit: "Audit",
         },

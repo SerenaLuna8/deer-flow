@@ -15,6 +15,6 @@ make support-bundle
 
 If runs remain queued, inspect Worker readiness and job state. If Automation does not fire, inspect Scheduler enabled state and advisory-lock ownership. If SSE reconnect fails, verify the durable stream cursor remains under the same account/project/thread.
 
-Project private data and Memory are PostgreSQL-backed. Do not repair missing data by creating local private-data files. Backup/restore uses authenticated encrypted archives, external tombstone journals and a new target database.
+Project private data and Memory are PostgreSQL-backed. Do not repair missing data by creating local private-data files.
 
 Support bundles are redacted, but should still be shared only with trusted maintainers.

@@ -150,7 +150,7 @@ test("branchThreadFromTurn surfaces gateway detail on failure", async () => {
   ).rejects.toThrow("This turn can no longer be branched from.");
 });
 
-test("compactThreadContext posts agent attribution and abort signal", async () => {
+test("compactThreadContext leaves agent authority to the server", async () => {
   const controller = new AbortController();
   fetchWithAuth.mockResolvedValue({
     ok: true,
@@ -170,7 +170,6 @@ test("compactThreadContext posts agent attribution and abort signal", async () =
   await expect(
     compactThreadContext("thread-1", {
       apiBaseURL,
-      agentName: "research-agent",
       signal: controller.signal,
     }),
   ).resolves.toMatchObject({
@@ -187,7 +186,6 @@ test("compactThreadContext posts agent attribution and abort signal", async () =
       },
       body: JSON.stringify({
         force: true,
-        agent_name: "research-agent",
       }),
       signal: controller.signal,
     },

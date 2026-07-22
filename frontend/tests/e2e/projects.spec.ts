@@ -26,6 +26,12 @@ const baseProject: Project = {
   agent_count: 2,
   skill_count: 3,
   mcp_count: 1,
+  quota_summary: {
+    members: { used: 4, reserved: 0, limit: 20 },
+    storage_bytes: { used: 0, reserved: 0, limit: 5_368_709_120 },
+    concurrent_runs: { used: 0, reserved: 0, limit: 3 },
+    mcp_calls_daily: { used: 0, reserved: 0, limit: 10_000 },
+  },
   status: "active",
   is_suspended: false,
   membership_version: 1,
@@ -250,7 +256,10 @@ test("workspace shows project cards without project navigation", async ({
   await expect(page.getByRole("link", { name: "Scheduled tasks" })).toHaveCount(
     0,
   );
-  await expect(page.getByRole("button", { name: "账户" })).toBeVisible();
+  await page.getByRole("button", { name: "账户" }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "平台管理" }),
+  ).toHaveAttribute("href", "/admin/operations");
 });
 
 test("project workbench supports create, search, pin, edit, enter, and return", async ({
@@ -302,7 +311,11 @@ test("project workbench supports create, search, pin, edit, enter, and return", 
   await expect(page.getByRole("link", { name: "项目概览" })).toBeVisible();
   await expect(page.getByRole("link", { name: "成员与邀请" })).toBeVisible();
   await expect(page.getByRole("link", { name: "项目设置" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "账户" })).toBeVisible();
+  await page.getByRole("button", { name: "账户" }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "平台管理" }),
+  ).toHaveAttribute("href", "/admin/operations");
+  await page.keyboard.press("Escape");
   await expect(page.getByRole("link", { name: "Agent" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Skill" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "MCP" })).toHaveCount(0);

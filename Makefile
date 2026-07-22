@@ -1,8 +1,17 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install test test-project-foundation-postgres print-project-foundation-postgres-tests test-project-saas-postgres print-project-saas-postgres-tests release-acceptance setup setup-db migrate-db reconcile-usage backup-db restore-db drill-restore rotate-credentials check-db doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon gateway worker scheduler nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.DEFAULT_GOAL := help
 
-BASH ?= bash
+.PHONY: \
+	help \
+	setup config config-upgrade check doctor install setup-sandbox support-bundle \
+	setup-db migrate-db check-db reconcile-usage rotate-credentials \
+	test test-project-foundation-postgres print-project-foundation-postgres-tests \
+	test-project-saas-postgres print-project-saas-postgres-tests release-acceptance \
+	detect-thread-boundaries detect-blocking-io \
+	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean \
+	docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway up down
+
 BACKEND_UV_RUN = cd backend && uv run
 PROJECT_FOUNDATION_POSTGRES_TESTS = \
 	tests/test_m7_final_baseline_postgres.py \
@@ -20,8 +29,6 @@ PROJECT_FOUNDATION_POSTGRES_TESTS = \
 	tests/test_m6_audit_redaction.py \
 	tests/test_m6_audit_integration_postgres.py \
 	tests/test_m6_retention_purge_postgres.py \
-	tests/test_m7_backup_restore_postgres.py \
-	tests/test_m6_restore_postgres.py \
 	tests/test_m6_worker_crash_recovery_postgres.py \
 	tests/test_m6_gateway_reconnect_process.py \
 	tests/test_m7_process_boundary.py \
@@ -31,7 +38,6 @@ PROJECT_FOUNDATION_POSTGRES_TESTS = \
 M8_RELEASE_POSTGRES_TESTS = $(PROJECT_FOUNDATION_POSTGRES_TESTS) \
 	tests/test_m8_isolation_matrix_postgres.py \
 	tests/test_m8_capacity_postgres.py \
-	tests/test_m8_recovery_switch_postgres.py \
 	tests/test_m8_release_gate_postgres.py
 
 # Detect OS for Windows compatibility
@@ -45,51 +51,61 @@ else
     RUN_WITH_GIT_BASH =
 endif
 
-help:
-	@echo "DeerFlow Development Commands:"
-	@echo "  make setup           - Interactive setup wizard (recommended for new users)"
-	@echo "  make doctor          - Check configuration and system requirements"
-	@echo "  make support-bundle  - Create a redacted issue summary, AI draft, and evidence bundle"
-	@echo "  make config          - Generate local config files (aborts if config already exists)"
-	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
-	@echo "  make check           - Check if all required tools are installed"
-	@echo "  make test            - Run the final M1-M8 PostgreSQL SaaS release gate (0 skip)"
-	@echo "  make test-project-foundation-postgres - Run the immutable M1-M7 diagnostic prefix"
-	@echo "  make test-project-saas-postgres - Run the final M1-M8 PostgreSQL SaaS release gate"
-	@echo "  make release-acceptance - Run the complete M8 host release acceptance manifest"
-	@echo "  make setup-db        - 创建并初始化 PostgreSQL 数据库"
-	@echo "  make migrate-db      - 验证或初始化空 PostgreSQL 数据库；旧库必须重建"
-	@echo "  make reconcile-usage - 预检或执行 quota reconciliation（参数通过 ARGS 传入）"
-	@echo "  make backup-db      - 创建外部、认证加密 PostgreSQL backup archive（参数通过 ARGS 传入）"
-	@echo "  make restore-db     - 恢复认证 archive 到全新 deerflow_restore_* 数据库（参数通过 ARGS 传入）"
-	@echo "  make drill-restore  - 恢复到随机临时数据库，验证后只删除该临时库（参数通过 ARGS 传入）"
-	@echo "  make rotate-credentials - 分批轮换 credential envelopes（参数通过 ARGS 传入）"
-	@echo "  make check-db        - 只读检查 PostgreSQL 数据库状态"
-	@echo "  make detect-thread-boundaries - Inventory async/thread boundary points"
-	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
-	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
-	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
-	@echo "  make dev             - Start all services in development mode (with hot-reloading)"
-	@echo "  make dev-daemon      - Start dev services in background (daemon mode)"
-	@echo "  make start           - Start all services in production mode (optimized, no hot-reloading)"
-	@echo "  make start-daemon    - Start prod services in background (daemon mode)"
-	@echo "  make nginx           - Start nginx alone in the foreground (local dev config)"
-	@echo "  make stop            - Stop all running services"
-	@echo "  make clean           - Clean up processes and temporary files"
-	@echo ""
-	@echo "Docker Production Commands:"
-	@echo "  make up              - Build and start production Docker services (localhost:2026)"
-	@echo "  make down            - Stop and remove production Docker containers"
-	@echo ""
-	@echo "Docker Development Commands:"
-	@echo "  make docker-init     - Pull the sandbox image"
-	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
-	@echo "  make docker-stop     - Stop Docker development services"
-	@echo "  make docker-logs     - View Docker development logs"
-	@echo "  make docker-logs-frontend - View Docker frontend logs"
-	@echo "  make docker-logs-gateway - View Docker gateway logs"
+SERVE = $(RUN_WITH_GIT_BASH) ./scripts/serve.sh
+DOCKER = $(RUN_WITH_GIT_BASH) ./scripts/docker.sh
+DEPLOY = $(RUN_WITH_GIT_BASH) ./scripts/deploy.sh
 
-## Setup & Diagnosis
+help:
+	@echo "DeerFlow 命令"
+	@echo ""
+	@echo "本地服务："
+	@echo "  make dev                              启动开发环境（热更新，入口 localhost:2026）"
+	@echo "  make dev-daemon                       后台启动开发环境"
+	@echo "  make start                            启动本地生产模式"
+	@echo "  make start-daemon                     后台启动本地生产模式"
+	@echo "  make gateway                          单独启动 Gateway"
+	@echo "  make worker                           单独启动 Worker"
+	@echo "  make scheduler                        单独启动 Scheduler"
+	@echo "  make nginx                            单独启动本地 Nginx"
+	@echo "  make stop                             停止本地服务"
+	@echo "  make clean                            停止服务并清理本地运行状态和日志"
+	@echo ""
+	@echo "配置与安装："
+	@echo "  make setup                            运行交互式初始化向导"
+	@echo "  make config                           从示例生成本地配置"
+	@echo "  make config-upgrade                   升级并补齐 config.yaml"
+	@echo "  make check                            检查必要工具"
+	@echo "  make doctor                           检查配置和运行环境"
+	@echo "  make install                          安装前后端依赖和 pre-commit hooks"
+	@echo "  make setup-sandbox                    预拉取 Sandbox 容器镜像"
+	@echo "  make support-bundle                   生成脱敏诊断材料"
+	@echo ""
+	@echo "PostgreSQL 与运维："
+	@echo "  make setup-db                         创建并初始化数据库"
+	@echo "  make migrate-db                       验证或初始化空数据库"
+	@echo "  make check-db                         只读检查数据库状态"
+	@echo "  make reconcile-usage ARGS=...         校准配额用量"
+	@echo "  make rotate-credentials ARGS=...      轮换 Credential envelope"
+	@echo ""
+	@echo "测试与发布验收："
+	@echo "  make test                             运行 M1-M8 PostgreSQL 发布门禁"
+	@echo "  make test-project-foundation-postgres 运行 M1-M7 PostgreSQL 诊断前缀"
+	@echo "  make test-project-saas-postgres       运行 M1-M8 PostgreSQL 发布门禁"
+	@echo "  make release-acceptance               运行完整 M8 宿主机验收"
+	@echo "  make detect-thread-boundaries         检查异步和线程边界"
+	@echo "  make detect-blocking-io               检查后端阻塞 IO"
+	@echo ""
+	@echo "Docker："
+	@echo "  make docker-init                      拉取 Sandbox 镜像"
+	@echo "  make docker-start                     启动 Docker 开发环境"
+	@echo "  make docker-stop                      停止 Docker 开发环境"
+	@echo "  make docker-logs                      查看 Docker 日志"
+	@echo "  make docker-logs-frontend             查看 Frontend 日志"
+	@echo "  make docker-logs-gateway              查看 Gateway 日志"
+	@echo "  make up                               构建并启动生产容器"
+	@echo "  make down                             停止生产容器"
+
+# Tests and release acceptance
 test: test-project-saas-postgres
 
 test-project-foundation-postgres:
@@ -107,12 +123,14 @@ print-project-saas-postgres-tests:
 release-acceptance:
 	@cd backend && uv run python scripts/run_release_acceptance.py
 
+# Configuration and diagnostics
 setup:
 	@$(BACKEND_UV_RUN) python ../scripts/setup_wizard.py
 
 doctor:
 	@$(BACKEND_UV_RUN) python ../scripts/doctor.py
 
+# PostgreSQL and operations
 setup-db:
 	@$(MAKE) -C backend setup-db
 
@@ -122,30 +140,13 @@ migrate-db:
 reconcile-usage:
 	@$(MAKE) -C backend reconcile-usage ARGS="$(ARGS)"
 
-gateway:
-	@$(MAKE) -C backend gateway
-
-worker:
-	@$(MAKE) -C backend worker
-
-scheduler:
-	@$(MAKE) -C backend scheduler
-
-backup-db:
-	@$(MAKE) -C backend backup-db ARGS="$(ARGS)"
-
-restore-db:
-	@$(MAKE) -C backend restore-db ARGS="$(ARGS)"
-
-drill-restore:
-	@$(MAKE) -C backend drill-restore ARGS="$(ARGS)"
-
 rotate-credentials:
 	@$(MAKE) -C backend rotate-credentials ARGS="$(ARGS)"
 
 check-db:
 	@$(MAKE) -C backend check-db
 
+# Support and static diagnostics
 support-bundle:
 	@$(BACKEND_UV_RUN) python ../scripts/support_bundle.py --include-doctor
 
@@ -161,11 +162,10 @@ config:
 config-upgrade:
 	@$(RUN_WITH_GIT_BASH) ./scripts/config-upgrade.sh
 
-# Check required tools
 check:
 	@$(PYTHON) ./scripts/check.py
 
-# Install all dependencies
+# Dependency installation
 install:
 	@echo "Installing backend dependencies..."
 	@cd backend && uv sync
@@ -184,78 +184,65 @@ install:
 	@echo "  make setup-sandbox"
 	@echo ""
 
-# Pre-pull sandbox Docker image (optional but recommended)
 setup-sandbox:
 	@$(RUN_WITH_GIT_BASH) ./scripts/setup-sandbox.sh
 
-# Start all services in development mode (with hot-reloading)
-dev:
-	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev
+# Local service lifecycle
+gateway:
+	@$(MAKE) -C backend gateway
 
-# Start all services in production mode (with optimizations)
-start:
-	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod
+worker:
+	@$(MAKE) -C backend worker
 
-# Start all services in daemon mode (background)
-dev-daemon:
-	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev --daemon
+scheduler:
+	@$(MAKE) -C backend scheduler
 
-# Start prod services in daemon mode (background)
-start-daemon:
-	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod --daemon
+dev: check
+	@$(SERVE) --dev
 
-# Start nginx alone in the foreground with the local dev config
+start: check
+	@$(SERVE) --prod
+
+dev-daemon: check
+	@$(SERVE) --dev --daemon
+
+start-daemon: check
+	@$(SERVE) --prod --daemon
+
 nginx:
 	@$(RUN_WITH_GIT_BASH) ./scripts/nginx.sh
 
-# Stop all services
 stop:
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --stop
+	@$(SERVE) --stop
 
-# Clean up
 clean: stop
 	@echo "Cleaning up..."
 	@-rm -rf backend/.deer-flow 2>/dev/null || true
 	@-rm -rf logs/*.log 2>/dev/null || true
 	@echo "✓ Cleanup complete"
 
-# ==========================================
-# Docker Development Commands
-# ==========================================
-
-# Initialize Docker containers and install dependencies
+# Docker development
 docker-init:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh init
+	@$(DOCKER) init
 
-# Start Docker development environment
 docker-start:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh start
+	@$(DOCKER) start
 
-# Stop Docker development environment
 docker-stop:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh stop
+	@$(DOCKER) stop
 
-# View Docker development logs
 docker-logs:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs
+	@$(DOCKER) logs
 
-# View Docker development logs
 docker-logs-frontend:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --frontend
+	@$(DOCKER) logs --frontend
+
 docker-logs-gateway:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --gateway
-# ==========================================
-# Production Docker Commands
-# ==========================================
+	@$(DOCKER) logs --gateway
 
-# Build and start production services
+# Docker production
 up:
-	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh
+	@$(DEPLOY)
 
-# Stop and remove production containers
 down:
-	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh down
+	@$(DEPLOY) down

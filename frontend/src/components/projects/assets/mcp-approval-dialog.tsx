@@ -1,5 +1,6 @@
 "use client";
 
+import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,6 +13,21 @@ import {
 import type { AssetVersion } from "@/core/shared-assets";
 
 type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
+type McpApprovalResult = boolean | void;
+type McpApprovalHandler = (
+  version: McpVersion,
+  credentialVersions: Record<string, string>,
+) => McpApprovalResult | Promise<McpApprovalResult>;
+
+export async function settleMcpApproval(
+  operation: () => McpApprovalResult | Promise<McpApprovalResult>,
+): Promise<boolean> {
+  try {
+    return (await operation()) !== false;
+  } catch {
+    return false;
+  }
+}
 
 export type CredentialVersionOption = {
   id: string;
@@ -82,6 +98,7 @@ export function McpApprovalForm({
   credentialScope,
   credentialsLoading = false,
   credentialsError,
+  approvalError,
   onRetryCredentials,
   onApprove,
 }: {
@@ -91,11 +108,9 @@ export function McpApprovalForm({
   credentialScope: "system" | "project";
   credentialsLoading?: boolean;
   credentialsError?: unknown;
+  approvalError?: unknown;
   onRetryCredentials?: () => void;
-  onApprove: (
-    version: McpVersion,
-    credentialVersions: Record<string, string>,
-  ) => void;
+  onApprove: McpApprovalHandler;
 }) {
   const hasRequiredSlots = version.credential_slots.some(
     (slot) => slot.required,
@@ -126,7 +141,7 @@ export function McpApprovalForm({
         );
         if (missingRequiredSlot) return;
 
-        onApprove(
+        void onApprove(
           version,
           Object.fromEntries(entries.filter(([, id]) => id !== "")),
         );
@@ -175,6 +190,11 @@ export function McpApprovalForm({
           )}
         </>
       )}
+      {Boolean(approvalError) && (
+        <p role="alert" className="text-destructive text-sm">
+          {adminAssetErrorMessage(approvalError)}
+        </p>
+      )}
       <DialogFooter>
         <Button
           type="submit"
@@ -200,6 +220,7 @@ export function McpApprovalDialog({
   credentialScope,
   credentialsLoading = false,
   credentialsError,
+  approvalError,
   onRetryCredentials,
   onOpenChange,
   onApprove,
@@ -211,12 +232,10 @@ export function McpApprovalDialog({
   credentialScope: "system" | "project";
   credentialsLoading?: boolean;
   credentialsError?: unknown;
+  approvalError?: unknown;
   onRetryCredentials?: () => void;
   onOpenChange: (open: boolean) => void;
-  onApprove: (
-    version: McpVersion,
-    credentialVersions: Record<string, string>,
-  ) => void;
+  onApprove: McpApprovalHandler;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -236,11 +255,15 @@ export function McpApprovalDialog({
             credentialScope={credentialScope}
             credentialsLoading={credentialsLoading}
             credentialsError={credentialsError}
+            approvalError={approvalError}
             onRetryCredentials={onRetryCredentials}
-            onApprove={(approvedVersion, bindings) => {
-              onApprove(approvedVersion, bindings);
-              onOpenChange(false);
-            }}
+            onApprove={(approvedVersion, bindings) =>
+              void settleMcpApproval(() =>
+                onApprove(approvedVersion, bindings),
+              ).then((approved) => {
+                if (approved) onOpenChange(false);
+              })
+            }
           />
         )}
       </DialogContent>

@@ -16,12 +16,12 @@ from fastapi import (
     UploadFile,
     status,
 )
-from pydantic import Field
+from pydantic import Field, model_validator
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
-from app.gateway.deps import private_work_context, project_session, require_project_private_open
+from app.gateway.deps import get_config, private_work_context, project_session, require_project_private_open
 from app.gateway.private_work_schemas import (
     PrivateRunCreateRequest,
     PrivateThreadTokenUsageResponse,
@@ -29,6 +29,7 @@ from app.gateway.private_work_schemas import (
     StrictPrivateWorkRequest,
     StrictPrivateWorkResponse,
 )
+from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.checkpointer import (
     PRIVATE_SCOPE_MARKER,
     ProjectScopedCheckpointer,
@@ -63,6 +64,7 @@ from app.reliability.errors import (
     ReliabilityError,
     ReliabilityInvalidStreamCursor,
 )
+from deerflow.config.app_config import AppConfig
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.persistence.private_work.file_repository import (
     PRIVATE_FILE_CHUNK_SIZE,
@@ -78,6 +80,7 @@ from deerflow.runtime.events.stream import (
     PostgresStreamBridge,
     parse_stream_cursor,
 )
+from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS
 from deerflow.runtime.runs.store import RunStore
 from deerflow.utils.time import coerce_iso
 
@@ -115,6 +118,8 @@ class PrivateThreadResponse(StrictPrivateWorkResponse):
     status: str
     metadata: dict[str, Any]
     version: int
+    created_at: str
+    updated_at: str
 
 
 class PrivateThreadSearchResponse(StrictPrivateWorkResponse):
@@ -192,6 +197,92 @@ class PrivateWorkReadinessResponse(StrictPrivateWorkResponse):
     request_id: str
 
 
+class PrivateThreadGoalRequest(StrictPrivateWorkRequest):
+    objective: str = Field(min_length=1, max_length=4000)
+    max_continuations: int = Field(
+        default=DEFAULT_MAX_GOAL_CONTINUATIONS,
+        ge=0,
+        le=DEFAULT_MAX_GOAL_CONTINUATIONS,
+    )
+
+
+class PrivateThreadGoalResponse(StrictPrivateWorkResponse):
+    goal: dict[str, Any] | None = None
+
+
+class PrivateCompactKeep(StrictPrivateWorkRequest):
+    type: Literal["fraction", "tokens", "messages"]
+    value: int | float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_value(self) -> PrivateCompactKeep:
+        if self.type == "fraction" and float(self.value) > 1:
+            raise ValueError("fraction must not exceed 1")
+        if self.type in {"tokens", "messages"} and (not isinstance(self.value, int) or isinstance(self.value, bool)):
+            raise ValueError("tokens and messages require integer values")
+        return self
+
+    def to_tuple(self) -> tuple[str, int | float]:
+        return self.type, self.value
+
+
+class PrivateThreadCompactRequest(StrictPrivateWorkRequest):
+    force: bool = True
+    keep: PrivateCompactKeep | None = None
+
+
+class PrivateThreadCompactResponse(StrictPrivateWorkResponse):
+    thread_id: str
+    compacted: bool
+    reason: str | None = None
+    removed_message_count: int = 0
+    preserved_message_count: int = 0
+    summary_updated: bool = False
+    checkpoint_id: str | None = None
+    total_tokens: int = 0
+
+
+class PrivateThreadBranchRequest(StrictPrivateWorkRequest):
+    message_id: str = Field(min_length=1, max_length=128)
+    message_ids: list[str] = Field(default_factory=list, max_length=20)
+    title: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_message_ids(self) -> PrivateThreadBranchRequest:
+        if any(not value or len(value) > 128 for value in self.message_ids):
+            raise ValueError("message ids must be between 1 and 128 characters")
+        if len(self.message_ids) != len(set(self.message_ids)):
+            raise ValueError("message ids must be unique")
+        return self
+
+
+class PrivateThreadBranchResponse(StrictPrivateWorkResponse):
+    thread_id: str
+    parent_thread_id: str
+    parent_checkpoint_id: str
+    branched_from_message_id: str
+    workspace_clone_mode: str
+
+
+class PrivateRegeneratePrepareRequest(StrictPrivateWorkRequest):
+    message_id: str = Field(min_length=1, max_length=128)
+
+
+class PrivateRegeneratePrepareResponse(StrictPrivateWorkResponse):
+    input: dict[str, Any]
+    checkpoint: dict[str, Any]
+    metadata: dict[str, Any]
+    target_run_id: str
+
+
+class PrivateSuggestionsRequest(StrictPrivateWorkRequest):
+    n: int = Field(default=3, ge=1, le=5)
+
+
+class PrivateSuggestionsResponse(StrictPrivateWorkResponse):
+    suggestions: list[str] = Field(default_factory=list)
+
+
 @router.get("/readiness", response_model=PrivateWorkReadinessResponse)
 async def get_private_work_readiness(
     context: PrivateWorkContext = Depends(private_work_context),
@@ -214,6 +305,8 @@ def _thread_response(record: PrivateThreadRecord) -> PrivateThreadResponse:
         status=record.status,
         metadata=record.metadata,
         version=record.version,
+        created_at=record.created_at.isoformat(),
+        updated_at=record.updated_at.isoformat(),
     )
 
 
@@ -264,6 +357,16 @@ def _run_response(record: PrivateRunRecord | RunRecord) -> PrivateRunResponse:
 def _thread_service(request: Request, request_id: str) -> PrivateThreadService:
     service = getattr(request.app.state, "private_thread_service", None)
     if not isinstance(service, PrivateThreadService):
+        raise PrivateWorkUnavailable(request_id)
+    return service
+
+
+def _chat_control_service(
+    request: Request,
+    request_id: str,
+) -> ProjectChatControlService:
+    service = getattr(request.app.state, "project_chat_control_service", None)
+    if not isinstance(service, ProjectChatControlService):
         raise PrivateWorkUnavailable(request_id)
     return service
 
@@ -573,6 +676,188 @@ def _scoped_checkpointer(
 
 def _raise_http(error: PrivateWorkError) -> None:
     raise private_work_http_exception(error) from None
+
+
+@router.get(
+    "/threads/{thread_id}/goal",
+    response_model=PrivateThreadGoalResponse,
+)
+async def get_private_thread_goal(
+    thread_id: uuid.UUID,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateThreadGoalResponse:
+    try:
+        goal = await _chat_control_service(
+            request,
+            context.request_id,
+        ).get_goal(context, str(thread_id))
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateThreadGoalResponse(goal=goal)
+
+
+@router.put(
+    "/threads/{thread_id}/goal",
+    response_model=PrivateThreadGoalResponse,
+)
+async def set_private_thread_goal(
+    thread_id: uuid.UUID,
+    body: PrivateThreadGoalRequest,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateThreadGoalResponse:
+    try:
+        goal = await _chat_control_service(
+            request,
+            context.request_id,
+        ).set_goal(
+            context,
+            str(thread_id),
+            objective=body.objective,
+            max_continuations=body.max_continuations,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateThreadGoalResponse(goal=goal)
+
+
+@router.delete(
+    "/threads/{thread_id}/goal",
+    response_model=PrivateThreadGoalResponse,
+)
+async def clear_private_thread_goal(
+    thread_id: uuid.UUID,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateThreadGoalResponse:
+    try:
+        await _chat_control_service(
+            request,
+            context.request_id,
+        ).clear_goal(context, str(thread_id))
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateThreadGoalResponse(goal=None)
+
+
+@router.post(
+    "/threads/{thread_id}/compact",
+    response_model=PrivateThreadCompactResponse,
+)
+async def compact_private_thread(
+    thread_id: uuid.UUID,
+    body: PrivateThreadCompactRequest,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
+) -> PrivateThreadCompactResponse:
+    try:
+        result = await _chat_control_service(
+            request,
+            context.request_id,
+        ).compact(
+            context,
+            str(thread_id),
+            force=body.force,
+            keep=None if body.keep is None else body.keep.to_tuple(),
+            app_config=config,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateThreadCompactResponse(
+        thread_id=result.thread_id,
+        compacted=result.compacted,
+        reason=result.reason,
+        removed_message_count=result.removed_message_count,
+        preserved_message_count=result.preserved_message_count,
+        summary_updated=result.summary_updated,
+        checkpoint_id=result.checkpoint_id,
+        total_tokens=result.total_tokens,
+    )
+
+
+@router.post(
+    "/threads/{thread_id}/branches",
+    response_model=PrivateThreadBranchResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def branch_private_thread(
+    thread_id: uuid.UUID,
+    body: PrivateThreadBranchRequest,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateThreadBranchResponse:
+    try:
+        record, checkpoint_id = await _chat_control_service(
+            request,
+            context.request_id,
+        ).branch(
+            context,
+            str(thread_id),
+            message_id=body.message_id,
+            message_ids=body.message_ids,
+            title=body.title,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateThreadBranchResponse(
+        thread_id=record.thread_id,
+        parent_thread_id=str(thread_id),
+        parent_checkpoint_id=checkpoint_id,
+        branched_from_message_id=body.message_id,
+        workspace_clone_mode=str(record.metadata.get("workspace_clone_mode", "historical_skip")),
+    )
+
+
+@router.post(
+    "/threads/{thread_id}/runs/regenerate/prepare",
+    response_model=PrivateRegeneratePrepareResponse,
+)
+async def prepare_private_regenerate_run(
+    thread_id: uuid.UUID,
+    body: PrivateRegeneratePrepareRequest,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateRegeneratePrepareResponse:
+    try:
+        payload = await _chat_control_service(
+            request,
+            context.request_id,
+        ).prepare_regenerate(
+            context,
+            str(thread_id),
+            message_id=body.message_id,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateRegeneratePrepareResponse.model_validate(payload)
+
+
+@router.post(
+    "/threads/{thread_id}/suggestions",
+    response_model=PrivateSuggestionsResponse,
+)
+async def generate_private_suggestions(
+    thread_id: uuid.UUID,
+    body: PrivateSuggestionsRequest,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
+) -> PrivateSuggestionsResponse:
+    try:
+        suggestions = await _chat_control_service(
+            request,
+            context.request_id,
+        ).suggest(
+            context,
+            str(thread_id),
+            n=body.n,
+            app_config=config,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateSuggestionsResponse(suggestions=suggestions)
 
 
 @router.post(

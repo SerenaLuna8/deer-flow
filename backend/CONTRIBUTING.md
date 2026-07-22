@@ -31,4 +31,4 @@ New system assets are published through admin services; project assets are creat
 
 ## Verification
 
-Run focused tests while developing, then backend format/lint/full tests and the root PostgreSQL gate when the change affects persistence, authorization, jobs, streams, quotas, audit or recovery.
+Run focused tests while developing, then backend format/lint/full tests and the root PostgreSQL gate when the change affects persistence, authorization, jobs, streams, quotas, audit, retries, or restart behavior.

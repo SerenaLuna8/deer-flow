@@ -1,9 +1,9 @@
 """Regression anchor: DynamicContextMiddleware must not block the event loop.
 
-``_inject`` performs synchronous file I/O (memory JSON loading) and
-potentially blocking network calls (tiktoken encoding download on first
-use — see issue #3402).  ``abefore_agent`` offloads the call via
-``asyncio.to_thread`` so the event loop stays responsive.
+``_inject`` is an extension seam whose reminder formatting may perform
+synchronous work. ``abefore_agent`` offloads the call via
+``asyncio.to_thread`` so the event loop stays responsive while the production
+path remains independent from legacy global file Memory.
 
 This anchor drives the real ``create_agent`` graph via ``ainvoke`` under
 the strict Blockbuster gate.  If the offload regresses and the blocking
@@ -38,9 +38,8 @@ async def test_abefore_agent_does_not_block_event_loop() -> None:
     """``abefore_agent`` must offload _inject() to a thread pool."""
     mw = DynamicContextMiddleware()
 
-    # Mock _build_full_reminder to simulate a slow synchronous operation
-    # (file I/O + tiktoken download).  The mock sleeps briefly to make any
-    # event-loop blocking visible to the Blockbuster gate.
+    # Mock _build_full_reminder to simulate a slow downstream formatter. The
+    # sleep makes any event-loop blocking visible to the Blockbuster gate.
     original_build = mw._build_full_reminder
 
     def slow_build_reminder():

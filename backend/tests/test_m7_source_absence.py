@@ -189,18 +189,6 @@ BANNED_LEGACY_SYMBOLS_BY_PATH = {
     "backend/app/gateway/deps.py": frozenset({"get_checkpointer", "get_store", "get_thread_store"}),
 }
 
-M7_CHANGED_MARKDOWN_DOCS = (
-    "AGENTS.md",
-    "backend/AGENTS.md",
-    "frontend/AGENTS.md",
-    "README.md",
-    "CHANGELOG.md",
-    "docs/operations/m6-backup-recovery.md",
-    "docs/superpowers/specs/2026-07-12-project-first-saas-design.md",
-    "docs/superpowers/specs/2026-07-18-project-legacy-cleanup-m7-design.md",
-    "docs/superpowers/plans/2026-07-18-project-legacy-cleanup-m7.md",
-)
-
 HISTORICAL_MARKDOWN_PREFIXES = (
     "docs/superpowers/plans/",
     "docs/superpowers/specs/",
@@ -221,12 +209,8 @@ HISTORICAL_MARKDOWN_PATHS = frozenset(
 ACTIVE_ROOT_MARKDOWN = frozenset(
     {
         "AGENTS.md",
-        "CHANGELOG.md",
-        "CONTRIBUTING.md",
         "Install.md",
         "README.md",
-        "RELEASING.md",
-        "SECURITY.md",
         "backend/AGENTS.md",
         "backend/CONTRIBUTING.md",
         "backend/README.md",
@@ -254,7 +238,10 @@ CONFIG_TOMBSTONES = frozenset(
         "legacy_run_store",
         "mcp_config",
         "mcp_config_path",
+        "recovery",
         "run_events",
+        "skill_evolution",
+        "skill_scan",
         "stream_bridge",
     }
 )

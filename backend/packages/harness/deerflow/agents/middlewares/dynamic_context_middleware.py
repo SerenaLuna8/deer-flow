@@ -168,11 +168,14 @@ class DynamicContextMiddleware(AgentMiddleware):
         so the downstream SystemMessage carries only framework authority and
         memory stays at role:user — preventing untrusted content from gaining
         system privilege (OWASP LLM01).
-        """
-        from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
-        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config) if injection_enabled else ""
+        Project Memory is loaded only by :meth:`_inject_private`, from an
+        authenticated ``PrivateResourceScope`` backed by PostgreSQL.  The
+        unscoped path deliberately injects the date only.  Keeping this helper
+        independent from ``lead_agent.prompt`` also preserves the process
+        boundary: Gateway-owned chat controls may reuse context-compaction
+        helpers without importing the Worker-only lead-agent graph.
+        """
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 
         date_reminder = "\n".join(
@@ -183,9 +186,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             ]
         )
 
-        memory_block = memory_context.strip() if memory_context else None
-
-        return date_reminder, memory_block
+        return date_reminder, None
 
     def _build_date_update_reminder(self) -> str:
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
@@ -393,17 +394,13 @@ class DynamicContextMiddleware(AgentMiddleware):
                     _INJECT_TIMEOUT_SECONDS,
                 )
                 return self._inject(state, memory_block_override=None)
-        # _inject() performs synchronous file I/O (memory JSON loading) and
-        # potentially blocking network calls (tiktoken encoding download on
-        # first use).  Offload to a thread so the event loop is never blocked
-        # — a blocking call here starves all concurrent HTTP handlers (auth,
-        # SSE heartbeats, etc.).  See issue #3402.
+        # Keep the unscoped compatibility hook off the event loop.  Production
+        # no longer reads global file Memory here, but downstream extensions
+        # may still provide synchronous reminder formatting; a blocking call
+        # would starve concurrent HTTP handlers (auth, SSE heartbeats, etc.).
         #
-        # Bounded timeout: if startup warm-up failed silently (e.g. network
-        # blip during deploy), the first request's cold tiktoken download can
-        # block for tens of minutes (OS TCP timeout).  Time-box injection so
-        # the request degrades gracefully (no memory context) rather than
-        # hanging.
+        # Time-box compatibility formatting so the request degrades to no
+        # injected context instead of hanging.
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(self._inject, state),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -24,8 +24,14 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
-from app.shared_assets.mcp_service import McpAssetView
-from app.shared_assets.models import AssetKind, AssetScope
+from app.shared_assets.mcp_service import (
+    McpAssetView,
+    McpCredentialSlotView,
+    McpDefinition,
+    McpVersionView,
+)
+from app.shared_assets.models import AssetKind, AssetScope, WorkflowStatus
+from app.shared_assets.skill_service import SkillFileContentView, SkillVersionView
 
 PROJECT_ID = uuid.uuid4()
 NOW = datetime.now(UTC)
@@ -106,6 +112,7 @@ def _client(
     binding_service=None,
     credential_service=None,
     mcp_service=None,
+    skill_service=None,
 ) -> TestClient:
     app = FastAPI()
     app.include_router(project_assets.project_router)
@@ -118,6 +125,8 @@ def _client(
         app.dependency_overrides[project_assets.get_credential_service] = lambda: credential_service
     if mcp_service is not None:
         app.dependency_overrides[project_assets.get_mcp_service] = lambda: mcp_service
+    if skill_service is not None:
+        app.dependency_overrides[project_assets.get_skill_service] = lambda: skill_service
     return TestClient(app)
 
 
@@ -166,7 +175,7 @@ def test_project_asset_list_separates_scopes() -> None:
     assert "mcp.credentials.approve" not in system_item["capabilities"]
     assert project_item["binding"] is None
     assert "shared_assets.edit" in project_item["capabilities"]
-    assert "shared_assets.manage_bindings" not in project_item["capabilities"]
+    assert "shared_assets.manage_bindings" in project_item["capabilities"]
     service.list_visible.assert_awaited_once()
     actor = service.list_visible.await_args.args[0]
     assert actor.project_id == PROJECT_ID
@@ -188,6 +197,24 @@ def test_project_asset_list_keeps_unbound_system_assets_visible() -> None:
     assert response.status_code == 200
     assert len(response.json()["system_items"]) == 1
     assert response.json()["system_items"][0]["binding"] is None
+
+
+def test_project_asset_capabilities_expose_suspend_only_to_effective_admins() -> None:
+    admin_capabilities = project_assets._asset_item_capabilities(
+        _context(ProjectRole.ADMIN),
+        AssetScope.PROJECT,
+        AssetKind.AGENT,
+    )
+    editor_capabilities = project_assets._asset_item_capabilities(
+        _context(ProjectRole.EDITOR),
+        AssetScope.PROJECT,
+        AssetKind.AGENT,
+    )
+
+    assert "shared_assets.edit" in admin_capabilities
+    assert "shared_assets.manage_bindings" in admin_capabilities
+    assert "shared_assets.edit" in editor_capabilities
+    assert "shared_assets.manage_bindings" not in editor_capabilities
 
 
 def test_project_mcp_and_credential_capabilities_are_scope_effective() -> None:
@@ -281,6 +308,220 @@ def test_project_asset_version_history_returns_typed_envelope() -> None:
     assert requested_asset_id == asset_id
 
 
+def _skill_version(asset_id: uuid.UUID, *, source_id: uuid.UUID | None = None) -> SkillVersionView:
+    return SkillVersionView(
+        id=uuid.uuid4(),
+        skill_id=asset_id,
+        version_number=2,
+        workflow_status=WorkflowStatus.DRAFT,
+        description="Updated skill",
+        frontmatter={"name": "updated-skill", "description": "Updated skill"},
+        compatibility=None,
+        secret_requirements=(),
+        scan_decision="allow",
+        scan_rule_ids=(),
+        scan_summary={"rule_ids": [], "severity_counts": {}},
+        file_views=(),
+        supersedes_version_id=source_id,
+        payload_checksum="b" * 64,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+    )
+
+
+def test_project_skill_file_content_preview_is_typed_and_never_cached() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    service.preview_version_file.return_value = SkillFileContentView(
+        path="SKILL.md",
+        media_type="text/markdown",
+        size_bytes=12,
+        sha256="a" * 64,
+        preview_status="ready",
+        encoding="utf-8",
+        content="# Skill\n",
+        source_payload_checksum="b" * 64,
+        asset_version=3,
+    )
+
+    response = _client(skill_service=service).get(
+        f"/api/projects/{PROJECT_ID}/skills/{asset_id}/versions/{version_id}/files/content",
+        params={"path": "SKILL.md"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.json() == {
+        "data": {
+            "path": "SKILL.md",
+            "media_type": "text/markdown",
+            "size_bytes": 12,
+            "sha256": "a" * 64,
+            "preview_status": "ready",
+            "encoding": "utf-8",
+            "content": "# Skill\n",
+            "source_payload_checksum": "b" * 64,
+            "asset_version": 3,
+        },
+        "request_id": "req-project-assets",
+    }
+    service.preview_version_file.assert_awaited_once_with(
+        service.preview_version_file.await_args.args[0],
+        asset_id,
+        version_id,
+        "SKILL.md",
+    )
+
+
+def test_project_skill_fork_route_uses_strict_discriminated_changes() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    service.fork_version.return_value = _skill_version(asset_id, source_id=source_id)
+    body = {
+        "expected_asset_version": 3,
+        "expected_source_payload_checksum": "a" * 64,
+        "changes": [
+            {
+                "op": "replace",
+                "path": "SKILL.md",
+                "content": "---\nname: updated-skill\ndescription: Updated skill\n---\n",
+                "media_type": "text/markdown",
+            },
+            {
+                "op": "create",
+                "path": "references/guide.md",
+                "content": "Guide\n",
+                "media_type": "text/markdown",
+            },
+            {"op": "delete", "path": "references/old.md"},
+        ],
+    }
+
+    response = _client(skill_service=service).post(
+        f"/api/projects/{PROJECT_ID}/skills/{asset_id}/versions/{source_id}/fork",
+        json=body,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["workflow_status"] == "draft"
+    args = service.fork_version.await_args.args
+    assert args[1:3] == (asset_id, source_id)
+    changes = args[3]
+    assert [(item.op, item.path) for item in changes] == [
+        ("replace", "SKILL.md"),
+        ("create", "references/guide.md"),
+        ("delete", "references/old.md"),
+    ]
+    assert service.fork_version.await_args.kwargs == {
+        "expected_asset_version": 3,
+        "expected_source_payload_checksum": "a" * 64,
+    }
+
+    invalid = _client(skill_service=service).post(
+        f"/api/projects/{PROJECT_ID}/skills/{asset_id}/versions/{source_id}/fork",
+        json={**body, "unexpected": True},
+    )
+    assert invalid.status_code == 422
+
+
+def _mcp_version_with_read_only_mappings(asset_id: uuid.UUID) -> McpVersionView:
+    return McpVersionView(
+        id=uuid.uuid4(),
+        mcp_server_id=asset_id,
+        version_number=2,
+        workflow_status=WorkflowStatus.PENDING_APPROVAL,
+        definition=McpDefinition(
+            description="Analytics tools",
+            transport="streamable_http",
+            url="https://analytics.example.test/mcp",
+            env=MappingProxyType({}),
+            headers=MappingProxyType({"X-Client": "deerflow"}),
+            oauth=MappingProxyType({}),
+            routing=MappingProxyType({}),
+            tool_overrides=MappingProxyType({}),
+            timeout_seconds=45,
+            credential_slots=(
+                project_assets.McpCredentialSlot(
+                    name="api-key",
+                    purpose="Authenticate analytics requests",
+                    payload_schema=MappingProxyType({"headers": ("Authorization",)}),
+                ),
+            ),
+        ),
+        credential_slots=(
+            McpCredentialSlotView(
+                id=uuid.uuid4(),
+                name="api-key",
+                purpose="Authenticate analytics requests",
+                payload_schema=MappingProxyType({"headers": ("Authorization",)}),
+                required=True,
+            ),
+        ),
+        credential_grants=(),
+        supersedes_version_id=None,
+        payload_checksum="b" * 64,
+        submitted_at=NOW,
+        reviewed_at=None,
+        reviewed_by_user_id=None,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+    )
+
+
+def test_project_mcp_version_history_serializes_read_only_mapping_fields() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version = _mcp_version_with_read_only_mappings(asset_id)
+    service.get_version_history.return_value = (version,)
+
+    response = _client(mcp_service=service).get(f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["definition"]["headers"] == {"X-Client": "deerflow"}
+    assert response.json()["data"][0]["credential_slots"][0]["payload_schema"] == {"headers": ["Authorization"]}
+    assert response.json()["data"][0]["workflow_status"] == "pending_approval"
+
+
+def test_project_mcp_version_mutation_serializes_after_committing_domain_result() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version = _mcp_version_with_read_only_mappings(asset_id)
+    service.create_version.return_value = version
+
+    response = _client(mcp_service=service).post(
+        f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions",
+        json={
+            "description": "Analytics tools",
+            "transport": "streamable_http",
+            "command": None,
+            "args": [],
+            "url": "https://analytics.example.test/mcp",
+            "env": {},
+            "headers": {"X-Client": "deerflow"},
+            "oauth": {},
+            "routing": {},
+            "tool_overrides": {},
+            "timeout_seconds": 45,
+            "credential_slots": [
+                {
+                    "name": "api-key",
+                    "purpose": "Authenticate analytics requests",
+                    "payload_schema": {"headers": ["Authorization"]},
+                    "required": True,
+                }
+            ],
+            "expected_asset_version": 1,
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["definition"]["headers"] == {"X-Client": "deerflow"}
+    assert response.json()["data"]["credential_slots"][0]["payload_schema"] == {"headers": ["Authorization"]}
+
+
 def test_version_routes_register_kind_specific_strict_openapi_contracts() -> None:
     app = FastAPI()
     app.include_router(project_assets.project_router)
@@ -322,6 +563,20 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
     components = openapi["components"]["schemas"]
     for model_name in (*history_models.values(), *version_models.values()):
         assert components[model_name]["additionalProperties"] is False
+    preview_path = openapi["paths"]["/api/projects/{project_id}/skills/{asset_id}/versions/{version_id}/files/content"]
+    assert preview_path["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/SkillFileContentResponse"}
+    fork_path = openapi["paths"]["/api/projects/{project_id}/skills/{asset_id}/versions/{source_version_id}/fork"]
+    assert fork_path["post"]["responses"]["201"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/SkillVersionResponse"}
+    assert fork_path["post"]["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/SkillForkRequest"}
+    for model_name in (
+        "SkillFileContentResponse",
+        "SkillFileContentItemResponse",
+        "SkillForkRequest",
+        "SkillFileCreateChangeRequest",
+        "SkillFileReplaceChangeRequest",
+        "SkillFileDeleteChangeRequest",
+    ):
+        assert components[model_name]["additionalProperties"] is False
     credential_history = components["CredentialVersionHistoryResponse"]
     credential_item_ref = credential_history["properties"]["data"]["items"]["$ref"]
     credential_item = components[credential_item_ref.rsplit("/", 1)[-1]]
@@ -345,7 +600,7 @@ def test_credential_history_response_is_secret_storage_safe() -> None:
         version_number=1,
         status="active",
         payload_schema_version=1,
-        payload_schema={"env": ("TOKEN",)},
+        payload_schema=MappingProxyType({"env": ("TOKEN",)}),
         supersedes_version_id=None,
         created_by_user_id=str(uuid.uuid4()),
         created_at=NOW,

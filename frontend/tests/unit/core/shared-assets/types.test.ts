@@ -6,12 +6,15 @@ import {
   agentVersionSchema,
   assetSummarySchema,
   createCredentialInputSchema,
+  credentialPayloadSchema,
   credentialVersionSchema,
   credentialMetadataSchema,
   mcpVersionSchema,
   mcpVersionInputSchema,
   projectAssetListSchema,
   projectCredentialListSchema,
+  skillFileForkInputSchema,
+  skillVersionFileContentResponseSchema,
   skillVersionInputSchema,
   skillVersionSchema,
   systemBindingSchema,
@@ -24,6 +27,58 @@ const VERSION_ID = "22222222-2222-4222-8222-222222222222";
 const PROJECT_ID = "33333333-3333-4333-8333-333333333333";
 
 describe("shared asset contracts", () => {
+  test("strictly parses bounded skill file previews and immutable fork changes", () => {
+    const preview = skillVersionFileContentResponseSchema.parse({
+      data: {
+        path: "SKILL.md",
+        media_type: "text/markdown",
+        size_bytes: 24,
+        sha256: "c".repeat(64),
+        preview_status: "ready",
+        encoding: "utf-8",
+        content: "# Skill\n",
+        source_payload_checksum: "d".repeat(64),
+        asset_version: 3,
+      },
+      request_id: "req-skill-file",
+    });
+
+    expect(preview.data.content).toBe("# Skill\n");
+    expect(
+      skillVersionFileContentResponseSchema.safeParse({
+        ...preview,
+        data: { ...preview.data, preview_status: "binary", content: "raw" },
+      }).success,
+    ).toBe(false);
+
+    const input = skillFileForkInputSchema.parse({
+      expected_asset_version: 3,
+      expected_source_payload_checksum: "d".repeat(64),
+      changes: [
+        {
+          op: "replace",
+          path: "SKILL.md",
+          content: "# Updated\n",
+          media_type: "text/markdown",
+        },
+        {
+          op: "create",
+          path: "references/guide.md",
+          content: "Guide",
+          media_type: "text/markdown",
+        },
+        { op: "delete", path: "references/old.md" },
+      ],
+    });
+    expect(input.changes).toHaveLength(3);
+    expect(
+      skillFileForkInputSchema.safeParse({
+        ...input,
+        changes: [{ op: "delete", path: "SKILL.md", content: "forbidden" }],
+      }).success,
+    ).toBe(false);
+  });
+
   test("strictly parses persisted project binding and item capabilities", () => {
     const base = {
       id: ASSET_ID,
@@ -248,6 +303,77 @@ describe("shared asset contracts", () => {
     });
     expect(input.payload.env?.TOKEN).toBe("write-only");
     expect(input).not.toHaveProperty("ciphertext");
+  });
+
+  test("accepts only non-empty multi-field Credential payload sections", () => {
+    expect(
+      credentialPayloadSchema.parse({
+        env: {
+          GITHUB_TOKEN: "write-only-token",
+          GITHUB_ORG: "deer-flow",
+        },
+        headers: { Authorization: "write-only-header" },
+        oauth: { refresh_token: "write-only-refresh-token" },
+      }),
+    ).toEqual({
+      env: {
+        GITHUB_TOKEN: "write-only-token",
+        GITHUB_ORG: "deer-flow",
+      },
+      headers: { Authorization: "write-only-header" },
+      oauth: { refresh_token: "write-only-refresh-token" },
+    });
+
+    for (const payload of [
+      {},
+      { env: {} },
+      { env: { "": "write-only" } },
+      { env: { ["x".repeat(256)]: "write-only" } },
+      { cookies: { session: "write-only" } },
+      { oauth: { token: { nested: "not-supported" } } },
+    ]) {
+      expect(() => credentialPayloadSchema.parse(payload)).toThrow();
+    }
+  });
+
+  test("restricts Credential version field schemas to supported payload sections", () => {
+    const version = {
+      id: VERSION_ID,
+      credential_id: ASSET_ID,
+      version_number: 1,
+      status: "active",
+      payload_schema_version: 1,
+      payload_schema: {
+        env: ["GITHUB_TOKEN", "GITHUB_ORG"],
+        headers: ["Authorization"],
+        oauth: ["refresh_token"],
+      },
+      supersedes_version_id: null,
+      created_by_user_id: "user-1",
+      created_at: "2026-07-14T00:00:00Z",
+    };
+
+    expect(credentialVersionSchema.parse(version).payload_schema).toEqual(
+      version.payload_schema,
+    );
+    expect(() =>
+      credentialVersionSchema.parse({
+        ...version,
+        payload_schema: { cookies: ["session"] },
+      }),
+    ).toThrow();
+    expect(() =>
+      credentialVersionSchema.parse({
+        ...version,
+        payload_schema: { env: [] },
+      }),
+    ).toThrow();
+    expect(() =>
+      credentialVersionSchema.parse({
+        ...version,
+        payload_schema: { env: [""] },
+      }),
+    ).toThrow();
   });
 
   test("rejects invalid Skill and MCP wire enums and definition slot schemas", () => {

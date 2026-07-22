@@ -1,7 +1,9 @@
 "use client";
 
+import { useQueries, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -11,16 +13,73 @@ import {
   type CreateProjectThreadInput,
 } from "@/core/private-work/api-client";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import { projectAgentsStartChatPath } from "@/core/private-work/start-chat-intent";
 import type { ProjectClientScope } from "@/core/private-work/types";
 import type { Project } from "@/core/projects/types";
 import {
+  useEnableProjectSystemBinding,
   useProjectAssets,
+  listProjectAssetVersions,
+  projectAssetVersionsKey,
+  type EnableSystemBindingInput,
   type ProjectAssetItem,
   type ProjectAssetList,
+  type VersionHistoryResponse,
 } from "@/core/shared-assets";
+import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
 
+export { projectAgentsStartChatPath };
+
 export type ExecutableProjectAgent = ProjectAssetItem;
+
+export function configurableSystemAgents(
+  catalog: ProjectAssetList | undefined,
+): ProjectAssetItem[] {
+  if (!catalog) return [];
+  return catalog.system_items.filter(
+    (item) =>
+      item.status === "active" &&
+      item.current_published_version_id !== null &&
+      item.binding?.enabled !== true &&
+      item.capabilities.includes("shared_assets.execute") &&
+      item.capabilities.includes("shared_assets.manage_bindings"),
+  );
+}
+
+export type SystemAgentDependencyAvailability = "loading" | "ready" | "blocked";
+
+export function systemAgentDependencyAvailability(
+  agent: ProjectAssetItem,
+  history: VersionHistoryResponse | undefined,
+  boundSkillVersionIds: ReadonlySet<string>,
+  boundMcpVersionIds: ReadonlySet<string>,
+): SystemAgentDependencyAvailability {
+  if (!history) return "loading";
+  const currentVersion = history.data.find(
+    (version) =>
+      "agent_id" in version &&
+      version.id === agent.current_published_version_id &&
+      version.workflow_status === "published",
+  );
+  if (!currentVersion || !("agent_id" in currentVersion)) return "blocked";
+  return currentVersion.skill_version_ids.every((id) =>
+    boundSkillVersionIds.has(id),
+  ) && currentVersion.mcp_version_ids.every((id) => boundMcpVersionIds.has(id))
+    ? "ready"
+    : "blocked";
+}
+
+function boundSystemVersionIds(
+  catalog: ProjectAssetList | undefined,
+): Set<string> {
+  return new Set(
+    (catalog?.system_items ?? [])
+      .filter((item) => item.binding?.enabled === true)
+      .map((item) => item.binding?.version_id)
+      .filter((id): id is string => Boolean(id)),
+  );
+}
 
 export function executableProjectAgents(
   catalog: ProjectAssetList | undefined,
@@ -55,6 +114,7 @@ type CreateProjectChatDependencies = {
     scope: ProjectClientScope,
     input: CreateProjectThreadInput,
   ) => Promise<unknown>;
+  invalidateThreadLists?: () => void;
   navigate: (path: string) => void;
 };
 
@@ -64,35 +124,81 @@ export async function createProjectChatForAgent({
   agent,
   createThreadId = uuid,
   createThread = createProjectThread,
+  invalidateThreadLists,
   navigate,
 }: CreateProjectChatDependencies): Promise<string> {
   const threadId = createThreadId();
   await createThread(scope, {
     threadId,
     ...projectThreadAgentSelection(agent),
+    displayName: "新对话",
   });
+  invalidateThreadLists?.();
   navigate(
     `/projects/${encodeURIComponent(projectSlug)}/chats/${encodeURIComponent(threadId)}`,
   );
   return threadId;
 }
 
+type EnableSystemAgentAndCreateProjectChatDependencies = Omit<
+  CreateProjectChatDependencies,
+  "agent"
+> & {
+  agent: ProjectAssetItem;
+  enableBinding: (input: EnableSystemBindingInput) => Promise<unknown>;
+};
+
+export async function enableSystemAgentAndCreateProjectChat({
+  enableBinding,
+  agent,
+  ...createDependencies
+}: EnableSystemAgentAndCreateProjectChatDependencies): Promise<string> {
+  if (
+    agent.scope !== "system" ||
+    agent.status !== "active" ||
+    agent.current_published_version_id === null
+  ) {
+    throw new Error("该系统 Agent 暂时无法启用");
+  }
+  await enableBinding({
+    asset_id: agent.id,
+    version_id: agent.current_published_version_id,
+    ...(agent.binding
+      ? { expected_binding_version: agent.binding.version }
+      : {}),
+  });
+  return createProjectChatForAgent({
+    ...createDependencies,
+    agent,
+  });
+}
+
 export function AgentSelectorDialog({
   open,
   agents,
+  configurableSystemAgents: systemAgents = [],
+  blockedSystemAgents = [],
+  canAuthorProjectAgent = false,
+  agentsPath,
   isCreating,
   isLoading = false,
   error = null,
   onOpenChange,
   onSelect,
+  onEnableSystemAgent,
 }: {
   open: boolean;
   agents: ExecutableProjectAgent[];
+  configurableSystemAgents?: ProjectAssetItem[];
+  blockedSystemAgents?: ProjectAssetItem[];
+  canAuthorProjectAgent?: boolean;
+  agentsPath?: string;
   isCreating: boolean;
   isLoading?: boolean;
   error?: Error | null;
   onOpenChange: (open: boolean) => void;
   onSelect: (agent: ExecutableProjectAgent) => void;
+  onEnableSystemAgent?: (agent: ProjectAssetItem) => void;
 }) {
   if (!open) return null;
   return (
@@ -111,7 +217,7 @@ export function AgentSelectorDialog({
             选择 Agent
           </h2>
           <p className="text-muted-foreground mt-1 text-sm">
-            对话保存 logical Agent，运行时由服务端复核可执行版本。
+            选择一个 Agent 开始新的私有对话。
           </p>
         </div>
         <Button
@@ -131,7 +237,7 @@ export function AgentSelectorDialog({
         <p role="alert" className="text-destructive mt-6 text-sm">
           无法加载 Agent，请稍后重试。
         </p>
-      ) : (
+      ) : agents.length > 0 ? (
         <div className="mt-6 space-y-2">
           {agents.map((agent) => (
             <Button
@@ -149,6 +255,66 @@ export function AgentSelectorDialog({
             </Button>
           ))}
         </div>
+      ) : (
+        <div className="mt-6 space-y-5">
+          <div>
+            <h3 className="font-medium">项目还没有可执行 Agent</h3>
+            <p className="text-muted-foreground mt-2 text-sm">
+              需要先启用一个系统 Agent，或创建并发布项目 Agent。
+            </p>
+          </div>
+          {systemAgents.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">可立即启用</p>
+              {systemAgents.map((agent) => (
+                <Button
+                  key={agent.id}
+                  type="button"
+                  className="h-auto w-full justify-between px-4 py-3"
+                  disabled={isCreating}
+                  onClick={() => onEnableSystemAgent?.(agent)}
+                >
+                  <span className="truncate">
+                    启用 {agent.display_name} 并开始对话
+                  </span>
+                  <span className="text-primary-foreground/75 text-xs">
+                    系统 Agent
+                  </span>
+                </Button>
+              ))}
+            </div>
+          )}
+          {blockedSystemAgents.length > 0 && (
+            <div className="rounded-xl border border-dashed p-4">
+              <p className="text-sm font-medium">需要先完成依赖配置</p>
+              <p className="text-muted-foreground mt-1 text-sm">
+                以下系统 Agent 依赖的 Skill 或 MCP 尚未全部在项目中启用。
+              </p>
+              <ul className="mt-3 space-y-1 text-sm">
+                {blockedSystemAgents.map((agent) => (
+                  <li key={agent.id}>{agent.display_name}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(canAuthorProjectAgent || blockedSystemAgents.length > 0) &&
+            agentsPath && (
+              <Button asChild variant="outline" className="w-full">
+                <Link href={agentsPath}>
+                  {blockedSystemAgents.length > 0
+                    ? "前往 Agent 页面完成配置"
+                    : "创建项目 Agent"}
+                </Link>
+              </Button>
+            )}
+          {systemAgents.length === 0 &&
+            blockedSystemAgents.length === 0 &&
+            !canAuthorProjectAgent && (
+              <p className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
+                请联系项目 Admin 或 Editor 完成配置。
+              </p>
+            )}
+        </div>
       )}
     </div>
   );
@@ -164,6 +330,7 @@ export function ProjectAgentSelectorDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { user } = useAuth();
   const privateWork = usePrivateWorkAccess();
   const assets = useProjectAssets(
@@ -176,30 +343,90 @@ export function ProjectAgentSelectorDialog({
     () => executableProjectAgents(assets.data as ProjectAssetList | undefined),
     [assets.data],
   );
+  const systemAgents = useMemo(
+    () => configurableSystemAgents(assets.data as ProjectAssetList | undefined),
+    [assets.data],
+  );
+  const needsDependencyCheck =
+    open && Boolean(user) && agents.length === 0 && systemAgents.length > 0;
+  const skillAssets = useProjectAssets(
+    user?.id ?? "",
+    project.id,
+    "skills",
+    needsDependencyCheck,
+  );
+  const mcpAssets = useProjectAssets(
+    user?.id ?? "",
+    project.id,
+    "mcp-servers",
+    needsDependencyCheck,
+  );
+  const systemAgentHistories = useQueries({
+    queries: systemAgents.map((agent) => ({
+      queryKey: projectAssetVersionsKey(
+        user?.id ?? "",
+        project.id,
+        "agents",
+        agent.id,
+      ),
+      queryFn: ({ signal }: { signal: AbortSignal }) =>
+        listProjectAssetVersions(project.id, "agents", agent.id, signal),
+      enabled: needsDependencyCheck,
+    })),
+  });
+  const boundSkillVersionIds = useMemo(
+    () =>
+      boundSystemVersionIds(skillAssets.data as ProjectAssetList | undefined),
+    [skillAssets.data],
+  );
+  const boundMcpVersionIds = useMemo(
+    () => boundSystemVersionIds(mcpAssets.data as ProjectAssetList | undefined),
+    [mcpAssets.data],
+  );
+  const dependencyAvailability = systemAgents.map((agent, index) =>
+    systemAgentDependencyAvailability(
+      agent,
+      systemAgentHistories[index]?.data,
+      boundSkillVersionIds,
+      boundMcpVersionIds,
+    ),
+  );
+  const readySystemAgents = systemAgents.filter(
+    (_agent, index) => dependencyAvailability[index] === "ready",
+  );
+  const blockedSystemAgents = systemAgents.filter(
+    (_agent, index) => dependencyAvailability[index] === "blocked",
+  );
+  const dependencyLoading =
+    needsDependencyCheck &&
+    (skillAssets.isLoading ||
+      mcpAssets.isLoading ||
+      systemAgentHistories.some((query) => query.isLoading));
+  const dependencyError =
+    skillAssets.error ??
+    mcpAssets.error ??
+    systemAgentHistories.find((query) => query.error)?.error ??
+    null;
+  const enableSystemAgent = useEnableProjectSystemBinding(
+    user?.id ?? "",
+    project.id,
+    "agent",
+  );
   const [isCreating, setIsCreating] = useState(false);
-
-  useEffect(() => {
-    if (open && assets.isSuccess && agents.length === 0) {
-      onOpenChange(false);
-      router.push(`/projects/${encodeURIComponent(project.slug)}/agents`);
-    }
-  }, [
-    agents.length,
-    assets.isSuccess,
-    onOpenChange,
-    open,
-    project.slug,
-    router,
-  ]);
+  const startChatIntentIdRef = useRef<string | null>(null);
+  startChatIntentIdRef.current ??= uuid();
 
   const handleSelect = async (agent: ExecutableProjectAgent) => {
-    if (!privateWork.scope || isCreating) return;
+    const scope = privateWork.scope;
+    if (!scope || isCreating) return;
     setIsCreating(true);
     try {
       await createProjectChatForAgent({
-        scope: privateWork.scope,
+        scope,
         projectSlug: project.slug,
         agent,
+        invalidateThreadLists: () =>
+          invalidateStoppedThreadCaches(queryClient, null, false, scope),
         navigate: (path) => router.push(path),
       });
       onOpenChange(false);
@@ -210,15 +437,49 @@ export function ProjectAgentSelectorDialog({
     }
   };
 
+  const handleEnableSystemAgent = async (agent: ProjectAssetItem) => {
+    const scope = privateWork.scope;
+    if (!scope || isCreating) return;
+    setIsCreating(true);
+    try {
+      await enableSystemAgentAndCreateProjectChat({
+        scope,
+        projectSlug: project.slug,
+        agent,
+        enableBinding: (input) => enableSystemAgent.mutateAsync(input),
+        invalidateThreadLists: () =>
+          invalidateStoppedThreadCaches(queryClient, null, false, scope),
+        navigate: (path) => router.push(path),
+      });
+      onOpenChange(false);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "无法启用项目 Agent",
+      );
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
   return (
     <AgentSelectorDialog
       open={open}
       agents={agents}
-      isCreating={isCreating}
-      isLoading={assets.isLoading}
-      error={assets.error}
+      configurableSystemAgents={readySystemAgents}
+      blockedSystemAgents={blockedSystemAgents}
+      canAuthorProjectAgent={project.capabilities.includes(
+        "shared_assets.edit",
+      )}
+      agentsPath={projectAgentsStartChatPath(
+        project.slug,
+        startChatIntentIdRef.current,
+      )}
+      isCreating={isCreating || enableSystemAgent.isPending}
+      isLoading={assets.isLoading || dependencyLoading}
+      error={assets.error ?? dependencyError}
       onOpenChange={onOpenChange}
       onSelect={(agent) => void handleSelect(agent)}
+      onEnableSystemAgent={(agent) => void handleEnableSystemAgent(agent)}
     />
   );
 }

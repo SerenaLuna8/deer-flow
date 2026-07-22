@@ -1,8 +1,10 @@
 "use client";
 
+import { ActivityIcon, DatabaseIcon, GaugeIcon, UsersIcon } from "lucide-react";
 import { notFound } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/core/i18n/hooks";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
@@ -19,6 +21,12 @@ import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import { useCurrentProject } from "../project-context";
 
+import {
+  describeUsageDimension,
+  type UsageDimension,
+  usageViewCopy,
+} from "./project-usage-view-model";
+
 export type ProjectUsageState =
   | { status: "loading" }
   | { status: "error" }
@@ -31,7 +39,7 @@ export function ProjectUsageStateView({
   state: ProjectUsageState;
   onRetry?: () => void;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const labels = t.project.governance.usage;
   if (state.status === "loading") {
     return (
@@ -65,36 +73,124 @@ export function ProjectUsageStateView({
       </section>
     );
   }
+  const copy = usageViewCopy[locale];
+  const iconByDimension = {
+    members: UsersIcon,
+    storage_bytes: DatabaseIcon,
+    concurrent_runs: ActivityIcon,
+    mcp_calls_daily: GaugeIcon,
+  } as const;
+
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      {state.data.dimensions.map((item) => (
-        <section key={item.dimension} className="bg-card rounded-xl border p-5">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="font-semibold">
-              {labels.dimensions[item.dimension]}
-            </h2>
-            {item.warning_threshold_reached ? (
-              <span className="text-amber-700 dark:text-amber-300">
-                {labels.thresholdReached}
-              </span>
-            ) : null}
-          </div>
-          <dl className="mt-4 grid grid-cols-3 gap-3 text-sm">
-            <div>
-              <dt className="text-muted-foreground">{labels.used}</dt>
-              <dd>{item.used}</dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">{labels.reserved}</dt>
-              <dd>{item.reserved}</dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">{labels.limit}</dt>
-              <dd>{item.limit}</dd>
-            </div>
-          </dl>
-        </section>
-      ))}
+    <div className="space-y-4">
+      <section className="bg-muted/35 flex flex-col gap-2 rounded-2xl border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-sm font-semibold">{copy.effectiveLimit}</h2>
+          <p className="text-muted-foreground mt-1 text-sm leading-6">
+            {copy.policyExplanation}
+          </p>
+        </div>
+        <span className="bg-background text-muted-foreground w-fit rounded-full border px-3 py-1 text-xs">
+          {locale === "zh-CN"
+            ? `策略版本 ${state.data.policy.version}`
+            : `Policy version ${state.data.policy.version}`}
+        </span>
+      </section>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        {state.data.dimensions.map((item) => {
+          const detail = describeUsageDimension(
+            state.data,
+            item.dimension,
+            locale,
+          );
+          const Icon = iconByDimension[item.dimension];
+          return (
+            <section
+              key={item.dimension}
+              className="bg-card rounded-2xl border p-5 shadow-xs"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-xl">
+                    <Icon aria-hidden className="size-4" />
+                  </span>
+                  <div>
+                    <h2 className="font-semibold">
+                      {labels.dimensions[item.dimension]}
+                    </h2>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      {detail.bucket}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap justify-end gap-1.5">
+                  {item.warning_threshold_reached ? (
+                    <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                      {labels.thresholdReached}
+                    </span>
+                  ) : null}
+                  <span className="bg-muted text-muted-foreground rounded-full px-2.5 py-1 text-xs">
+                    {detail.inheritsPlatformLimit
+                      ? copy.inheritedLimit
+                      : copy.configuredLimit}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-6 flex items-end justify-between gap-3">
+                <div>
+                  <p className="text-muted-foreground text-xs">
+                    {copy.currentOccupancy}
+                  </p>
+                  <p className="mt-1 text-2xl font-semibold tracking-tight tabular-nums">
+                    {detail.consumed}
+                    <span className="text-muted-foreground ml-1.5 text-sm font-normal">
+                      / {detail.limit}
+                    </span>
+                  </p>
+                </div>
+                <strong className="text-sm tabular-nums">
+                  {detail.progressText}
+                </strong>
+              </div>
+              <Progress
+                aria-label={`${labels.dimensions[item.dimension]} ${copy.progressLabel}`}
+                aria-valuenow={detail.progressValue}
+                className="mt-3 h-2"
+                value={detail.progressValue}
+              />
+
+              <dl className="mt-5 grid grid-cols-3 gap-3 border-t pt-4 text-sm">
+                <div>
+                  <dt className="text-muted-foreground text-xs">
+                    {labels.used}
+                  </dt>
+                  <dd className="mt-1 font-medium tabular-nums">
+                    {detail.used}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground text-xs">
+                    {labels.reserved}
+                  </dt>
+                  <dd className="mt-1 font-medium tabular-nums">
+                    {detail.reserved}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground text-xs">
+                    {copy.effectiveLimit}
+                  </dt>
+                  <dd className="mt-1 font-medium tabular-nums">
+                    {detail.effectiveLimit}
+                  </dd>
+                </div>
+              </dl>
+            </section>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -122,8 +218,9 @@ function AuthorizedProjectUsagePage({
   access: PrivateWorkAccess;
   scope: ProjectClientScope;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const labels = t.project.governance.usage;
+  const copy = usageViewCopy[locale];
   const usage = useProjectUsage(scope);
   const update = useUpdateProjectQuotaLimits(access);
 
@@ -140,12 +237,44 @@ function AuthorizedProjectUsagePage({
   }
 
   const configured = usage.data.policy.configured;
+  const fields = [
+    {
+      name: "member_limit",
+      dimension: "members",
+      label: labels.dimensions.members,
+      minimum: 1,
+    },
+    {
+      name: "storage_bytes_limit",
+      dimension: "storage_bytes",
+      label: labels.dimensions.storage_bytes,
+      minimum: 0,
+    },
+    {
+      name: "concurrent_run_limit",
+      dimension: "concurrent_runs",
+      label: labels.dimensions.concurrent_runs,
+      minimum: 1,
+    },
+    {
+      name: "mcp_calls_daily_limit",
+      dimension: "mcp_calls_daily",
+      label: labels.dimensions.mcp_calls_daily,
+      minimum: 0,
+    },
+  ] as const satisfies ReadonlyArray<{
+    name: keyof typeof configured;
+    dimension: UsageDimension;
+    label: string;
+    minimum: number;
+  }>;
+
   return (
     <div className="space-y-6">
       <ProjectUsageStateView state={{ status: "ready", data: usage.data }} />
       <form
         key={usage.data.policy.version}
-        className="bg-card rounded-xl border p-5"
+        className="bg-card rounded-2xl border p-5 shadow-xs sm:p-6"
         onSubmit={(event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
@@ -160,36 +289,56 @@ function AuthorizedProjectUsagePage({
           });
         }}
       >
-        <h2 className="font-semibold">{labels.tightenTitle}</h2>
+        <div className="max-w-2xl">
+          <h2 className="font-semibold">{labels.tightenTitle}</h2>
+          <p className="text-muted-foreground mt-2 text-sm leading-6">
+            {copy.editorDescription}
+          </p>
+        </div>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          {(
-            [
-              ["member_limit", labels.dimensions.members, 1],
-              ["storage_bytes_limit", labels.dimensions.storage_bytes, 0],
-              ["concurrent_run_limit", labels.dimensions.concurrent_runs, 1],
-              ["mcp_calls_daily_limit", labels.dimensions.mcp_calls_daily, 0],
-            ] as const
-          ).map(([name, label, minimum]) => (
-            <label key={name} className="grid gap-2 text-sm">
-              {label}
-              <input
-                className="border-input bg-background h-9 rounded-md border px-3"
-                type="number"
-                min={minimum}
-                name={name}
-                defaultValue={configured[name] ?? ""}
-              />
-            </label>
-          ))}
+          {fields.map((field) => {
+            const detail = describeUsageDimension(
+              usage.data,
+              field.dimension,
+              locale,
+            );
+            return (
+              <label
+                key={field.name}
+                className="bg-muted/25 grid gap-2 rounded-xl border p-4 text-sm"
+              >
+                <span className="font-medium">{field.label}</span>
+                <input
+                  className="border-input bg-background h-10 rounded-lg border px-3 tabular-nums"
+                  type="number"
+                  min={field.minimum}
+                  name={field.name}
+                  defaultValue={configured[field.name] ?? ""}
+                />
+                <span className="text-muted-foreground text-xs leading-5">
+                  {detail.inheritsPlatformLimit
+                    ? copy.inheritedValue
+                    : `${copy.configuredValue} ${detail.configuredLimit}`}
+                  {" · "}
+                  {copy.effectiveValue} {detail.effectiveLimit}
+                  {field.dimension === "storage_bytes"
+                    ? ` · ${copy.bytesInputHint}`
+                    : ""}
+                </span>
+              </label>
+            );
+          })}
         </div>
         {update.error ? (
           <p role="alert" className="mt-4 text-sm text-red-600">
             {labels.updateError}
           </p>
         ) : null}
-        <Button className="mt-5" type="submit" disabled={update.isPending}>
-          {update.isPending ? labels.saving : labels.save}
-        </Button>
+        <div className="mt-5 flex justify-end border-t pt-5">
+          <Button type="submit" disabled={update.isPending}>
+            {update.isPending ? labels.saving : labels.save}
+          </Button>
+        </div>
       </form>
     </div>
   );

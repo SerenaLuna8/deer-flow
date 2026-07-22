@@ -183,14 +183,14 @@ describe("project memory adapter", () => {
     await expect(loadProjectMemory(access)).rejects.toThrow();
   });
 
-  test("denies every project Memory mutation for a Viewer", () => {
+  test("lets a Viewer export and delete existing own Memory without edit authority", () => {
     expect(projectMemoryPermissions(["private_work.read_own"])).toEqual({
       canRead: true,
       canExport: true,
       canReload: false,
       canImport: false,
       canModify: false,
-      canDelete: false,
+      canDelete: true,
     });
   });
 

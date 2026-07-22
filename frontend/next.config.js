@@ -52,6 +52,15 @@ const config = {
     defaultLocale: "en",
   },
   devIndicators: false,
+  async redirects() {
+    return [
+      {
+        source: "/workspace/projects",
+        destination: "/workspace",
+        permanent: false,
+      },
+    ];
+  },
   async rewrites() {
     const rewrites = [];
     const gatewayURL = getInternalServiceURL(

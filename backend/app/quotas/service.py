@@ -60,6 +60,12 @@ class QuotaService:
         self._config = config
         self._source_ref_hasher = source_ref_hasher
 
+    @property
+    def config(self) -> QuotaConfig:
+        """Return the validated platform defaults and warning policy."""
+
+        return self._config
+
     @staticmethod
     def _dimension(value: str) -> QuotaDimension:
         if value not in QUOTA_DIMENSIONS:

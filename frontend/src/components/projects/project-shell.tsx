@@ -1,6 +1,7 @@
 "use client";
 
-import { LogOutIcon, UserRoundIcon } from "lucide-react";
+import { LogOutIcon, ShieldCheckIcon, UserRoundIcon } from "lucide-react";
+import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -11,16 +12,19 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import type { User } from "@/core/auth/types";
 import type { Project } from "@/core/projects/types";
 
 import { ProjectDesktopNav, ProjectMobileNav } from "./project-nav";
 
 function ProjectAccountMenu({
   accountEmail,
+  systemRole,
   compact = false,
   onLogout,
 }: {
   accountEmail: string;
+  systemRole: User["system_role"];
   compact?: boolean;
   onLogout: () => void | Promise<void>;
 }) {
@@ -42,6 +46,17 @@ function ProjectAccountMenu({
           {accountEmail}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
+        {systemRole === "system_admin" ? (
+          <>
+            <DropdownMenuItem asChild>
+              <Link href="/admin/operations">
+                <ShieldCheckIcon aria-hidden className="size-4" />
+                平台管理
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        ) : null}
         <DropdownMenuItem onSelect={() => void onLogout()}>
           <LogOutIcon aria-hidden className="size-4" />
           退出登录
@@ -54,11 +69,13 @@ function ProjectAccountMenu({
 export function ProjectShell({
   project,
   accountEmail,
+  systemRole,
   onLogout,
   children,
 }: {
   project: Project;
   accountEmail: string;
+  systemRole: User["system_role"];
   onLogout: () => void | Promise<void>;
   children: React.ReactNode;
 }) {
@@ -70,7 +87,11 @@ export function ProjectShell({
       <ProjectDesktopNav
         project={project}
         footer={
-          <ProjectAccountMenu accountEmail={accountEmail} onLogout={onLogout} />
+          <ProjectAccountMenu
+            accountEmail={accountEmail}
+            systemRole={systemRole}
+            onLogout={onLogout}
+          />
         }
       />
       <div className="min-w-0">
@@ -79,6 +100,7 @@ export function ProjectShell({
           account={
             <ProjectAccountMenu
               accountEmail={accountEmail}
+              systemRole={systemRole}
               compact
               onLogout={onLogout}
             />

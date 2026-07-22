@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
+from app.channels.store import ChannelStore
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRepository,
@@ -358,6 +360,110 @@ class TestChannelConnectionRepository:
             )
             == "thread-bob"
         )
+
+    @pytest.mark.postgres
+    @pytest.mark.anyio
+    async def test_channel_store_round_trip_rejects_wrong_project_owner_scope(self, repo, seed):
+        await _create_thread(
+            seed,
+            scope=seed.owner_a_scope,
+            thread_id="thread-channel-store",
+            agent_id=seed.project_agent_id,
+        )
+        connection = await repo.upsert_connection(
+            scope=seed.owner_a_scope,
+            provider="feishu",
+            external_account_id="open-id-a",
+            workspace_id="chat-a",
+        )
+        store = ChannelStore(repo)
+
+        assert await store.set_thread_id(
+            "feishu",
+            "chat-a",
+            "thread-channel-store",
+            topic_id="message-a",
+            connection_id=connection["id"],
+            scope=seed.owner_a_scope,
+        )
+        assert (
+            await store.get_thread_id(
+                "feishu",
+                "chat-a",
+                topic_id="message-a",
+                connection_id=connection["id"],
+                scope=seed.owner_a_scope,
+            )
+            == "thread-channel-store"
+        )
+        assert (
+            await store.get_thread_id(
+                "feishu",
+                "chat-a",
+                topic_id="message-a",
+                connection_id=connection["id"],
+                scope=seed.owner_b_scope,
+            )
+            is None
+        )
+        assert (
+            await store.get_thread_id(
+                "slack",
+                "chat-a",
+                topic_id="message-a",
+                connection_id=connection["id"],
+                scope=seed.owner_a_scope,
+            )
+            is None
+        )
+
+    @pytest.mark.postgres
+    @pytest.mark.anyio
+    async def test_channel_store_concurrent_alias_writes_are_first_writer_wins(self, repo, seed):
+        for thread_id in ("thread-channel-first", "thread-channel-second"):
+            await _create_thread(
+                seed,
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent_id=seed.project_agent_id,
+            )
+        connection = await repo.upsert_connection(
+            scope=seed.owner_a_scope,
+            provider="feishu",
+            external_account_id="open-id-race",
+            workspace_id="chat-race",
+        )
+        first_store = ChannelStore(repo)
+        second_store = ChannelStore(repo)
+
+        results = await asyncio.gather(
+            first_store.set_thread_id(
+                "feishu",
+                "chat-race",
+                "thread-channel-first",
+                topic_id="message-race",
+                connection_id=connection["id"],
+                scope=seed.owner_a_scope,
+            ),
+            second_store.set_thread_id(
+                "feishu",
+                "chat-race",
+                "thread-channel-second",
+                topic_id="message-race",
+                connection_id=connection["id"],
+                scope=seed.owner_a_scope,
+            ),
+        )
+
+        assert sorted(results) == [False, True]
+        persisted = await first_store.get_thread_id(
+            "feishu",
+            "chat-race",
+            topic_id="message-race",
+            connection_id=connection["id"],
+            scope=seed.owner_a_scope,
+        )
+        assert persisted in {"thread-channel-first", "thread-channel-second"}
 
     @pytest.mark.anyio
     async def test_disconnect_connection_revokes_owner_connection_and_removes_credentials(self, repo, seed):

@@ -333,6 +333,57 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             except Exception:
                 raise PrivateWorkUnavailable(self._context.request_id) from None
 
+    async def aput_already_authorized(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+        *,
+        session: AsyncSession,
+    ) -> RunnableConfig:
+        """Write while the caller holds the exact scoped Thread authority lock.
+
+        This narrow adapter exists for compare-and-swap flows that must keep the
+        final head check and checkpoint write inside one database lock cycle.
+        The caller must already hold the scoped Thread lock; this method repeats
+        the exact authority/row check in the same transaction as defense in
+        depth before touching the raw saver.
+        """
+
+        if not session.in_transaction():
+            raise PrivateWorkUnavailable(self._context.request_id)
+        thread_id = self._thread_id(config)
+        try:
+            await self._revalidator.require(
+                session,
+                self._context,
+                Capability.PRIVATE_WORK_CREATE,
+                lock=True,
+            )
+            record = await PrivateThreadRepository(session).get(
+                scope=self._context.resource_scope,
+                thread_id=thread_id,
+                lock=True,
+            )
+            if record is None:
+                raise PrivateWorkNotFound(self._context.request_id)
+            written_config = await self._raw.aput(
+                self._sanitize_config(config, thread_id=thread_id),
+                checkpoint,
+                self._sanitize_metadata(metadata),
+                new_versions,
+            )
+            item = await self._raw.aget_tuple(written_config)
+            if item is None:
+                raise PrivateWorkNotFound(self._context.request_id)
+            self._validate_marker(item, thread_id=thread_id)
+            return written_config
+        except PrivateWorkError:
+            raise
+        except Exception:
+            raise PrivateWorkUnavailable(self._context.request_id) from None
+
     async def aput_writes(
         self,
         config: RunnableConfig,

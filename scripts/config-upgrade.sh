@@ -75,6 +75,8 @@ print()
 # Each migration targets a specific version upgrade.
 # 'replacements': list of (old_string, new_string) applied to the raw YAML text.
 #   This handles value changes that a dict merge cannot catch.
+# 'remove_keys': removed top-level application sections to delete from old configs.
+# 'remove_paths': removed nested application fields to delete from old configs.
 
 MIGRATIONS = {
     1: {
@@ -86,6 +88,26 @@ MIGRATIONS = {
             ('src.tools.', 'deerflow.tools.'),
         ],
     },
+    24: {
+        'description': 'Remove the retired database backup and restore configuration',
+        'remove_keys': ['recovery'],
+    },
+    25: {
+        'description': 'Remove configuration fields no longer consumed by the project-first runtime',
+        'remove_keys': ['skill_evolution', 'skill_scan'],
+        'remove_paths': [
+            'uploads.max_files',
+            'uploads.max_file_size',
+            'uploads.max_total_size',
+            'uploads.auto_convert_documents',
+            'scheduler.lease_seconds',
+            'worker.default_max_attempts',
+            'quotas.max_member_limit',
+            'quotas.max_storage_bytes_limit',
+            'quotas.max_concurrent_run_limit',
+            'quotas.max_mcp_calls_daily_limit',
+        ],
+    },
     # Future migrations go here:
     # 2: {
     #     'description': '...',
@@ -95,6 +117,8 @@ MIGRATIONS = {
 
 # Apply migrations in order for versions (user_version, example_version]
 migrated = []
+keys_to_remove = []
+paths_to_remove = []
 for version in range(user_version + 1, example_version + 1):
     migration = MIGRATIONS.get(version)
     if not migration:
@@ -104,14 +128,40 @@ for version in range(user_version + 1, example_version + 1):
         if old in raw_text:
             raw_text = raw_text.replace(old, new)
             migrated.append(f'{old} -> {new}')
+    keys_to_remove.extend(migration.get('remove_keys', []))
+    paths_to_remove.extend(migration.get('remove_paths', []))
 
 # Re-parse after text migrations
 user = yaml.safe_load(raw_text) or {}
+removed = []
+for key in keys_to_remove:
+    if key in user:
+        user.pop(key)
+        removed.append(key)
+
+for field_path in paths_to_remove:
+    parts = field_path.split('.')
+    parent = user
+    for part in parts[:-1]:
+        if not isinstance(parent, dict) or part not in parent:
+            break
+        parent = parent[part]
+    else:
+        key = parts[-1]
+        if isinstance(parent, dict) and key in parent:
+            parent.pop(key)
+            removed.append(field_path)
 
 if migrated:
     print(f'Applied {len(migrated)} migration(s):')
     for m in migrated:
         print(f'  ~ {m}')
+    print()
+
+if removed:
+    print(f'Removed {len(removed)} retired field(s):')
+    for key in removed:
+        print(f'  - {key}')
     print()
 
 # ── Merge missing fields ─────────────────────────────────────────────────
@@ -147,7 +197,7 @@ if added:
     for a in added:
         print(f'  + {a}')
 
-if not migrated and not added:
+if not migrated and not removed and not added:
     print('No changes needed (version bumped only).')
 
 print()

@@ -4,9 +4,10 @@
 functions of their inputs; async callers must dispatch them off the event
 loop. Policy is one code constant — ``CRITICAL`` blocks, everything else is a
 warning — applied by ``enforce_static_scan()`` and
-``enforce_static_scan_result()``, which also honour the ``skill_scan.enabled``
-kill switch. Rule specs live next to the analyzers that match them so a rule is
-authored, read, and tested in one place.
+``enforce_static_scan_result()``. Deterministic scanning is a mandatory safety
+boundary and cannot be disabled through application configuration. Rule specs
+live next to the analyzers that match them so a rule is authored, read, and
+tested in one place.
 """
 
 from __future__ import annotations
@@ -119,16 +120,13 @@ _DESTRUCTIVE_RM_RE = (
 
 
 def skill_scan_enabled(app_config: Any | None = None) -> bool:
-    if app_config is None:
-        try:
-            from deerflow.config import get_app_config
+    """Return the mandatory deterministic-scan policy.
 
-            app_config = get_app_config()
-        except Exception:
-            app_config = None
-    skill_scan_config = getattr(app_config, "skill_scan", None)
-    if skill_scan_config is not None and hasattr(skill_scan_config, "enabled"):
-        return bool(skill_scan_config.enabled)
+    The argument remains for API compatibility with callers that already pass
+    an application config object; application config no longer controls this
+    security boundary.
+    """
+
     return True
 
 

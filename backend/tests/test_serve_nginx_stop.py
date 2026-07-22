@@ -152,6 +152,28 @@ def test_port_probe_trusts_available_lsof_before_fallbacks(tmp_path: Path) -> No
     assert result.returncode == 1
 
 
+def test_port_probe_ignores_ipv6_only_listener(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise serve.sh helpers")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    lsof = binary / "lsof"
+    lsof.write_text(
+        '#!/bin/sh\ncase "$*" in\n  *-i4TCP:8001*) exit 1 ;;\n  *) exit 0 ;;\nesac\n',
+        encoding="utf-8",
+    )
+    lsof.chmod(0o755)
+
+    result = subprocess.run(
+        [bash, "-c", f"{_extract_shell_function('_is_port_listening')}\n_is_port_listening 8001"],
+        env={**os.environ, "PATH": f"{binary}:{os.environ['PATH']}"},
+        check=False,
+    )
+
+    assert result.returncode == 1
+
+
 def test_wait_for_port_trusts_available_lsof_before_fallbacks(tmp_path: Path) -> None:
     bash = shutil.which("bash")
     if bash is None:
@@ -174,6 +196,32 @@ def test_wait_for_port_trusts_available_lsof_before_fallbacks(tmp_path: Path) ->
             bash,
             "-c",
             f"{_extract_shell_function('is_port_listening', WAIT_FOR_PORT_SH)}\nPORT=3000\nis_port_listening",
+        ],
+        env={**os.environ, "PATH": f"{binary}:{os.environ['PATH']}"},
+        check=False,
+    )
+
+    assert result.returncode == 1
+
+
+def test_wait_for_port_ignores_ipv6_only_listener(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise wait-for-port.sh helpers")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    lsof = binary / "lsof"
+    lsof.write_text(
+        '#!/bin/sh\ncase "$*" in\n  *-i4TCP:8001*) exit 1 ;;\n  *) exit 0 ;;\nesac\n',
+        encoding="utf-8",
+    )
+    lsof.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            f"{_extract_shell_function('is_port_listening', WAIT_FOR_PORT_SH)}\nPORT=8001\nis_port_listening",
         ],
         env={**os.environ, "PATH": f"{binary}:{os.environ['PATH']}"},
         check=False,

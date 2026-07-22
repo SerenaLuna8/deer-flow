@@ -17,6 +17,11 @@ export const ASSET_WORKFLOW_STATUSES = [
   "rejected",
 ] as const;
 export const SKILL_SCAN_DECISIONS = ["allow", "warn", "block"] as const;
+export const SKILL_FILE_PREVIEW_STATUSES = [
+  "ready",
+  "binary",
+  "too_large",
+] as const;
 export const MCP_TRANSPORTS = [
   "stdio",
   "sse",
@@ -24,6 +29,7 @@ export const MCP_TRANSPORTS = [
   "streamable_http",
 ] as const;
 export const CREDENTIAL_GRANT_STATUSES = ["active", "revoked"] as const;
+export const CREDENTIAL_PAYLOAD_GROUPS = ["env", "headers", "oauth"] as const;
 
 export const assetKindSchema = z.enum(ASSET_KINDS);
 export const assetListKindSchema = z.enum(ASSET_LIST_KINDS);
@@ -31,8 +37,10 @@ export const assetScopeSchema = z.enum(["system", "project"]);
 export const assetStatusSchema = z.enum(ASSET_STATUSES);
 export const assetWorkflowStatusSchema = z.enum(ASSET_WORKFLOW_STATUSES);
 export const skillScanDecisionSchema = z.enum(SKILL_SCAN_DECISIONS);
+export const skillFilePreviewStatusSchema = z.enum(SKILL_FILE_PREVIEW_STATUSES);
 export const mcpTransportSchema = z.enum(MCP_TRANSPORTS);
 export const credentialGrantStatusSchema = z.enum(CREDENTIAL_GRANT_STATUSES);
+export const credentialPayloadGroupSchema = z.enum(CREDENTIAL_PAYLOAD_GROUPS);
 export const assetIdSchema = z.string().uuid();
 export const assetCapabilitiesSchema = z.array(capabilitySchema);
 
@@ -110,6 +118,43 @@ const safeJsonObjectSchema = z.custom<Record<string, unknown>>(
 );
 const stringMapSchema = z.custom<Record<string, string>>(isStringMap);
 const stringListMapSchema = z.custom<Record<string, string[]>>(isStringListMap);
+const credentialFieldNameSchema = z.string().min(1).max(255);
+const credentialFieldMapSchema = z
+  .record(z.string())
+  .superRefine((value, context) => {
+    const fields = Object.keys(value);
+    if (fields.length === 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Credential payload groups cannot be empty",
+      });
+    }
+    for (const fieldName of fields) {
+      if (!credentialFieldNameSchema.safeParse(fieldName).success) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Credential field names must contain 1 to 255 characters",
+          path: [fieldName],
+        });
+      }
+    }
+  });
+const credentialFieldListSchema = z
+  .array(credentialFieldNameSchema)
+  .min(1)
+  .refine((fields) => new Set(fields).size === fields.length, {
+    message: "Credential field names must be unique within a group",
+  });
+const credentialPayloadStructureSchema = z
+  .object({
+    env: credentialFieldListSchema.optional(),
+    headers: credentialFieldListSchema.optional(),
+    oauth: credentialFieldListSchema.optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "Credential payload schema cannot be empty",
+  });
 
 export const agentVersionSchema = z
   .object({
@@ -141,6 +186,95 @@ const skillFileViewSchema = z
     sha256: z.string().min(1),
   })
   .strict();
+
+export const skillFilePathSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((path) => path === path.normalize("NFC"), {
+    message: "Skill file paths must use canonical NFC",
+  })
+  .refine(
+    (path) =>
+      !path.startsWith("/") &&
+      !path.includes("\\") &&
+      !path.includes("\0") &&
+      path
+        .split("/")
+        .every((part) => part !== "" && part !== "." && part !== ".."),
+    { message: "Skill file paths must be relative POSIX paths" },
+  );
+
+export const skillVersionFileContentSchema = z
+  .object({
+    path: skillFilePathSchema,
+    media_type: z.string().min(1),
+    size_bytes: z.number().int().nonnegative(),
+    sha256: z.string().min(1),
+    preview_status: skillFilePreviewStatusSchema,
+    encoding: z.literal("utf-8").nullable(),
+    content: z.string().nullable(),
+    source_payload_checksum: z.string().min(1),
+    asset_version: z.number().int().positive(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const ready = value.preview_status === "ready";
+    if (ready && (value.encoding !== "utf-8" || value.content === null)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Ready Skill files require UTF-8 content",
+      });
+    }
+    if (!ready && (value.encoding !== null || value.content !== null)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Unavailable Skill files cannot include content",
+      });
+    }
+  });
+
+export const skillVersionFileContentResponseSchema = z
+  .object({
+    data: skillVersionFileContentSchema,
+    request_id: z.string().min(1),
+  })
+  .strict();
+
+const editableSkillFileChangeSchema = z
+  .object({
+    op: z.enum(["create", "replace"]),
+    path: skillFilePathSchema,
+    content: z.string().max(1024 * 1024),
+    media_type: z.string().min(1).max(255),
+  })
+  .strict();
+const deletedSkillFileChangeSchema = z
+  .object({
+    op: z.literal("delete"),
+    path: skillFilePathSchema.refine((path) => path !== "SKILL.md", {
+      message: "SKILL.md cannot be deleted",
+    }),
+  })
+  .strict();
+
+export const skillFileChangeSchema = z.union([
+  editableSkillFileChangeSchema,
+  deletedSkillFileChangeSchema,
+]);
+export const skillFileForkInputSchema = z
+  .object({
+    expected_asset_version: z.number().int().positive(),
+    expected_source_payload_checksum: z.string().min(1),
+    changes: z.array(skillFileChangeSchema).min(1).max(256),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      new Set(value.changes.map((change) => change.path)).size ===
+      value.changes.length,
+    { message: "Skill file changes must use unique paths", path: ["changes"] },
+  );
 
 export const skillVersionSchema = z
   .object({
@@ -235,7 +369,7 @@ export const credentialVersionSchema = z
     version_number: z.number().int().positive(),
     status: z.enum(["active", "retired", "revoked"]),
     payload_schema_version: z.number().int().positive(),
-    payload_schema: stringListMapSchema,
+    payload_schema: credentialPayloadStructureSchema,
     supersedes_version_id: assetIdSchema.nullable(),
     created_by_user_id: z.string().min(1),
     created_at: z.string().datetime({ offset: true }),
@@ -457,12 +591,14 @@ export const mcpVersionInputSchema = z
 
 export const credentialPayloadSchema = z
   .object({
-    env: stringMapSchema.optional(),
-    headers: stringMapSchema.optional(),
-    oauth: stringMapSchema.optional(),
+    env: credentialFieldMapSchema.optional(),
+    headers: credentialFieldMapSchema.optional(),
+    oauth: credentialFieldMapSchema.optional(),
   })
   .strict()
-  .refine((value) => Object.keys(value).length > 0);
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "Credential payload cannot be empty",
+  });
 
 export const createCredentialInputSchema = z
   .object({
@@ -515,6 +651,10 @@ export type AssetKind = z.infer<typeof assetKindSchema>;
 export type AssetListKind = z.infer<typeof assetListKindSchema>;
 export type AssetScope = z.infer<typeof assetScopeSchema>;
 export type AssetStatus = z.infer<typeof assetStatusSchema>;
+export type CredentialPayloadGroup = z.infer<
+  typeof credentialPayloadGroupSchema
+>;
+export type CredentialPayload = z.infer<typeof credentialPayloadSchema>;
 export type AssetSummary = z.infer<typeof assetSummarySchema>;
 export type ProjectAssetItem = z.infer<typeof projectAssetItemSchema>;
 export type ProjectCredentialItem = z.infer<typeof projectCredentialItemSchema>;
@@ -539,6 +679,14 @@ export type CredentialMutationResponse = z.infer<
 export type CreateAssetInput = z.input<typeof createAssetInputSchema>;
 export type AgentVersionInput = z.input<typeof agentVersionInputSchema>;
 export type SkillVersionInput = z.input<typeof skillVersionInputSchema>;
+export type SkillVersionFileContent = z.infer<
+  typeof skillVersionFileContentSchema
+>;
+export type SkillVersionFileContentResponse = z.infer<
+  typeof skillVersionFileContentResponseSchema
+>;
+export type SkillFileChange = z.input<typeof skillFileChangeSchema>;
+export type SkillFileForkInput = z.input<typeof skillFileForkInputSchema>;
 export type McpVersionInput = z.input<typeof mcpVersionInputSchema>;
 export type CreateCredentialInput = z.input<typeof createCredentialInputSchema>;
 export type ExpectedAssetVersionInput = z.input<

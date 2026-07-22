@@ -685,7 +685,7 @@ def check_env_file(project_root: Path) -> CheckResult:
     return CheckResult(
         ".env found",
         "warn",
-        fix="Run 'make setup' or copy .env.example to .env",
+        fix="Run 'make setup' or create .env with the required environment variables",
     )
 
 

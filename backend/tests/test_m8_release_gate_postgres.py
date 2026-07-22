@@ -30,8 +30,6 @@ EXPECTED_M1_M7_PREFIX = (
     "tests/test_m6_audit_redaction.py",
     "tests/test_m6_audit_integration_postgres.py",
     "tests/test_m6_retention_purge_postgres.py",
-    "tests/test_m7_backup_restore_postgres.py",
-    "tests/test_m6_restore_postgres.py",
     "tests/test_m6_worker_crash_recovery_postgres.py",
     "tests/test_m6_gateway_reconnect_process.py",
     "tests/test_m7_process_boundary.py",
@@ -41,7 +39,6 @@ EXPECTED_M1_M7_PREFIX = (
 EXPECTED_M8_SUFFIX = (
     "tests/test_m8_isolation_matrix_postgres.py",
     "tests/test_m8_capacity_postgres.py",
-    "tests/test_m8_recovery_switch_postgres.py",
     "tests/test_m8_release_gate_postgres.py",
 )
 EXPECTED_COMMAND_IDS = (
@@ -73,7 +70,6 @@ EXPECTED_COMMAND_IDS = (
     "host.make_start",
     "chromium.host_journey",
     "deepseek.live_journey",
-    "recovery.full_switch",
     "cleanup.evidence_log_security",
     "cleanup.residual_audit",
 )
@@ -214,29 +210,3 @@ def test_release_gate_stats_count_both_pytest_error_buckets(monkeypatch) -> None
     pytest_sessionfinish(session, 0)
 
     assert lines == ["M1-M8 release stats: collected=4 passed=1 failed=3 skipped=0"]
-
-
-def test_m8_runbook_covers_candidate_review_final_and_scope_without_secrets() -> None:
-    runbook = (REPO_ROOT / "docs/operations/m8-host-release-acceptance.md").read_text(encoding="utf-8")
-    for required in (
-        "candidate_ready",
-        "final_pass",
-        "M8_CANDIDATE_MANIFEST",
-        "M8_REVIEW_REPORT_PATH",
-        "evidence_relative_locator",
-        "3f574b89..HEAD",
-        "Critical",
-        "Important",
-        "Minor",
-        "Docker Compose",
-        "Kubernetes",
-        "Helm",
-        "Firefox",
-        "Safari/WebKit",
-        "credential",
-        "轮换",
-        "保留策略",
-    ):
-        assert required in runbook
-    assert "sk-" not in runbook
-    assert "postgresql://" not in runbook

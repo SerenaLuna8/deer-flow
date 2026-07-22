@@ -31,14 +31,15 @@ export function ProjectLifecyclePanel() {
   return (
     <section
       aria-labelledby="project-lifecycle-title"
-      className="border-destructive/30 bg-destructive/5 mt-8 rounded-2xl border p-6"
+      className="border-destructive/30 bg-destructive/5 rounded-2xl border p-6"
     >
       <h2 id="project-lifecycle-title" className="text-lg font-semibold">
         项目生命周期
       </h2>
       <p className="text-muted-foreground mt-2 max-w-2xl text-sm">
-        请求删除后，项目立即停止进入和治理；恢复窗口结束后将无法自助恢复，M2
-        不执行物理清除。
+        {
+          "请求删除后，项目会立即停止进入和治理，并提供 30 天恢复窗口。恢复窗口结束后将无法自助恢复。"
+        }
       </p>
       {deletion.error && (
         <p role="alert" className="text-destructive mt-3 text-sm">
@@ -59,7 +60,9 @@ export function ProjectLifecyclePanel() {
           <DialogHeader>
             <DialogTitle>确认删除项目</DialogTitle>
             <DialogDescription>
-              项目会立即进入待删除状态，你将返回工作空间。
+              {
+                "项目会立即进入待删除状态，你将返回工作空间。项目管理员可在 30 天恢复窗口内撤销这次操作。"
+              }
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

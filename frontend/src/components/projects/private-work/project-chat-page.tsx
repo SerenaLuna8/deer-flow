@@ -46,13 +46,13 @@ export function projectChatRouteScope(
     ),
     automationHref: (threadId) =>
       `/projects/${encodeURIComponent(project.slug)}/automations?thread_id=${encodeURIComponent(threadId)}`,
-    goalVisible: false,
-    compactVisible: false,
-    branchVisible: false,
-    regenerateVisible: false,
+    goalVisible: canRead,
+    compactVisible: canRun,
+    branchVisible: canCreate,
+    regenerateVisible: canRun,
     sidecarVisible: canRun,
     artifactsVisible: canRead,
-    followupSuggestionsEnabled: false,
+    followupSuggestionsEnabled: canRun,
   };
 }
 

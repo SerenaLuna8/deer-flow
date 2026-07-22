@@ -13,6 +13,12 @@ def _now() -> datetime:
 
 
 class ProjectInvitationRateLimitRow(Base):
+    """Shared fixed-window counters for invitation and public-auth attempts.
+
+    The physical name is retained from the M2 schema for baseline stability;
+    every caller persists a domain-separated HMAC-SHA256 key.
+    """
+
     __tablename__ = "project_invitation_rate_limits"
 
     key_hash: Mapped[str] = mapped_column(CHAR(64), primary_key=True)

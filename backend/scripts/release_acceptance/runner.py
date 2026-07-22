@@ -1,14 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
-import json
 import os
-import secrets
 import signal
 import subprocess
-import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
@@ -18,8 +13,6 @@ from urllib.parse import unquote, urlsplit
 
 from pydantic import model_validator
 
-from app.recovery.archive import load_backup_key
-from app.reliability.owner_refs import AuditHmacKeyring
 from scripts.release_acceptance.commands import (
     COMMANDS,
     AsyncCommandExecutor,
@@ -34,13 +27,12 @@ from scripts.release_acceptance.host_stack import (
     OwnedHostStack,
     SubprocessHostCommandRunner,
 )
-from scripts.release_acceptance.live_probe import ChromiumJourneyRunner, RecoveryBrowserProbe
+from scripts.release_acceptance.live_probe import ChromiumJourneyRunner
 from scripts.release_acceptance.models import (
     M8_REVIEW_BASE_COMMIT,
     CleanupSummary,
     HostCommandTiming,
     LiveModelSummary,
-    RecoverySummary,
     ReleaseEvidence,
     ReviewReport,
     SecuritySummary,
@@ -51,7 +43,6 @@ from scripts.release_acceptance.models import (
 )
 from scripts.release_acceptance.ownership import OwnershipLedger
 from scripts.release_acceptance.preflight import Preflight, PreflightFailure, PreflightResult, PreflightSuccess
-from scripts.release_acceptance.recovery_drill import PostgresRecoveryOperations, RecoverySwitchDrill
 from scripts.release_acceptance.security import SecretScanner, load_secret_allowlist
 
 
@@ -97,7 +88,6 @@ class DiagnosticResult(StrictModel):
     host_setup_passed: bool
     chromium: TestSummary | None = None
     deepseek: LiveModelSummary | None = None
-    recovery: RecoverySummary | None = None
     evidence_log_security_passed: bool = True
     cleanup: CleanupSummary
     timings: tuple[HostCommandTiming, ...] = ()
@@ -135,20 +125,6 @@ def _write_owned_frontend_tsconfig(frontend_runtime_root: Path) -> None:
         handle.write('{"extends":"../tsconfig.json"}\n')
 
 
-def _audit_keyring(environment: dict[str, str]) -> AuditHmacKeyring:
-    try:
-        active = environment["DEER_FLOW_AUDIT_ACTIVE_KEY_ID"]
-        raw = json.loads(environment["DEER_FLOW_AUDIT_KEYRING_JSON"])
-        if not isinstance(raw, dict):
-            raise ValueError
-        keys = {key_id: base64.b64decode(value, validate=True) for key_id, value in raw.items() if isinstance(key_id, str) and isinstance(value, str)}
-        if len(keys) != len(raw):
-            raise ValueError
-        return AuditHmacKeyring(active_key_id=active, _keys=keys)
-    except (KeyError, ValueError, TypeError, json.JSONDecodeError, binascii.Error):
-        raise RuntimeError("M8_AUDIT_KEYRING_INVALID") from None
-
-
 async def run_host_diagnostic(
     *,
     repository: Path,
@@ -166,7 +142,6 @@ async def run_host_diagnostic(
     run_id = acceptance_run_id or uuid.uuid4()
     runtime_root = repository / f".m8-runtime-{run_id.hex}"
     frontend_runtime_root = repository / "frontend" / f".m8-next-{run_id.hex}"
-    recovery_root = Path(tempfile.gettempdir()).resolve() / f"deerflow-m8-recovery-{run_id.hex}"
     admin_url = environment.get("POSTGRES_ADMIN_URL", "")
     database_url = environment.get("DATABASE_URL", "")
     parsed = urlsplit(database_url.replace("postgresql+asyncpg://", "postgresql://", 1))
@@ -180,8 +155,6 @@ async def run_host_diagnostic(
     host: OwnedHostStack | None = None
     browser_summary: TestSummary | None = None
     live_summary: LiveModelSummary | None = None
-    recovery_summary: RecoverySummary | None = None
-    recovery_timing: HostCommandTiming | None = None
     command_runner: SubprocessHostCommandRunner | None = None
     host_passed = False
     code = "HOST_DIAGNOSTIC_FAILED"
@@ -191,9 +164,6 @@ async def run_host_diagnostic(
         ledger.register_path(runtime_root, disposition="temporary")
         await asyncio.to_thread(frontend_runtime_root.mkdir, mode=0o700)
         ledger.register_path(frontend_runtime_root, disposition="temporary")
-        if StageId.RECOVERY in stages:
-            await asyncio.to_thread(recovery_root.mkdir, mode=0o700)
-            ledger.register_external_path(recovery_root)
         await asyncio.to_thread(_write_owned_frontend_tsconfig, frontend_runtime_root)
         child_environment = dict(environment)
         child_environment.update(
@@ -231,50 +201,9 @@ async def run_host_diagnostic(
                 live_model=(preflight_result.model if StageId.DEEPSEEK in stages else None),
                 live_database_url=(host.database_url if StageId.DEEPSEEK in stages else None),
                 restart_gateway=(host.restart_gateway if StageId.DEEPSEEK in stages else None),
-                capture_recovery_authority=StageId.RECOVERY in stages,
             )
             browser_summary = journey.tests
             live_summary = journey.live_model
-            if StageId.RECOVERY in stages:
-                recovery_started = datetime.now(UTC)
-                source_app_url = host.database_url
-                backup_key = load_backup_key(
-                    environment.get("DEER_FLOW_BACKUP_KEY"),
-                    database_url=source_app_url,
-                )
-                journal_key = secrets.token_bytes(32)
-                while journal_key == backup_key:
-                    journal_key = secrets.token_bytes(32)
-                authority = journey_runner.recovery_authority
-                recovery_browser = RecoveryBrowserProbe(
-                    command_runner=command_runner,
-                    environment=child_environment,
-                    runtime_root=runtime_root,
-                    authority=authority,
-                )
-                recovery_summary = await RecoverySwitchDrill(
-                    PostgresRecoveryOperations(
-                        source_host=host,
-                        database_manager=database,
-                        ledger=ledger,
-                        recovery_browser=recovery_browser,
-                        recovery_root=recovery_root,
-                        source_app_url=source_app_url,
-                        postgres_admin_url=admin_url,
-                        app_role=app_role,
-                        authority=authority,
-                        backup_key=backup_key,
-                        journal_key=journal_key,
-                        keyring=_audit_keyring(environment),
-                    )
-                ).run()
-                recovery_finished = datetime.now(UTC)
-                recovery_timing = HostCommandTiming(
-                    command_id="recovery.full_switch",
-                    started_at=recovery_started,
-                    finished_at=recovery_finished,
-                    duration_ms=int((recovery_finished - recovery_started).total_seconds() * 1000),
-                )
         code = "OK"
     except BaseException:
         code = "HOST_DIAGNOSTIC_FAILED"
@@ -338,15 +267,12 @@ async def run_host_diagnostic(
                             duration_ms=live_summary.duration_ms,
                         )
                     )
-    if recovery_timing is not None:
-        formal_timings.append(recovery_timing)
     return DiagnosticResult(
         status="passed" if code == "OK" else "failed",
         code=code,
         host_setup_passed=host_passed,
         chromium=browser_summary,
         deepseek=live_summary,
-        recovery=recovery_summary,
         evidence_log_security_passed=evidence_log_security_passed,
         cleanup=cleanup,
         timings=tuple(formal_timings),
@@ -558,7 +484,6 @@ class ReleaseRunner:
                                     StageId.HOST_SETUP,
                                     StageId.CHROMIUM,
                                     StageId.DEEPSEEK,
-                                    StageId.RECOVERY,
                                 ),
                                 acceptance_run_id=self._acceptance_run_id,
                             )
@@ -737,14 +662,5 @@ def _host_outcome(
             failed=1 - passed,
             skipped=0,
             summary=result.deepseek,
-        )
-    if command.stage is StageId.RECOVERY and result.recovery is not None:
-        passed = int(result.recovery.rpo_outcome == "archive_point_confirmed")
-        return CommandOutcome(
-            status="passed" if passed else "failed",
-            passed=passed,
-            failed=1 - passed,
-            skipped=0,
-            summary=result.recovery,
         )
     return _failed_outcome(command.stage, command.command_id)

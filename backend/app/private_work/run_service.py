@@ -210,7 +210,7 @@ class PrivateRunService:
                 await self._revalidator.require(
                     session,
                     context,
-                    Capability.PRIVATE_WORK_CREATE,
+                    Capability.PRIVATE_WORK_READ_OWN,
                     lock=True,
                 )
                 await self._require_thread(

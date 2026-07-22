@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with code in this repository. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with code in this repository. It is the source of truth.
 
 It is the **monorepo orientation layer**: it maps the whole repo and points to the
 module guides that own the depth. For anything inside a module, read that module's
@@ -57,7 +57,7 @@ deer-flow/
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` to `config.yaml`.
 `DATABASE_URL` is the only application persistence connection. PostgreSQL owns application
-data, checkpoints, stores, durable jobs, streams, quotas, audit records, and recovery proof.
+data, checkpoints, stores, durable jobs, streams, quotas, and audit records.
 Config schema and resolution are documented in [backend/AGENTS.md](backend/AGENTS.md).
 
 ## Final M7 runtime boundary
@@ -81,7 +81,7 @@ Config schema and resolution are documented in [backend/AGENTS.md](backend/AGENT
 - System-admin operations expose bounded readiness and governance metadata only. They never return
   prompts, messages, Memory, file/artifact bodies, Run output, credentials, locators, or raw errors.
 
-## Fresh database and recovery boundary
+## Fresh database boundary
 
 The supported install sequence is: provision a new empty PostgreSQL database, run
 `make setup-db`, then run `make start`. Setup installs the sole application revision
@@ -91,11 +91,6 @@ project. Runtime startup validates the target and never creates or repairs it.
 An old revision or unknown nonempty schema fails before DDL with `M7_RECREATE_REQUIRED`.
 The operator must preserve that database if needed, point `DATABASE_URL` at a newly created empty
 database, and repeat setup. No command upgrades the old database in place.
-
-Recovery accepts only authenticated archive schema version 7 at
-`0001_project_saas_baseline`. Restore always targets a distinct, nonexistent new database, replays
-the external tombstone journal, verifies the exact schema, and writes proof before a separate manual
-traffic switch. See [docs/operations/m6-backup-recovery.md](docs/operations/m6-backup-recovery.md).
 
 M1–M8 已完成，总体里程碑进度为 8/8（100%）。M8 的关闭前实现提交
 `896fe62ec4265a343ab6a6d209453d11508d81a0` 已通过完整宿主机 candidate、0 Critical / 0 Important /
@@ -115,9 +110,6 @@ make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
 make setup-db    # 显式创建并完整初始化 PostgreSQL 目标库
-make backup-db ARGS="--output /secure/backups"  # 外部认证加密 PostgreSQL archive
-make restore-db ARGS="--archive /secure/backups/<archive> --target-url <new-deerflow_restore-url> --journal /secure/recovery/tombstones.jsonl --execute"  # 恢复、重放、probe 并写 proof；不切换 DATABASE_URL
-make drill-restore ARGS="--archive /secure/backups/<archive> --journal /secure/recovery/tombstones.jsonl"  # 随机恢复库演练，仅清理该库
 make rotate-credentials ARGS="--dry-run --key-id m3-next"  # 分批轮换 credential envelope
 make check-db    # 只读检查连接、Alembic head 与必需表
 make release-acceptance  # M8 宿主机完整 candidate/review/final 验收（要求显式 live 环境）
@@ -152,11 +144,8 @@ Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and 
 
 - Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
 - Frontend work → **[frontend/AGENTS.md](frontend/AGENTS.md)**
-- Setup & install → **[Install.md](Install.md)**, **[CONTRIBUTING.md](CONTRIBUTING.md)**
+- Setup & install → **[Install.md](Install.md)**
 - Project overview & usage → **[README.md](README.md)**
-- Security policy → **[SECURITY.md](SECURITY.md)**
-- Changes → **[CHANGELOG.md](CHANGELOG.md)**
-- Cutting a release → **[RELEASING.md](RELEASING.md)**
 
 ## Cross-Cutting Conventions
 
@@ -171,19 +160,18 @@ These apply repo-wide; module guides own the module-specific detail.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **PostgreSQL release gate** — root `Makefile` 的 `PROJECT_FOUNDATION_POSTGRES_TESTS`
-  是固定 22 文件 M1–M7 真实 PostgreSQL gate 的唯一有序来源；覆盖 M7 baseline/bootstrap、M2–M5
-  runtime integration、M6 process/job/stream/quota/audit/recovery，以及真实 Gateway/Scheduler/Worker
+  是固定 20 文件 M1–M7 真实 PostgreSQL gate 的唯一有序来源；覆盖 M7 baseline/bootstrap、M2–M5
+  runtime integration、M6 process/job/stream/quota/audit/retention，以及真实 Gateway/Scheduler/Worker
   lease、Worker-only graph、Gateway restart cursor 和跨 account/project/owner 隔离。生产 source-absence
   gate 只扫描 app/harness/scripts/frontend runtime/nginx roots，历史 docs/tests 不参与；已移除 config
   key 只允许出现在精确 validator allowlist。每个数据库测试只创建
-  随机 `deerflow_test_*`/`deerflow_restore_*` 数据库。Release evidence 必须通过
+  随机 `deerflow_test_*` 数据库。Release evidence 必须通过
   `POSTGRES_TEST_URL=... make test-project-foundation-postgres` 运行并保持 0 skip；跨平台 Python runner 和
   `.github/workflows/project-saas-release-gates.yml` 会在变量缺失时于 pytest 前硬失败。
-- **M8 final PostgreSQL gate** — `M8_RELEASE_POSTGRES_TESTS` 只允许在上述 22 文件前缀后追加
-  M8 isolation、capacity、recovery-switch 和 release-contract 四个文件；`make test` 与
-  `make test-project-saas-postgres` 使用该 26 文件 0-skip 清单。完整 live 关闭只能走
-  `make release-acceptance`，操作顺序见
-  [docs/operations/m8-host-release-acceptance.md](docs/operations/m8-host-release-acceptance.md)。
+- **M8 final PostgreSQL gate** — `M8_RELEASE_POSTGRES_TESTS` 只允许在上述 20 文件前缀后追加
+  M8 isolation、capacity 和 release-contract 三个文件；`make test` 与
+  `make test-project-saas-postgres` 使用该 23 文件 0-skip 清单。完整 live 验收使用
+  `make release-acceptance`。
 - **M7 fresh-install baseline** — `migrations/versions/` 只允许
   `0001_project_saas_baseline.py`；`down_revision=None`，downgrade 永远拒绝。`make setup-db` 在空库安装
   final application schema、builtin catalog、LangGraph schema 与 default project；`make check-db` 只读验证

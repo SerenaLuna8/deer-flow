@@ -639,7 +639,7 @@ class SystemJobAuditSink:
 
 
 class TrustedOperationAuditSink:
-    """Process-bound contracts for forward-owned backup and recovery callers."""
+    """Process-bound contract for Worker-owned retention purge."""
 
     def __init__(
         self,
@@ -650,11 +650,7 @@ class TrustedOperationAuditSink:
         if type(service) is not AuditService:
             raise TypeError("trusted-operation AuditService is required")
         context = service.require_process_context(process_context)
-        if context.process not in {
-            AuditProcess.OPERATOR,
-            AuditProcess.RECOVERY,
-            AuditProcess.WORKER,
-        }:
+        if context.process is not AuditProcess.WORKER:
             raise TypeError("trusted-operation AuditService is required")
         self._service = service
         self._process_context = context
@@ -663,115 +659,6 @@ class TrustedOperationAuditSink:
     def _require_process(self, *allowed: AuditProcess) -> None:
         if self._process not in allowed:
             raise AuditAuthorityRejected()
-
-    async def backup_created(
-        self,
-        session: AsyncSession,
-        *,
-        backup_id: uuid.UUID,
-        table_count: int,
-        tombstone_high_watermark: int,
-        request_id: str,
-    ) -> None:
-        self._require_process(AuditProcess.OPERATOR)
-        await self._service.append(
-            session,
-            AuditActor.trusted_process(self._process_context),
-            AuditAction.BACKUP_CREATED,
-            AuditTarget(
-                AuditTargetKind.BACKUP,
-                _uuid(backup_id),
-                None,
-            ),
-            AuditOutcome.SUCCESS,
-            {
-                "table_count": table_count,
-                "tombstone_high_watermark": tombstone_high_watermark,
-            },
-            request_id=request_id,
-        )
-
-    async def restore_started(
-        self,
-        session: AsyncSession,
-        *,
-        restore_id: uuid.UUID,
-        table_count: int,
-        tombstones_replayed: int,
-        request_id: str,
-    ) -> None:
-        await self._restore_event(
-            session,
-            action=AuditAction.RESTORE_STARTED,
-            restore_id=restore_id,
-            table_count=table_count,
-            tombstones_replayed=tombstones_replayed,
-            request_id=request_id,
-        )
-
-    async def restore_completed(
-        self,
-        session: AsyncSession,
-        *,
-        restore_id: uuid.UUID,
-        table_count: int,
-        tombstones_replayed: int,
-        request_id: str,
-    ) -> None:
-        await self._restore_event(
-            session,
-            action=AuditAction.RESTORE_COMPLETED,
-            restore_id=restore_id,
-            table_count=table_count,
-            tombstones_replayed=tombstones_replayed,
-            request_id=request_id,
-        )
-
-    async def recovery_drill_completed(
-        self,
-        session: AsyncSession,
-        *,
-        restore_id: uuid.UUID,
-        table_count: int,
-        tombstones_replayed: int,
-        request_id: str,
-    ) -> None:
-        await self._restore_event(
-            session,
-            action=AuditAction.RECOVERY_DRILL_COMPLETED,
-            restore_id=restore_id,
-            table_count=table_count,
-            tombstones_replayed=tombstones_replayed,
-            request_id=request_id,
-        )
-
-    async def _restore_event(
-        self,
-        session: AsyncSession,
-        *,
-        action: AuditAction,
-        restore_id: uuid.UUID,
-        table_count: int,
-        tombstones_replayed: int,
-        request_id: str,
-    ) -> None:
-        self._require_process(AuditProcess.OPERATOR, AuditProcess.RECOVERY)
-        await self._service.append(
-            session,
-            AuditActor.trusted_process(self._process_context),
-            action,
-            AuditTarget(
-                AuditTargetKind.RESTORE,
-                _uuid(restore_id),
-                None,
-            ),
-            AuditOutcome.SUCCESS,
-            {
-                "table_count": table_count,
-                "tombstones_replayed": tombstones_replayed,
-            },
-            request_id=request_id,
-        )
 
     async def purge_completed(
         self,
@@ -783,12 +670,9 @@ class TrustedOperationAuditSink:
         purged_count: int,
         request_id: str,
     ) -> None:
-        if resource_kind == "account":
-            self._require_process(AuditProcess.RECOVERY)
-        elif resource_kind in {"project", "file"}:
-            self._require_process(AuditProcess.WORKER, AuditProcess.RECOVERY)
-        else:
+        if resource_kind not in {"account", "project", "file"}:
             raise TypeError("purge audit resource kind is invalid")
+        self._require_process(AuditProcess.WORKER)
         await self._service.append(
             session,
             AuditActor.trusted_process(self._process_context),

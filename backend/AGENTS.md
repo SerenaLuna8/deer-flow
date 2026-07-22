@@ -61,9 +61,6 @@ make test-blocking-io
 make lint
 make format
 make check-db
-make backup-db ARGS="--output /secure/backups"
-make restore-db ARGS="--archive /secure/backups/<archive> --target-url <new-target-url> --journal /secure/recovery/tombstones.jsonl --execute"
-make drill-restore ARGS="--archive /secure/backups/<archive> --journal /secure/recovery/tombstones.jsonl"
 ```
 
 `scheduler.enabled=false` leaves project Automation APIs and manual triggers available but
@@ -97,14 +94,14 @@ URLs.
 ### Release PostgreSQL gate
 
 The root `Makefile` variable `PROJECT_FOUNDATION_POSTGRES_TESTS` is the sole ordered
-22-file M1-M7 PostgreSQL release list. Run it only against a disposable maintenance instance:
+20-file M1-M7 PostgreSQL release list. Run it only against a disposable maintenance instance:
 
 ```bash
 POSTGRES_TEST_URL="postgresql://.../postgres" make test-project-foundation-postgres
 ```
 
-The URL must have create/drop/terminate authority for random `deerflow_test_*` and
-`deerflow_restore_*` databases. It must never be a production URL or the ordinary application
+The URL must have create/drop/terminate authority for random `deerflow_test_*`
+databases. It must never be a production URL or the ordinary application
 URL. Missing `POSTGRES_TEST_URL` fails before pytest collection; selected tests must report
 zero skips.
 
@@ -123,7 +120,6 @@ backend/
 │   ├── jobs/                 # durable job application ports
 │   ├── quotas/               # transactional project quota enforcement
 │   ├── audit/                # typed append-only audit
-│   ├── recovery/             # archive, journal, restore, retention proof
 │   └── channels/             # final project-bound inbound adapters
 ├── packages/harness/deerflow/
 │   ├── agents/               # LangGraph graph and middleware
@@ -134,7 +130,7 @@ backend/
 │   ├── mcp/                  # admitted MCP tool materialization
 │   ├── skills/               # immutable admitted Skill parsing/loading
 │   └── subagents/            # delegated Agent execution
-├── scripts/                  # setup/check/backup/restore/operator CLIs
+├── scripts/                  # setup/check/operator CLIs
 └── tests/                    # unit, PostgreSQL, process, blocking-I/O gates
 ```
 
@@ -215,37 +211,19 @@ Private target identifiers are domain-separated HMACs; raw project-owner resourc
 messages, files, Memory, Run output, exception text, URLs, and secrets are forbidden. Audit
 rows and committed usage ledger rows are append-only.
 
-Retention purge writes an authenticated encrypted hash-chained tombstone to the external
-journal and fsyncs it before physical deletion commits. The database anchor records the same
-journal ID, source identity, sequence, and head digest. Recovery and purge share one source
-authority so a verified restore cannot omit a concurrent tombstone.
-
-## M7 archive and new-database restore
-
-Backup accepts only the exact M7 baseline catalog and creates archive schema version 7. Archive
-manifest and chunk AAD bind the revision, canonical schema digest, source identity, and chunk
-coordinates. Public output contains only proof metadata.
-
-Restore authenticates the complete archive before resolving or creating a target. It accepts
-only a distinct nonexistent `deerflow_restore_<pid>_<32-lowercase-hex>` database, replays the
-continuous external journal suffix, verifies the exact M7 schema again, removes sensitive
-workspace files by captured identity, and writes proof. It never changes `DATABASE_URL`, starts
-services, overwrites a database, or switches traffic. The separate drill uses the same workflow
-and drops only its invocation-owned generated target.
-
-See [../docs/operations/m6-backup-recovery.md](../docs/operations/m6-backup-recovery.md).
+Retention purge remains a project-governance operation and validates the current pending-deletion
+authority in the same transaction before physically deleting project data.
 
 ## Configuration
 
 Configuration is read only from an explicit `DEER_FLOW_CONFIG_PATH` or the repository-root
-`config.yaml`. `database`, `worker`, `scheduler`, `quotas`, `recovery`, `channels`, sandbox,
+`config.yaml`. `database`, `worker`, `scheduler`, `quotas`, `channels`, sandbox,
 models, tools, logging, and final runtime policy remain supported. Infrastructure configuration
 is restart-required. Unknown application extension fields remain allowed where their typed
 models permit them, but removed top-level keys fail validation instead of being ignored.
 
 Secret values must come from environment-backed configuration and must be separated by domain:
-Auth, Credential encryption, audit/quota HMAC, backup encryption, recovery journal encryption,
-and database passwords cannot reuse material.
+Auth, Credential encryption, audit/quota HMAC, and database passwords cannot reuse material.
 
 ## Testing and code quality
 
@@ -279,7 +257,6 @@ credential, private resource, and exception detail.
 M1–M8 已完成，总体进度为 8/8（100%）。M8 宿主机发布验收的后端 full gate 为 6867 passed、
 0 failed、940 个由专用 live/PostgreSQL 阶段覆盖的 expected skip；固定 M1–M8 PostgreSQL gate 为
 326 passed、0 skipped。认证范围及未认证部署方式见根 `AGENTS.md` 和 operator runbook。
-`M8_RELEASE_POSTGRES_TESTS` 保留该 22 文件前缀并只追加四个 M8 PostgreSQL 文件；最终
-0-skip gate 是根目录 `make test-project-saas-postgres`。完整宿主机验收使用随机自有 source/
-restore 数据库并通过根目录 `make release-acceptance` 执行，candidate/review/final 操作见
-[`docs/operations/m8-host-release-acceptance.md`](../docs/operations/m8-host-release-acceptance.md)。
+`M8_RELEASE_POSTGRES_TESTS` 保留该 20 文件前缀并只追加三个 M8 PostgreSQL 文件；最终
+0-skip gate 是根目录 `make test-project-saas-postgres`。完整宿主机验收使用随机自有
+`deerflow_test_*` 数据库并通过根目录 `make release-acceptance` 执行。

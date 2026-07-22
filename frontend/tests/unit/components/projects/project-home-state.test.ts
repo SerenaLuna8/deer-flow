@@ -156,4 +156,36 @@ describe("project home identity state", () => {
     expect(renderedProject).toBe(enteredProject);
     expect(renderedProject).not.toBe(oldProject);
   });
+
+  test("changes identity when the project summary changes so enter-project refreshes the whole snapshot", () => {
+    const firstLookup = {
+      ...oldProject,
+      member_count: 1,
+      agent_count: 0,
+      skill_count: 0,
+      mcp_count: 0,
+    } as Project;
+    const firstIdentity = projectHomeIdentityKey(
+      "u1",
+      "alpha",
+      firstLookup.id,
+      1,
+      firstLookup,
+    );
+    const refreshedIdentity = projectHomeIdentityKey(
+      "u1",
+      "alpha",
+      firstLookup.id,
+      1,
+      { ...firstLookup, agent_count: 1 },
+    );
+
+    expect(refreshedIdentity).not.toBe(firstIdentity);
+    expect(
+      projectResultForIdentity(refreshedIdentity, {
+        identity: firstIdentity!,
+        project: { ...firstLookup, agent_count: 1 },
+      }),
+    ).toBeNull();
+  });
 });

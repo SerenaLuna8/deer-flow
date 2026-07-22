@@ -91,7 +91,6 @@ def test_appconfig_descriptions_retain_original_field_documentation():
         "channel_connections": "IM channel connection",
         "worker": "independent Worker",
         "quotas": "project quota",
-        "recovery": "backup and recovery",
     }
     for field_name, expected_substring in descriptions.items():
         description = AppConfig.model_fields[field_name].description or ""

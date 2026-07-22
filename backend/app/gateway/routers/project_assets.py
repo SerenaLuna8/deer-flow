@@ -3,12 +3,13 @@ from __future__ import annotations
 import base64
 import binascii
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import fields as dataclass_fields
+from dataclasses import is_dataclass
 from datetime import datetime
 from typing import Annotated, Any, Literal, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.encoders import jsonable_encoder
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,6 +41,7 @@ from app.shared_assets import (
     McpService,
     SharedAssetError,
     SkillArchiveFile,
+    SkillFileChange,
     SkillService,
     WorkflowStatus,
 )
@@ -215,6 +217,37 @@ class SkillVersionRequest(_StrictModel):
     expected_asset_version: int = Field(ge=1)
 
 
+class SkillFileCreateChangeRequest(_StrictModel):
+    op: Literal["create"]
+    path: str = Field(min_length=1, max_length=1024)
+    content: str = Field(max_length=1048576)
+    media_type: str = Field(min_length=1, max_length=255)
+
+
+class SkillFileReplaceChangeRequest(_StrictModel):
+    op: Literal["replace"]
+    path: str = Field(min_length=1, max_length=1024)
+    content: str = Field(max_length=1048576)
+    media_type: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class SkillFileDeleteChangeRequest(_StrictModel):
+    op: Literal["delete"]
+    path: str = Field(min_length=1, max_length=1024)
+
+
+SkillFileChangeRequest = Annotated[
+    SkillFileCreateChangeRequest | SkillFileReplaceChangeRequest | SkillFileDeleteChangeRequest,
+    Field(discriminator="op"),
+]
+
+
+class SkillForkRequest(_StrictModel):
+    expected_asset_version: int = Field(ge=1)
+    expected_source_payload_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
+    changes: list[SkillFileChangeRequest] = Field(min_length=1, max_length=256)
+
+
 class McpSlotRequest(_StrictModel):
     name: str
     purpose: str = ""
@@ -286,6 +319,18 @@ class SkillFileResponse(_StrictModel):
     media_type: str
     size_bytes: int
     sha256: str
+
+
+class SkillFileContentItemResponse(_StrictModel):
+    path: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    preview_status: Literal["ready", "binary", "too_large"]
+    encoding: Literal["utf-8"] | None
+    content: str | None
+    source_payload_checksum: str
+    asset_version: int
 
 
 class SkillVersionItemResponse(_StrictModel):
@@ -384,6 +429,11 @@ class AgentVersionResponse(_StrictModel):
 
 class SkillVersionResponse(_StrictModel):
     data: SkillVersionItemResponse
+    request_id: str
+
+
+class SkillFileContentResponse(_StrictModel):
+    data: SkillFileContentItemResponse
     request_id: str
 
 
@@ -589,10 +639,9 @@ def _asset_item_capabilities(
     allowed = {
         Capability.SHARED_ASSETS_READ,
         Capability.SHARED_ASSETS_EXECUTE,
+        Capability.SHARED_ASSETS_MANAGE_BINDINGS,
     }
-    if scope is AssetScope.SYSTEM:
-        allowed.add(Capability.SHARED_ASSETS_MANAGE_BINDINGS)
-    else:
+    if scope is AssetScope.PROJECT:
         allowed.add(Capability.SHARED_ASSETS_EDIT)
         if kind is AssetKind.MCP:
             allowed.add(Capability.MCP_CREDENTIALS_APPROVE)
@@ -657,7 +706,7 @@ async def _version_call(actor, operation, response_model: type[_StrictModel]):
     try:
         result = await operation()
         return response_model(
-            data=jsonable_encoder(result),
+            data=_response_data(result),
             request_id=actor.request_id,
         )
     except ASSET_ERRORS as exc:
@@ -668,11 +717,22 @@ async def _version_history(actor, operation, response_model: type[_StrictModel])
     try:
         versions = await operation()
         return response_model(
-            data=[jsonable_encoder(version) for version in versions],
+            data=[_response_data(version) for version in versions],
             request_id=actor.request_id,
         )
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
+
+
+def _response_data(value: object) -> object:
+    """Copy immutable domain views into ordinary response-safe containers."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _response_data(getattr(value, field.name)) for field in dataclass_fields(value)}
+    if isinstance(value, Mapping):
+        return {str(key): _response_data(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_response_data(item) for item in value]
+    return value
 
 
 def _decode_skill_files(body: SkillVersionRequest, request_id: str) -> tuple[SkillArchiveFile, ...]:
@@ -837,6 +897,70 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
         router.add_api_route(path, endpoint, methods=methods, response_model=response_model, status_code=code)
     for segment, dependency in (("agents", get_agent_service), ("skills", get_skill_service), ("mcp-servers", get_mcp_service)):
         add_status_routes(segment, dependency)
+
+
+@project_router.get(
+    "/skills/{asset_id}/versions/{version_id}/files/content",
+    response_model=SkillFileContentResponse,
+)
+async def preview_project_skill_file(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    response: Response,
+    path: Annotated[str, Query(min_length=1, max_length=1024)],
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[SkillService, Depends(get_skill_service)],
+):
+    try:
+        view = await service.preview_version_file(
+            context,
+            asset_id,
+            version_id,
+            path,
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return SkillFileContentResponse(
+            data=SkillFileContentItemResponse(**_response_data(view)),
+            request_id=context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@project_router.post(
+    "/skills/{asset_id}/versions/{source_version_id}/fork",
+    response_model=SkillVersionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def fork_project_skill_version(
+    asset_id: uuid.UUID,
+    source_version_id: uuid.UUID,
+    body: SkillForkRequest,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[SkillService, Depends(get_skill_service)],
+):
+    changes = tuple(
+        SkillFileChange(
+            op=item.op,
+            path=item.path,
+            content=getattr(item, "content", None),
+            media_type=getattr(item, "media_type", None),
+        )
+        for item in body.changes
+    )
+    return await _version_call(
+        context,
+        lambda: service.fork_version(
+            context,
+            asset_id,
+            source_version_id,
+            changes,
+            expected_asset_version=body.expected_asset_version,
+            expected_source_payload_checksum=body.expected_source_payload_checksum,
+        ),
+        SkillVersionResponse,
+    )
 
 
 @project_router.get("/agents", response_model=ScopedAssetListResponse)

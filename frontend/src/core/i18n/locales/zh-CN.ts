@@ -303,7 +303,6 @@ export const zhCN: Translations = {
           worker_fleet: "Worker 集群",
           scheduler: "调度器",
           stream: "事件流",
-          recovery: "恢复",
           quota: "配额",
           audit: "审计",
         },

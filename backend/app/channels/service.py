@@ -151,7 +151,7 @@ class ChannelService:
         gateway_app: Any | None = None,
     ) -> None:
         self.bus = MessageBus()
-        self.store = ChannelStore()
+        self.store = ChannelStore(connection_repo) if connection_repo is not None else None
         self._connection_repo = connection_repo
         self._connection_service = connection_service or _make_project_connection_service(connection_repo)
         private_inbound_dispatcher = _make_project_inbound_dispatcher(
@@ -474,8 +474,8 @@ async def start_channel_service(
     global _channel_service
     if _channel_service is not None:
         return _channel_service
-    # from_app_config reads the JSON channel store and runtime config files;
-    # keep that disk IO off the event loop.
+    # Config resolution may read the operator config when no parsed AppConfig
+    # was supplied; keep that synchronous work off the event loop.
     _channel_service = await asyncio.to_thread(
         ChannelService.from_app_config,
         app_config,

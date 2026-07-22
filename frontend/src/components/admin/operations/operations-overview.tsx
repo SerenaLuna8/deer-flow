@@ -61,7 +61,6 @@ export function OperationsOverviewStateView({
     ["worker_fleet", readiness.worker_fleet],
     ["scheduler", readiness.scheduler],
     ["stream", readiness.stream],
-    ["recovery", readiness.recovery],
     ["quota", readiness.quota],
     ["audit", readiness.audit],
   ] as const;

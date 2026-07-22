@@ -299,7 +299,7 @@ async def claim_invitation(
     key_hash = _claim_key(request)
     now = datetime.now(UTC)
     try:
-        admitted = await rate_limit.admit_attempt(key_hash, now)
+        admitted = await rate_limit.admit_attempt(key_hash)
         invitation_claim: InvitationClaim | None = None
         if admitted:
             try:
@@ -336,7 +336,7 @@ async def redeem_invitation(
     key_hash = _redeem_key(request, user_email)
     now = datetime.now(UTC)
     try:
-        if not await rate_limit.admit_attempt(key_hash, now):
+        if not await rate_limit.admit_attempt(key_hash):
             return _redeem_error_response(
                 ProjectInvitationInvalid(),
                 request_id,

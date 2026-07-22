@@ -47,7 +47,6 @@ def _minimal_prompt_app_config() -> SimpleNamespace:
     return SimpleNamespace(
         sandbox=SimpleNamespace(mounts=[]),
         skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: Path("/tmp/skills")),
-        skill_evolution=SimpleNamespace(enabled=False),
         acp_agents={},
     )
 

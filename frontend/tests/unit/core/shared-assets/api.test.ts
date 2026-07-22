@@ -17,6 +17,8 @@ import {
   createProjectCredential,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
+  forkProjectSkillVersion,
+  getProjectSkillVersionFile,
   listAdminAssets,
   listProjectAssetVersions,
   listProjectAssets,
@@ -145,6 +147,96 @@ beforeEach(() => {
 });
 
 describe("shared asset api", () => {
+  test("loads one skill file lazily and forks edits without sending unchanged files", async () => {
+    const sourceChecksum = "d".repeat(64);
+    const fileResponse = {
+      data: {
+        path: "references/guide.md",
+        media_type: "text/markdown",
+        size_bytes: 5,
+        sha256: "c".repeat(64),
+        preview_status: "ready",
+        encoding: "utf-8",
+        content: "Guide",
+        source_payload_checksum: sourceChecksum,
+        asset_version: 3,
+      },
+      request_id: "req-file",
+    };
+    const skillVersion = {
+      id: versionId,
+      skill_id: asset.id,
+      version_number: 2,
+      workflow_status: "draft",
+      description: "Updated",
+      frontmatter: {},
+      compatibility: null,
+      secret_requirements: [],
+      scan_decision: "allow",
+      scan_rule_ids: [],
+      scan_summary: {},
+      file_views: [],
+      supersedes_version_id: versionId,
+      payload_checksum: "e".repeat(64),
+      created_by_user_id: "user-1",
+      created_at: "2026-07-22T00:00:00Z",
+    };
+    mockedFetch
+      .mockResolvedValueOnce(jsonResponse(200, fileResponse))
+      .mockResolvedValueOnce(
+        jsonResponse(201, {
+          data: skillVersion,
+          request_id: "req-fork",
+        }),
+      );
+    const signal = new AbortController().signal;
+
+    await expect(
+      getProjectSkillVersionFile(
+        PROJECT_ID,
+        asset.id,
+        versionId,
+        "references/guide.md",
+        signal,
+      ),
+    ).resolves.toEqual(fileResponse);
+    await forkProjectSkillVersion(PROJECT_ID, asset.id, versionId, {
+      expected_asset_version: 3,
+      expected_source_payload_checksum: sourceChecksum,
+      changes: [
+        {
+          op: "replace",
+          path: "references/guide.md",
+          content: "Updated guide",
+          media_type: "text/markdown",
+        },
+      ],
+    });
+
+    expect(mockedFetch.mock.calls[0]).toEqual([
+      `/backend/api/projects/${PROJECT_ID}/skills/${asset.id}/versions/${versionId}/files/content?path=references%2Fguide.md`,
+      { signal },
+    ]);
+    expect(mockedFetch.mock.calls[1]).toEqual([
+      `/backend/api/projects/${PROJECT_ID}/skills/${asset.id}/versions/${versionId}/fork`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          expected_asset_version: 3,
+          expected_source_payload_checksum: sourceChecksum,
+          changes: [
+            {
+              op: "replace",
+              path: "references/guide.md",
+              content: "Updated guide",
+              media_type: "text/markdown",
+            },
+          ],
+        }),
+      }),
+    ]);
+  });
+
   test("uses only the authenticated fetcher for project, admin, and system catalog lists", async () => {
     mockedFetch
       .mockResolvedValueOnce(

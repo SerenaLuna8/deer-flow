@@ -156,9 +156,6 @@ exception, locator, or secret fields. Closed/degraded readiness displays unavail
 not fabricated zero counts. Safe requeue is shown only when the server returns exact
 eligibility for a parentless retention-purge predecessor.
 
-Backup, restore, journal, proof, and traffic switching are operator CLI responsibilities.
-The browser exposes none of them.
-
 ## Component ownership
 
 - `ProjectContextProvider` owns project resolution and enter.

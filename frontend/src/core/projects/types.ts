@@ -47,6 +47,23 @@ export const capabilitySchema = z.enum(CAPABILITIES);
 export const projectErrorCodeSchema = z.enum(PROJECT_ERROR_CODES);
 export const projectIdSchema = z.string().uuid();
 
+export const quotaDimensionSummarySchema = z
+  .object({
+    used: z.number().int().nonnegative(),
+    reserved: z.number().int().nonnegative(),
+    limit: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const projectQuotaSummarySchema = z
+  .object({
+    members: quotaDimensionSummarySchema,
+    storage_bytes: quotaDimensionSummarySchema,
+    concurrent_runs: quotaDimensionSummarySchema,
+    mcp_calls_daily: quotaDimensionSummarySchema,
+  })
+  .strict();
+
 export const projectSchema = z
   .object({
     id: projectIdSchema,
@@ -62,6 +79,7 @@ export const projectSchema = z
     agent_count: z.number().int().nonnegative(),
     skill_count: z.number().int().nonnegative(),
     mcp_count: z.number().int().nonnegative(),
+    quota_summary: projectQuotaSummarySchema,
     status: z.enum(["active", "pending_deletion"]),
     is_suspended: z.boolean(),
     membership_version: z.number().int().positive(),
@@ -197,6 +215,7 @@ export type InvitableProjectRole = z.infer<typeof invitableProjectRoleSchema>;
 export type Capability = z.infer<typeof capabilitySchema>;
 export type ProjectErrorCode = z.infer<typeof projectErrorCodeSchema>;
 export type Project = z.infer<typeof projectSchema>;
+export type ProjectQuotaSummary = z.infer<typeof projectQuotaSummarySchema>;
 export type ProjectPage = z.infer<typeof projectPageSchema>;
 export type CreateProjectInput = z.input<typeof createProjectSchema>;
 export type PatchProjectInput = z.input<typeof patchProjectSchema>;

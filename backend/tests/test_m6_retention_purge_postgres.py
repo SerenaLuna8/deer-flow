@@ -1,31 +1,27 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 from sqlalchemy import select, text, update
 from support.m4_private_threads import seed_m4_thread_database
 
-from app.audit.service import AuditService, _bind_recovery_audit_process
+from app.audit.service import AuditService, _bind_worker_audit_process
 from app.audit.sinks import TrustedOperationAuditSink
 from app.private_work.retention import PrivateWorkRetentionService
-from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
-from app.recovery.journal import TombstoneJournal, TombstoneJournalUnavailable
-from app.recovery.purge import (
+from app.private_work.retention_purge import (
     RetentionCandidate,
     RetentionNotEligible,
     RetentionPurger,
     RetentionPurgeRepository,
 )
+from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.private_work.model import PrivateFileRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
-from deerflow.persistence.recovery.model import DeletionTombstoneRow
 from deerflow.persistence.user.model import UserRow
 
 NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
@@ -34,7 +30,7 @@ NOT_EXPIRED = NOW - timedelta(days=29)
 
 
 @pytest.mark.anyio
-async def test_private_work_retention_service_exposes_the_journal_first_purge_boundary() -> None:
+async def test_private_work_retention_service_exposes_transactional_purge_boundary() -> None:
     candidate = RetentionCandidate.file(
         project_id=uuid.uuid4(),
         owner_user_id=str(uuid.uuid4()),
@@ -48,7 +44,7 @@ async def test_private_work_retention_service_exposes_the_journal_first_purge_bo
     class _Purger:
         async def purge(self, value: RetentionCandidate, *, now: datetime | None = None) -> str:
             calls.append((value, now))
-            return "durable-receipt"
+            return "purge-result"
 
     result = await PrivateWorkRetentionService.purge_expired(
         _Purger(),  # type: ignore[arg-type]
@@ -56,7 +52,7 @@ async def test_private_work_retention_service_exposes_the_journal_first_purge_bo
         now=NOW,
     )
 
-    assert result == "durable-receipt"
+    assert result == "purge-result"
     assert calls == [(candidate, NOW)]
 
 
@@ -68,7 +64,7 @@ def _audit(factory) -> TrustedOperationAuditSink:
     service = AuditService(factory, _keyring())
     return TrustedOperationAuditSink(
         service,
-        process_context=_bind_recovery_audit_process(service),
+        process_context=_bind_worker_audit_process(service),
     )
 
 
@@ -117,46 +113,17 @@ def _file_candidate(seed, file_id: uuid.UUID, *, deleted_at: datetime = EXPIRED)
     )
 
 
-def _purger(seed, tmp_path: Path) -> RetentionPurger:
+def _purger(seed) -> RetentionPurger:
     return RetentionPurger(
         seed.factory,
-        journal=TombstoneJournal(tmp_path / "operator" / "tombstones.jsonl", b"j" * 32),
-        keyring=_keyring(),
         audit=_audit(seed.factory),
     )
 
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_purge_aborts_when_journal_fsync_fails_and_keeps_private_rows(
-    migrated_postgres_database_url: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    try:
-        file_id = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"purge-{uuid.uuid4()}", deleted_at=EXPIRED)
-        purger = _purger(seed, tmp_path)
-
-        def fail(*_args, **_kwargs):
-            raise TombstoneJournalUnavailable()
-
-        monkeypatch.setattr(purger.journal, "append_and_fsync", fail)
-        with pytest.raises(TombstoneJournalUnavailable):
-            await purger.purge(_file_candidate(seed, file_id), now=NOW)
-
-        async with seed.factory() as session:
-            assert await session.get(PrivateFileRow, file_id) is not None
-            assert (await session.execute(select(DeletionTombstoneRow))).scalars().all() == []
-    finally:
-        await seed.engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.anyio
 async def test_file_purge_relocks_30_day_state_and_deletes_only_exact_scope(
     migrated_postgres_database_url: str,
-    tmp_path: Path,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     try:
@@ -164,24 +131,19 @@ async def test_file_purge_relocks_30_day_state_and_deletes_only_exact_scope(
         same_owner = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"same-{uuid.uuid4()}", deleted_at=EXPIRED)
         other_owner = await _seed_deleted_file(seed, context=seed.owner_b, thread_id=f"other-{uuid.uuid4()}", deleted_at=EXPIRED)
         too_early = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"early-{uuid.uuid4()}", deleted_at=NOT_EXPIRED)
-        purger = _purger(seed, tmp_path)
+        purger = _purger(seed)
 
         with pytest.raises(RetentionNotEligible):
             await purger.purge(_file_candidate(seed, too_early, deleted_at=NOT_EXPIRED), now=NOW)
-        receipt = await purger.purge(_file_candidate(seed, target), now=NOW)
+        result = await purger.purge(_file_candidate(seed, target), now=NOW)
 
-        assert receipt.sequence == 1
+        assert result.resource_kind == "file"
+        assert result.purged_count == 1
         async with seed.factory() as session:
             assert await session.get(PrivateFileRow, target) is None
             assert await session.get(PrivateFileRow, same_owner) is not None
             assert await session.get(PrivateFileRow, other_owner) is not None
             assert await session.get(PrivateFileRow, too_early) is not None
-            row = await session.get(DeletionTombstoneRow, 1)
-            assert row is not None
-            assert row.resource_kind == "file"
-            assert row.purge_status == "purged"
-            assert row.ciphertext_digest == receipt.ciphertext_digest
-            assert str(target) not in repr(row.__dict__)
             audit = (await session.execute(select(AuditLogRow).where(AuditLogRow.action == "purge.completed"))).scalar_one()
             assert audit.metadata_json == {"resource_kind": "file", "purged_count": 1}
             assert str(target) not in repr(audit.__dict__)
@@ -191,15 +153,14 @@ async def test_file_purge_relocks_30_day_state_and_deletes_only_exact_scope(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_journal_success_database_failure_is_retryable_with_same_sequence(
+async def test_database_failure_rolls_back_and_transactional_retry_succeeds(
     migrated_postgres_database_url: str,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     try:
         file_id = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"retry-{uuid.uuid4()}", deleted_at=EXPIRED)
-        purger = _purger(seed, tmp_path)
+        purger = _purger(seed)
         real_purge = RetentionPurgeRepository.physically_purge
         attempts = 0
 
@@ -213,17 +174,15 @@ async def test_journal_success_database_failure_is_retryable_with_same_sequence(
         monkeypatch.setattr(RetentionPurgeRepository, "physically_purge", fail_once)
         with pytest.raises(RuntimeError, match="database write failed"):
             await purger.purge(_file_candidate(seed, file_id), now=NOW)
-        assert purger.journal.snapshot().high_watermark == 1
         async with seed.factory() as session:
             assert await session.get(PrivateFileRow, file_id) is not None
-            assert await session.get(DeletionTombstoneRow, 1) is None
+            assert (await session.execute(select(AuditLogRow).where(AuditLogRow.action == "purge.completed"))).scalars().all() == []
 
-        receipt = await purger.purge(_file_candidate(seed, file_id), now=NOW)
-        assert receipt.sequence == 1
-        assert purger.journal.snapshot().high_watermark == 1
+        result = await purger.purge(_file_candidate(seed, file_id), now=NOW)
+        assert result.purged_count == 1
         async with seed.factory() as session:
             assert await session.get(PrivateFileRow, file_id) is None
-            assert await session.get(DeletionTombstoneRow, 1) is not None
+            assert (await session.execute(select(AuditLogRow).where(AuditLogRow.action == "purge.completed"))).scalar_one() is not None
     finally:
         await seed.engine.dispose()
 
@@ -232,13 +191,12 @@ async def test_journal_success_database_failure_is_retryable_with_same_sequence(
 @pytest.mark.anyio
 async def test_project_purge_revalidates_pending_deletion_and_preserves_other_project(
     migrated_postgres_database_url: str,
-    tmp_path: Path,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     try:
         project_file = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"project-a-{uuid.uuid4()}", deleted_at=EXPIRED)
         other_file = await _seed_deleted_file(seed, context=seed.project_b_owner_a, thread_id=f"project-b-{uuid.uuid4()}", deleted_at=EXPIRED)
-        purger = _purger(seed, tmp_path)
+        purger = _purger(seed)
         candidate = RetentionCandidate.project(
             project_id=seed.owner_a.project_id,
             deletion_effective_at=EXPIRED,
@@ -263,9 +221,8 @@ async def test_project_purge_revalidates_pending_deletion_and_preserves_other_pr
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_account_purge_is_recovery_only_and_requires_every_membership_expired(
+async def test_account_purge_requires_every_membership_expired(
     migrated_postgres_database_url: str,
-    tmp_path: Path,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     try:
@@ -280,7 +237,7 @@ async def test_account_purge_is_recovery_only_and_requires_every_membership_expi
             idempotency_key=f"account:{seed.owner_a.user_id}",
             request_id="task17-account-purge",
         )
-        purger = _purger(seed, tmp_path)
+        purger = _purger(seed)
 
         with pytest.raises(RetentionNotEligible):
             await purger.purge(candidate, now=NOW)
@@ -309,7 +266,6 @@ async def test_account_purge_is_recovery_only_and_requires_every_membership_expi
 @pytest.mark.anyio
 async def test_account_rejoin_race_fails_closed_after_candidate_creation(
     migrated_postgres_database_url: str,
-    tmp_path: Path,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     try:
@@ -337,7 +293,7 @@ async def test_account_rejoin_race_fails_closed_after_candidate_creation(
             )
 
         with pytest.raises(RetentionNotEligible):
-            await _purger(seed, tmp_path).purge(candidate, now=NOW)
+            await _purger(seed).purge(candidate, now=NOW)
         async with seed.factory() as session:
             assert await session.get(PrivateFileRow, file_id) is not None
     finally:
@@ -348,7 +304,6 @@ async def test_account_rejoin_race_fails_closed_after_candidate_creation(
 @pytest.mark.anyio
 async def test_account_membership_insert_waits_for_owner_lock_and_exact_set_revalidation_rejects(
     migrated_postgres_database_url: str,
-    tmp_path: Path,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     entered = asyncio.Event()
@@ -402,11 +357,6 @@ async def test_account_membership_insert_waits_for_owner_lock_and_exact_set_reva
         )
         purger = RetentionPurger(
             seed.factory,
-            journal=TombstoneJournal(
-                tmp_path / "operator" / "tombstones.jsonl",
-                b"j" * 32,
-            ),
-            keyring=_keyring(),
             audit=_audit(seed.factory),
             repository=BlockingRepository(),
         )
@@ -451,33 +401,33 @@ async def test_account_membership_insert_waits_for_owner_lock_and_exact_set_reva
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_cancellation_during_journal_fsync_rolls_back_and_keeps_rows(
+async def test_cancellation_during_transaction_rolls_back_and_keeps_rows(
     migrated_postgres_database_url: str,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     try:
         file_id = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"cancel-{uuid.uuid4()}", deleted_at=EXPIRED)
-        purger = _purger(seed, tmp_path)
-        entered = threading.Event()
-        release = threading.Event()
-        real_append = purger.journal.append_and_fsync
+        purger = _purger(seed)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_purge = RetentionPurgeRepository.physically_purge
 
-        def delayed(record, *, committed_sequence):
+        async def delayed(self, session, candidate):
+            result = await real_purge(self, session, candidate)
             entered.set()
-            release.wait(timeout=5)
-            return real_append(record, committed_sequence=committed_sequence)
+            await release.wait()
+            return result
 
-        monkeypatch.setattr(purger.journal, "append_and_fsync", delayed)
+        monkeypatch.setattr(RetentionPurgeRepository, "physically_purge", delayed)
         task = asyncio.create_task(purger.purge(_file_candidate(seed, file_id), now=NOW))
-        await asyncio.to_thread(entered.wait, 5)
+        await asyncio.wait_for(entered.wait(), timeout=5)
         task.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
         async with seed.factory() as session:
             assert await session.get(PrivateFileRow, file_id) is not None
-            assert (await session.execute(select(DeletionTombstoneRow))).scalars().all() == []
+            assert (await session.execute(select(AuditLogRow).where(AuditLogRow.action == "purge.completed"))).scalars().all() == []
     finally:
         await seed.engine.dispose()

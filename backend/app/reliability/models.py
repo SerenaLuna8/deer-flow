@@ -15,7 +15,6 @@ class ReliabilityReadiness:
     worker_fleet: str
     scheduler: str
     stream: str
-    recovery: str
     quota: str
     audit: str
     request_id: str

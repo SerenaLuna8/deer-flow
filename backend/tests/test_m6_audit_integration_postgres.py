@@ -26,8 +26,6 @@ from app.audit.models import (
 from app.audit.service import (
     AuditService,
     _bind_gateway_audit_process,
-    _bind_operator_audit_process,
-    _bind_recovery_audit_process,
     _bind_scheduler_audit_process,
     _bind_worker_audit_process,
 )
@@ -986,61 +984,26 @@ async def test_quota_policy_audit_contract_persists_only_allowlisted_governance_
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_trusted_operation_audit_contracts_allowlist_recovery_metadata(
+async def test_trusted_operation_audit_contract_allowlists_retention_purge_metadata(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     sink_type = audit_sinks.TrustedOperationAuditSink
-    operator_service = AuditService(seed.factory, _keyring())
-    operator = sink_type(
-        operator_service,
-        process_context=_bind_operator_audit_process(operator_service),
+    worker_service = AuditService(seed.factory, _keyring())
+    worker = sink_type(
+        worker_service,
+        process_context=_bind_worker_audit_process(worker_service),
     )
-    recovery_service = AuditService(seed.factory, _keyring())
-    recovery = sink_type(
-        recovery_service,
-        process_context=_bind_recovery_audit_process(recovery_service),
-    )
-    backup_id = uuid.uuid4()
-    restore_id = uuid.uuid4()
     purge_id = uuid.uuid4()
     try:
         async with seed.factory() as session, session.begin():
-            await operator.backup_created(
-                session,
-                backup_id=backup_id,
-                table_count=18,
-                tombstone_high_watermark=41,
-                request_id="operator backup request",
-            )
-            await operator.restore_started(
-                session,
-                restore_id=restore_id,
-                table_count=18,
-                tombstones_replayed=0,
-                request_id="operator restore request",
-            )
-            await recovery.restore_completed(
-                session,
-                restore_id=restore_id,
-                table_count=18,
-                tombstones_replayed=2,
-                request_id="recovery restore request",
-            )
-            await recovery.recovery_drill_completed(
-                session,
-                restore_id=restore_id,
-                table_count=18,
-                tombstones_replayed=2,
-                request_id="recovery drill request",
-            )
-            await recovery.purge_completed(
+            await worker.purge_completed(
                 session,
                 purge_id=purge_id,
                 project_id=None,
                 resource_kind="account",
                 purged_count=9,
-                request_id="recovery purge request",
+                request_id="retention purge request",
             )
 
         async with seed.factory() as session:
@@ -1056,31 +1019,15 @@ async def test_trusted_operation_audit_contracts_allowlist_recovery_metadata(
                 .scalars()
                 .all()
             )
-        assert [row.action for row in rows] == [
-            "backup.created",
-            "restore.started",
-            "restore.completed",
-            "recovery.drill_completed",
-            "purge.completed",
-        ]
+        assert [row.action for row in rows] == ["purge.completed"]
         assert rows[0].metadata_json == {
-            "table_count": 18,
-            "tombstone_high_watermark": 41,
-        }
-        assert rows[-1].metadata_json == {
             "resource_kind": "account",
             "purged_count": 9,
         }
         encoded = repr([row.__dict__ for row in rows])
         for forbidden in (
-            str(backup_id),
-            str(restore_id),
             str(purge_id),
-            "operator backup request",
-            "operator restore request",
-            "recovery restore request",
-            "recovery drill request",
-            "recovery purge request",
+            "retention purge request",
         ):
             assert forbidden not in encoded
     finally:

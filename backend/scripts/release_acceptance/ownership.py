@@ -10,7 +10,6 @@ import signal
 import socket
 import stat
 import subprocess
-import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -20,7 +19,6 @@ from typing import Literal, Protocol
 from scripts.release_acceptance.models import CleanupSummary
 
 _TEST_DATABASE_NAME = re.compile(r"^deerflow_test_[a-z0-9]{6,64}$")
-_RESTORE_DATABASE_NAME = re.compile(r"^deerflow_restore_[0-9]+_[0-9a-f]{32}$")
 _ROLE_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,62}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -51,7 +49,7 @@ class DatabaseIdentity:
 
 @dataclass(frozen=True, slots=True)
 class OwnedPath:
-    anchor: Literal["repository", "external_temp"]
+    anchor: Literal["repository"]
     relative_token: str
     device: int
     inode: int
@@ -165,10 +163,8 @@ class OwnershipLedger:
         acceptance_run_id: uuid.UUID,
         process_probe: ProcessProbe | None = None,
         database_probe: DatabaseProbe | None = None,
-        external_temp_root: Path | None = None,
     ) -> None:
         self.repository = repository.resolve()
-        self.external_temp_root = (external_temp_root or Path(tempfile.gettempdir())).resolve()
         self.acceptance_run_id = acceptance_run_id
         self._process_probe = process_probe or HostProcessProbe()
         self._database_probe = database_probe or NullDatabaseProbe()
@@ -188,7 +184,7 @@ class OwnershipLedger:
         return owned
 
     def register_database(self, *, name: str, owner: str, marker_digest: str) -> OwnedDatabase:
-        if _TEST_DATABASE_NAME.fullmatch(name) is None and _RESTORE_DATABASE_NAME.fullmatch(name) is None:
+        if _TEST_DATABASE_NAME.fullmatch(name) is None:
             raise OwnershipError("OWNED_DATABASE_NAME_INVALID")
         if _ROLE_NAME.fullmatch(owner) is None or _SHA256.fullmatch(marker_digest) is None:
             raise OwnershipError("OWNED_DATABASE_IDENTITY_INVALID")
@@ -202,24 +198,19 @@ class OwnershipLedger:
         self,
         path: Path,
         *,
-        anchor: Literal["repository", "external_temp"],
+        anchor: Literal["repository"],
         disposition: Literal["temporary", "retained_evidence"],
     ) -> OwnedPath:
-        root = self.repository if anchor == "repository" else self.external_temp_root
+        root = self.repository
         candidate = path if path.is_absolute() else root / path
         absolute = Path(os.path.abspath(candidate))
         try:
             relative = absolute.relative_to(root).as_posix()
         except ValueError:
-            code = "OWNED_PATH_OUTSIDE_REPOSITORY" if anchor == "repository" else "OWNED_EXTERNAL_PATH_INVALID"
-            raise OwnershipError(code) from None
+            raise OwnershipError("OWNED_PATH_OUTSIDE_REPOSITORY") from None
         token = PurePosixPath(relative)
         if relative in {"", "."} or str(token) != relative or any(part in {"", ".", ".."} for part in token.parts):
             raise OwnershipError("OWNED_PATH_TOKEN_INVALID")
-        if anchor == "external_temp":
-            expected_root = f"deerflow-m8-recovery-{self.acceptance_run_id.hex}"
-            if disposition != "temporary" or not token.parts or token.parts[0] != expected_root:
-                raise OwnershipError("OWNED_EXTERNAL_PATH_INVALID")
         current = root
         for part in token.parts:
             current /= part
@@ -258,13 +249,6 @@ class OwnershipLedger:
             disposition=disposition,
         )
 
-    def register_external_path(self, path: Path) -> OwnedPath:
-        return self._register_anchored_path(
-            path,
-            anchor="external_temp",
-            disposition="temporary",
-        )
-
     def reserve_port(self, port: int) -> None:
         if port < 1 or port > 65535 or port in self._ports:
             raise OwnershipError("OWNED_PORT_INVALID")
@@ -295,7 +279,7 @@ class OwnershipLedger:
         return CleanupAction(status="failed")
 
     def remove_path(self, owned: OwnedPath) -> CleanupAction:
-        root = self.repository if owned.anchor == "repository" else self.external_temp_root
+        root = self.repository
         target = root / owned.relative_token
         current = root
         try:

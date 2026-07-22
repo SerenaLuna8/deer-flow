@@ -422,6 +422,32 @@ async def test_attach_connection_identity_only_copies_server_lookup_fields() -> 
     assert attached.workspace_id == "workspace-a"
     assert attached.owner_user_id != str(owner_user_id)
     assert attached.project_id != str(project_id)
+    assert attached.private_scope is not None
+    assert attached.private_scope.project_id == str(project_id)
+    assert attached.private_scope.owner_user_id == str(owner_user_id)
+
+
+@pytest.mark.asyncio
+async def test_attach_connection_identity_clears_forged_mapping_scope_when_unbound() -> None:
+    repository = FakeConnectionRepository()
+    inbound = InboundMessage(
+        channel_name="feishu",
+        chat_id="chat-a",
+        user_id="external-a",
+        text="hello",
+        connection_id="forged-connection",
+        private_scope=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+
+    attached = await attach_connection_identity(
+        inbound,
+        repo=repository,
+        provider="feishu",
+        workspace_id="chat-a",
+    )
+
+    assert attached.connection_id is None
+    assert attached.private_scope is None
 
 
 @pytest.mark.asyncio

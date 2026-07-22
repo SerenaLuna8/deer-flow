@@ -51,6 +51,20 @@ def test_discovered_surface_classification_is_closed() -> None:
     assert {surface.layer for surface in discovered} <= set(load_isolation_matrix(_MATRIX_PATH).dimensions.layers)
 
 
+def test_skill_file_preview_and_fork_keep_skill_authority() -> None:
+    discovered = {surface.surface_id: surface for surface in discover_scoped_surface(_REPO_ROOT)}
+    expected = {
+        "frontend:frontend/src/core/shared-assets/api.ts:getProjectSkillVersionFile": ("skill", "get", "frontend"),
+        "frontend:frontend/src/core/shared-assets/api.ts:forkProjectSkillVersion": ("skill", "create", "frontend"),
+        "repository:backend/app/shared_assets/skill_repository.py:SkillRepository.load_project_visible_version_file_content": ("skill", "get", "repository"),
+        "route:backend/app/gateway/routers/project_assets.py:preview_project_skill_file": ("skill", "get", "api"),
+        "route:backend/app/gateway/routers/project_assets.py:fork_project_skill_version": ("skill", "create", "api"),
+    }
+    for surface_id, classification in expected.items():
+        surface = discovered[surface_id]
+        assert (surface.resource_family, surface.operation, surface.layer) == classification
+
+
 def test_denial_cases_require_zero_database_delta_and_database_evidence(matrix) -> None:
     denial_cases = [case for case in matrix.cases if case.expected_status >= 400]
     assert denial_cases

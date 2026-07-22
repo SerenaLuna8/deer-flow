@@ -17,7 +17,6 @@ concurrent runs on different repos from clobbering each other's token.
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -27,7 +26,6 @@ from langgraph_sdk.errors import ConflictError
 
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
-from app.channels.store import ChannelStore
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.tools import _github_env_from_runtime, bash_tool
 
@@ -428,8 +426,7 @@ def _github_msg(installation_id: int | None = 140594274) -> InboundMessage:
 
 def _new_manager() -> ChannelManager:
     bus = MessageBus()
-    store = ChannelStore(path=Path("/tmp/nonexistent-store-test.json"))
-    return ChannelManager(bus=bus, store=store)
+    return ChannelManager(bus=bus, store=None)
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ProjectAuditStateView } from "@/components/projects/governance/project-audit-page";
 import { ProjectUsageStateView } from "@/components/projects/governance/project-usage-page";
 import { projectNavigationItems } from "@/components/projects/project-nav";
+import { projectSettingsNavigationItems } from "@/components/projects/settings/project-settings-shell";
 import { I18nProvider } from "@/core/i18n/context";
 import {
   auditPageSchema,
@@ -42,6 +43,12 @@ const adminProject: Project = {
   agent_count: 0,
   skill_count: 0,
   mcp_count: 0,
+  quota_summary: {
+    members: { used: 1, reserved: 0, limit: 20 },
+    storage_bytes: { used: 0, reserved: 0, limit: 5_368_709_120 },
+    concurrent_runs: { used: 0, reserved: 0, limit: 3 },
+    mcp_calls_daily: { used: 0, reserved: 0, limit: 10_000 },
+  },
   status: "active",
   is_suspended: false,
   membership_version: 1,
@@ -283,8 +290,8 @@ describe("M6 project governance", () => {
     ).toThrow();
   });
 
-  test("gates each navigation link by exact capability, M6 readiness, and static mode", () => {
-    const ready = projectNavigationItems(
+  test("keeps governance under settings and gates its tabs by capability and static mode", () => {
+    const topLevel = projectNavigationItems(
       adminProject,
       false,
       false,
@@ -294,63 +301,40 @@ describe("M6 project governance", () => {
       true,
       true,
     );
-    expect(ready).toEqual(
+    expect(topLevel).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ label: "Usage" }),
-        expect.objectContaining({ label: "Audit" }),
+        expect.objectContaining({
+          href: "/projects/alpha/settings",
+          label: "项目设置",
+        }),
+      ]),
+    );
+    expect(topLevel).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ href: "/projects/alpha/settings/usage" }),
+        expect.objectContaining({ href: "/projects/alpha/settings/audit" }),
+      ]),
+    );
+
+    expect(projectSettingsNavigationItems(adminProject, false)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          href: "/projects/alpha/settings/usage",
+          label: "用量与限额",
+        }),
+        expect.objectContaining({
+          href: "/projects/alpha/settings/audit",
+          label: "审计日志",
+        }),
       ]),
     );
     expect(
-      projectNavigationItems(
+      projectSettingsNavigationItems(
         { ...adminProject, capabilities: ["project.read"] },
         false,
-        false,
-        false,
-        false,
-        false,
-        true,
-        true,
       ),
-    ).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ label: "Usage" }),
-        expect.objectContaining({ label: "Audit" }),
-      ]),
-    );
-    expect(
-      projectNavigationItems(
-        adminProject,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-      ),
-    ).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ label: "Usage" }),
-        expect.objectContaining({ label: "Audit" }),
-      ]),
-    );
-    expect(
-      projectNavigationItems(
-        adminProject,
-        false,
-        false,
-        false,
-        false,
-        true,
-        true,
-        true,
-      ),
-    ).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ label: "Usage" }),
-        expect.objectContaining({ label: "Audit" }),
-      ]),
-    );
+    ).toEqual([]);
+    expect(projectSettingsNavigationItems(adminProject, true)).toEqual([]);
   });
 
   test("renders loading, empty, error, and public data states without secrets", () => {

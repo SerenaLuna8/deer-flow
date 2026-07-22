@@ -48,6 +48,7 @@ export function useEnteredProjectBySlug(
     slug,
     projectId,
     projectQuery.data?.membership_version,
+    projectQuery.data,
   );
   const identityRef = useRef(identity);
   const attemptsRef = useRef(createProjectHomeAttemptCoordinator());
@@ -191,6 +192,7 @@ export function ProjectContextProvider({
         <ProjectShell
           project={entry.project}
           accountEmail={user.email}
+          systemRole={user.system_role}
           onLogout={logout}
         >
           {children}

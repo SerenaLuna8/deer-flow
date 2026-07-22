@@ -13,6 +13,7 @@ export function ProjectWorkbenchPage() {
       key={user.id}
       userId={user.id}
       accountEmail={user.email}
+      systemRole={user.system_role}
       onLogout={logout}
     />
   );

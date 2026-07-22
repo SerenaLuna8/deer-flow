@@ -39,7 +39,6 @@ from deerflow.persistence.projects.invitation_rate_limit_model import (
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.quotas import ProjectQuotaRow, ProjectUsageCounterRow, ProjectUsageLedgerRow
-from deerflow.persistence.recovery import DeletionTombstoneRow, RestoreProofRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
@@ -83,7 +82,6 @@ __all__ = [
     "CredentialVersionRow",
     "FeedbackRow",
     "DeadJobRow",
-    "DeletionTombstoneRow",
     "JobAttemptRow",
     "JobRow",
     "McpCredentialSlotRow",
@@ -107,7 +105,6 @@ __all__ = [
     "RunAssetVersionRow",
     "RunMcpGrantSnapshotRow",
     "RunRow",
-    "RestoreProofRow",
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
     "SkillRow",

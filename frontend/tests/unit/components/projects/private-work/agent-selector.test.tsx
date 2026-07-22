@@ -4,10 +4,18 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   AgentSelectorDialog,
   createProjectChatForAgent,
+  enableSystemAgentAndCreateProjectChat,
   executableProjectAgents,
+  configurableSystemAgents,
+  projectAgentsStartChatPath,
+  systemAgentDependencyAvailability,
   projectThreadAgentSelection,
 } from "@/components/projects/private-work/agent-selector-dialog";
-import type { ProjectAssetList } from "@/core/shared-assets";
+import type {
+  ProjectAssetItem,
+  ProjectAssetList,
+  VersionHistoryResponse,
+} from "@/core/shared-assets";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const PROJECT_AGENT_ID = "22222222-2222-4222-8222-222222222222";
@@ -117,6 +125,8 @@ describe("project Agent selector", () => {
     expect(html.match(/Analyst/g)).toHaveLength(2);
     expect(html).toContain("项目 Agent");
     expect(html).toContain("系统 Agent");
+    expect(html).toContain("选择一个 Agent 开始新的私有对话");
+    expect(html).not.toMatch(/logical|复核版本/u);
   });
 
   test("create selection contains logical Agent only", () => {
@@ -131,6 +141,7 @@ describe("project Agent selector", () => {
   test("creates an explicit UUID thread then navigates to project detail", async () => {
     const created: unknown[] = [];
     const navigated: string[] = [];
+    const events: string[] = [];
     const agent = executableProjectAgents(catalog)[0]!;
     const threadId = "88888888-8888-4888-8888-888888888888";
 
@@ -143,9 +154,14 @@ describe("project Agent selector", () => {
       agent,
       createThreadId: () => threadId,
       createThread: async (scope, input) => {
+        events.push("created");
         created.push({ scope, input });
       },
-      navigate: (path) => navigated.push(path),
+      invalidateThreadLists: () => events.push("invalidated"),
+      navigate: (path) => {
+        events.push("navigated");
+        navigated.push(path);
+      },
     });
 
     expect(created).toEqual([
@@ -158,9 +174,230 @@ describe("project Agent selector", () => {
           threadId,
           agentAssetId: PROJECT_AGENT_ID,
           agentScope: "project",
+          displayName: "新对话",
         },
       },
     ]);
+    expect(events).toEqual(["created", "invalidated", "navigated"]);
     expect(navigated).toEqual([`/projects/alpha%20team/chats/${threadId}`]);
+  });
+
+  test("keeps no-Agent guidance in context for Admin Editor and Runner capabilities", () => {
+    const configurable: ProjectAssetItem = {
+      ...catalog.system_items[1]!,
+      capabilities: [
+        "shared_assets.read",
+        "shared_assets.execute",
+        "shared_assets.manage_bindings",
+      ],
+    };
+    const agentsPath = projectAgentsStartChatPath("alpha team", "intent-admin");
+    const admin = renderToStaticMarkup(
+      <AgentSelectorDialog
+        open
+        agents={[]}
+        configurableSystemAgents={[configurable]}
+        canAuthorProjectAgent
+        agentsPath={agentsPath}
+        isCreating={false}
+        onOpenChange={() => undefined}
+        onSelect={() => undefined}
+        onEnableSystemAgent={() => undefined}
+      />,
+    );
+    expect(admin).toContain("项目还没有可执行 Agent");
+    expect(admin).toContain("启用 Analyst 并开始对话");
+    expect(admin).toContain("创建项目 Agent");
+    expect(admin).toContain(
+      'href="/projects/alpha%20team/agents?intent=start_chat&amp;intent_id=intent-admin"',
+    );
+
+    const editor = renderToStaticMarkup(
+      <AgentSelectorDialog
+        open
+        agents={[]}
+        configurableSystemAgents={[]}
+        canAuthorProjectAgent
+        agentsPath={agentsPath}
+        isCreating={false}
+        onOpenChange={() => undefined}
+        onSelect={() => undefined}
+      />,
+    );
+    expect(editor).toContain("创建项目 Agent");
+    expect(editor).not.toContain("启用 Analyst");
+
+    const runner = renderToStaticMarkup(
+      <AgentSelectorDialog
+        open
+        agents={[]}
+        configurableSystemAgents={[]}
+        canAuthorProjectAgent={false}
+        agentsPath={agentsPath}
+        isCreating={false}
+        onOpenChange={() => undefined}
+        onSelect={() => undefined}
+      />,
+    );
+    expect(runner).toContain("请联系项目 Admin 或 Editor 完成配置");
+    expect(runner).not.toContain("创建项目 Agent");
+    expect(runner).not.toContain("启用并开始对话");
+  });
+
+  test("finds only system Agents the current capability set can enable", () => {
+    const disabled = catalog.system_items[1]!;
+    const configurableCatalog: ProjectAssetList = {
+      ...catalog,
+      system_items: [
+        catalog.system_items[0]!,
+        {
+          ...disabled,
+          capabilities: [
+            "shared_assets.read",
+            "shared_assets.execute",
+            "shared_assets.manage_bindings",
+          ],
+        },
+      ],
+    };
+
+    expect(
+      configurableSystemAgents(configurableCatalog).map(({ id }) => id),
+    ).toEqual([disabled.id]);
+  });
+
+  test("only offers immediate enable when the published Agent dependencies are already bound", () => {
+    const agent = {
+      ...catalog.system_items[1]!,
+      current_published_version_id: VERSION_ID,
+    };
+    const skillVersionId = "99999999-9999-4999-8999-999999999991";
+    const mcpVersionId = "99999999-9999-4999-8999-999999999992";
+    const history = {
+      request_id: "req-history",
+      data: [
+        {
+          id: VERSION_ID,
+          agent_id: agent.id,
+          version_number: 1,
+          workflow_status: "published",
+          description: "Project assistant",
+          soul: "Careful assistant",
+          model_ref: "default",
+          tool_groups: [],
+          skill_version_ids: [skillVersionId],
+          mcp_version_ids: [mcpVersionId],
+          supersedes_version_id: null,
+          payload_checksum: "sha256:test",
+          created_by_user_id: "user-1",
+          created_at: "2026-07-15T00:00:00Z",
+        },
+      ],
+    } satisfies VersionHistoryResponse;
+
+    expect(
+      systemAgentDependencyAvailability(
+        agent,
+        undefined,
+        new Set([skillVersionId]),
+        new Set([mcpVersionId]),
+      ),
+    ).toBe("loading");
+    expect(
+      systemAgentDependencyAvailability(
+        agent,
+        history,
+        new Set([skillVersionId]),
+        new Set(),
+      ),
+    ).toBe("blocked");
+    expect(
+      systemAgentDependencyAvailability(
+        agent,
+        history,
+        new Set([skillVersionId]),
+        new Set([mcpVersionId]),
+      ),
+    ).toBe("ready");
+  });
+
+  test("keeps dependency-blocked system Agents out of the immediate enable action", () => {
+    const configurable: ProjectAssetItem = {
+      ...catalog.system_items[1]!,
+      capabilities: [
+        "shared_assets.read",
+        "shared_assets.execute",
+        "shared_assets.manage_bindings",
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <AgentSelectorDialog
+        open
+        agents={[]}
+        configurableSystemAgents={[]}
+        blockedSystemAgents={[configurable]}
+        canAuthorProjectAgent
+        agentsPath={projectAgentsStartChatPath("alpha", "dependency-check")}
+        isCreating={false}
+        onOpenChange={() => undefined}
+        onSelect={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("需要先完成依赖配置");
+    expect(html).toContain("Analyst");
+    expect(html).not.toContain("启用 Analyst 并开始对话");
+    expect(html).toContain("前往 Agent 页面完成配置");
+  });
+
+  test("enables a pinned system Agent before creating and entering the first Chat", async () => {
+    const agent: ProjectAssetItem = {
+      ...catalog.system_items[1]!,
+      capabilities: [
+        "shared_assets.read",
+        "shared_assets.execute",
+        "shared_assets.manage_bindings",
+      ],
+    };
+    const calls: unknown[] = [];
+    const threadId = "88888888-8888-4888-8888-888888888888";
+
+    await enableSystemAgentAndCreateProjectChat({
+      scope: {
+        accountId: "99999999-9999-4999-8999-999999999999",
+        projectId: PROJECT_ID,
+      },
+      projectSlug: "alpha",
+      agent,
+      enableBinding: async (input) => {
+        calls.push(["enable", input]);
+      },
+      createThreadId: () => threadId,
+      createThread: async (_scope, input) => {
+        calls.push(["create", input]);
+      },
+      navigate: (path) => calls.push(["navigate", path]),
+    });
+
+    expect(calls).toEqual([
+      [
+        "enable",
+        {
+          asset_id: agent.id,
+          version_id: VERSION_ID,
+          expected_binding_version: 1,
+        },
+      ],
+      [
+        "create",
+        {
+          threadId,
+          agentAssetId: agent.id,
+          agentScope: "system",
+          displayName: "新对话",
+        },
+      ],
+      ["navigate", `/projects/alpha/chats/${threadId}`],
+    ]);
   });
 });

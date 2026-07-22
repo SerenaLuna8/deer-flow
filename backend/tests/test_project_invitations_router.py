@@ -176,10 +176,11 @@ def test_claim_valid_and_invalid_tokens_are_indistinguishable(monkeypatch) -> No
     valid_claim = InvitationClaim(INVITATION_ID, "a" * 64)
     claim = AsyncMock(side_effect=[valid_claim, ProjectInvitationInvalid()])
     monkeypatch.setattr(project_invitations.InvitationService, "claim", claim)
+    admit_attempt = AsyncMock(return_value=True)
     monkeypatch.setattr(
         project_invitations.InvitationRateLimitRepository,
         "admit_attempt",
-        AsyncMock(return_value=True),
+        admit_attempt,
     )
     monkeypatch.setattr(
         project_invitations.InvitationRateLimitRepository,
@@ -216,6 +217,8 @@ def test_claim_valid_and_invalid_tokens_are_indistinguishable(monkeypatch) -> No
         assert b"token_hash" not in raw
         with pytest.raises((UnicodeDecodeError, json.JSONDecodeError)):
             json.loads(raw.decode("utf-8"))
+    assert len(admit_attempt.await_args_list) == 2
+    assert all(len(call.args) == 1 for call in admit_attempt.await_args_list)
 
 
 def test_claim_rate_limit_is_not_observable_from_status_body_or_cookie_shape(monkeypatch) -> None:

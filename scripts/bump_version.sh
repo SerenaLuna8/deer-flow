@@ -9,7 +9,7 @@
 #   frontend/package.json               ("version": "...")
 #   deploy/helm/deer-flow/Chart.yaml    (version: + appVersion:)
 #
-# This does NOT edit CHANGELOG.md or create/push a git tag — keep those manual.
+# This does NOT create or push a git tag; release publication remains manual.
 # After running, commit and tag v<version> to trigger the release workflows
 # (container.yaml + chart.yaml), which gate on scripts/verify_versions.sh.
 
@@ -92,6 +92,6 @@ fi
 
 echo
 echo "Next steps:"
-echo "  1. Update CHANGELOG.md"
+echo "  1. Review the version changes"
 echo "  2. git add -A && git commit -m \"release: v$VERSION\""
 echo "  3. git tag v$VERSION && git push origin v$VERSION"

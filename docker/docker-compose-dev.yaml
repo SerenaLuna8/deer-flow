@@ -159,7 +159,7 @@ services:
       # config, credentials) into the container. Mount them only when you use
       # the Claude/Codex CLI login as a model provider or ACP agent, via the
       # opt-in docker-compose.cli-auth.yaml overlay. Prefer an env token
-      # (CLAUDE_CODE_OAUTH_TOKEN, see .env.example / backend/docs/CONFIGURATION.md).
+      # (CLAUDE_CODE_OAUTH_TOKEN, see backend/docs/CONFIGURATION.md).
     working_dir: /app
     environment:
       - CI=true

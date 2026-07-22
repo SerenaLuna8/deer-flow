@@ -63,7 +63,6 @@ export function ProjectPrivateWorkCta({ project }: { project: Project }) {
           </div>
           <Button
             type="button"
-            variant="outline"
             disabled={!entryEnabled}
             aria-disabled={!entryEnabled}
             onClick={() => setSelectorOpen(true)}

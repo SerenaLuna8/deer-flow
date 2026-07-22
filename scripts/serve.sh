@@ -177,7 +177,10 @@ _is_port_listening() {
     local port=$1 status
 
     if command -v lsof >/dev/null 2>&1; then
-        if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+        # All local DeerFlow services bind an IPv4 socket. An unrelated
+        # IPv6-only listener (for example [::1]:8001) does not conflict with
+        # that socket and must not block startup.
+        if lsof -nP -a -i4TCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0
         else
             status=$?
@@ -393,8 +396,6 @@ if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
     echo "  Run 'make setup' (recommended) or 'make config' to generate config.yaml."
     exit 1
 fi
-
-"$REPO_ROOT/scripts/config-upgrade.sh"
 
 # ── Install dependencies ────────────────────────────────────────────────────
 

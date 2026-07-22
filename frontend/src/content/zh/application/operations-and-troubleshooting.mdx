@@ -15,4 +15,4 @@ make support-bundle
 
 Run 长时间 queued 时检查 Worker readiness 和 job 状态；Automation 未触发时检查 Scheduler enabled 状态与 advisory-lock ownership；SSE 重连失败时确认 cursor 仍绑定同一 account/project/thread。
 
-项目私有数据和 Memory 均由 PostgreSQL 持久化。不要通过创建本地私有数据文件修复问题。备份恢复必须使用认证加密 archive、外部 tombstone journal 和新目标数据库。
+项目私有数据和 Memory 均由 PostgreSQL 持久化。不要通过创建本地私有数据文件修复问题。

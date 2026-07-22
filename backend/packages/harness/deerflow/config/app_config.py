@@ -21,13 +21,10 @@ from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
-from deerflow.config.recovery_config import RecoveryConfig
 from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.scheduler_config import SchedulerConfig
-from deerflow.config.skill_evolution_config import SkillEvolutionConfig
-from deerflow.config.skill_scan_config import SkillScanConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
 from deerflow.config.suggestions_config import SuggestionsConfig
@@ -57,6 +54,24 @@ LEGACY_CONFIG_TOMBSTONES = frozenset(
         "mcp_config_path",
         "legacy_run_store",
         "legacy_event_store",
+        "recovery",
+        "skill_evolution",
+        "skill_scan",
+    }
+)
+
+LEGACY_CONFIG_PATH_TOMBSTONES = frozenset(
+    {
+        "uploads.max_files",
+        "uploads.max_file_size",
+        "uploads.max_total_size",
+        "uploads.auto_convert_documents",
+        "scheduler.lease_seconds",
+        "worker.default_max_attempts",
+        "quotas.max_member_limit",
+        "quotas.max_storage_bytes_limit",
+        "quotas.max_concurrent_run_limit",
+        "quotas.max_mcp_calls_daily_limit",
     }
 )
 
@@ -155,8 +170,6 @@ class AppConfig(BaseModel):
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
-    skill_scan: SkillScanConfig = Field(default_factory=SkillScanConfig, description="Native deterministic skill safety scanning configuration")
-    skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig, description="Agent-managed skill evolution configuration")
     tool_output: ToolOutputConfig = Field(default_factory=ToolOutputConfig, description="Tool output budget protection configuration")
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
@@ -206,14 +219,7 @@ class AppConfig(BaseModel):
         default_factory=QuotaConfig,
         description=format_field_description(
             "quotas",
-            field_doc="Platform defaults and deployment ceilings for project quota enforcement.",
-        ),
-    )
-    recovery: RecoveryConfig = Field(
-        default_factory=RecoveryConfig,
-        description=format_field_description(
-            "recovery",
-            field_doc="Local paths and limits used by backup and recovery services.",
+            field_doc="Platform defaults and warning policy for project quota enforcement.",
         ),
     )
     # Name -> config lookup tables, (re)built after validation by
@@ -228,9 +234,14 @@ class AppConfig(BaseModel):
     @classmethod
     def reject_removed_legacy_config(cls, value: object) -> object:
         if isinstance(value, Mapping):
-            removed = sorted(LEGACY_CONFIG_TOMBSTONES.intersection(value))
+            removed = set(LEGACY_CONFIG_TOMBSTONES.intersection(value))
+            for field_path in LEGACY_CONFIG_PATH_TOMBSTONES:
+                section, key = field_path.split(".", 1)
+                section_value = value.get(section)
+                if isinstance(section_value, Mapping) and key in section_value:
+                    removed.add(field_path)
             if removed:
-                raise ValueError(f"LEGACY_CONFIG_REMOVED: {','.join(removed)}")
+                raise ValueError(f"LEGACY_CONFIG_REMOVED: {','.join(sorted(removed))}")
         return value
 
     @model_validator(mode="before")

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -37,6 +37,19 @@ class ThreadCompactionResult:
     total_tokens: int = 0
 
 
+@dataclass(frozen=True)
+class PreparedThreadCompaction:
+    """A compaction result prepared from one immutable source checkpoint."""
+
+    thread_id: str
+    source_checkpoint_id: str
+    result: ThreadCompactionResult
+    write_config: dict[str, Any] | None = None
+    checkpoint: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    new_versions: dict[str, Any] | None = None
+
+
 def _create_compaction_middleware(
     *,
     app_config: AppConfig,
@@ -55,7 +68,19 @@ def _checkpoint_namespace(checkpoint_tuple: Any) -> str:
     return checkpoint_ns if isinstance(checkpoint_ns, str) else ""
 
 
-async def compact_thread_context(
+def _checkpoint_id(checkpoint_tuple: Any) -> str:
+    config = getattr(checkpoint_tuple, "config", {}) or {}
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    value = configurable.get("checkpoint_id") if isinstance(configurable, dict) else None
+    if not isinstance(value, str) or not value:
+        checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+        value = checkpoint.get("id") if isinstance(checkpoint, dict) else None
+    if not isinstance(value, str) or not value:
+        raise ContextCompactionFailed("Compaction source checkpoint has no identity.")
+    return value
+
+
+async def prepare_thread_compaction(
     checkpointer: Any,
     thread_id: str,
     *,
@@ -64,8 +89,8 @@ async def compact_thread_context(
     user_id: str | None = None,
     agent_name: str | None = None,
     app_config: AppConfig | None = None,
-) -> ThreadCompactionResult:
-    """Summarize old messages in a thread and write a compacted checkpoint."""
+) -> PreparedThreadCompaction:
+    """Summarize one checkpoint without persisting the prepared replacement."""
     resolved_app_config = app_config or get_app_config()
     middleware = _create_compaction_middleware(app_config=resolved_app_config, keep=keep)
 
@@ -73,13 +98,18 @@ async def compact_thread_context(
     checkpoint_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", read_config)
     if checkpoint_tuple is None:
         raise LookupError(f"Thread {thread_id} checkpoint not found")
+    source_checkpoint_id = _checkpoint_id(checkpoint_tuple)
 
     checkpoint: dict[str, Any] = dict(getattr(checkpoint_tuple, "checkpoint", {}) or {})
     metadata: dict[str, Any] = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
     channel_values: dict[str, Any] = dict(checkpoint.get("channel_values", {}) or {})
     messages = channel_values.get("messages")
     if not isinstance(messages, list) or not messages:
-        return ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages")
+        return PreparedThreadCompaction(
+            thread_id=thread_id,
+            source_checkpoint_id=source_checkpoint_id,
+            result=ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages"),
+        )
 
     state = {
         "messages": list(messages),
@@ -92,7 +122,11 @@ async def compact_thread_context(
     runtime = SimpleNamespace(context=runtime_context)
     result = await middleware.acompact_state(state, runtime, force=force)  # type: ignore[arg-type]
     if result is None:
-        return ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages")
+        return PreparedThreadCompaction(
+            thread_id=thread_id,
+            source_checkpoint_id=source_checkpoint_id,
+            result=ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages"),
+        )
 
     channel_values["messages"] = list(result.preserved_messages)
     channel_values["summary_text"] = result.summary_text
@@ -126,17 +160,66 @@ async def compact_thread_context(
     }
 
     write_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": _checkpoint_namespace(checkpoint_tuple)}}
-    new_config = await _call_checkpointer_method(checkpointer, "aput", "put", write_config, checkpoint, metadata, new_versions)
+    return PreparedThreadCompaction(
+        thread_id=thread_id,
+        source_checkpoint_id=source_checkpoint_id,
+        result=ThreadCompactionResult(
+            thread_id=thread_id,
+            compacted=True,
+            removed_message_count=len(result.messages_to_summarize),
+            preserved_message_count=len(result.preserved_messages),
+            summary_updated=True,
+            total_tokens=result.total_tokens,
+        ),
+        write_config=write_config,
+        checkpoint=checkpoint,
+        metadata=metadata,
+        new_versions=new_versions,
+    )
+
+
+async def commit_thread_compaction(
+    checkpointer: Any,
+    prepared: PreparedThreadCompaction,
+) -> ThreadCompactionResult:
+    """Persist a prepared replacement after the caller validates its source."""
+    if not prepared.result.compacted:
+        return prepared.result
+    if prepared.write_config is None or prepared.checkpoint is None or prepared.metadata is None or prepared.new_versions is None:
+        raise ContextCompactionFailed("Prepared compaction is incomplete.")
+    new_config = await _call_checkpointer_method(
+        checkpointer,
+        "aput",
+        "put",
+        prepared.write_config,
+        prepared.checkpoint,
+        prepared.metadata,
+        prepared.new_versions,
+    )
     new_checkpoint_id = None
     if isinstance(new_config, dict):
         new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
+    return replace(prepared.result, checkpoint_id=new_checkpoint_id)
 
-    return ThreadCompactionResult(
-        thread_id=thread_id,
-        compacted=True,
-        removed_message_count=len(result.messages_to_summarize),
-        preserved_message_count=len(result.preserved_messages),
-        summary_updated=True,
-        checkpoint_id=new_checkpoint_id,
-        total_tokens=result.total_tokens,
+
+async def compact_thread_context(
+    checkpointer: Any,
+    thread_id: str,
+    *,
+    keep: tuple[str, int | float] | None = None,
+    force: bool = True,
+    user_id: str | None = None,
+    agent_name: str | None = None,
+    app_config: AppConfig | None = None,
+) -> ThreadCompactionResult:
+    """Summarize old messages in a thread and write a compacted checkpoint."""
+    prepared = await prepare_thread_compaction(
+        checkpointer,
+        thread_id,
+        keep=keep,
+        force=force,
+        user_id=user_id,
+        agent_name=agent_name,
+        app_config=app_config,
     )
+    return await commit_thread_compaction(checkpointer, prepared)

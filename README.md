@@ -291,8 +291,6 @@ make down   # 停止并移除容器
 
 访问地址：http://localhost:2026
 
-更完整的 Docker 开发说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
 #### 方式二：本地开发
 
 如果你更希望直接在本地启动各个服务：
@@ -629,7 +627,7 @@ Automation；Viewer 只能查看自己的 definition 和运行历史。
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。M6 由独立 Scheduler 持有并持续验证
 PostgreSQL session ownership lock；Gateway 不再持有 poller。关闭轮询不影响项目 API 和手动触发，
 手动触发仍使用同一 occurrence/Run/job 原子 admission。独立 Worker、持久化 SSE、通用 jobs/retries、
-配额、审计和通用备份恢复已在 M6 完成。
+配额、审计和 retention purge 已在 M6 完成。
 
 项目 API 位于 `/api/projects/{project_id}/automations`。M1–M8 已全部完成，总体进度为
 8/8（100%）。DeerFlow 项目优先、多用户 SaaS V1 已通过限定的宿主机部署发布验收：全新
@@ -639,7 +637,6 @@ PostgreSQL 数据库、`make setup-db`、`make start`、桌面版 Chromium 和 D
 
 ## 文档
 
-- [贡献指南](CONTRIBUTING.md) - 开发环境搭建与协作流程
 - [配置指南](backend/docs/CONFIGURATION.md) - 安装与配置说明
 - [架构概览](backend/CLAUDE.md) - 技术架构说明
 - [后端架构](backend/README.md) - 后端架构与 API 参考
@@ -664,7 +661,7 @@ DeerFlow 具备**系统指令执行、资源操作、业务逻辑调用**等关�
 
 ## 参与贡献
 
-欢迎参与贡献。开发环境、工作流和相关规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+欢迎通过 Issue 或 Pull Request 参与贡献。提交前请运行对应模块的检查和测试命令。
 
 目前回归测试已经覆盖 Docker sandbox 模式识别，以及 `backend/tests/` 中 provisioner kubeconfig-path 处理相关测试。
 

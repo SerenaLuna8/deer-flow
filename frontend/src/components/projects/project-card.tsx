@@ -22,7 +22,11 @@ import {
 import type { Project } from "@/core/projects/types";
 import { cn } from "@/lib/utils";
 
-import { canUpdateProject, formatProjectTime } from "./project-view-model";
+import {
+  canUpdateProject,
+  formatProjectQuota,
+  formatProjectTime,
+} from "./project-view-model";
 
 const ROLE_LABELS: Record<Project["role"], string> = {
   admin: "Admin",
@@ -42,6 +46,7 @@ export function ProjectCard({
   onEdit: () => void;
   pinPending?: boolean;
 }) {
+  const quota = formatProjectQuota(project.quota_summary);
   return (
     <Card
       data-testid="project-card"
@@ -116,6 +121,15 @@ export function ProjectCard({
           <span>Agent {project.agent_count}</span>
           <span>Skill {project.skill_count}</span>
           <span>MCP {project.mcp_count}</span>
+        </div>
+        <div
+          aria-label="项目配额摘要"
+          className="border-border/70 grid grid-cols-2 gap-x-3 gap-y-1 rounded-lg border px-3 py-2 text-xs"
+        >
+          <span>{quota.members}</span>
+          <span>{quota.storage}</span>
+          <span>{quota.runs}</span>
+          <span>{quota.mcp}</span>
         </div>
       </CardContent>
       <CardFooter>

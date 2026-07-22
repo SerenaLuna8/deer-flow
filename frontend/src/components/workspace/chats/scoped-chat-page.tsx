@@ -74,6 +74,24 @@ export type ScopedChatRouteScope = ChatRouteScope & {
   followupSuggestionsEnabled?: boolean;
 };
 
+export function shouldShowThreadWelcome({
+  isNewThread,
+  isHistoryLoading,
+  hasMoreHistory,
+  visibleMessageCount,
+  dismissed,
+}: {
+  isNewThread: boolean;
+  isHistoryLoading: boolean;
+  hasMoreHistory: boolean;
+  visibleMessageCount: number;
+  dismissed: boolean;
+}) {
+  if (dismissed) return false;
+  if (isNewThread) return true;
+  return !isHistoryLoading && !hasMoreHistory && visibleMessageCount === 0;
+}
+
 function OptionalSidecarProvider({
   enabled,
   children,
@@ -107,6 +125,7 @@ export function ScopedChatPage({
   // the moment the user submits so the UI animates immediately, even though
   // `isNewThread` stays true until the backend actually creates the thread.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
+  const welcomeDismissedThreadIdsRef = useRef(new Set<string>());
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
@@ -127,14 +146,6 @@ export function ScopedChatPage({
   useEffect(() => {
     mountedRef.current = true;
   }, []);
-
-  // Keep welcome layout in sync when navigating between threads (sidebar
-  // clicks, "new chat" button).  Submitting in /chats/new flips the layout
-  // via onSend below — `isNewThread` stays true until onStart, so this effect
-  // is harmless during the submit transition.
-  useEffect(() => {
-    setIsWelcomeMode(isNewThread);
-  }, [isNewThread]);
 
   const { showNotification } = useNotification();
 
@@ -157,9 +168,11 @@ export function ScopedChatPage({
     // LangGraph SDK eagerly fetches /history the moment it receives a
     // thread id and assumes the thread exists on the backend (issue #2746).
     onSend: () => {
+      welcomeDismissedThreadIdsRef.current.add(threadId);
       setIsWelcomeMode(false);
     },
     onStart: (createdThreadId) => {
+      welcomeDismissedThreadIdsRef.current.add(createdThreadId);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(
         null,
@@ -188,6 +201,12 @@ export function ScopedChatPage({
   });
 
   const hasThreadMessages = thread.messages.length > 0;
+  const visibleMessageCount = useMemo(
+    () =>
+      thread.messages.filter((message) => !isHiddenFromUIMessage(message))
+        .length,
+    [thread.messages],
+  );
   const metadataSettled =
     !threadMetadata.isLoading && !threadMetadata.isFetching;
   const historySettled = !isHistoryLoading && !hasMoreHistory;
@@ -200,6 +219,18 @@ export function ScopedChatPage({
     metadataSettled &&
     historySettled &&
     !hasUsableThreadState;
+
+  const shouldWelcome = shouldShowThreadWelcome({
+    isNewThread,
+    isHistoryLoading: isHistoryLoading || !metadataSettled,
+    hasMoreHistory,
+    visibleMessageCount,
+    dismissed: welcomeDismissedThreadIdsRef.current.has(threadId),
+  });
+
+  useEffect(() => {
+    setIsWelcomeMode(shouldWelcome);
+  }, [shouldWelcome]);
   const threadMetadataFailed =
     !isNewThread &&
     !isMock &&
@@ -339,7 +370,7 @@ export function ScopedChatPage({
           <div className="relative flex size-full min-h-0 justify-between">
             <header
               className={cn(
-                "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
+                "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 pr-2 pl-12 sm:pr-4 sm:pl-12 xl:pl-4",
                 isWelcomeMode
                   ? "bg-background/0 backdrop-blur-none"
                   : "bg-background/80 shadow-xs backdrop-blur",

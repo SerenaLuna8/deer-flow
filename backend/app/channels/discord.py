@@ -60,10 +60,15 @@ class DiscordChannel(Channel):
         # _run_client (Discord loop thread) and the main thread both read/write.
         self._thread_store_lock = threading.Lock()
         store = config.get("channel_store")
-        if store is not None:
+        if store is not None and hasattr(store, "_path"):
+            # Test doubles may still provide an isolated location for this
+            # separate Discord-native thread cache. Production ChannelStore is
+            # PostgreSQL-backed and intentionally has no filesystem path.
             self._thread_store_path = store._path.parent / "discord_threads.json"
         else:
-            self._thread_store_path = Path.home() / ".deer-flow" / "channels" / "discord_threads.json"
+            from deerflow.config.paths import get_paths
+
+            self._thread_store_path = Path(get_paths().base_dir) / "channels" / "discord_threads.json"
 
         # Typing indicator management
         self._typing_tasks: dict[str, asyncio.Task] = {}

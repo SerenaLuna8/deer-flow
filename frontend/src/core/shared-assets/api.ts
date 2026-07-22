@@ -32,7 +32,10 @@ import {
   replaceCredentialInputSchema,
   revokeCredentialInputSchema,
   skillVersionHistoryResponseSchema,
+  skillFileForkInputSchema,
+  skillFilePathSchema,
   skillVersionInputSchema,
+  skillVersionFileContentResponseSchema,
   skillVersionResponseSchema,
   systemBindingSchema,
   type AdminAssetList,
@@ -56,6 +59,8 @@ import {
   type ReplaceCredentialInput,
   type RevokeCredentialInput,
   type SkillVersionInput,
+  type SkillFileForkInput,
+  type SkillVersionFileContentResponse,
   type SystemBinding,
   type VersionHistoryResponse,
   type VersionResponse,
@@ -526,6 +531,23 @@ export async function listAdminAssetVersions(
   return parseResponse(response, versionHistorySchema(kind));
 }
 
+export async function getProjectSkillVersionFile(
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<SkillVersionFileContentResponse> {
+  const asset = parseInput(assetIdSchema, assetId);
+  const version = parseInput(assetIdSchema, versionId);
+  const filePath = parseInput(skillFilePathSchema, path);
+  const response = await request(
+    `${projectAssetUrl(projectId, "skills")}/${asset}/versions/${version}/files/content?path=${encodeURIComponent(filePath)}`,
+    { signal },
+  );
+  return parseResponse(response, skillVersionFileContentResponseSchema);
+}
+
 async function postVersionMutation<T>(
   url: string,
   inputSchema: z.ZodType<T>,
@@ -541,6 +563,24 @@ async function postVersionMutation<T>(
     signal,
   });
   return parseResponse(response, responseSchema);
+}
+
+export function forkProjectSkillVersion(
+  projectId: string,
+  assetId: string,
+  sourceVersionId: string,
+  input: SkillFileForkInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse> {
+  const asset = parseInput(assetIdSchema, assetId);
+  const sourceVersion = parseInput(assetIdSchema, sourceVersionId);
+  return postVersionMutation(
+    `${projectAssetUrl(projectId, "skills")}/${asset}/versions/${sourceVersion}/fork`,
+    skillFileForkInputSchema,
+    skillVersionResponseSchema,
+    input,
+    signal,
+  );
 }
 
 export function publishProjectAssetVersion(

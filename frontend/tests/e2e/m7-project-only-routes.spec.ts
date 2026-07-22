@@ -29,6 +29,12 @@ const project: Project = {
   agent_count: 1,
   skill_count: 0,
   mcp_count: 0,
+  quota_summary: {
+    members: { used: 1, reserved: 0, limit: 20 },
+    storage_bytes: { used: 0, reserved: 0, limit: 5_368_709_120 },
+    concurrent_runs: { used: 0, reserved: 0, limit: 3 },
+    mcp_calls_daily: { used: 0, reserved: 0, limit: 10_000 },
+  },
   status: "active",
   is_suspended: false,
   membership_version: 1,
@@ -42,8 +48,18 @@ const LEGACY_WORKSPACE_ROUTES = [
   "/workspace/scheduled-tasks",
   "/workspace/skills",
   "/workspace/tools",
-  "/workspace/projects",
 ] as const;
+
+test("legacy project workbench URL redirects to the canonical workspace", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+
+  await page.goto("/workspace/projects");
+
+  await expect(page).toHaveURL(/\/workspace$/u);
+  await expect(page.getByTestId("project-workbench")).toBeVisible();
+});
 
 test("legacy workspace URLs render Next not-found without redirect", async ({
   page,

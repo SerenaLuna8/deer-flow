@@ -9,14 +9,16 @@ export default async function ProjectUsageRoute() {
   const { t } = await getI18n();
   const labels = t.project.governance.usage;
   return (
-    <main className="mx-auto w-full max-w-6xl space-y-6 px-4 py-8 sm:px-6 lg:px-8">
-      <div>
-        <h1 className="text-3xl font-semibold tracking-tight">
+    <section className="min-w-0 space-y-6">
+      <header className="max-w-2xl">
+        <h2 className="text-2xl font-semibold tracking-tight">
           {labels.title}
-        </h1>
-        <p className="text-muted-foreground mt-3">{labels.description}</p>
-      </div>
+        </h2>
+        <p className="text-muted-foreground mt-2 leading-6">
+          {labels.description}
+        </p>
+      </header>
       <ProjectUsagePage />
-    </main>
+    </section>
   );
 }

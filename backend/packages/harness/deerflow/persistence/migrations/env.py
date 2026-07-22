@@ -38,7 +38,10 @@ _ = models
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Alembic can run inside the Gateway process and test process.  Do not let
+    # its logging bootstrap disable application loggers that were registered
+    # before migrations started.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

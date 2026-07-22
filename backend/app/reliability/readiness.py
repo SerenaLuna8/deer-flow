@@ -23,7 +23,6 @@ class ReliabilityReadinessService:
         worker_fleet: Callable[[], str] | None = None,
         scheduler: Callable[[], str] | None = None,
         stream: Callable[[], str] | None = None,
-        recovery: Callable[[], str] | None = None,
         quota: Callable[[], str] | None = None,
         audit: Callable[[], str] | None = None,
         process: ProcessReadinessSnapshot | None = None,
@@ -35,7 +34,6 @@ class ReliabilityReadinessService:
             "worker_fleet": worker_fleet,
             "scheduler": scheduler,
             "stream": stream,
-            "recovery": recovery,
             "quota": quota,
             "audit": audit,
         }
@@ -62,7 +60,6 @@ class ReliabilityReadinessService:
             worker_fleet=process.worker_fleet if process is not None else "closed",
             scheduler=process.scheduler if process is not None else "closed",
             stream="closed",
-            recovery="closed",
             quota="closed",
             audit="closed",
             request_id=request_id,

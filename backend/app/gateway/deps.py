@@ -257,6 +257,14 @@ async def gateway_platform_runtime(
         from deerflow.runtime.events.store.db import DbRunEventStore
 
         app.state.private_run_event_store = DbRunEventStore(sf)
+        from app.private_work.chat_controls import ProjectChatControlService
+
+        app.state.project_chat_control_service = ProjectChatControlService(
+            sf,
+            app.state.project_scoped_checkpointer,
+            app.state.private_thread_service,
+            app.state.private_run_event_store,
+        )
         from deerflow.runtime.events.stream import PostgresStreamBridge
 
         app.state.private_stream_bridge = PostgresStreamBridge(sf)

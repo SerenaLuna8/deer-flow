@@ -47,10 +47,6 @@ export const auditActionSchema = z.enum([
   "run.terminal",
   "job.dead",
   "job.requeued",
-  "backup.created",
-  "restore.started",
-  "restore.completed",
-  "recovery.drill_completed",
   "purge.completed",
   "audit.corrected",
 ]);
@@ -106,18 +102,6 @@ const jobMetadataSchema = z
     retry_safety: z.enum(["safe", "unknown", "unsafe"]),
   })
   .strict();
-const backupMetadataSchema = z
-  .object({
-    table_count: z.number().int().nonnegative(),
-    tombstone_high_watermark: z.number().int().nonnegative(),
-  })
-  .strict();
-const restoreMetadataSchema = z
-  .object({
-    table_count: z.number().int().nonnegative(),
-    tombstones_replayed: z.number().int().nonnegative(),
-  })
-  .strict();
 const purgeMetadataSchema = z
   .object({
     resource_kind: z.enum(["project", "account", "file"]),
@@ -160,10 +144,6 @@ const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
   "run.terminal": runTerminalMetadataSchema,
   "job.dead": jobMetadataSchema,
   "job.requeued": jobMetadataSchema,
-  "backup.created": backupMetadataSchema,
-  "restore.started": restoreMetadataSchema,
-  "restore.completed": restoreMetadataSchema,
-  "recovery.drill_completed": restoreMetadataSchema,
   "purge.completed": purgeMetadataSchema,
   "audit.corrected": correctionMetadataSchema,
 };
@@ -179,7 +159,6 @@ export const auditItemSchema = z
       "scheduler",
       "operator",
       "migration",
-      "recovery",
       "system_admin",
     ]),
     action: auditActionSchema,
@@ -192,8 +171,6 @@ export const auditItemSchema = z
       "quota",
       "run",
       "job",
-      "backup",
-      "restore",
       "purge",
       "audit",
     ]),

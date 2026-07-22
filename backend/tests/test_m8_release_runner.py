@@ -24,7 +24,6 @@ from scripts.release_acceptance.models import (
     M8_REVIEW_BASE_COMMIT,
     CleanupSummary,
     LiveModelSummary,
-    RecoverySummary,
     ReviewReport,
     StageId,
 )
@@ -438,7 +437,6 @@ async def test_host_manifest_is_dispatched_once_without_executing_internal_comma
         CommandSpec(command_id="host.check_db", stage="host_setup", argv=("make", "check-db"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
         CommandSpec(command_id="chromium.host_journey", stage="chromium", argv=("internal", "chromium"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
         CommandSpec(command_id="deepseek.live_journey", stage="deepseek", argv=("internal", "deepseek"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
-        CommandSpec(command_id="recovery.full_switch", stage="recovery", argv=("internal", "recovery"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
         CommandSpec(command_id="cleanup.evidence_log_security", stage="cleanup", argv=("internal", "security"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="cleanup"),
         CommandSpec(command_id="cleanup.residual_audit", stage="cleanup", argv=("internal", "residual"), cwd="root", timeout_seconds=10, allowed_environment=frozenset(), summary_parser="exit_code", execution="cleanup"),
     )
@@ -473,15 +471,6 @@ async def test_host_manifest_is_dispatched_once_without_executing_internal_comma
                 cursor_count=3,
                 duration_ms=5,
             ),
-            recovery=RecoverySummary(
-                archive_schema_version=7,
-                schema_revision="0001_project_saas_baseline",
-                tombstone_count=1,
-                proof_digest="f" * 64,
-                rto_ms=5,
-                rpo_outcome="archive_point_confirmed",
-                restored_count=1,
-            ),
             cleanup=CleanupSummary(
                 residual_processes=0,
                 residual_ports=0,
@@ -494,7 +483,6 @@ async def test_host_manifest_is_dispatched_once_without_executing_internal_comma
                 timing("host.check_db", 1),
                 timing("chromium.host_journey", 2),
                 timing("deepseek.live_journey", 3),
-                timing("recovery.full_switch", 4),
             ),
         )
 
@@ -507,7 +495,7 @@ async def test_host_manifest_is_dispatched_once_without_executing_internal_comma
     ).run()
     assert evidence.status == "candidate_ready"
     assert executor.calls == ["contracts.schemas", "backend.unit"]
-    assert host_calls == [(StageId.HOST_SETUP, StageId.CHROMIUM, StageId.DEEPSEEK, StageId.RECOVERY)]
+    assert host_calls == [(StageId.HOST_SETUP, StageId.CHROMIUM, StageId.DEEPSEEK)]
     assert tuple(stage.command_id for stage in evidence.stages) == (
         "preflight.host",
         "contracts.schemas",
@@ -516,11 +504,10 @@ async def test_host_manifest_is_dispatched_once_without_executing_internal_comma
         "host.check_db",
         "chromium.host_journey",
         "deepseek.live_journey",
-        "recovery.full_switch",
         "cleanup.evidence_log_security",
         "cleanup.residual_audit",
     )
-    host_evidence = {stage.command_id: stage for stage in evidence.stages if stage.command_id.startswith(("host.", "chromium.", "deepseek.", "recovery."))}
+    host_evidence = {stage.command_id: stage for stage in evidence.stages if stage.command_id.startswith(("host.", "chromium.", "deepseek."))}
     assert all(item.duration_ms == 250 for item in host_evidence.values())
     assert host_evidence["host.setup_db"].started_at != host_evidence["host.check_db"].started_at
 
@@ -617,24 +604,10 @@ def test_cli_accepts_only_fixed_diagnostic_stage_prefixes() -> None:
         ]
     ).stage == ["host_setup", "chromium", "deepseek"]
     assert diagnostic_stages(("host_setup", "chromium", "deepseek")) == (StageId.HOST_SETUP, StageId.CHROMIUM, StageId.DEEPSEEK)
-    assert _parse_args(
-        [
-            "--stage",
-            "host_setup",
-            "--stage",
-            "chromium",
-            "--stage",
-            "deepseek",
-            "--stage",
-            "recovery",
-        ]
-    ).stage == ["host_setup", "chromium", "deepseek", "recovery"]
-    assert diagnostic_stages(("host_setup", "chromium", "deepseek", "recovery")) == (
-        StageId.HOST_SETUP,
-        StageId.CHROMIUM,
-        StageId.DEEPSEEK,
-        StageId.RECOVERY,
-    )
+    with pytest.raises(SystemExit):
+        _parse_args(["--stage", "host_setup", "--stage", "recovery"])
+    with pytest.raises(ValueError, match="'recovery' is not a valid StageId"):
+        diagnostic_stages(("host_setup", "chromium", "deepseek", "recovery"))
     with pytest.raises(SystemExit):
         _parse_args(["--stage", "chromium"])
     with pytest.raises(SystemExit):

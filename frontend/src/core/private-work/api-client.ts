@@ -78,6 +78,8 @@ const privateThreadSchema = z
     status: z.enum(["idle", "busy", "interrupted", "error"]),
     metadata: z.record(z.string(), z.unknown()),
     version: z.number().int().positive(),
+    created_at: z.string().datetime({ offset: true }),
+    updated_at: z.string().datetime({ offset: true }),
   })
   .strict();
 
@@ -135,22 +137,16 @@ function versionCache(scope: ProjectClientScope): Map<string, number> {
   return versions;
 }
 
-function privateThreadTimestamp(metadata: Record<string, unknown>): string {
-  const timestamp = metadata.updated_at ?? metadata.created_at;
-  return typeof timestamp === "string" ? timestamp : "1970-01-01T00:00:00.000Z";
-}
-
 function mapPrivateThread(
   scope: ProjectClientScope,
   value: PrivateThread,
 ): Thread {
   versionCache(scope).set(value.thread_id, value.version);
-  const timestamp = privateThreadTimestamp(value.metadata);
   return {
     thread_id: value.thread_id,
-    created_at: timestamp,
-    updated_at: timestamp,
-    state_updated_at: timestamp,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+    state_updated_at: value.updated_at,
     metadata: {
       ...value.metadata,
       agent_asset_id: value.agent_asset_id,

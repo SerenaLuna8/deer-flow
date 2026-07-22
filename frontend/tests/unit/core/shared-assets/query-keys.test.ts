@@ -9,6 +9,7 @@ import {
   adminAssetKey,
   projectAssetKey,
   projectAssetVersionsKey,
+  projectSkillVersionFileKey,
 } from "@/core/shared-assets/query-keys";
 
 describe("shared asset query isolation", () => {
@@ -36,6 +37,40 @@ describe("shared asset query isolation", () => {
     );
     expect(projectAssetKey("u1", "p1", "agents")).not.toEqual(
       projectAssetKey("u1", "p1", "skills"),
+    );
+  });
+
+  test("skill file content keys isolate account, project, asset, version, and path", () => {
+    const key = projectSkillVersionFileKey(
+      "u1",
+      "p1",
+      "asset-1",
+      "version-1",
+      "references/guide.md",
+    );
+    expect(key).toEqual([
+      "account",
+      "u1",
+      "shared-assets",
+      "project",
+      "p1",
+      "skills",
+      "asset",
+      "asset-1",
+      "versions",
+      "version",
+      "version-1",
+      "file",
+      "references/guide.md",
+    ]);
+    expect(key).not.toEqual(
+      projectSkillVersionFileKey(
+        "u1",
+        "p1",
+        "asset-1",
+        "version-2",
+        "references/guide.md",
+      ),
     );
   });
 

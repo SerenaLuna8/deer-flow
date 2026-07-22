@@ -81,3 +81,19 @@ export function projectAssetVersionsKey(
     "versions",
   ] as const;
 }
+
+export function projectSkillVersionFileKey(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  path: string,
+) {
+  return [
+    ...projectAssetVersionsKey(accountId, projectId, "skills", assetId),
+    "version",
+    requireKeyPart(versionId, "Version ID"),
+    "file",
+    requireKeyPart(path, "Skill file path"),
+  ] as const;
+}

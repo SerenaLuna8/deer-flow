@@ -32,7 +32,6 @@ class StageId(StrEnum):
     HOST_SETUP = "host_setup"
     CHROMIUM = "chromium"
     DEEPSEEK = "deepseek"
-    RECOVERY = "recovery"
     CLEANUP = "cleanup"
 
 
@@ -116,17 +115,6 @@ class LiveModelSummary(StrictModel):
         return self
 
 
-class RecoverySummary(StrictModel):
-    kind: Literal["recovery"] = "recovery"
-    archive_schema_version: Literal[7]
-    schema_revision: Literal["0001_project_saas_baseline"]
-    tombstone_count: int = Field(ge=0)
-    proof_digest: str = Field(pattern=_SHA256.pattern)
-    rto_ms: int = Field(ge=0)
-    rpo_outcome: Literal["archive_point_confirmed", "failed"]
-    restored_count: int = Field(ge=0)
-
-
 class CleanupSummary(StrictModel):
     kind: Literal["cleanup"] = "cleanup"
     residual_processes: int = Field(ge=0)
@@ -137,7 +125,7 @@ class CleanupSummary(StrictModel):
 
 
 StageSummary = Annotated[
-    TestSummary | MatrixSummary | SecuritySummary | LiveModelSummary | RecoverySummary | CleanupSummary,
+    TestSummary | MatrixSummary | SecuritySummary | LiveModelSummary | CleanupSummary,
     Field(discriminator="kind"),
 ]
 
@@ -164,7 +152,6 @@ class StageEvidence(StrictModel):
         expected_kind = {
             StageId.SECURITY: "security",
             StageId.DEEPSEEK: "live_model",
-            StageId.RECOVERY: "recovery",
             StageId.CLEANUP: "cleanup",
         }.get(self.stage, "tests")
         if self.command_id == "contracts.matrix":

@@ -6,6 +6,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  createDeferredPrivateWorkScopeRelease,
   PrivateWorkProvider,
   usePrivateWorkAccess,
 } from "@/core/private-work/provider";
@@ -26,6 +27,32 @@ function AccessConsumer() {
 }
 
 describe("private-work provider", () => {
+  test("keeps the same scope active across Strict Effects cleanup replay", () => {
+    const queued: Array<() => void> = [];
+    const released: string[] = [];
+    const release = createDeferredPrivateWorkScopeRelease((task) =>
+      queued.push(task),
+    );
+
+    release.defer(scope, () => released.push("first"));
+    release.retain(scope);
+    queued.shift()?.();
+    expect(released).toEqual([]);
+
+    const nextScope = {
+      ...scope,
+      projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    };
+    release.defer(scope, () => released.push("project-switch"));
+    release.retain(nextScope);
+    queued.shift()?.();
+    expect(released).toEqual(["project-switch"]);
+
+    release.defer(nextScope, () => released.push("unmount"));
+    queued.shift()?.();
+    expect(released).toEqual(["project-switch", "unmount"]);
+  });
+
   test("provides the project client and scope to nested hooks", () => {
     const registry = createPrivateWorkScopeRegistry();
     const access = registry.acquire(scope);

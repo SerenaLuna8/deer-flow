@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import tempfile
 import uuid
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
@@ -209,70 +208,6 @@ class TestMessageBus:
         assert msg.is_final is True
         assert msg.thread_ts is None
         assert msg.metadata == {}
-
-
-# ---------------------------------------------------------------------------
-# ChannelStore tests
-# ---------------------------------------------------------------------------
-
-
-class TestChannelStore:
-    @pytest.fixture
-    def store(self, tmp_path):
-        return ChannelStore(path=tmp_path / "store.json")
-
-    def test_set_and_get_thread_id(self, store):
-        store.set_thread_id("slack", "ch1", "thread-abc", user_id="u1")
-        assert store.get_thread_id("slack", "ch1") == "thread-abc"
-
-    def test_get_nonexistent_returns_none(self, store):
-        assert store.get_thread_id("slack", "nonexistent") is None
-
-    def test_remove(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        assert store.remove("slack", "ch1") is True
-        assert store.get_thread_id("slack", "ch1") is None
-
-    def test_remove_nonexistent_returns_false(self, store):
-        assert store.remove("slack", "nope") is False
-
-    def test_list_entries_all(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        store.set_thread_id("feishu", "ch2", "t2")
-        entries = store.list_entries()
-        assert len(entries) == 2
-
-    def test_list_entries_filtered(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        store.set_thread_id("feishu", "ch2", "t2")
-        entries = store.list_entries(channel_name="slack")
-        assert len(entries) == 1
-        assert entries[0]["channel_name"] == "slack"
-
-    def test_persistence(self, tmp_path):
-        path = tmp_path / "store.json"
-        store1 = ChannelStore(path=path)
-        store1.set_thread_id("slack", "ch1", "t1")
-
-        store2 = ChannelStore(path=path)
-        assert store2.get_thread_id("slack", "ch1") == "t1"
-
-    def test_update_preserves_created_at(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        entries = store.list_entries()
-        created_at = entries[0]["created_at"]
-
-        store.set_thread_id("slack", "ch1", "t2")
-        entries = store.list_entries()
-        assert entries[0]["created_at"] == created_at
-        assert entries[0]["thread_id"] == "t2"
-        assert entries[0]["updated_at"] >= created_at
-
-    def test_corrupt_file_handled(self, tmp_path):
-        path = tmp_path / "store.json"
-        path.write_text("not json", encoding="utf-8")
-        store = ChannelStore(path=path)
-        assert store.get_thread_id("x", "y") is None
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +582,7 @@ class TestChannelManager:
         from app.channels.manager import ChannelManager
 
         bus = MessageBus()
-        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        store = None
         manager = ChannelManager(bus=bus, store=store, langgraph_url="http://localhost:8001")
 
         with patch("langgraph_sdk.get_client") as get_client:
@@ -693,7 +628,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
 
             reply = await manager._fetch_gateway("/api/models", "models")
@@ -787,7 +722,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            manager = ChannelManager(bus=bus, store=ChannelStore(path=tmp_path / "store.json"))
+            manager = ChannelManager(bus=bus, store=None)
             manager._handle_project_inbound_chat = AsyncMock()
             await manager.start()
             try:
@@ -820,7 +755,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            manager = ChannelManager(bus=bus, store=ChannelStore(path=tmp_path / "store.json"))
+            manager = ChannelManager(bus=bus, store=None)
             manager._handle_project_inbound_chat = AsyncMock(side_effect=[RuntimeError("temporary"), None])
             manager._send_error = AsyncMock()
             inbound = InboundMessage(
@@ -926,7 +861,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             owner_id = uuid.uuid4()
             context = PrivateWorkContext.from_project(
                 ProjectContext(
@@ -1012,7 +947,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             owner_id = uuid.uuid4()
             context = PrivateWorkContext.from_project(
                 ProjectContext(
@@ -1193,7 +1128,7 @@ class TestChannelManagerBoundIdentityPolicy:
             )
             dispatcher = ProjectInboundDispatcher(resolver, launcher)
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             manager = ChannelManager(
                 bus=bus,
                 store=store,
@@ -1260,7 +1195,7 @@ class TestChannelManagerBoundIdentityPolicy:
             bus = MessageBus()
             manager = ChannelManager(
                 bus=bus,
-                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                store=None,
                 private_inbound_dispatcher=ProjectInboundDispatcher(resolver, launcher),
             )
             manager._client = _make_mock_langgraph_client()
@@ -1296,7 +1231,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             manager = ChannelManager(bus=bus, store=store)
             mock_client = _make_mock_langgraph_client()
             manager._client = mock_client
@@ -1333,7 +1268,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             manager = ChannelManager(bus=bus, store=store)
             mock_client = _make_mock_langgraph_client()
             manager._client = mock_client
@@ -1371,7 +1306,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             manager = ChannelManager(bus=bus, store=store)
             outbound_received = []
 
@@ -1412,7 +1347,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             repo = _BoundIdentityRepo(
                 [
                     {
@@ -1452,7 +1387,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             repo = _BoundIdentityRepo(
                 [
                     {
@@ -1496,7 +1431,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             repo = _BoundIdentityRepo(
                 [
                     {
@@ -1544,7 +1479,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             manager = ChannelManager(bus=bus, store=store)
             mock_client = _make_mock_langgraph_client(thread_id="thread-local")
             manager._client = mock_client
@@ -1570,7 +1505,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = None
             manager = ChannelManager(bus=bus, store=store)
             mock_client = _make_mock_langgraph_client(thread_id="thread-legacy")
             manager._client = mock_client
@@ -1769,11 +1704,15 @@ class TestFeishuChannel:
 
     def test_prepare_inbound_and_send_share_running_card_task(self):
         from app.channels.feishu import FeishuChannel
+        from deerflow.runtime.private_scope import PrivateResourceScope
 
         async def go():
             bus = MessageBus()
             bus.publish_inbound = AsyncMock()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = SimpleNamespace(
+                get_thread_id=AsyncMock(return_value=None),
+                set_thread_id=AsyncMock(return_value=True),
+            )
             channel = FeishuChannel(bus, config={"channel_store": store})
             channel._api_client = MagicMock()
 
@@ -1810,6 +1749,12 @@ class TestFeishuChannel:
                         text="Hello",
                         is_final=False,
                         thread_ts="om-source-msg",
+                        connection_id="connection-1",
+                        private_scope=PrivateResourceScope(
+                            project_id=str(uuid.uuid4()),
+                            owner_user_id=str(uuid.uuid4()),
+                            membership_version=1,
+                        ),
                         metadata={
                             "user_id": "user-1",
                             "root_id": "om-root-msg",
@@ -1829,9 +1774,11 @@ class TestFeishuChannel:
             assert channel._reply_card.await_count == 1
             channel._update_card.assert_awaited_once_with("om-running-card", "Hello")
             assert "om-source-msg" not in channel._running_card_tasks
-            assert store.get_thread_id("feishu", "chat-1", topic_id="om-source-msg") == "thread-1"
-            assert store.get_thread_id("feishu", "chat-1", topic_id="om-running-card") == "thread-1"
-            assert store.get_thread_id("feishu", "chat-1", topic_id="om-root-msg") == "thread-1"
+            assert {call.kwargs["topic_id"] for call in store.set_thread_id.await_args_list} == {
+                "om-source-msg",
+                "om-running-card",
+                "om-root-msg",
+            }
 
         _run(go())
 

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import { describe, expect, test, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { headers } from "next/headers";
 import {
   createElement,
   type ComponentType,
@@ -23,6 +24,7 @@ rs.mock("next/navigation", () => ({
   usePathname: () => "/admin/assets/agents",
   useRouter: () => ({ push: rs.fn() }),
 }));
+rs.mock("next/headers", () => ({ headers: rs.fn() }));
 rs.mock("@/core/auth/server", () => ({ getServerSideUser: rs.fn() }));
 rs.mock("@/core/static-mode", () => ({ isStaticWebsiteOnly: () => false }));
 
@@ -66,12 +68,17 @@ describe("admin asset access and credential safety", () => {
 
   test("server layout preserves the admin target for unauthenticated users", async () => {
     rs.mocked(getServerSideUser).mockResolvedValue({ tag: "unauthenticated" });
+    rs.mocked(headers).mockResolvedValue(
+      new Headers({
+        "x-deerflow-admin-return-path": "/admin/assets/agents?scope=system",
+      }) as never,
+    );
 
     await expect(
       AdminLayout({ children: createElement("p", null, "restricted") }),
     ).rejects.toMatchObject({
       code: "NEXT_REDIRECT",
-      destination: "/login?next=%2Fadmin%2Foperations",
+      destination: "/login?next=%2Fadmin%2Fassets%2Fagents%3Fscope%3Dsystem",
     });
   });
 

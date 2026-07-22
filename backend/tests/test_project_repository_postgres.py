@@ -13,6 +13,9 @@ from app.projects.context import resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
 from app.projects.models import CreateProject, ProjectChanges
 from app.projects.repository import ProjectRepository
+from deerflow.persistence.shared_assets.agent_model import AgentRow
+from deerflow.persistence.shared_assets.mcp_model import McpServerRow
+from deerflow.persistence.shared_assets.skill_model import SkillRow
 
 
 @pytest.mark.asyncio
@@ -37,6 +40,47 @@ async def test_repository_create_scope_personal_state_and_cursor(migrated_postgr
             view = await repository.get(context)
             assert session.in_transaction() is False
             assert view.member_count == 1 and view.agent_count == view.skill_count == view.mcp_count == 0
+            async with session.begin():
+                agent = AgentRow(scope="project", project_id=context.project_id, slug="alpha-agent", display_name="Alpha Agent", created_by_user_id=str(owner))
+                skill = SkillRow(scope="project", project_id=context.project_id, slug="alpha-skill", display_name="Alpha Skill", created_by_user_id=str(owner))
+                mcp = McpServerRow(scope="project", project_id=context.project_id, slug="alpha-mcp", display_name="Alpha MCP", created_by_user_id=str(owner))
+                session.add_all((agent, skill, mcp))
+            draft_summary = await repository.get(context)
+            assert (draft_summary.agent_count, draft_summary.skill_count, draft_summary.mcp_count) == (0, 0, 0)
+            agent_version_id, skill_version_id, mcp_version_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+            async with session.begin():
+                await session.execute(
+                    text("""INSERT INTO agent_versions
+                    (id,agent_id,version_number,workflow_status,soul,model_ref,payload_checksum,created_by_user_id)
+                    VALUES (:version,:asset,1,'published','Helpful','test-model',:checksum,:user)"""),
+                    {"version": agent_version_id, "asset": agent.id, "checksum": "a" * 64, "user": str(owner)},
+                )
+                await session.execute(
+                    text("""INSERT INTO skill_versions
+                    (id,skill_id,version_number,workflow_status,scan_decision,payload_checksum,created_by_user_id)
+                    VALUES (:version,:asset,1,'published','allow',:checksum,:user)"""),
+                    {"version": skill_version_id, "asset": skill.id, "checksum": "b" * 64, "user": str(owner)},
+                )
+                await session.execute(
+                    text("""INSERT INTO mcp_server_versions
+                    (id,mcp_server_id,version_number,workflow_status,transport,payload_checksum,created_by_user_id)
+                    VALUES (:version,:asset,1,'published','http',:checksum,:user)"""),
+                    {"version": mcp_version_id, "asset": mcp.id, "checksum": "c" * 64, "user": str(owner)},
+                )
+                await session.execute(
+                    text("UPDATE agents SET current_published_version_id=:version WHERE id=:asset"),
+                    {"version": agent_version_id, "asset": agent.id},
+                )
+                await session.execute(
+                    text("UPDATE skills SET current_published_version_id=:version WHERE id=:asset"),
+                    {"version": skill_version_id, "asset": skill.id},
+                )
+                await session.execute(
+                    text("UPDATE mcp_servers SET current_published_version_id=:version WHERE id=:asset"),
+                    {"version": mcp_version_id, "asset": mcp.id},
+                )
+            summary = await repository.get(context)
+            assert (summary.agent_count, summary.skill_count, summary.mcp_count) == (1, 1, 1)
             assert (await repository.update(context, ProjectChanges(display_name="Alpha Updated"))).display_name == "Alpha Updated"
             assert session.in_transaction() is False
             await repository.pin(context, True)

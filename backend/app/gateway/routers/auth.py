@@ -36,6 +36,12 @@ from app.gateway.auth.oidc_state import (
     get_state_cookie,
     set_state_cookie,
 )
+from app.gateway.auth.rate_limit import (
+    AUTH_RATE_LIMIT_WINDOW,
+    AuthenticationRateLimitAction,
+    AuthenticationRateLimitAdmission,
+    AuthenticationRateLimitRepository,
+)
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, generate_csrf_token, is_secure_request
 from app.gateway.deps import (
@@ -256,19 +262,8 @@ def _set_session_cookie(response: Response, token: str, request: Request) -> Non
 
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
-# In-process dict — not shared across workers.
-#
-# **Limitation**: with multi-worker deployments (e.g., gunicorn -w N), each
-# worker maintains its own lockout table, so an attacker effectively gets
-# N × _MAX_LOGIN_ATTEMPTS guesses before being locked out everywhere. For
-# production multi-worker setups, replace this with a shared store (Redis,
-# database-backed counter) to enforce a true per-IP limit.
 
-_MAX_LOGIN_ATTEMPTS = 5
-_LOCKOUT_SECONDS = 300  # 5 minutes
-
-# ip → (fail_count, lock_until_timestamp)
-_login_attempts: dict[str, tuple[int, float]] = {}
+_AUTH_RATE_LIMIT_RETRY_AFTER_SECONDS = int(AUTH_RATE_LIMIT_WINDOW.total_seconds())
 
 
 def _trusted_proxies() -> list:
@@ -332,51 +327,69 @@ def _get_client_ip(request: Request) -> str:
     return peer_host or "unknown"
 
 
-def _check_rate_limit(ip: str) -> None:
-    """Raise 429 if the IP is currently locked out."""
-    record = _login_attempts.get(ip)
-    if record is None:
-        return
-    fail_count, lock_until = record
-    if fail_count >= _MAX_LOGIN_ATTEMPTS:
-        if time.time() < lock_until:
-            raise HTTPException(
-                status_code=429,
-                detail="Too many login attempts. Try again later.",
+def _database_unavailable_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "code": "DATABASE_UNAVAILABLE",
+            "message": "Project storage unavailable",
+        },
+    )
+
+
+def _rate_limited_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=AuthErrorResponse(
+            code=AuthErrorCode.RATE_LIMITED,
+            message="Too many authentication attempts. Try again later.",
+        ).model_dump(),
+        headers={
+            "Retry-After": str(_AUTH_RATE_LIMIT_RETRY_AFTER_SECONDS),
+        },
+    )
+
+
+async def _admit_auth_attempt(
+    action: AuthenticationRateLimitAction,
+    request: Request,
+) -> AuthenticationRateLimitAdmission:
+    """Atomically admit one public-auth attempt in shared PostgreSQL state."""
+
+    client_ip = _get_client_ip(request)
+    try:
+        factory = get_session_factory()
+    except RuntimeError:
+        raise _database_unavailable_error() from None
+    try:
+        async with factory() as session:
+            admission = await AuthenticationRateLimitRepository(session).admit_attempt(
+                action,
+                client_ip,
             )
-        del _login_attempts[ip]
+    except ProjectDatabaseUnavailable:
+        raise _database_unavailable_error() from None
+    if not admission.admitted:
+        raise _rate_limited_error()
+    return admission
 
 
-_MAX_TRACKED_IPS = 10000
+async def _clear_auth_attempts(
+    admission: AuthenticationRateLimitAdmission,
+) -> None:
+    """Clear a successful login's counter without affecting other actions."""
 
-
-def _record_login_failure(ip: str) -> None:
-    """Record a failed login attempt for the given IP."""
-    # Evict expired lockouts when dict grows too large
-    if len(_login_attempts) >= _MAX_TRACKED_IPS:
-        now = time.time()
-        expired = [k for k, (c, t) in _login_attempts.items() if c >= _MAX_LOGIN_ATTEMPTS and now >= t]
-        for k in expired:
-            del _login_attempts[k]
-        # If still too large, evict cheapest-to-lose half: below-threshold
-        # IPs (lock_until=0.0) sort first, then earliest-expiring lockouts.
-        if len(_login_attempts) >= _MAX_TRACKED_IPS:
-            by_time = sorted(_login_attempts.items(), key=lambda kv: kv[1][1])
-            for k, _ in by_time[: len(by_time) // 2]:
-                del _login_attempts[k]
-
-    record = _login_attempts.get(ip)
-    if record is None:
-        _login_attempts[ip] = (1, 0.0)
-    else:
-        new_count = record[0] + 1
-        lock_until = time.time() + _LOCKOUT_SECONDS if new_count >= _MAX_LOGIN_ATTEMPTS else 0.0
-        _login_attempts[ip] = (new_count, lock_until)
-
-
-def _record_login_success(ip: str) -> None:
-    """Clear failure counter for the given IP on successful login."""
-    _login_attempts.pop(ip, None)
+    try:
+        factory = get_session_factory()
+    except RuntimeError:
+        raise _database_unavailable_error() from None
+    try:
+        async with factory() as session:
+            await AuthenticationRateLimitRepository(session).clear(
+                admission,
+            )
+    except ProjectDatabaseUnavailable:
+        raise _database_unavailable_error() from None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
@@ -389,19 +402,22 @@ async def login_local(
     form_data: OAuth2PasswordRequestForm = Depends(),
 ):
     """Local email/password login."""
-    client_ip = _get_client_ip(request)
-    _check_rate_limit(client_ip)
+    admission = await _admit_auth_attempt(
+        AuthenticationRateLimitAction.LOGIN,
+        request,
+    )
 
     user = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password})
 
     if user is None:
-        _record_login_failure(client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect email or password").model_dump(),
         )
 
-    _record_login_success(client_ip)
+    await _clear_auth_attempts(
+        admission,
+    )
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request)
 
@@ -418,6 +434,10 @@ async def register(request: Request, response: Response, body: RegisterRequest):
     The first admin is created explicitly through /initialize. This endpoint creates regular users.
     Auto-login by setting the session cookie.
     """
+    await _admit_auth_attempt(
+        AuthenticationRateLimitAction.REGISTER,
+        request,
+    )
     try:
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
     except ValueError:

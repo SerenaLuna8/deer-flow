@@ -5,6 +5,7 @@ rs.mock("next/navigation", () => ({
   notFound: rs.fn(() => {
     throw new Error("NOT_FOUND");
   }),
+  usePathname: () => "/projects/alpha",
 }));
 rs.mock("@/components/projects/project-context", () => ({
   useCurrentProject: rs.fn(),
@@ -71,6 +72,12 @@ const project: Project = {
   agent_count: 0,
   skill_count: 0,
   mcp_count: 0,
+  quota_summary: {
+    members: { used: 1, reserved: 0, limit: 20 },
+    storage_bytes: { used: 0, reserved: 0, limit: 5_368_709_120 },
+    concurrent_runs: { used: 0, reserved: 0, limit: 3 },
+    mcp_calls_daily: { used: 0, reserved: 0, limit: 10_000 },
+  },
   status: "active",
   is_suspended: false,
   membership_version: 1,
@@ -112,8 +119,8 @@ describe("M6 project governance hook gates", () => {
     expect(useProjectAudit).not.toHaveBeenCalled();
   });
 
-  test("navigation mounts only the hook for its exact capability", () => {
-    render(
+  test("navigation exposes settings without mounting governance data hooks", () => {
+    const html = render(
       <ProjectDesktopNav
         project={{
           ...project,
@@ -122,7 +129,10 @@ describe("M6 project governance hook gates", () => {
         footer={<span>footer</span>}
       />,
     );
-    expect(useProjectUsage).toHaveBeenCalledTimes(1);
+    expect(html).toContain("项目设置");
+    expect(html).not.toContain("Usage");
+    expect(html).not.toContain("Audit");
+    expect(useProjectUsage).not.toHaveBeenCalled();
     expect(useProjectAudit).not.toHaveBeenCalled();
   });
 });

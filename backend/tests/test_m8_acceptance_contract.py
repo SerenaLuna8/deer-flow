@@ -93,11 +93,8 @@ _EXPECTED_MATRIX_DIMENSIONS = {
         "retention",
         "admin",
         "channel",
-        "archive",
-        "journal",
-        "restore_proof",
     ],
-    "scopes": ["account", "workspace", "project_shared", "project_private", "project_governance", "system_governance", "recovery"],
+    "scopes": ["account", "workspace", "project_shared", "project_private", "project_governance", "system_governance"],
     "ownerships": ["not_applicable", "own", "other_owner", "server_owned"],
     "operations": [
         "create",
@@ -173,7 +170,6 @@ def test_stage_manifest_is_closed_ordered_and_recursively_frozen() -> None:
         "host_setup",
         "chromium",
         "deepseek",
-        "recovery",
         "cleanup",
     ]
     with pytest.raises(ValidationError):

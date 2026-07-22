@@ -220,14 +220,14 @@ start() {
     # Only aio mode (AioSandboxProvider without provisioner_url) needs the host
     # Docker socket. Mount it via the opt-in docker-compose.dood.yaml overlay so
     # the default (local) and provisioner modes never expose the host daemon.
-    # Mounting the socket = root-equivalent host control; see SECURITY.md.
+    # Mounting the socket grants root-equivalent control over the host daemon.
     if [ "$sandbox_mode" = "aio" ]; then
         local docker_socket="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
         if [ ! -S "$docker_socket" ]; then
             echo -e "${YELLOW}⚠ Docker socket not found at $docker_socket — AioSandboxProvider (DooD) will not work.${NC}"
             exit 1
         fi
-        echo -e "${YELLOW}Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
+        echo -e "${YELLOW}Mounting host Docker socket into gateway (DooD = host root-equivalent).${NC}"
         COMPOSE_CMD="$COMPOSE_CMD -f $DOCKER_DIR/docker-compose.dood.yaml"
     fi
 

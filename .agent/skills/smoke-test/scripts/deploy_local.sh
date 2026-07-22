@@ -21,13 +21,7 @@ echo ""
 
 # Check the .env file
 if [ ! -f ".env" ]; then
-    echo ".env does not exist. Copying it from the example..."
-    if [ -f ".env.example" ]; then
-        cp .env.example .env
-        echo "✓ Created the .env file"
-    else
-        echo "⚠  .env.example does not exist. Please create the .env file manually"
-    fi
+    echo "⚠  .env does not exist. Run 'make setup' or provide the required variables through the process environment"
 else
     echo "✓ .env file exists"
 fi

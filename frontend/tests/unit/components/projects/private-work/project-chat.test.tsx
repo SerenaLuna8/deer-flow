@@ -30,6 +30,12 @@ const project: Project = {
   agent_count: 1,
   skill_count: 0,
   mcp_count: 0,
+  quota_summary: {
+    members: { used: 1, reserved: 0, limit: 20 },
+    storage_bytes: { used: 0, reserved: 0, limit: 5_368_709_120 },
+    concurrent_runs: { used: 0, reserved: 0, limit: 3 },
+    mcp_calls_daily: { used: 0, reserved: 0, limit: 10_000 },
+  },
   status: "active",
   is_suspended: false,
   membership_version: 1,
@@ -46,13 +52,13 @@ describe("project chat route", () => {
     expect(scope.canUpload).toBe(true);
     expect(scope.canDelete).toBe(true);
     expect(scope.automationVisible).toBe(false);
-    expect(scope.goalVisible).toBe(false);
-    expect(scope.compactVisible).toBe(false);
-    expect(scope.branchVisible).toBe(false);
-    expect(scope.regenerateVisible).toBe(false);
+    expect(scope.goalVisible).toBe(true);
+    expect(scope.compactVisible).toBe(true);
+    expect(scope.branchVisible).toBe(true);
+    expect(scope.regenerateVisible).toBe(true);
     expect(scope.sidecarVisible).toBe(true);
     expect(scope.artifactsVisible).toBe(true);
-    expect(scope.followupSuggestionsEnabled).toBe(false);
+    expect(scope.followupSuggestionsEnabled).toBe(true);
   });
 
   test("uses only the project Automation route when every Chat entry gate is open", () => {
@@ -226,21 +232,28 @@ describe("project chat route", () => {
     };
     const scope = projectChatRouteScope(viewer);
     expect(scope.canUpload).toBe(false);
+    expect(scope.goalVisible).toBe(true);
+    expect(scope.compactVisible).toBe(false);
+    expect(scope.branchVisible).toBe(false);
+    expect(scope.regenerateVisible).toBe(false);
     expect(scope.sidecarVisible).toBe(false);
     expect(scope.artifactsVisible).toBe(true);
+    expect(scope.followupSuggestionsEnabled).toBe(false);
   });
 
-  test("project list uses the scoped delete hook without nesting actions in links", () => {
+  test("persistent conversation rail protects scoped deletion outside the thread link", () => {
     const source = readFileSync(
       resolve(
         process.cwd(),
-        "src/components/projects/private-work/project-chats-page.tsx",
+        "src/components/projects/private-work/project-conversation-rail.tsx",
       ),
       "utf8",
     );
     expect(source).toContain("usePrivateWorkAccess");
     expect(source).toContain("useDeleteThread(privateWork)");
-    expect(source).toContain("aria-label={`删除 ${titleOfThread(thread)}`}");
+    expect(source).toContain("ProjectThreadDeleteDialog");
+    expect(source).toContain("deleteThread.mutateAsync");
+    expect(source).toContain("aria-label={`删除 ${title}`}");
     expect(source).toMatch(/<\/Link>\s*\{canDelete && \(/u);
   });
 });

@@ -24,8 +24,6 @@ EXPECTED_M1_M7_GATE = (
     "tests/test_m6_audit_redaction.py",
     "tests/test_m6_audit_integration_postgres.py",
     "tests/test_m6_retention_purge_postgres.py",
-    "tests/test_m7_backup_restore_postgres.py",
-    "tests/test_m6_restore_postgres.py",
     "tests/test_m6_worker_crash_recovery_postgres.py",
     "tests/test_m6_gateway_reconnect_process.py",
     "tests/test_m7_process_boundary.py",

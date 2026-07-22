@@ -62,7 +62,9 @@ async def test_project_api_and_repository_enforce_account_isolation(
         audit_service,
         process_context=_bind_gateway_audit_process(audit_service),
     )
-    app.state.project_quota_enforcer = ProjectQuotaEnforcer(QuotaService(factory, QuotaConfig(), source_ref_hasher=audit_keyring))
+    quota_service = QuotaService(factory, QuotaConfig(), source_ref_hasher=audit_keyring)
+    app.state.project_quota_service = quota_service
+    app.state.project_quota_enforcer = ProjectQuotaEnforcer(quota_service)
 
     def headers(name: str) -> dict[str, str]:
         return {"x-test-user": str(users[name])}

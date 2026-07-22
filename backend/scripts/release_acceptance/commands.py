@@ -40,7 +40,6 @@ _BACKEND_TEST_ENVIRONMENT = frozenset(
         "DEEPSEEK_API_KEY",
         "DEER_FLOW_AUDIT_ACTIVE_KEY_ID",
         "DEER_FLOW_AUDIT_KEYRING_JSON",
-        "DEER_FLOW_BACKUP_KEY",
         "DEER_FLOW_CONFIG_PATH",
         "DEER_FLOW_HOME",
     }
@@ -345,7 +344,6 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec(command_id="host.make_start", stage=StageId.HOST_SETUP, argv=("make", "start"), cwd="root", timeout_seconds=900, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
     CommandSpec(command_id="chromium.host_journey", stage=StageId.CHROMIUM, argv=("internal", "chromium-host-journey"), cwd="root", timeout_seconds=1800, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
     CommandSpec(command_id="deepseek.live_journey", stage=StageId.DEEPSEEK, argv=("internal", "deepseek-live-journey"), cwd="root", timeout_seconds=1800, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
-    CommandSpec(command_id="recovery.full_switch", stage=StageId.RECOVERY, argv=("internal", "recovery-full-switch"), cwd="root", timeout_seconds=3600, allowed_environment=frozenset(), summary_parser="exit_code", execution="host"),
     CommandSpec(
         command_id="cleanup.evidence_log_security", stage=StageId.CLEANUP, argv=("internal", "evidence-log-security"), cwd="root", timeout_seconds=600, allowed_environment=frozenset(), summary_parser="exit_code", execution="cleanup"
     ),
@@ -356,12 +354,6 @@ DIAGNOSTIC_STAGE_SEQUENCES: tuple[tuple[StageId, ...], ...] = (
     (StageId.HOST_SETUP,),
     (StageId.HOST_SETUP, StageId.CHROMIUM),
     (StageId.HOST_SETUP, StageId.CHROMIUM, StageId.DEEPSEEK),
-    (
-        StageId.HOST_SETUP,
-        StageId.CHROMIUM,
-        StageId.DEEPSEEK,
-        StageId.RECOVERY,
-    ),
 )
 
 

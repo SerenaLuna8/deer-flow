@@ -22,8 +22,11 @@ from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 if TYPE_CHECKING:
-    from app.recovery.journal import TombstoneReceipt
-    from app.recovery.purge import RetentionCandidate, RetentionPurger
+    from app.private_work.retention_purge import (
+        RetentionCandidate,
+        RetentionPurger,
+        RetentionPurgeResult,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,8 +46,8 @@ class PrivateWorkRetentionService:
         candidate: RetentionCandidate,
         *,
         now: datetime | None = None,
-    ) -> TombstoneReceipt:
-        """Enter the recovery-owned, journal-first physical purge boundary."""
+    ) -> RetentionPurgeResult:
+        """Enter the transactional physical-purge boundary for expired data."""
 
         return await purger.purge(candidate, now=now)
 

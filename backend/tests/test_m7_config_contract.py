@@ -19,6 +19,22 @@ LEGACY_CONFIG_TOMBSTONES = (
     "mcp_config_path",
     "legacy_run_store",
     "legacy_event_store",
+    "recovery",
+    "skill_evolution",
+    "skill_scan",
+)
+
+LEGACY_CONFIG_PATH_TOMBSTONES = (
+    "uploads.max_files",
+    "uploads.max_file_size",
+    "uploads.max_total_size",
+    "uploads.auto_convert_documents",
+    "scheduler.lease_seconds",
+    "worker.default_max_attempts",
+    "quotas.max_member_limit",
+    "quotas.max_storage_bytes_limit",
+    "quotas.max_concurrent_run_limit",
+    "quotas.max_mcp_calls_daily_limit",
 )
 
 
@@ -30,6 +46,20 @@ def test_legacy_config_tombstones_are_rejected(key: str, value: object) -> None:
             {
                 "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
                 key: value,
+            }
+        )
+
+
+@pytest.mark.parametrize("value", (False, None))
+@pytest.mark.parametrize("field_path", LEGACY_CONFIG_PATH_TOMBSTONES)
+def test_legacy_nested_config_tombstones_are_rejected(field_path: str, value: object) -> None:
+    section, key = field_path.split(".", 1)
+
+    with pytest.raises(ValidationError, match=rf"LEGACY_CONFIG_REMOVED: {field_path}"):
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                section: {key: value},
             }
         )
 
@@ -109,6 +139,9 @@ def test_missing_canonical_config_fails_without_cwd_or_home_probe(
         "deerflow.config.agents_api_config",
         "deerflow.config.run_events_config",
         "deerflow.config.stream_bridge_config",
+        "deerflow.config.recovery_config",
+        "deerflow.config.skill_evolution_config",
+        "deerflow.config.skill_scan_config",
         "deerflow.runtime.events.store.memory",
         "deerflow.runtime.runs.store.memory",
         "deerflow.runtime.stream_bridge",
@@ -148,6 +181,13 @@ def test_serve_exports_valid_explicit_or_repo_root_config() -> None:
     assert "DEER_FLOW_CONFIG_PATH does not name a file" in source
 
 
+def test_serve_does_not_upgrade_config_implicitly() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "scripts/serve.sh").read_text(encoding="utf-8")
+
+    assert "config-upgrade.sh" not in source
+
+
 def test_config_upgrade_uses_explicit_path_before_repo_root() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     source = (repo_root / "scripts/config-upgrade.sh").read_text(encoding="utf-8")
@@ -156,3 +196,23 @@ def test_config_upgrade_uses_explicit_path_before_repo_root() -> None:
     repo_root_fallback = source.index('CONFIG="$REPO_ROOT/config.yaml"')
     assert explicit_branch < repo_root_fallback
     assert "DEER_FLOW_CONFIG_PATH does not name a file" in source
+
+
+def test_config_upgrade_removes_retired_recovery_section() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "scripts/config-upgrade.sh").read_text(encoding="utf-8")
+
+    assert "24: {" in source
+    assert "'remove_keys': ['recovery']" in source
+    assert "user.pop(key)" in source
+
+
+def test_config_upgrade_removes_retired_nested_fields() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "scripts/config-upgrade.sh").read_text(encoding="utf-8")
+
+    assert "25: {" in source
+    assert "'remove_paths': [" in source
+    assert "'remove_keys': ['skill_evolution', 'skill_scan']" in source
+    for field_path in LEGACY_CONFIG_PATH_TOMBSTONES:
+        assert repr(field_path) in source

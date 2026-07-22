@@ -24,13 +24,13 @@ helm install deer-flow deploy/helm/deer-flow \
 - Gateway owns HTTP admission, queries and SSE reading.
 - Worker owns Agent graph execution and durable stream writing.
 - Scheduler, when enabled, owns its PostgreSQL session lock and Automation polling.
-- PostgreSQL is authoritative for private work, jobs, streams, quota, audit and recovery state.
+- PostgreSQL is authoritative for private work, jobs, streams, quota and audit state.
 
 Horizontal scaling uses the same PostgreSQL authority and process readiness probes.
 
-## Storage and backup
+## Storage
 
-Sandbox/object bytes may use configured persistent storage, but project metadata and Memory remain in PostgreSQL. Use the root backup/restore commands for authenticated encrypted archives, external tombstone journal replay and new-database restore proof.
+Sandbox/object bytes may use configured persistent storage, while project metadata and Memory remain in PostgreSQL.
 
 ## Upgrade
 

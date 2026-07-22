@@ -1,19 +1,21 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { beforeEach, describe, expect, test, rs } from "@rstest/core";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
   approveProjectMcpVersion,
   createAdminAssetVersion,
-  createAdminCredential,
   createProjectAssetVersion,
-  createProjectCredential,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
+  forkProjectSkillVersion,
+  getProjectSkillVersionFile,
   listAdminAssetVersions,
   listProjectAssetVersions,
   listSystemAssetCatalog,
   publishProjectAssetVersion,
-  replaceProjectCredential,
   revokeProjectCredential,
   rollbackProjectSystemBinding,
   submitProjectMcpVersion,
@@ -24,17 +26,15 @@ import {
   useApproveAdminMcpVersion,
   useApproveProjectMcpVersion,
   useCreateAdminAssetVersion,
-  useCreateAdminCredential,
   useCreateProjectAssetVersion,
-  useCreateProjectCredential,
   useDisableProjectSystemBinding,
   useEnableProjectSystemBinding,
+  useForkProjectSkillVersion,
   useProjectAssetVersions,
+  useProjectSkillVersionFile,
   useSystemAssetCatalog,
   usePublishAdminAssetVersion,
   usePublishProjectAssetVersion,
-  useReplaceAdminCredential,
-  useReplaceProjectCredential,
   useRevokeAdminCredential,
   useRevokeProjectCredential,
   useRollbackProjectSystemBinding,
@@ -55,12 +55,12 @@ rs.mock("@/core/shared-assets/api", () => ({
   changeProjectAssetStatus: rs.fn(),
   createAdminAsset: rs.fn(),
   createAdminAssetVersion: rs.fn(),
-  createAdminCredential: rs.fn(),
   createProjectAsset: rs.fn(),
   createProjectAssetVersion: rs.fn(),
-  createProjectCredential: rs.fn(),
   disableProjectSystemBinding: rs.fn(),
   enableProjectSystemBinding: rs.fn(),
+  forkProjectSkillVersion: rs.fn(),
+  getProjectSkillVersionFile: rs.fn(),
   listAdminAssetVersions: rs.fn(),
   listAdminAssets: rs.fn(),
   listProjectAssetVersions: rs.fn(),
@@ -68,8 +68,6 @@ rs.mock("@/core/shared-assets/api", () => ({
   listSystemAssetCatalog: rs.fn(),
   publishAdminAssetVersion: rs.fn(),
   publishProjectAssetVersion: rs.fn(),
-  replaceAdminCredential: rs.fn(),
-  replaceProjectCredential: rs.fn(),
   revokeAdminCredential: rs.fn(),
   revokeProjectCredential: rs.fn(),
   rollbackProjectSystemBinding: rs.fn(),
@@ -103,16 +101,15 @@ beforeEach(() => {
   for (const api of [
     approveProjectMcpVersion,
     createAdminAssetVersion,
-    createAdminCredential,
     createProjectAssetVersion,
-    createProjectCredential,
     disableProjectSystemBinding,
     enableProjectSystemBinding,
+    forkProjectSkillVersion,
+    getProjectSkillVersionFile,
     listAdminAssetVersions,
     listProjectAssetVersions,
     listSystemAssetCatalog,
     publishProjectAssetVersion,
-    replaceProjectCredential,
     revokeProjectCredential,
     rollbackProjectSystemBinding,
     submitProjectMcpVersion,
@@ -123,6 +120,99 @@ beforeEach(() => {
 });
 
 describe("shared asset hooks", () => {
+  test("never exposes secret-bearing Credential create or replace TanStack hooks", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/core/shared-assets/hooks.ts"),
+      "utf8",
+    );
+    for (const hook of [
+      "useCreateProjectCredential",
+      "useCreateAdminCredential",
+      "useReplaceProjectCredential",
+      "useReplaceAdminCredential",
+    ]) {
+      expect(source).not.toContain(`export function ${hook}`);
+    }
+  });
+
+  test("loads Skill source with an abortable fully isolated ephemeral key", async () => {
+    const signal = new AbortController().signal;
+    const source = useProjectSkillVersionFile(
+      accountId,
+      projectId,
+      assetId,
+      versionId,
+      "SKILL.md",
+    ) as unknown as QueryConfig & { gcTime: number; enabled: boolean };
+
+    await source.queryFn({ signal });
+
+    expect(source.queryKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "skills",
+      "asset",
+      assetId,
+      "versions",
+      "version",
+      versionId,
+      "file",
+      "SKILL.md",
+    ]);
+    expect(source.gcTime).toBe(0);
+    expect(source.enabled).toBe(true);
+    expect(getProjectSkillVersionFile).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      versionId,
+      "SKILL.md",
+      signal,
+    );
+  });
+
+  test("forks a project Skill as a new version and invalidates only its project catalog", async () => {
+    const fork = mutation(useForkProjectSkillVersion(accountId, projectId));
+    const input = {
+      expected_asset_version: 3,
+      expected_source_payload_checksum: "d".repeat(64),
+      changes: [
+        {
+          op: "replace" as const,
+          path: "SKILL.md",
+          content: "# Updated",
+          media_type: "text/markdown",
+        },
+      ],
+    };
+
+    await fork.mutationFn({
+      assetId,
+      sourceVersionId: versionId,
+      input,
+    } as never);
+    await fork.onSuccess();
+
+    expect(forkProjectSkillVersion).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      versionId,
+      input,
+    );
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "skills",
+      ],
+    });
+  });
+
   test("loads the authenticated system catalog with an account-scoped key", async () => {
     const signal = new AbortController().signal;
     const catalog = useSystemAssetCatalog(
@@ -183,7 +273,7 @@ describe("shared asset hooks", () => {
     );
   });
 
-  test("wires typed version and write-only credential authoring hooks", async () => {
+  test("wires typed version authoring hooks", async () => {
     const agentInput = {
       description: "Writer",
       soul: "Be precise",
@@ -193,23 +283,12 @@ describe("shared asset hooks", () => {
       mcp_version_ids: [],
       expected_asset_version: 1,
     };
-    const credentialInput = {
-      name: "github",
-      display_name: "GitHub",
-      credential_type: "token",
-      payload: { env: { TOKEN: "write-only" } },
-    };
     const projectVersion = mutation(
       useCreateProjectAssetVersion(accountId, projectId, "agents"),
     );
     const adminVersion = mutation(
       useCreateAdminAssetVersion(accountId, "mcp-servers"),
     );
-    const projectCredential = mutation(
-      useCreateProjectCredential(accountId, projectId),
-    );
-    const adminCredential = mutation(useCreateAdminCredential(accountId));
-
     await projectVersion.mutationFn({ assetId, input: agentInput } as never);
     await adminVersion.mutationFn({
       assetId,
@@ -229,8 +308,6 @@ describe("shared asset hooks", () => {
         expected_asset_version: 1,
       },
     } as never);
-    await projectCredential.mutationFn(credentialInput as never);
-    await adminCredential.mutationFn(credentialInput as never);
     await projectVersion.onSuccess();
 
     expect(createProjectAssetVersion).toHaveBeenCalledWith(
@@ -247,12 +324,7 @@ describe("shared asset hooks", () => {
         expected_asset_version: 1,
       }),
     );
-    expect(createProjectCredential).toHaveBeenCalledWith(
-      projectId,
-      credentialInput,
-    );
-    expect(createAdminCredential).toHaveBeenCalledWith(credentialInput);
-    expect(client.invalidateQueries).toHaveBeenLastCalledWith({
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
       queryKey: [
         "account",
         accountId,
@@ -262,13 +334,15 @@ describe("shared asset hooks", () => {
         "agents",
       ],
     });
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["account", accountId, "projects"],
+    });
   });
 
   test("wires project lifecycle and binding mutations to scope-local invalidation", async () => {
     const publish = mutation(
       usePublishProjectAssetVersion(accountId, projectId, "agents"),
     );
-    const replace = mutation(useReplaceProjectCredential(accountId, projectId));
     const revoke = mutation(useRevokeProjectCredential(accountId, projectId));
     const submit = mutation(useSubmitProjectMcpVersion(accountId, projectId));
     const approve = mutation(useApproveProjectMcpVersion(accountId, projectId));
@@ -289,13 +363,6 @@ describe("shared asset hooks", () => {
       assetId,
       versionId,
       input: { expected_asset_version: 1 },
-    } as never);
-    await replace.mutationFn({
-      credentialId: assetId,
-      input: {
-        payload: { env: { TOKEN: "write-only" } },
-        expected_credential_version: 1,
-      },
     } as never);
     await revoke.mutationFn({
       credentialId: assetId,
@@ -331,7 +398,6 @@ describe("shared asset hooks", () => {
     await disable.onSuccess();
 
     expect(publishProjectAssetVersion).toHaveBeenCalled();
-    expect(replaceProjectCredential).toHaveBeenCalled();
     expect(revokeProjectCredential).toHaveBeenCalled();
     expect(submitProjectMcpVersion).toHaveBeenCalled();
     expect(approveProjectMcpVersion).toHaveBeenCalled();
@@ -339,7 +405,7 @@ describe("shared asset hooks", () => {
     expect(upgradeProjectSystemBinding).toHaveBeenCalled();
     expect(rollbackProjectSystemBinding).toHaveBeenCalled();
     expect(disableProjectSystemBinding).toHaveBeenCalled();
-    expect(client.invalidateQueries).toHaveBeenLastCalledWith({
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
       queryKey: [
         "account",
         accountId,
@@ -349,12 +415,14 @@ describe("shared asset hooks", () => {
         "agents",
       ],
     });
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["account", accountId, "projects"],
+    });
   });
 
   test("exports the admin lifecycle hooks", () => {
     for (const hook of [
       usePublishAdminAssetVersion,
-      useReplaceAdminCredential,
       useRevokeAdminCredential,
       useSubmitAdminMcpVersion,
       useApproveAdminMcpVersion,

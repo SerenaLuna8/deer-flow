@@ -547,14 +547,7 @@ skills:
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
 
-Skill installs and agent-managed skill writes also run through native deterministic SkillScan before the LLM scanner:
-
-```yaml
-skill_scan:
-  enabled: true
-```
-
-Set `skill_scan.enabled: false` to disable only the deterministic analyzers. Safe archive extraction and the LLM-based skill scanner still run.
+Skill installs and agent-managed skill writes always run through native deterministic SkillScan before the LLM scanner. This mandatory security boundary is not configurable.
 
 **Per-Agent Skill Filtering**:
 Custom agents can restrict which skills they load by defining a `skills` field in their `config.yaml` (located at `workspace/agents/<agent_name>/config.yaml`):

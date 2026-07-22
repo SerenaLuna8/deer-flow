@@ -17,7 +17,7 @@ Gateway 只公开认证账户、项目和平台管理 API。除公开认证入�
 | `/api/projects/{project_id}/automations` | project + owner | Automation definition、occurrence 和手动触发 |
 | `/api/projects/{project_id}/usage` | project | 配额策略与用量 |
 | `/api/projects/{project_id}/audit` | project | 脱敏审计查询 |
-| `/api/admin/*` | system admin | 平台资产、readiness、job、审计和恢复运维 |
+| `/api/admin/*` | system admin | 平台资产、readiness、job 和审计运维 |
 
 ## 错误契约
 

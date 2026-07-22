@@ -12,6 +12,7 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,6 +25,7 @@ from deerflow.persistence.channel_connections.model import (
     ChannelCredentialRow,
     ChannelOAuthStateRow,
 )
+from deerflow.persistence.projects.model import ProjectMembershipRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.utils.time import coerce_iso
 
@@ -590,18 +592,31 @@ class ChannelConnectionRepository:
     ) -> dict[str, Any] | None:
         async with self.session_factory() as session:
             result = await session.execute(
-                select(ChannelConnectionRow)
+                select(
+                    ChannelConnectionRow,
+                    ProjectMembershipRow.version.label("membership_version"),
+                )
+                .join(
+                    ProjectMembershipRow,
+                    (ProjectMembershipRow.project_id == ChannelConnectionRow.project_id) & (ProjectMembershipRow.user_id == ChannelConnectionRow.owner_user_id),
+                )
                 .where(
                     ChannelConnectionRow.provider == provider,
                     ChannelConnectionRow.external_account_id == self._normalize_optional_identity(external_account_id),
                     ChannelConnectionRow.workspace_id == self._normalize_optional_identity(workspace_id),
                     ChannelConnectionRow.status == "connected",
+                    ProjectMembershipRow.status == "active",
                 )
                 .order_by(ChannelConnectionRow.updated_at.desc(), ChannelConnectionRow.id.desc())
                 .limit(1)
             )
-            row = result.scalar_one_or_none()
-            return self._connection_to_dict(row) if row is not None else None
+            resolved = result.one_or_none()
+            if resolved is None:
+                return None
+            row, membership_version = resolved
+            data = self._connection_to_dict(row)
+            data["membership_version"] = int(membership_version)
+            return data
 
     async def set_thread_id(
         self,
@@ -629,16 +644,9 @@ class ChannelConnectionRepository:
             ).scalar_one_or_none()
             if connection is None:
                 return False
-            stmt = select(ChannelConversationRow).where(
-                ChannelConversationRow.project_id == project_id,
-                ChannelConversationRow.owner_user_id == owner_user_id,
-                ChannelConversationRow.connection_id == connection_id,
-                ChannelConversationRow.external_conversation_id == external_conversation_id,
-                ChannelConversationRow.external_topic_id == topic_id,
-            )
-            row = (await session.execute(stmt)).scalar_one_or_none()
-            if row is None:
-                row = ChannelConversationRow(
+            insert_result = await session.execute(
+                pg_insert(ChannelConversationRow)
+                .values(
                     id=self._new_id(),
                     project_id=project_id,
                     connection_id=connection_id,
@@ -648,12 +656,34 @@ class ChannelConnectionRepository:
                     external_topic_id=topic_id,
                     thread_id=thread_id,
                 )
-                session.add(row)
-            else:
-                row.thread_id = thread_id
-                row.provider = provider
-            await session.commit()
-            return True
+                .on_conflict_do_nothing(
+                    constraint="uq_channel_conversation_connection_external",
+                )
+                .returning(ChannelConversationRow.id)
+            )
+            if insert_result.scalar_one_or_none() is not None:
+                await session.commit()
+                return True
+
+            # Another process already owns this exact provider conversation.
+            # Identical retries are idempotent; a different Thread never
+            # silently remaps established private work.
+            existing = (
+                await session.execute(
+                    select(
+                        ChannelConversationRow.provider,
+                        ChannelConversationRow.thread_id,
+                    ).where(
+                        ChannelConversationRow.project_id == project_id,
+                        ChannelConversationRow.owner_user_id == owner_user_id,
+                        ChannelConversationRow.connection_id == connection_id,
+                        ChannelConversationRow.external_conversation_id == external_conversation_id,
+                        ChannelConversationRow.external_topic_id == topic_id,
+                    )
+                )
+            ).one_or_none()
+            await session.rollback()
+            return existing is not None and existing[0] == provider and existing[1] == thread_id
 
     async def get_thread_id(
         self,
@@ -662,14 +692,82 @@ class ChannelConnectionRepository:
         connection_id: str,
         external_conversation_id: str,
         external_topic_id: str | None = None,
+        provider: str | None = None,
     ) -> str | None:
         project_id, owner_user_id = self._coordinates(scope)
         async with self.session_factory() as session:
-            stmt = select(ChannelConversationRow.thread_id).where(
+            conditions = [
                 ChannelConversationRow.project_id == project_id,
                 ChannelConversationRow.owner_user_id == owner_user_id,
                 ChannelConversationRow.connection_id == connection_id,
                 ChannelConversationRow.external_conversation_id == external_conversation_id,
                 ChannelConversationRow.external_topic_id == (external_topic_id or ""),
-            )
+            ]
+            if provider is not None:
+                conditions.append(ChannelConversationRow.provider == provider)
+            stmt = select(ChannelConversationRow.thread_id).where(*conditions)
             return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def remove_thread_ids(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        connection_id: str,
+        provider: str,
+        external_conversation_id: str,
+        external_topic_id: str | None = None,
+    ) -> bool:
+        """Delete one topic mapping, or every topic for one conversation."""
+        project_id, owner_user_id = self._coordinates(scope)
+        conditions = [
+            ChannelConversationRow.project_id == project_id,
+            ChannelConversationRow.owner_user_id == owner_user_id,
+            ChannelConversationRow.connection_id == connection_id,
+            ChannelConversationRow.provider == provider,
+            ChannelConversationRow.external_conversation_id == external_conversation_id,
+        ]
+        if external_topic_id is not None:
+            conditions.append(ChannelConversationRow.external_topic_id == external_topic_id)
+        async with self.session_factory() as session:
+            result = await session.execute(delete(ChannelConversationRow).where(*conditions))
+            await session.commit()
+            return bool(result.rowcount)
+
+    async def list_thread_ids(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        connection_id: str,
+        provider: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List mappings for one exact private connection."""
+        project_id, owner_user_id = self._coordinates(scope)
+        conditions = [
+            ChannelConversationRow.project_id == project_id,
+            ChannelConversationRow.owner_user_id == owner_user_id,
+            ChannelConversationRow.connection_id == connection_id,
+        ]
+        if provider is not None:
+            conditions.append(ChannelConversationRow.provider == provider)
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(ChannelConversationRow)
+                .where(*conditions)
+                .order_by(
+                    ChannelConversationRow.created_at.asc(),
+                    ChannelConversationRow.id.asc(),
+                )
+            )
+            entries: list[dict[str, Any]] = []
+            for row in result.scalars():
+                entry: dict[str, Any] = {
+                    "channel_name": row.provider,
+                    "chat_id": row.external_conversation_id,
+                    "thread_id": row.thread_id,
+                    "created_at": self._coerce_datetime(row.created_at),
+                    "updated_at": self._coerce_datetime(row.updated_at),
+                }
+                if row.external_topic_id:
+                    entry["topic_id"] = row.external_topic_id
+                entries.append(entry)
+            return entries

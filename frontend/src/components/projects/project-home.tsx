@@ -1,4 +1,11 @@
-import { BotIcon, PlugZapIcon, SparklesIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  BotIcon,
+  PlugZapIcon,
+  SparklesIcon,
+} from "lucide-react";
+import Link from "next/link";
 
 import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
@@ -8,57 +15,97 @@ import { ProjectHeader } from "./project-header";
 import { ProjectPrivateWorkCta } from "./project-private-work-cta";
 
 const assets = [
-  { key: "agent", label: "共享 Agent", icon: BotIcon },
-  { key: "skill", label: "共享 Skill", icon: SparklesIcon },
-  { key: "mcp", label: "共享 MCP", icon: PlugZapIcon },
+  {
+    key: "agent",
+    label: "共享 Agent",
+    description: "选择、发布或启用项目可执行 Agent",
+    path: "agents",
+    countKey: "agent_count",
+    icon: BotIcon,
+  },
+  {
+    key: "skill",
+    label: "共享 Skill",
+    description: "维护项目成员共同使用的能力快照",
+    path: "skills",
+    countKey: "skill_count",
+    icon: SparklesIcon,
+  },
+  {
+    key: "mcp",
+    label: "共享 MCP",
+    description: "配置项目内可复用的工具连接定义",
+    path: "mcp",
+    countKey: "mcp_count",
+    icon: PlugZapIcon,
+  },
 ] as const;
 
 export function ProjectHome({ project }: { project: Project }) {
-  const counts = {
-    agent: project.agent_count,
-    skill: project.skill_count,
-    mcp: project.mcp_count,
-  };
+  const base = `/projects/${encodeURIComponent(project.slug)}`;
   return (
     <div data-testid="project-home" className="bg-background min-h-screen">
       <ProjectHeader project={project} />
       <main className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
+        <div>
+          <Link
+            href="/workspace"
+            className="text-muted-foreground hover:text-foreground inline-flex items-center gap-2 text-sm transition-colors"
+          >
+            <ArrowLeftIcon aria-hidden className="size-4" />
+            返回工作空间
+          </Link>
+        </div>
+        <ProjectPrivateWorkCta project={project} />
+        {PROJECT_PRIVATE_WORKSPACE &&
+          project.capabilities.includes("private_work.read_own") && (
+            <RecentPrivateWork project={project} />
+          )}
         <section className="border-primary/20 bg-primary/5 rounded-2xl border p-5">
           <h2 className="font-semibold">项目隐私边界</h2>
           <p className="text-muted-foreground mt-2 text-sm">
             对话和记忆私有，Agent、Skill 和 MCP 共享。
           </p>
         </section>
-        <section>
-          <div className="mb-4">
-            <h2 className="text-xl font-semibold">共享资产</h2>
-            <p className="text-muted-foreground mt-1 text-sm">
-              资产管理将在后续里程碑开放。
-            </p>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-3">
-            {assets.map(({ key, label, icon: Icon }) => (
-              <div
-                key={key}
-                className="border-border/70 bg-card rounded-xl border p-5"
-              >
-                <Icon className="text-primary mb-4" size={22} />
-                <div className="flex items-end justify-between gap-3">
-                  <span className="font-medium">{label}</span>
-                  <span className="text-2xl font-semibold">{counts[key]}</span>
-                </div>
-                <span className="text-muted-foreground mt-3 block text-xs">
-                  后续里程碑
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
-        {PROJECT_PRIVATE_WORKSPACE &&
-          project.capabilities.includes("private_work.read_own") && (
-            <RecentPrivateWork project={project} />
-          )}
-        <ProjectPrivateWorkCta project={project} />
+        {project.capabilities.includes("shared_assets.read") && (
+          <section>
+            <div className="mb-4">
+              <h2 className="text-xl font-semibold">共享资产</h2>
+              <p className="text-muted-foreground mt-1 text-sm">
+                查看当前项目可用的 Agent、Skill 和 MCP。
+              </p>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-3">
+              {assets.map(
+                ({ key, label, description, path, countKey, icon: Icon }) => (
+                  <Link
+                    key={key}
+                    href={`${base}/${path}`}
+                    className="border-border/70 bg-card hover:border-primary/40 hover:bg-accent/30 focus-visible:ring-ring group rounded-xl border p-5 transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <Icon className="text-primary" size={22} />
+                      <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
+                        <strong className="text-foreground text-2xl leading-none font-semibold tabular-nums">
+                          {project[countKey]}
+                        </strong>
+                        个可用
+                        <ArrowRightIcon
+                          aria-hidden
+                          className="group-hover:text-primary size-4 transition-colors"
+                        />
+                      </span>
+                    </div>
+                    <span className="mt-5 block font-medium">{label}</span>
+                    <span className="text-muted-foreground mt-2 block text-sm">
+                      {description}
+                    </span>
+                  </Link>
+                ),
+              )}
+            </div>
+          </section>
+        )}
       </main>
     </div>
   );

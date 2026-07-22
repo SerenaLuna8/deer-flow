@@ -32,6 +32,12 @@ const project: Project = {
   agent_count: 0,
   skill_count: 0,
   mcp_count: 0,
+  quota_summary: {
+    members: { used: 2, reserved: 0, limit: 20 },
+    storage_bytes: { used: 0, reserved: 0, limit: 5_368_709_120 },
+    concurrent_runs: { used: 0, reserved: 0, limit: 3 },
+    mcp_calls_daily: { used: 0, reserved: 0, limit: 10_000 },
+  },
   status: "active",
   is_suspended: false,
   membership_version: 4,

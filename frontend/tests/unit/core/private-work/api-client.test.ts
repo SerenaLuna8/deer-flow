@@ -68,6 +68,8 @@ describe("project private-work API client", () => {
             status: "idle",
             metadata: {},
             version: 1,
+            created_at: "2026-07-21T06:00:00Z",
+            updated_at: "2026-07-21T06:00:00Z",
           }),
           {
             status: 201,

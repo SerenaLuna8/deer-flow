@@ -31,13 +31,6 @@ export interface M8LiveBrowserResult {
   private_denials: number;
 }
 
-export interface M8RecoveryBrowserResult {
-  schema_version: 1;
-  phase: "restore" | "source";
-  boundaries_passed: number;
-  failures: number;
-}
-
 async function writeOwnedResult(result: object): Promise<void> {
   const rootValue = process.env.M8_BROWSER_OUTPUT_ROOT;
   const targetValue = process.env.M8_BROWSER_RESULT_PATH;
@@ -69,12 +62,6 @@ async function writeOwnedResult(result: object): Promise<void> {
 
 export async function writeBrowserResult(
   result: M8BrowserResult,
-): Promise<void> {
-  await writeOwnedResult(result);
-}
-
-export async function writeRecoveryBrowserResult(
-  result: M8RecoveryBrowserResult,
 ): Promise<void> {
   await writeOwnedResult(result);
 }

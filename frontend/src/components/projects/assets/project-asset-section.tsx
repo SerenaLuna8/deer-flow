@@ -60,11 +60,11 @@ export function ProjectAssetSection({
                     <dd>{item.version}</dd>
                   </div>
                   <div>
-                    <dt className="text-muted-foreground text-xs">
-                      当前发布版本
-                    </dt>
-                    <dd className="truncate font-mono text-xs">
-                      {item.current_published_version_id ?? "—"}
+                    <dt className="text-muted-foreground text-xs">发布状态</dt>
+                    <dd>
+                      {item.current_published_version_id
+                        ? "已有发布版本"
+                        : "尚未发布"}
                     </dd>
                   </div>
                 </dl>

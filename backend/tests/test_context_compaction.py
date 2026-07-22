@@ -142,6 +142,46 @@ async def test_compact_thread_context_writes_summary_and_bumps_changed_channels(
 
 
 @pytest.mark.asyncio
+async def test_compaction_can_prepare_without_writing_then_commit(monkeypatch):
+    messages = [
+        HumanMessage(content="old question"),
+        AIMessage(content="old answer"),
+        HumanMessage(content="latest question"),
+    ]
+    checkpointer = _FakeCheckpointer(
+        {
+            "id": "ckpt-old",
+            "channel_values": {"messages": messages},
+            "channel_versions": {"messages": 2},
+        }
+    )
+    monkeypatch.setattr(
+        context_compaction,
+        "_create_compaction_middleware",
+        lambda **_kwargs: _FakeCompactionMiddleware(),
+    )
+
+    prepared = await context_compaction.prepare_thread_compaction(
+        checkpointer,
+        "thread-1",
+        app_config=SimpleNamespace(),
+    )
+
+    assert prepared.source_checkpoint_id == "ckpt-old"
+    assert prepared.result.compacted is True
+    assert checkpointer.put_args is None
+
+    result = await context_compaction.commit_thread_compaction(
+        checkpointer,
+        prepared,
+    )
+
+    assert result.compacted is True
+    assert result.checkpoint_id is not None
+    assert checkpointer.put_args is not None
+
+
+@pytest.mark.asyncio
 async def test_compact_thread_context_returns_noop_without_writing(monkeypatch):
     checkpointer = _FakeCheckpointer(
         {

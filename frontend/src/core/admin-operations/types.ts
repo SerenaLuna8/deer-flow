@@ -44,7 +44,6 @@ const operationsReadinessSchema = z
     worker_fleet: z.string().min(1),
     scheduler: z.string().min(1),
     stream: z.string().min(1),
-    recovery: z.string().min(1),
     quota: z.string().min(1),
     audit: z.string().min(1),
     role: z.enum(["gateway", "worker", "scheduler"]),

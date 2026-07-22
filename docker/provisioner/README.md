@@ -166,9 +166,8 @@ See [Building a Custom AIO Sandbox Image](../../backend/docs/CONFIGURATION.md#bu
 ### Project user-data PVC
 
 Provisioner mounts only the server-issued project/owner/thread sandbox subpath.
-Do not derive PVC paths from client input or a default user. Existing pre-project
-deployments must be upgraded through the supported release backup/new-database
-restore workflow before using the M7 chart.
+Do not derive PVC paths from client input or a default user. The M7 chart requires
+a freshly initialized PostgreSQL baseline before project-scoped PVCs are enabled.
 
 ### Important: K8S_API_SERVER Override
 

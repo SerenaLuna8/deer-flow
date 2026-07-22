@@ -9,7 +9,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -101,7 +100,6 @@ class M5LegacyMigrationDatabase:
     engine: AsyncEngine
     seed: M4ThreadSeed
     owner_map: dict[str, object]
-    backup_dir: Path
     expected_counts: dict[str, int]
     reuse_thread_id: str
     history_thread_id: str
@@ -461,7 +459,6 @@ async def _upgrade_empty_database_to_m4_final(engine: AsyncEngine) -> None:
 @asynccontextmanager
 async def isolated_m5_legacy_migration_database(
     admin_url: str,
-    backup_dir: Path,
 ) -> AsyncIterator[M5LegacyMigrationDatabase]:
     """Create a disposable, non-empty 0011 source for the M5 migration gate."""
 
@@ -534,17 +531,11 @@ async def isolated_m5_legacy_migration_database(
                     },
                 )
 
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            (backup_dir / "operator-restore-proof.txt").write_text(
-                "verified external PostgreSQL backup and restore rehearsal",
-                encoding="utf-8",
-            )
             yield M5LegacyMigrationDatabase(
                 url=RedactedURL(database_url),
                 engine=seed.engine,
                 seed=seed,
                 owner_map={str(seed.owner_a.user_id): _m5_owner_map_item(seed)},
-                backup_dir=backup_dir,
                 expected_counts={
                     "scheduled_tasks": 2,
                     "scheduled_task_runs": 2,

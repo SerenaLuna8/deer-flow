@@ -18,7 +18,6 @@ from app.private_work.run_repository import PrivateRunCreate, PrivateRunReposito
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.base import Base
-from deerflow.persistence.final_schema_contract import M7_CANONICAL_SCHEMA_DIGEST
 from scripts.check_postgres import check_postgres
 from scripts.setup_postgres import PostgresSetupError, _bootstrap_existing
 
@@ -49,9 +48,7 @@ REQUIRED_FUNCTIONS = {
 REQUIRED_TRIGGERS = {
     "trg_audit_logs_append_only",
     "trg_dead_jobs_append_only",
-    "trg_deletion_tombstones_append_only",
     "trg_project_usage_ledger_append_only",
-    "trg_restore_proofs_append_only",
     "trg_run_events_stream_terminal",
     "trg_scheduled_tasks_updated_at",
 }
@@ -70,14 +67,11 @@ EXPECTED_FUNCTION_FRAGMENTS = {
 EXPECTED_TRIGGER_IDENTITIES = {
     "trg_audit_logs_append_only": ("audit_logs", "reject_m7_append_only_mutation", 27),
     "trg_dead_jobs_append_only": ("dead_jobs", "reject_m7_append_only_mutation", 27),
-    "trg_deletion_tombstones_append_only": ("deletion_tombstones", "reject_m7_append_only_mutation", 27),
     "trg_project_usage_ledger_append_only": ("project_usage_ledger", "reject_m7_append_only_mutation", 27),
-    "trg_restore_proofs_append_only": ("restore_proofs", "reject_m7_append_only_mutation", 27),
     "trg_run_events_stream_terminal": ("run_events", "enforce_stream_terminal_invariant", 7),
     "trg_scheduled_tasks_updated_at": ("scheduled_tasks", "set_m7_updated_at", 19),
 }
 EXPECTED_APP_SEQUENCE_OWNERS = {
-    ("deletion_tombstones_journal_sequence_seq", "deletion_tombstones"),
     ("run_events_id_seq", "run_events"),
 }
 EXPECTED_LANGGRAPH_INDEX_OWNERS = {
@@ -763,9 +757,8 @@ async def test_stream_terminal_trigger_rejects_late_and_duplicate_terminal_event
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_append_only_audit_ledger_tombstone_and_restore_proof_reject_mutation(
+async def test_append_only_audit_usage_and_dead_job_ledgers_reject_mutation(
     postgres_database_url: str,
-    postgres_admin_url: str,
 ) -> None:
     bootstrap_engine = create_async_engine(postgres_database_url)
     try:
@@ -815,74 +808,10 @@ async def test_append_only_audit_ledger_tombstone_and_restore_proof_reject_mutat
                 ),
                 {"id": dead_job_id, "project": seed.owner_a.project_id},
             )
-            await connection.execute(
-                text(
-                    """INSERT INTO deletion_tombstones
-                    (journal_sequence,ciphertext_digest,record_digest,resource_kind,
-                     resource_ref_key_id,resource_ref_hmac)
-                    VALUES (1,:cipher,:record,'file','test',:ref)"""
-                ),
-                {"cipher": "3" * 64, "record": "4" * 64, "ref": "5" * 64},
-            )
-            await connection.execute(
-                text(
-                    """INSERT INTO restore_proofs
-                    (id,archive_id,archive_digest,archive_schema_version,schema_digest,
-                     target_database_ref_key_id,target_database_ref_hmac,schema_revision,
-                     archive_tombstone_sequence,replayed_through_sequence,journal_id,
-                     final_journal_head_digest)
-                    VALUES (:id,:archive,:digest,7,:schema_digest,'test',:ref,:revision,
-                            0,0,:journal,:head)"""
-                ),
-                {
-                    "id": uuid.uuid4(),
-                    "archive": uuid.uuid4(),
-                    "digest": "6" * 64,
-                    "ref": "7" * 64,
-                    "revision": M7_FINAL_SCHEMA_REVISION,
-                    "schema_digest": M7_CANONICAL_SCHEMA_DIGEST,
-                    "journal": uuid.uuid4(),
-                    "head": "8" * 64,
-                },
-            )
-
-        for archive_schema_version, schema_digest in (
-            (6, M7_CANONICAL_SCHEMA_DIGEST),
-            (7, "f" * 64),
-        ):
-            with pytest.raises(DBAPIError):
-                async with seed.engine.begin() as connection:
-                    await connection.execute(
-                        text(
-                            """INSERT INTO restore_proofs
-                            (id,archive_id,archive_digest,archive_schema_version,
-                             schema_digest,target_database_ref_key_id,
-                             target_database_ref_hmac,schema_revision,
-                             archive_tombstone_sequence,replayed_through_sequence,
-                             journal_id,final_journal_head_digest)
-                            VALUES (:id,:archive,:digest,:archive_schema_version,
-                                    :schema_digest,'test',:ref,:revision,0,0,
-                                    :journal,:head)"""
-                        ),
-                        {
-                            "id": uuid.uuid4(),
-                            "archive": uuid.uuid4(),
-                            "digest": "6" * 64,
-                            "archive_schema_version": archive_schema_version,
-                            "schema_digest": schema_digest,
-                            "ref": "7" * 64,
-                            "revision": M7_FINAL_SCHEMA_REVISION,
-                            "journal": uuid.uuid4(),
-                            "head": "8" * 64,
-                        },
-                    )
-
         mutations = {
             "project_usage_ledger": "delta=2",
             "audit_logs": "outcome='rejected'",
             "dead_jobs": "public_error_code='MUTATED'",
-            "deletion_tombstones": "purge_status='purged'",
-            "restore_proofs": "archive_schema_version=6, schema_digest='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
         }
         for table_name, assignment in mutations.items():
             with pytest.raises(DBAPIError):
@@ -894,26 +823,6 @@ async def test_append_only_audit_ledger_tombstone_and_restore_proof_reject_mutat
 
     finally:
         await seed.engine.dispose()
-
-    wrong_digest = "f" * 64
-    assert wrong_digest != M7_CANONICAL_SCHEMA_DIGEST
-    async with temporary_postgres_database(postgres_admin_url) as drift_url:
-        drift_engine = create_async_engine(drift_url)
-        try:
-            await bootstrap_module.bootstrap_schema(drift_engine)
-            async with drift_engine.begin() as connection:
-                await connection.execute(text("ALTER TABLE restore_proofs DROP CONSTRAINT ck_restore_proofs_archive_schema"))
-                await connection.execute(
-                    text(f"ALTER TABLE restore_proofs ADD CONSTRAINT ck_restore_proofs_archive_schema CHECK (archive_schema_version = 7 AND schema_revision = '0001_project_saas_baseline' AND schema_digest = '{wrong_digest}')")
-                )
-            async with drift_engine.connect() as connection:
-                before_catalog = await _schema_digest(connection)
-                before_rows = await _table_row_counts(connection)
-
-            result = await _entrypoint_refusal_result(drift_engine, drift_url)
-            assert result == (True, True, True, True, before_catalog, before_rows)
-        finally:
-            await drift_engine.dispose()
 
 
 @pytest.mark.postgres

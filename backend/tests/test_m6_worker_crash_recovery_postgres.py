@@ -87,7 +87,6 @@ worker:
   heartbeat_seconds: 4
   max_concurrent_jobs: 1
   shutdown_grace_seconds: 2
-  default_max_attempts: 3
   retry_initial_seconds: 1
   retry_max_seconds: 2
 scheduler:

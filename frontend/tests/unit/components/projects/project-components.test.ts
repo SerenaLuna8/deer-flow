@@ -26,6 +26,12 @@ const project: Project = {
   agent_count: 0,
   skill_count: 0,
   mcp_count: 0,
+  quota_summary: {
+    members: { used: 3, reserved: 0, limit: 20 },
+    storage_bytes: { used: 1_073_741_824, reserved: 0, limit: 5_368_709_120 },
+    concurrent_runs: { used: 1, reserved: 0, limit: 3 },
+    mcp_calls_daily: { used: 25, reserved: 0, limit: 10_000 },
+  },
   status: "active",
   is_suspended: false,
   membership_version: 1,
@@ -64,6 +70,11 @@ describe("project presentation contracts", () => {
     expect(html).toContain("Agent 0");
     expect(html).toContain("Skill 0");
     expect(html).toContain("MCP 0");
+    expect(html).toContain("项目配额摘要");
+    expect(html).toContain("成员 3 / 20");
+    expect(html).toContain("存储 1 GiB / 5 GiB");
+    expect(html).toContain("运行 1 / 3");
+    expect(html).toContain("MCP 25 / 10,000");
     expect(html).toContain("编辑项目");
     expect(html).not.toContain("private_activity");
 
@@ -79,15 +90,31 @@ describe("project presentation contracts", () => {
     ).not.toContain("编辑项目");
   });
 
-  test("home keeps privacy boundary and leaves navigation to the project shell", () => {
-    const html = renderWithQueryClient(createElement(ProjectHome, { project }));
+  test("home prioritizes private work and exposes real shared-asset entries", () => {
+    const html = renderWithQueryClient(
+      createElement(ProjectHome, {
+        project: {
+          ...project,
+          agent_count: 2,
+          skill_count: 3,
+          mcp_count: 4,
+        },
+      }),
+    );
     expect(html).toContain("对话和记忆私有");
     expect(html).toContain("Agent、Skill 和 MCP 共享");
-    expect(html).not.toContain("返回工作空间");
-    expect(html).not.toContain('href="/workspace"');
+    expect(html).toContain("返回工作空间");
+    expect(html).toContain('href="/workspace"');
     expect(html).not.toContain("/workspace/projects");
     expect(html).not.toContain("项目工作台");
-    expect(html).toContain("后续里程碑");
+    expect(html).not.toContain("后续里程碑");
+    expect(html).toContain('href="/projects/alpha/agents"');
+    expect(html).toContain('href="/projects/alpha/skills"');
+    expect(html).toContain('href="/projects/alpha/mcp"');
+    expect(html).toContain(">2</strong>个可用");
+    expect(html).toContain(">3</strong>个可用");
+    expect(html).toContain(">4</strong>个可用");
+    expect(html.indexOf("开始私有对话")).toBeLessThan(html.indexOf("共享资产"));
     expect(html).not.toContain("项目切换");
   });
 
@@ -134,6 +161,17 @@ describe("project presentation contracts", () => {
     expect(workbench).toContain("update.mutate(input)");
   });
 
+  test("workspace exposes a real pinned project filter backed by the list API", () => {
+    const workbench = readFileSync(
+      resolve(process.cwd(), "src/components/projects/project-workbench.tsx"),
+      "utf8",
+    );
+    expect(workbench).toContain('aria-label="筛选项目"');
+    expect(workbench).toContain('value="pinned"');
+    expect(workbench).toContain("pinned: true");
+    expect(workbench).toContain('filterAndSortProjects(');
+  });
+
   test("project context owns retry and stale enter protection", () => {
     const contextSource = readFileSync(
       resolve(process.cwd(), "src/components/projects/project-context.tsx"),
@@ -153,7 +191,7 @@ describe("project presentation contracts", () => {
     expect(loaderSource).not.toMatch(/useProjectBySlug|useEnterProject/u);
   });
 
-  test("lifecycle copy does not claim M2 physically deletes projects", () => {
+  test("lifecycle copy explains the supported recovery window without milestone language", () => {
     const source = readFileSync(
       resolve(
         process.cwd(),
@@ -161,8 +199,9 @@ describe("project presentation contracts", () => {
       ),
       "utf8",
     );
+    expect(source).toContain("30 天恢复窗口");
     expect(source).toContain("恢复窗口结束后将无法自助恢复");
-    expect(source).toMatch(/M2\s+不执行物理清除/u);
+    expect(source).not.toMatch(/M2|物理清除/u);
     expect(source).not.toContain("永久删除");
   });
 

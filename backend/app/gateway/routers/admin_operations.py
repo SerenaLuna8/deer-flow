@@ -86,7 +86,6 @@ class OperationsReadinessResponse(BaseModel):
     worker_fleet: str
     scheduler: str
     stream: str
-    recovery: str
     quota: str
     audit: str
     role: str
@@ -277,7 +276,6 @@ def overview_response(
                 worker_fleet=readiness.worker_fleet,
                 scheduler=readiness.scheduler,
                 stream=readiness.stream,
-                recovery=readiness.recovery,
                 quota=readiness.quota,
                 audit=readiness.audit,
                 role=readiness.role,
@@ -302,7 +300,6 @@ def overview_response(
             worker_fleet=readiness.worker_fleet,
             scheduler=readiness.scheduler,
             stream=readiness.stream,
-            recovery=readiness.recovery,
             quota=readiness.quota,
             audit=readiness.audit,
             role=readiness.role,

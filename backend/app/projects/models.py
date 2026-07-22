@@ -33,6 +33,21 @@ class ProjectChanges:
 
 
 @dataclass(frozen=True)
+class QuotaDimensionSummary:
+    used: int
+    reserved: int
+    limit: int
+
+
+@dataclass(frozen=True)
+class ProjectQuotaSummary:
+    members: QuotaDimensionSummary
+    storage_bytes: QuotaDimensionSummary
+    concurrent_runs: QuotaDimensionSummary
+    mcp_calls_daily: QuotaDimensionSummary
+
+
+@dataclass(frozen=True)
 class ProjectView:
     id: uuid.UUID
     slug: str
@@ -47,6 +62,7 @@ class ProjectView:
     agent_count: int
     skill_count: int
     mcp_count: int
+    quota_summary: ProjectQuotaSummary
     status: str
     is_suspended: bool
     membership_version: int

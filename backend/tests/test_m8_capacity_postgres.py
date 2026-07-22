@@ -4,12 +4,24 @@ import asyncio
 import hashlib
 import hmac
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.m4_private_threads import seed_m4_thread_database
 
+from app.gateway.auth.config import AuthConfig, set_auth_config
+from app.gateway.auth.invitation_rate_limit import (
+    InvitationRateLimitRepository,
+    hash_rate_limit_key,
+)
+from app.gateway.auth.rate_limit import (
+    AUTH_RATE_LIMIT_WINDOW,
+    AuthenticationRateLimitAction,
+    AuthenticationRateLimitRepository,
+    authentication_rate_limit_key,
+)
 from app.private_work.errors import PrivateWorkMcpQuotaExceeded, PrivateWorkTooLarge
 from app.private_work.file_service import PrivateFileLimits, PrivateFileService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
@@ -23,10 +35,19 @@ from app.quotas.models import QuotaExceeded, QuotaSourceRef, _issue_quota_compen
 from app.quotas.reconciliation import QuotaReconciler
 from app.quotas.service import QuotaService
 from deerflow.config.quota_config import QuotaConfig
+from deerflow.persistence.projects.invitation_rate_limit_model import (
+    ProjectInvitationRateLimitRow,
+)
 
 _MIB = 1024 * 1024
 _GIB = 1024 * _MIB
 _NOW = datetime(2026, 7, 20, 12, tzinfo=UTC)
+_RATE_LIMIT_TEST_SECRET = "test-m8-capacity-rate-limit-secret-32"
+
+
+@pytest.fixture(autouse=True)
+def _stable_rate_limit_auth_secret() -> None:
+    set_auth_config(AuthConfig(jwt_secret=_RATE_LIMIT_TEST_SECRET))
 
 
 def _source_ref(payload: bytes) -> QuotaSourceRef:
@@ -462,3 +483,241 @@ async def test_mcp_ten_thousand_consumes_once_and_overflow_prevents_transport(
             assert tuple(state) == (10_000, 0, 2, 10_000)
     finally:
         await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_auth_login_attempts_are_atomic_across_gateway_workers(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine_one = create_async_engine(migrated_postgres_database_url)
+    engine_two = create_async_engine(migrated_postgres_database_url)
+    worker_one = async_sessionmaker(engine_one, expire_on_commit=False)
+    worker_two = async_sessionmaker(engine_two, expire_on_commit=False)
+    client_ip = "192.0.2.80"
+
+    async def admit(worker_factory) -> bool:
+        async with worker_factory() as session:
+            admission = await AuthenticationRateLimitRepository(session).admit_attempt(
+                AuthenticationRateLimitAction.LOGIN,
+                client_ip,
+                _NOW,
+            )
+            return admission.admitted
+
+    try:
+        admissions = await asyncio.gather(*(admit(worker_one if index % 2 == 0 else worker_two) for index in range(12)))
+        assert sum(admissions) == 5
+
+        async with worker_one() as session:
+            row = await session.get(
+                ProjectInvitationRateLimitRow,
+                authentication_rate_limit_key(
+                    AuthenticationRateLimitAction.LOGIN,
+                    client_ip,
+                ),
+            )
+            assert row is not None
+            assert row.failure_count == 12
+            assert row.window_started_at == _NOW
+            assert row.expires_at == _NOW + AUTH_RATE_LIMIT_WINDOW
+    finally:
+        await engine_one.dispose()
+        await engine_two.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_auth_and_invitation_counters_do_not_clear_each_other_in_shared_table(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine_one = create_async_engine(migrated_postgres_database_url)
+    engine_two = create_async_engine(migrated_postgres_database_url)
+    auth_factory = async_sessionmaker(engine_one, expire_on_commit=False)
+    invitation_factory = async_sessionmaker(engine_two, expire_on_commit=False)
+    client_ip = "192.0.2.84"
+    invitation_key = hash_rate_limit_key(f"claim\x00{client_ip}")
+    try:
+        async with auth_factory() as session:
+            login = await AuthenticationRateLimitRepository(session).admit_attempt(
+                AuthenticationRateLimitAction.LOGIN,
+                client_ip,
+                _NOW,
+            )
+        async with auth_factory() as session:
+            registration = await AuthenticationRateLimitRepository(session).admit_attempt(
+                AuthenticationRateLimitAction.REGISTER,
+                client_ip,
+                _NOW,
+            )
+        async with invitation_factory() as session:
+            assert await InvitationRateLimitRepository(session).admit_attempt(
+                invitation_key,
+                _NOW,
+            )
+
+        async with auth_factory() as session:
+            await AuthenticationRateLimitRepository(session).clear(login)
+
+        async with invitation_factory() as session:
+            invitation_row = await session.get(
+                ProjectInvitationRateLimitRow,
+                invitation_key,
+            )
+            assert invitation_row is not None
+            assert invitation_row.failure_count == 1
+        async with auth_factory() as session:
+            assert (
+                await session.get(
+                    ProjectInvitationRateLimitRow,
+                    authentication_rate_limit_key(
+                        AuthenticationRateLimitAction.LOGIN,
+                        client_ip,
+                    ),
+                )
+                is None
+            )
+        async with invitation_factory() as session:
+            await InvitationRateLimitRepository(session).clear(invitation_key)
+        async with auth_factory() as session:
+            registration_row = await session.get(
+                ProjectInvitationRateLimitRow,
+                authentication_rate_limit_key(
+                    AuthenticationRateLimitAction.REGISTER,
+                    client_ip,
+                ),
+            )
+            assert registration_row is not None
+            assert registration_row.failure_count == registration.failure_count == 1
+    finally:
+        await engine_one.dispose()
+        await engine_two.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_auth_success_clear_preserves_a_later_concurrent_failure(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    client_ip = "192.0.2.81"
+    try:
+        async with factory() as session:
+            successful_login = await AuthenticationRateLimitRepository(session).admit_attempt(
+                AuthenticationRateLimitAction.LOGIN,
+                client_ip,
+                _NOW,
+            )
+            assert successful_login.admitted
+
+        # A second worker admits a failed attempt after the successful request
+        # was admitted but before it completes password verification.
+        async with factory() as session:
+            later_failure = await AuthenticationRateLimitRepository(session).admit_attempt(
+                AuthenticationRateLimitAction.LOGIN,
+                client_ip,
+                _NOW,
+            )
+            assert later_failure.admitted
+
+        async with factory() as session:
+            await AuthenticationRateLimitRepository(session).clear(successful_login)
+
+        async with factory() as session:
+            login_row = await session.get(
+                ProjectInvitationRateLimitRow,
+                authentication_rate_limit_key(
+                    AuthenticationRateLimitAction.LOGIN,
+                    client_ip,
+                ),
+            )
+            assert login_row is not None
+            assert login_row.failure_count == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_auth_login_clear_does_not_clear_registration_limit(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    client_ip = "192.0.2.83"
+    try:
+        async with factory() as session:
+            login = await AuthenticationRateLimitRepository(session).admit_attempt(
+                AuthenticationRateLimitAction.LOGIN,
+                client_ip,
+                _NOW,
+            )
+        async with factory() as session:
+            registration = await AuthenticationRateLimitRepository(session).admit_attempt(
+                AuthenticationRateLimitAction.REGISTER,
+                client_ip,
+                _NOW,
+            )
+            assert registration.admitted
+
+        async with factory() as session:
+            await AuthenticationRateLimitRepository(session).clear(login)
+
+        async with factory() as session:
+            assert (
+                await session.get(
+                    ProjectInvitationRateLimitRow,
+                    authentication_rate_limit_key(
+                        AuthenticationRateLimitAction.LOGIN,
+                        client_ip,
+                    ),
+                )
+                is None
+            )
+            registration_row = await session.get(
+                ProjectInvitationRateLimitRow,
+                authentication_rate_limit_key(
+                    AuthenticationRateLimitAction.REGISTER,
+                    client_ip,
+                ),
+            )
+            assert registration_row is not None
+            assert registration_row.failure_count == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_auth_registration_window_expires_without_process_local_state(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    client_ip = "192.0.2.82"
+    try:
+        for _ in range(5):
+            async with factory() as session:
+                admission = await AuthenticationRateLimitRepository(session).admit_attempt(
+                    AuthenticationRateLimitAction.REGISTER,
+                    client_ip,
+                    _NOW,
+                )
+                assert admission.admitted
+        async with factory() as session:
+            blocked = await AuthenticationRateLimitRepository(session).admit_attempt(
+                AuthenticationRateLimitAction.REGISTER,
+                client_ip,
+                _NOW + timedelta(minutes=4),
+            )
+            assert not blocked.admitted
+        async with factory() as session:
+            restarted = await AuthenticationRateLimitRepository(session).admit_attempt(
+                AuthenticationRateLimitAction.REGISTER,
+                client_ip,
+                _NOW + AUTH_RATE_LIMIT_WINDOW,
+            )
+            assert restarted.admitted
+    finally:
+        await engine.dispose()

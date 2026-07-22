@@ -40,6 +40,12 @@ function project(id: string, slug: string, displayName: string): Project {
     agent_count: 1,
     skill_count: 0,
     mcp_count: 0,
+    quota_summary: {
+      members: { used: 1, reserved: 0, limit: 20 },
+      storage_bytes: { used: 0, reserved: 0, limit: 5_368_709_120 },
+      concurrent_runs: { used: 0, reserved: 0, limit: 3 },
+      mcp_calls_daily: { used: 0, reserved: 0, limit: 10_000 },
+    },
     status: "active",
     is_suspended: false,
     membership_version: 1,
@@ -165,7 +171,7 @@ test("Link project switch drops a late previous-project Thread response", async 
     .getByTestId("project-card")
     .filter({ hasText: "Beta Project" });
   await betaCard.getByRole("link", { name: "进入项目" }).click();
-  await page.getByRole("link", { name: "Chats", exact: true }).click();
+  await page.getByRole("link", { name: "会话", exact: true }).click();
   await expect(page.getByText("Beta Project conversation")).toBeVisible();
   await expect
     .poll(() =>

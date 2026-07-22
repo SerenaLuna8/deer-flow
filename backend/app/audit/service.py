@@ -506,8 +506,4 @@ def _bind_operator_audit_process(service: AuditService) -> AuditProcessContext:
     return service._AuditService__process_registry.bind(AuditProcess.OPERATOR)
 
 
-def _bind_recovery_audit_process(service: AuditService) -> AuditProcessContext:
-    return service._AuditService__process_registry.bind(AuditProcess.RECOVERY)
-
-
 __all__ = ["AuditService"]

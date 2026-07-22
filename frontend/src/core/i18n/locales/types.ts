@@ -250,7 +250,6 @@ export interface Translations {
           worker_fleet: string;
           scheduler: string;
           stream: string;
-          recovery: string;
           quota: string;
           audit: string;
         };

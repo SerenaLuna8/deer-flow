@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.projects.asset_summary import load_project_asset_summary
 from app.projects.capabilities import Capability, capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.errors import (
@@ -18,12 +19,15 @@ from app.projects.errors import (
     ProjectNotFound,
 )
 from app.projects.models import ProjectRole, ProjectView
+from app.projects.quota_summary import load_project_quota_summary
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
 
 class ProjectLifecycleRepository:
-    def __init__(self, session: AsyncSession):
+    def __init__(self, session: AsyncSession, *, quota_config: QuotaConfig | None = None):
         self.session = session
+        self._quota_config = quota_config or QuotaConfig()
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
@@ -270,6 +274,8 @@ class ProjectLifecycleRepository:
                 )
             )
         ).scalar_one()
+        asset_summary = await load_project_asset_summary(self.session, project.id)
+        quota_summary = await load_project_quota_summary(self.session, project.id, self._quota_config)
         try:
             role = ProjectRole(membership.role)
         except ValueError:
@@ -285,9 +291,10 @@ class ProjectLifecycleRepository:
             is_pinned=membership.is_pinned,
             last_entered_at=membership.last_entered_at,
             member_count=member_count,
-            agent_count=0,
-            skill_count=0,
-            mcp_count=0,
+            agent_count=asset_summary.agent_count,
+            skill_count=asset_summary.skill_count,
+            mcp_count=asset_summary.mcp_count,
+            quota_summary=quota_summary,
             status=project.status,
             is_suspended=project.is_suspended,
             membership_version=membership.version,

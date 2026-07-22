@@ -64,18 +64,24 @@ export function SystemAssetSection({
                   <dl className="grid gap-3 sm:grid-cols-2">
                     <div>
                       <dt className="text-muted-foreground text-xs">
-                        系统当前发布版本
+                        系统发布状态
                       </dt>
-                      <dd className="truncate font-mono text-xs">
-                        {item.current_published_version_id ?? "—"}
+                      <dd>
+                        {item.current_published_version_id
+                          ? "已有发布版本"
+                          : "尚未发布"}
                       </dd>
                     </div>
                     <div>
                       <dt className="text-muted-foreground text-xs">
                         固定版本
                       </dt>
-                      <dd className="truncate font-mono text-xs">
-                        {item.binding?.version_id ?? "未绑定"}
+                      <dd>
+                        {item.binding?.enabled
+                          ? "已启用并固定"
+                          : item.binding
+                            ? "已关闭"
+                            : "未绑定"}
                       </dd>
                     </div>
                     <div>
@@ -92,9 +98,9 @@ export function SystemAssetSection({
                     </div>
                     <div>
                       <dt className="text-muted-foreground text-xs">
-                        绑定版本
+                        绑定修订版本
                       </dt>
-                      <dd>{item.binding?.version ?? "—"}</dd>
+                      <dd>{item.binding?.version ?? "无"}</dd>
                     </div>
                   </dl>
                   {canManage && (

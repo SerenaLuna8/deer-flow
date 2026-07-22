@@ -11,10 +11,13 @@ from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.projects.asset_summary import project_asset_summary_columns
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
-from app.projects.models import CreateProject, ProjectChanges, ProjectPage, ProjectRole, ProjectView
+from app.projects.models import CreateProject, ProjectChanges, ProjectPage, ProjectQuotaSummary, ProjectRole, ProjectView
+from app.projects.quota_summary import project_quota_summary_columns, project_quota_summary_from_row
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
 if TYPE_CHECKING:
@@ -106,9 +109,11 @@ class ProjectRepository:
         session: AsyncSession,
         *,
         quota: ProjectCreateQuotaPort | None = None,
+        quota_config: QuotaConfig | None = None,
     ):
         self.session = session
         self._quota = quota or _NoopProjectCreateQuota()
+        self._quota_config = quota_config or QuotaConfig()
 
     async def create_with_admin(
         self,
@@ -183,14 +188,35 @@ class ProjectRepository:
 
     async def _get_in_transaction(self, context: ProjectContext) -> ProjectView:
         member_count = select(func.count()).where(ProjectMembershipRow.project_id == ProjectRow.id, ProjectMembershipRow.status == "active").correlate(ProjectRow).scalar_subquery()
-        statement = select(ProjectRow, ProjectMembershipRow, member_count.label("member_count")).join(ProjectMembershipRow, ProjectMembershipRow.project_id == ProjectRow.id).where(self._scope(context))
+        asset_counts = project_asset_summary_columns(ProjectRow.id)
+        quota_summary = project_quota_summary_columns(ProjectRow.id, self._quota_config)
+        statement = select(ProjectRow, ProjectMembershipRow, member_count.label("member_count"), *asset_counts, *quota_summary).join(ProjectMembershipRow, ProjectMembershipRow.project_id == ProjectRow.id).where(self._scope(context))
         rows = (await self.session.execute(statement)).all()
         if len(rows) != 1:
             raise ProjectNotFound()
         row = rows[0]
-        return self._view(row.ProjectRow, row.ProjectMembershipRow, row.member_count, context.request_id)
+        return self._view(
+            row.ProjectRow,
+            row.ProjectMembershipRow,
+            row.member_count,
+            row.agent_count,
+            row.skill_count,
+            row.mcp_count,
+            project_quota_summary_from_row(row),
+            context.request_id,
+        )
 
-    def _view(self, project, membership, member_count: int, request_id: str) -> ProjectView:
+    def _view(
+        self,
+        project,
+        membership,
+        member_count: int,
+        agent_count: int,
+        skill_count: int,
+        mcp_count: int,
+        quota_summary: ProjectQuotaSummary,
+        request_id: str,
+    ) -> ProjectView:
         try:
             role = ProjectRole(membership.role)
         except ValueError:
@@ -206,9 +232,10 @@ class ProjectRepository:
             membership.is_pinned,
             membership.last_entered_at,
             member_count,
-            0,
-            0,
-            0,
+            agent_count,
+            skill_count,
+            mcp_count,
+            quota_summary,
             project.status,
             project.is_suspended,
             membership.version,
@@ -308,6 +335,8 @@ class ProjectRepository:
         include_recoverable: bool,
     ) -> ProjectPage:
         member_count = select(func.count()).where(ProjectMembershipRow.project_id == ProjectRow.id, ProjectMembershipRow.status == "active").correlate(ProjectRow).scalar_subquery()
+        asset_counts = project_asset_summary_columns(ProjectRow.id)
+        quota_summary = project_quota_summary_columns(ProjectRow.id, self._quota_config)
         project_visibility = ProjectRow.status == "active"
         if include_recoverable:
             project_visibility = or_(
@@ -320,7 +349,7 @@ class ProjectRepository:
                 ),
             )
         statement = (
-            select(ProjectRow, ProjectMembershipRow, member_count.label("member_count"))
+            select(ProjectRow, ProjectMembershipRow, member_count.label("member_count"), *asset_counts, *quota_summary)
             .join(ProjectRow, ProjectRow.id == ProjectMembershipRow.project_id)
             .where(
                 ProjectMembershipRow.user_id == str(user_id),
@@ -347,7 +376,19 @@ class ProjectRepository:
             statement = statement.where(or_(pinned_after, and_(ProjectMembershipRow.is_pinned.is_(cp), last_tail)))
         statement = statement.order_by(ProjectMembershipRow.is_pinned.desc(), ProjectMembershipRow.last_entered_at.desc().nulls_last(), ProjectRow.created_at.desc(), ProjectRow.id.desc()).limit(limit + 1)
         rows = (await self.session.execute(statement)).all()
-        items = tuple(self._view(row.ProjectRow, row.ProjectMembershipRow, row.member_count, request_id) for row in rows[:limit])
+        items = tuple(
+            self._view(
+                row.ProjectRow,
+                row.ProjectMembershipRow,
+                row.member_count,
+                row.agent_count,
+                row.skill_count,
+                row.mcp_count,
+                project_quota_summary_from_row(row),
+                request_id,
+            )
+            for row in rows[:limit]
+        )
         next_cursor = _encode_cursor(SimpleCursor(rows[limit - 1])) if len(rows) > limit else None
         return ProjectPage(items, next_cursor)
 

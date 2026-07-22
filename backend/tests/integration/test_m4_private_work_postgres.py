@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -12,6 +13,7 @@ from support.m4_private_work import (
     m4_release_database_ready,
 )
 
+from app.channels.store import ChannelStore
 from app.private_work.asset_runtime import PrivateAssetRuntime
 from app.private_work.authorization import (
     PrivateRunAuthorizationBoundary,
@@ -99,6 +101,124 @@ async def test_owner_thread_is_hidden_across_owner_project_and_outsider(
         assert await scenario.thread_service.get(scenario.seed.project_b_owner_a, created.thread_id) is None
         with pytest.raises(PrivateWorkNotFound):
             await scenario.thread_service.get(scenario.outsider, created.thread_id)
+    finally:
+        await scenario.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_channel_store_is_postgres_scoped_and_multi_process_safe(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await M4ReleaseScenario.create(migrated_postgres_database_url)
+    try:
+        for thread_id in ("release-channel-first", "release-channel-second"):
+            await scenario.thread_service.create(
+                scenario.seed.owner_a,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(scenario.seed.project_agent_id, "project"),
+            )
+        repository = ChannelConnectionRepository(scenario.seed.factory)
+        connection = await repository.upsert_connection(
+            scope=scenario.seed.owner_a_scope,
+            provider="feishu",
+            external_account_id="release-open-id",
+            workspace_id="release-chat",
+        )
+        store_a = ChannelStore(repository)
+        store_b = ChannelStore(repository)
+
+        writes = await asyncio.gather(
+            store_a.set_thread_id(
+                "feishu",
+                "release-chat",
+                "release-channel-first",
+                topic_id="release-message",
+                connection_id=connection["id"],
+                scope=scenario.seed.owner_a_scope,
+            ),
+            store_b.set_thread_id(
+                "feishu",
+                "release-chat",
+                "release-channel-second",
+                topic_id="release-message",
+                connection_id=connection["id"],
+                scope=scenario.seed.owner_a_scope,
+            ),
+        )
+
+        assert sorted(writes) == [False, True]
+        persisted = await store_a.get_thread_id(
+            "feishu",
+            "release-chat",
+            topic_id="release-message",
+            connection_id=connection["id"],
+            scope=scenario.seed.owner_a_scope,
+        )
+        assert persisted in {"release-channel-first", "release-channel-second"}
+        for denied_scope in (
+            scenario.seed.owner_b_scope,
+            scenario.seed.project_b_owner_a_scope,
+        ):
+            assert (
+                await store_a.get_thread_id(
+                    "feishu",
+                    "release-chat",
+                    topic_id="release-message",
+                    connection_id=connection["id"],
+                    scope=denied_scope,
+                )
+                is None
+            )
+        assert (
+            await store_a.get_thread_id(
+                "slack",
+                "release-chat",
+                topic_id="release-message",
+                connection_id=connection["id"],
+                scope=scenario.seed.owner_a_scope,
+            )
+            is None
+        )
+        entries = await store_a.list_entries(
+            "feishu",
+            connection_id=connection["id"],
+            scope=scenario.seed.owner_a_scope,
+        )
+        assert len(entries) == 1
+        assert entries[0]["thread_id"] == persisted
+        assert (
+            await store_a.list_entries(
+                "feishu",
+                connection_id=connection["id"],
+                scope=scenario.seed.owner_b_scope,
+            )
+            == []
+        )
+        assert not await store_a.remove(
+            "feishu",
+            "release-chat",
+            "release-message",
+            connection_id=connection["id"],
+            scope=scenario.seed.owner_b_scope,
+        )
+        assert await store_a.remove(
+            "feishu",
+            "release-chat",
+            "release-message",
+            connection_id=connection["id"],
+            scope=scenario.seed.owner_a_scope,
+        )
+        assert (
+            await store_a.get_thread_id(
+                "feishu",
+                "release-chat",
+                topic_id="release-message",
+                connection_id=connection["id"],
+                scope=scenario.seed.owner_a_scope,
+            )
+            is None
+        )
     finally:
         await scenario.close()
 

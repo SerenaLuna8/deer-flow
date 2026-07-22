@@ -12,6 +12,8 @@ const scope = {
 };
 const threadId = "33333333-3333-4333-8333-333333333333";
 const agentAssetId = "44444444-4444-4444-8444-444444444444";
+const createdAt = "2026-07-21T06:00:00Z";
+const updatedAt = "2026-07-21T06:01:00Z";
 
 function privateThread(version: number, displayName = "Runnable Thread") {
   return {
@@ -22,6 +24,8 @@ function privateThread(version: number, displayName = "Runnable Thread") {
     status: "idle",
     metadata: { topic: "private" },
     version,
+    created_at: createdAt,
+    updated_at: updatedAt,
   };
 }
 
@@ -70,6 +74,9 @@ describe("project thread adapter", () => {
         agent_scope: "project",
         private_work_version: 3,
       },
+      created_at: createdAt,
+      updated_at: updatedAt,
+      state_updated_at: updatedAt,
     });
     const [, init] = fetcher.mock.calls[0]!;
     expect(jsonRequestBody(init)).toEqual({ limit: 20, offset: 5 });

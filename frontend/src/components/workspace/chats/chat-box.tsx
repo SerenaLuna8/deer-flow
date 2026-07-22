@@ -11,6 +11,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { useI18n } from "@/core/i18n/hooks";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { useUploadedFiles } from "@/core/uploads";
@@ -27,12 +28,32 @@ import { SidecarPanel, useMaybeSidecar } from "../sidecar";
 
 const RIGHT_PANEL_ANIMATION_MS = 280;
 
-type RightPanelKind = "sidecar" | "artifacts";
+export type ChatRightPanelKind = "sidecar" | "artifacts";
+
+export function resolveChatRightPanel({
+  sidecarOpen,
+  artifactsEnabled,
+  artifactsOpen,
+  hasArtifacts,
+  staticWebsiteOnly,
+}: {
+  sidecarOpen: boolean;
+  artifactsEnabled: boolean;
+  artifactsOpen: boolean;
+  hasArtifacts: boolean;
+  staticWebsiteOnly: boolean;
+}): ChatRightPanelKind | null {
+  if (sidecarOpen) return "sidecar";
+  if (!artifactsEnabled || !artifactsOpen) return null;
+  if (staticWebsiteOnly && !hasArtifacts) return null;
+  return "artifacts";
+}
 
 const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   children,
   threadId,
 }) => {
+  const { locale, t } = useI18n();
   const { thread } = useThread();
   const isMobile = useIsMobile();
   const pathname = usePathname();
@@ -106,27 +127,20 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     threadArtifacts,
   ]);
 
-  const artifactPanelOpen = useMemo(() => {
-    if (!artifactsEnabled) {
-      return false;
-    }
-    if (sidecarOpen) {
-      return false;
-    }
-    if (isStaticWebsiteOnly()) {
-      return artifactsOpen && artifacts?.length > 0;
-    }
-    return artifactsOpen;
-  }, [artifactsEnabled, artifactsOpen, artifacts, sidecarOpen]);
-
-  const activeRightPanel: RightPanelKind | null = sidecarOpen
-    ? "sidecar"
-    : artifactPanelOpen
-      ? "artifacts"
-      : null;
+  const activeRightPanel = useMemo(
+    () =>
+      resolveChatRightPanel({
+        sidecarOpen,
+        artifactsEnabled,
+        artifactsOpen,
+        hasArtifacts: artifacts.length > 0,
+        staticWebsiteOnly: isStaticWebsiteOnly(),
+      }),
+    [artifacts.length, artifactsEnabled, artifactsOpen, sidecarOpen],
+  );
   const rightPanelOpen = activeRightPanel !== null;
   const [renderedRightPanel, setRenderedRightPanel] =
-    useState<RightPanelKind | null>(activeRightPanel);
+    useState<ChatRightPanelKind | null>(activeRightPanel);
 
   const resizableIdBase = useMemo(() => {
     return pathname.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
@@ -187,13 +201,19 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
           {artifacts.length === 0 ? (
             <ConversationEmptyState
               icon={<FilesIcon />}
-              title="No artifact selected"
-              description="Select an artifact to view its details"
+              title={
+                locale === "zh-CN" ? "尚未选择文件" : "No artifact selected"
+              }
+              description={
+                locale === "zh-CN"
+                  ? "选择一个文件以查看详情"
+                  : "Select an artifact to view its details"
+              }
             />
           ) : (
             <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
               <header className="shrink-0">
-                <h2 className="text-lg font-medium">Artifacts</h2>
+                <h2 className="text-lg font-medium">{t.common.artifacts}</h2>
               </header>
               <main className="min-h-0 grow">
                 <ArtifactFileList
@@ -215,6 +235,8 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     threadId,
     artifacts,
     setArtifactsOpen,
+    locale,
+    t.common.artifacts,
   ]);
 
   if (!artifactsEnabled && sidecar == null) {
@@ -245,10 +267,14 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
           >
             <SheetHeader className="sr-only">
               <SheetTitle>
-                {renderedRightPanel === "sidecar" ? "Sidecar" : "Artifacts"}
+                {renderedRightPanel === "sidecar"
+                  ? t.sidecar.title
+                  : t.common.artifacts}
               </SheetTitle>
               <SheetDescription>
-                Browse the side panel for this conversation.
+                {locale === "zh-CN"
+                  ? "查看当前对话的侧边内容。"
+                  : "Browse the side panel for this conversation."}
               </SheetDescription>
             </SheetHeader>
             <div className="min-h-0 flex-1 p-3 pt-10">{rightPanelContent}</div>

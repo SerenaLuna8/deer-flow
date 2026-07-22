@@ -78,10 +78,7 @@
       "audit",
       "retention",
       "admin",
-      "channel",
-      "archive",
-      "journal",
-      "restore_proof"
+      "channel"
     ],
     "scopes": [
       "account",
@@ -89,8 +86,7 @@
       "project_shared",
       "project_private",
       "project_governance",
-      "system_governance",
-      "recovery"
+      "system_governance"
     ],
     "ownerships": [
       "not_applicable",
@@ -132,8 +128,8 @@
     ]
   },
   "surface_manifest": {
-    "count": 459,
-    "sha256": "3a9ca6a619d5da48cff8a80364692db4cf6e3b4b54be17216ff20b43b83476c5"
+    "count": 474,
+    "sha256": "a9e4aadb3c76bbaa0b774b0854fbaaa33e43f38b263d2a10e14c4a5d248593d0"
   },
   "cases": [
     {
@@ -773,29 +769,6 @@
       ]
     },
     {
-      "case_id": "resource.archive.restore",
-      "actor": "system_admin_without_membership",
-      "account_relationship": "same_account",
-      "project_relationship": "none",
-      "membership_state": "none",
-      "platform_role": "system_admin",
-      "resource_family": "archive",
-      "scope": "recovery",
-      "ownership": "server_owned",
-      "operation": "restore",
-      "expected_status": 200,
-      "expected_code": null,
-      "expected_db_delta": 1,
-      "layers": [
-        "service",
-        "repository",
-        "database"
-      ],
-      "evidence_selectors": [
-        "pytest::tests/test_m6_restore_postgres.py::test_live_archive_restore_replays_tombstone_runs_probes_and_writes_proof"
-      ]
-    },
-    {
       "case_id": "resource.auth.get",
       "actor": "viewer",
       "account_relationship": "same_account",
@@ -817,6 +790,32 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation"
+      ]
+    },
+    {
+      "case_id": "rate_limit.auth.shared_admit",
+      "actor": "unauthenticated",
+      "account_relationship": "unauthenticated",
+      "project_relationship": "none",
+      "membership_state": "none",
+      "platform_role": "user",
+      "resource_family": "auth",
+      "scope": "account",
+      "ownership": "server_owned",
+      "operation": "create",
+      "expected_status": 201,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
+        "api",
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/test_auth_rate_limit.py::test_registration_is_rate_limited_and_success_does_not_clear_counter",
+        "pytest::tests/test_auth_rate_limit.py::test_login_rate_limit_is_postgresql_admitted_before_password_check",
+        "pytest::tests/test_m8_capacity_postgres.py::test_auth_login_attempts_are_atomic_across_gateway_workers",
+        "pytest::tests/test_m8_capacity_postgres.py::test_auth_success_clear_preserves_a_later_concurrent_failure"
       ]
     },
     {
@@ -845,30 +844,6 @@
       ]
     },
     {
-      "case_id": "resource.journal.purge",
-      "actor": "admin",
-      "account_relationship": "same_account",
-      "project_relationship": "same_project",
-      "membership_state": "active_admin",
-      "platform_role": "user",
-      "resource_family": "journal",
-      "scope": "recovery",
-      "ownership": "server_owned",
-      "operation": "purge",
-      "expected_status": 200,
-      "expected_code": null,
-      "expected_db_delta": 0,
-      "layers": [
-        "api",
-        "service",
-        "repository",
-        "database"
-      ],
-      "evidence_selectors": [
-        "pytest::tests/test_m6_retention_purge_postgres.py::test_project_purge_revalidates_pending_deletion_and_preserves_other_project"
-      ]
-    },
-    {
       "case_id": "resource.occurrence.get",
       "actor": "viewer",
       "account_relationship": "same_account",
@@ -891,30 +866,6 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m5_project_automation_postgres.py::test_project_api_is_project_owner_and_capability_scoped"
-      ]
-    },
-    {
-      "case_id": "resource.restore_proof.get",
-      "actor": "viewer",
-      "account_relationship": "same_account",
-      "project_relationship": "same_project",
-      "membership_state": "active_viewer",
-      "platform_role": "system_admin",
-      "resource_family": "restore_proof",
-      "scope": "recovery",
-      "ownership": "server_owned",
-      "operation": "get",
-      "expected_status": 200,
-      "expected_code": null,
-      "expected_db_delta": 0,
-      "layers": [
-        "api",
-        "service",
-        "repository",
-        "database"
-      ],
-      "evidence_selectors": [
-        "pytest::tests/test_m6_restore_postgres.py::test_live_archive_restore_replays_tombstone_runs_probes_and_writes_proof"
       ]
     },
     {
@@ -1127,7 +1078,9 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
-        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
+        "pytest::tests/test_project_assets_router.py::test_project_skill_fork_route_uses_strict_discriminated_changes",
+        "pytest::tests/test_shared_asset_skill_service.py::test_skill_fork_creates_new_immutable_snapshot_and_preserves_untouched_binary",
+        "playwright::tests/e2e/project-assets.spec.ts::Skill file preview and fork preserve immutable source version"
       ]
     },
     {
@@ -1152,7 +1105,9 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
-        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
+        "pytest::tests/test_project_assets_router.py::test_project_skill_file_content_preview_is_typed_and_never_cached",
+        "pytest::tests/test_shared_asset_skill_service.py::test_skill_file_preview_is_lazy_utf8_only_and_bounded",
+        "playwright::tests/e2e/project-assets.spec.ts::Skill file preview and fork preserve immutable source version"
       ]
     },
     {
@@ -1580,6 +1535,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider",
+        "pytest::tests/integration/test_m4_private_work_postgres.py::test_channel_store_is_postgres_scoped_and_multi_process_safe",
         "playwright::tests/e2e/project-private-data.spec.ts::project Connections lists, connects, and disconnects imperatively"
       ]
     },
@@ -1603,7 +1559,8 @@
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider"
+        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider",
+        "pytest::tests/integration/test_m4_private_work_postgres.py::test_channel_store_is_postgres_scoped_and_multi_process_safe"
       ]
     },
     {
@@ -1629,6 +1586,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider",
+        "pytest::tests/integration/test_m4_private_work_postgres.py::test_channel_store_is_postgres_scoped_and_multi_process_safe",
         "playwright::tests/e2e/project-private-data.spec.ts::project Connections lists, connects, and disconnects imperatively"
       ]
     },
@@ -1652,7 +1610,8 @@
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider"
+        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider",
+        "pytest::tests/integration/test_m4_private_work_postgres.py::test_channel_store_is_postgres_scoped_and_multi_process_safe"
       ]
     },
     {
@@ -2944,7 +2903,7 @@
       "membership_state": "none",
       "platform_role": "system_admin",
       "resource_family": "retention",
-      "scope": "recovery",
+      "scope": "system_governance",
       "ownership": "server_owned",
       "operation": "purge",
       "expected_status": 200,
@@ -3193,12 +3152,15 @@
       "expected_code": null,
       "expected_db_delta": 1,
       "layers": [
+        "frontend",
+        "api",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -3216,12 +3178,15 @@
       "expected_code": null,
       "expected_db_delta": 0,
       "layers": [
+        "frontend",
+        "api",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {

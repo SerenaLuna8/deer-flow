@@ -26,9 +26,25 @@ class SkillCreateCommand(Protocol):
 
 
 @dataclass(frozen=True)
+class SkillVersionFileMetadataRecord:
+    skill_version_id: uuid.UUID
+    path: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class SkillVersionRecord:
     row: SkillVersionRow
-    files: tuple[SkillVersionFileRow, ...]
+    files: tuple[SkillVersionFileRow | SkillVersionFileMetadataRecord, ...]
+
+
+@dataclass(frozen=True)
+class SkillVersionMetadataRecord:
+    asset: SkillRow
+    version: SkillVersionRow
+    files: tuple[SkillVersionFileMetadataRecord, ...]
 
 
 def _request_id(context: object) -> str:
@@ -363,6 +379,86 @@ class SkillRepository:
             raise AssetNotFound(context.request_id)
         return SkillVersionRecord(row, await self._load_files(row.id, for_update=for_update))
 
+    async def get_project_visible_version_metadata(
+        self,
+        context: ProjectContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+    ) -> SkillVersionMetadataRecord:
+        """Load preview metadata without selecting file content BLOBs."""
+
+        self._require_project_actor(context)
+        await self._lock_project_context(context)
+        statement = (
+            select(SkillRow, SkillVersionRow)
+            .join(SkillVersionRow, SkillVersionRow.skill_id == SkillRow.id)
+            .where(
+                SkillRow.id == asset_id,
+                SkillVersionRow.id == version_id,
+                SkillVersionRow.skill_id == asset_id,
+                or_(
+                    and_(
+                        SkillRow.scope == "project",
+                        SkillRow.project_id == context.project_id,
+                    ),
+                    and_(
+                        SkillRow.scope == "system",
+                        SkillRow.project_id.is_(None),
+                        SkillVersionRow.workflow_status == "published",
+                    ),
+                ),
+                self._project_context_exists(context),
+            )
+        )
+        selected = (await self.session.execute(statement)).one_or_none()
+        if selected is None:
+            raise AssetNotFound(context.request_id)
+        asset, version = selected
+        return SkillVersionMetadataRecord(
+            asset=asset,
+            version=version,
+            files=await self._load_file_metadata(version.id),
+        )
+
+    async def load_project_visible_version_file_content(
+        self,
+        context: ProjectContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+        path: str,
+    ) -> bytes:
+        """Load one authorized file body after repeating the trusted scope predicate."""
+
+        self._require_project_actor(context)
+        await self._lock_project_context(context)
+        statement = (
+            select(SkillVersionFileRow.content)
+            .join(SkillVersionRow, SkillVersionRow.id == SkillVersionFileRow.skill_version_id)
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(
+                SkillRow.id == asset_id,
+                SkillVersionRow.id == version_id,
+                SkillVersionRow.skill_id == asset_id,
+                SkillVersionFileRow.path == path,
+                or_(
+                    and_(
+                        SkillRow.scope == "project",
+                        SkillRow.project_id == context.project_id,
+                    ),
+                    and_(
+                        SkillRow.scope == "system",
+                        SkillRow.project_id.is_(None),
+                        SkillVersionRow.workflow_status == "published",
+                    ),
+                ),
+                self._project_context_exists(context),
+            )
+        )
+        content = (await self.session.execute(statement)).scalar_one_or_none()
+        if content is None:
+            raise AssetNotFound(context.request_id)
+        return bytes(content)
+
     async def get_system_version(
         self,
         context: SystemAssetGovernanceContext,
@@ -625,16 +721,60 @@ class SkillRepository:
             statement = statement.with_for_update(of=SkillVersionFileRow)
         return tuple((await self.session.execute(statement)).scalars().all())
 
+    async def _load_file_metadata(
+        self,
+        version_id: uuid.UUID,
+    ) -> tuple[SkillVersionFileMetadataRecord, ...]:
+        statement = (
+            select(
+                SkillVersionFileRow.skill_version_id,
+                SkillVersionFileRow.path,
+                SkillVersionFileRow.media_type,
+                SkillVersionFileRow.size_bytes,
+                SkillVersionFileRow.sha256,
+            )
+            .where(SkillVersionFileRow.skill_version_id == version_id)
+            .order_by(SkillVersionFileRow.path)
+        )
+        return tuple(
+            SkillVersionFileMetadataRecord(
+                skill_version_id=row.skill_version_id,
+                path=row.path,
+                media_type=row.media_type,
+                size_bytes=row.size_bytes,
+                sha256=row.sha256,
+            )
+            for row in (await self.session.execute(statement)).all()
+        )
+
     async def _load_file_map(
         self,
         version_ids: Sequence[uuid.UUID],
-    ) -> dict[uuid.UUID, tuple[SkillVersionFileRow, ...]]:
+    ) -> dict[uuid.UUID, tuple[SkillVersionFileMetadataRecord, ...]]:
         if not version_ids:
             return {}
-        statement = select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id.in_(version_ids)).order_by(SkillVersionFileRow.skill_version_id, SkillVersionFileRow.path)
-        grouped: dict[uuid.UUID, list[SkillVersionFileRow]] = {}
-        for row in (await self.session.execute(statement)).scalars().all():
-            grouped.setdefault(row.skill_version_id, []).append(row)
+        statement = (
+            select(
+                SkillVersionFileRow.skill_version_id,
+                SkillVersionFileRow.path,
+                SkillVersionFileRow.media_type,
+                SkillVersionFileRow.size_bytes,
+                SkillVersionFileRow.sha256,
+            )
+            .where(SkillVersionFileRow.skill_version_id.in_(version_ids))
+            .order_by(SkillVersionFileRow.skill_version_id, SkillVersionFileRow.path)
+        )
+        grouped: dict[uuid.UUID, list[SkillVersionFileMetadataRecord]] = {}
+        for row in (await self.session.execute(statement)).all():
+            grouped.setdefault(row.skill_version_id, []).append(
+                SkillVersionFileMetadataRecord(
+                    skill_version_id=row.skill_version_id,
+                    path=row.path,
+                    media_type=row.media_type,
+                    size_bytes=row.size_bytes,
+                    sha256=row.sha256,
+                )
+            )
         return {key: tuple(value) for key, value in grouped.items()}
 
     async def list_project_visible(self, context: ProjectContext) -> tuple[SkillRow, ...]:

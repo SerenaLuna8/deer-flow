@@ -101,7 +101,6 @@ def test_public_readiness_contract_has_no_cutover_field() -> None:
         "worker_fleet": "unavailable",
         "scheduler": "disabled",
         "stream": "closed",
-        "recovery": "closed",
         "quota": "closed",
         "audit": "closed",
         "role": "gateway",

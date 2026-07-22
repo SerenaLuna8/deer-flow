@@ -21,10 +21,7 @@ def _is_interactive() -> bool:
 def main() -> int:
     try:
         if not _is_interactive():
-            print(
-                "Non-interactive environment detected.\n"
-                "Please edit config.yaml and .env directly, or run 'make setup' in a terminal."
-            )
+            print("Non-interactive environment detected.\nPlease edit config.yaml and .env directly, or run 'make setup' in a terminal.")
             return 1
 
         from wizard.ui import (
@@ -105,12 +102,6 @@ def main() -> int:
         )
         print_success(f"Config written to: {config_path.relative_to(project_root)}")
 
-        if not env_path.exists():
-            env_example = project_root / ".env.example"
-            if env_example.exists():
-                import shutil
-                shutil.copyfile(env_example, env_path)
-
         env_pairs: dict[str, str] = {}
         if llm.api_key:
             env_pairs[llm.provider.env_var] = llm.api_key
@@ -127,6 +118,7 @@ def main() -> int:
         frontend_env_example = project_root / "frontend" / ".env.example"
         if not frontend_env.exists() and frontend_env_example.exists():
             import shutil
+
             shutil.copyfile(frontend_env_example, frontend_env)
             print_success("frontend/.env created from example")
 

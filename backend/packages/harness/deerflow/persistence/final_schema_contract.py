@@ -27,7 +27,6 @@ LANGGRAPH_TABLES = frozenset(
 )
 FINAL_APP_SEQUENCES = frozenset(
     {
-        ("deletion_tombstones_journal_sequence_seq", "deletion_tombstones"),
         ("run_events_id_seq", "run_events"),
     }
 )
@@ -78,28 +77,28 @@ class CatalogInvariant:
 # exposing data or relying on PostgreSQL object OIDs.
 FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=52,
-        digest="9428d581f97bb36d1beb911e8017e8cdae28b5760aa9897e2c1c300b4abba54a",
+        count=49,
+        digest="54a3929467c03bb4b4d799d27ec5a62097f977b3a765b9f055b22c60b8d8c478",
     ),
     "columns": CatalogInvariant(
-        count=615,
-        digest="8bb79d7b08cd7404a9e459a42ebb56471d57888310c965f143d40cd553ecd5b4",
+        count=586,
+        digest="861bb49db7d6961c2ceb471d005e88adb5f8342f8b56cf12625876a2f8a08ab6",
     ),
     "constraints": CatalogInvariant(
-        count=383,
-        digest="41ad7d27b84de8b3818c9753386561ba321e7909812078fccea8e6a11def2508",
+        count=371,
+        digest="5ecf40896c674f4a7d536cea75bf1b95a5d555bde55de9a04efcdccdb7e2b702",
     ),
     "indexes": CatalogInvariant(
-        count=161,
-        digest="927049f40b6cce93cab8d404ef1fad187cb642b494770332956e069f8bde8b08",
+        count=153,
+        digest="60eb4ab43351a9af5cb36da2d7d6622d4def074265489974192159fab7cff01f",
     ),
     "functions": CatalogInvariant(
         count=10,
         digest="4f5e3d18a510d365ffc45c6f389d14487d25791a2ed4118c64185a8515380719",
     ),
     "triggers": CatalogInvariant(
-        count=67,
-        digest="a9124147f208a824175614af4d8bcdcb8194f2c3f3bd3bf3b2a332130d13ce95",
+        count=64,
+        digest="71201311a82c867e46fb8e1d9728588f7ceb87b46064f2a0e4317d52b4999c2c",
     ),
 }
 
@@ -121,10 +120,6 @@ if M7_CANONICAL_SCHEMA_DIGEST != _catalog_signature_digest(FINAL_M7_CATALOG_SIGN
 
 
 _VARCHAR_TEXT_ARRAY = re.compile(r"ARRAY\[(?P<body>(?:'(?:''|[^'])*'::character varying(?:::text)?(?:,\s*)?)+)\](?:::text\[\])?")
-_M7_SCHEMA_DIGEST_PLACEHOLDER = "__M7_CANONICAL_SCHEMA_DIGEST__"
-_M7_RESTORE_PROOF_CONSTRAINT = "CHECK (archive_schema_version = 7 AND schema_revision::text = '0001_project_saas_baseline'::text AND schema_digest = '{schema_digest}'::bpchar)"
-
-
 _CATALOG_QUERIES = {
     "relations": """
         SELECT c.relname, c.relkind::text, c.relpersistence::text,
@@ -216,14 +211,9 @@ def _normalize_catalog_value(value: object) -> object:
     if not isinstance(value, str):
         return value
 
-    canonical_restore_proof_constraint = _M7_RESTORE_PROOF_CONSTRAINT.format(schema_digest=M7_CANONICAL_SCHEMA_DIGEST)
-    if value == canonical_restore_proof_constraint:
-        value = _M7_RESTORE_PROOF_CONSTRAINT.format(schema_digest=_M7_SCHEMA_DIGEST_PLACEHOLDER)
-
-    # pg_dump renders text-array ANY expressions with a cast on each element,
-    # while direct baseline DDL retains one cast on the array. PostgreSQL stores
-    # the same expression tree either way; normalize that presentation-only
-    # difference so one canonical verifier covers fresh and restored M7 schemas.
+    # PostgreSQL may render text-array ANY expressions with a cast on each
+    # element even though the baseline DDL uses one cast on the array. Normalize
+    # that presentation-only difference for stable catalog verification.
     def normalize_varchar_text_array(match: re.Match[str]) -> str:
         body = match.group("body").replace(
             "::character varying::text",
@@ -253,33 +243,6 @@ async def verify_m7_catalog(connection: AsyncConnection) -> bool:
     """Return whether all canonical M7 catalog invariants match exactly."""
 
     return await read_m7_catalog_signature(connection) == FINAL_M7_CATALOG_SIGNATURE
-
-
-async def read_m7_catalog_signature_asyncpg(connection: object) -> dict[str, CatalogInvariant]:
-    """Read the same contract through the exported-snapshot asyncpg session."""
-
-    signature: dict[str, CatalogInvariant] = {}
-    for category, query in _CATALOG_QUERIES.items():
-        if ":app_tables" in query:
-            sql = query.replace(":app_tables", "$1")
-            rows = await connection.fetch(sql, sorted(FINAL_APP_TABLES))
-        elif ":required_functions" in query:
-            sql = query.replace(":required_functions", "$1")
-            rows = await connection.fetch(sql, sorted(REQUIRED_FUNCTIONS))
-        else:  # pragma: no cover - every audited query is parameterized
-            rows = await connection.fetch(query)
-        normalized = tuple(tuple(row) for row in rows)
-        signature[category] = CatalogInvariant(
-            len(normalized),
-            _rows_digest(normalized),
-        )
-    return signature
-
-
-async def verify_m7_catalog_asyncpg(connection: object) -> bool:
-    """Verify the canonical schema inside an asyncpg exported snapshot."""
-
-    return await read_m7_catalog_signature_asyncpg(connection) == FINAL_M7_CATALOG_SIGNATURE
 
 
 _USER_SCHEMA_INVENTORY_SQL = """
@@ -458,13 +421,6 @@ async def inventory_user_schema_objects(connection: AsyncConnection) -> frozense
     return frozenset(str(value) for value in result.scalars())
 
 
-async def inventory_user_schema_objects_asyncpg(connection: object) -> frozenset[str]:
-    """Read the same exact root inventory inside an asyncpg snapshot."""
-
-    rows = await connection.fetch(_USER_SCHEMA_INVENTORY_SQL)
-    return frozenset(str(row[0]) for row in rows)
-
-
 def inventory_is_m7_allowed(objects: frozenset[str]) -> bool:
     """Validate exact app-only or complete app-plus-LangGraph root objects."""
 
@@ -534,9 +490,6 @@ __all__ = [
     "REQUIRED_FUNCTIONS",
     "inventory_is_m7_allowed",
     "inventory_user_schema_objects",
-    "inventory_user_schema_objects_asyncpg",
     "read_m7_catalog_signature",
-    "read_m7_catalog_signature_asyncpg",
     "verify_m7_catalog",
-    "verify_m7_catalog_asyncpg",
 ]

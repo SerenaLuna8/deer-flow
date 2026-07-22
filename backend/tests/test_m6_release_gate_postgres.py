@@ -5,19 +5,14 @@ import hashlib
 import hmac
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
 import uuid
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from postgres_utils import replace_database
-from sqlalchemy import select, text
-from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import select
 from support.m4_private_threads import seed_m4_thread_database
 
 from app.audit.models import (
@@ -28,28 +23,12 @@ from app.audit.models import (
     AuditTarget,
     AuditTargetKind,
 )
-from app.audit.service import AuditService, _bind_recovery_audit_process
-from app.audit.sinks import TrustedOperationAuditSink
-from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.audit.service import AuditService
 from app.quotas.models import QuotaExceeded, QuotaSourceRef
 from app.quotas.service import QuotaService
-from app.recovery import BackupConfig, create_backup
-from app.recovery.journal import TombstoneJournal, TombstoneSequenceGap
-from app.recovery.purge import RetentionCandidate, RetentionPurger
-from app.recovery.restore import (
-    RestoreAuthenticationFailed,
-    RestoreConfig,
-    Restorer,
-)
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.audit.model import AuditLogRow
-from deerflow.persistence.private_work.model import PrivateFileRow
-from deerflow.persistence.recovery.model import RecoveryJournalStateRow, RestoreProofRow
-
-NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
-BACKUP_KEY = b"b" * 32
-JOURNAL_KEY = b"j" * 32
 
 
 def _keyring() -> AuditHmacKeyring:
@@ -63,14 +42,6 @@ def _source_ref(payload: bytes) -> QuotaSourceRef:
     return QuotaSourceRef(
         key_id="release-quota-v1",
         hmac_hex=hmac.new(b"q" * 32, payload, hashlib.sha256).hexdigest(),
-    )
-
-
-def _recovery_audit(factory) -> TrustedOperationAuditSink:
-    service = AuditService(factory, _keyring())
-    return TrustedOperationAuditSink(
-        service,
-        process_context=_bind_recovery_audit_process(service),
     )
 
 
@@ -230,225 +201,6 @@ async def test_quota_race_and_audit_redaction_are_fail_closed(
         assert secret not in encoded
     finally:
         await seed.engine.dispose()
-
-
-async def _seed_purge_candidate(seed) -> uuid.UUID:
-    file_id = uuid.uuid4()
-    thread_id = f"release-restore-{uuid.uuid4()}"
-    async with seed.factory() as session, session.begin():
-        await PrivateThreadRepository(session).create(
-            scope=seed.owner_a_scope,
-            thread_id=thread_id,
-            agent=ThreadAgentRef(seed.project_agent_id, "project"),
-        )
-        session.add(
-            PrivateFileRow(
-                id=file_id,
-                project_id=seed.owner_a.project_id,
-                owner_user_id=str(seed.owner_a.user_id),
-                thread_id=thread_id,
-                kind="upload",
-                logical_path="release-restore.txt",
-                media_type="text/plain",
-                size=6,
-                sha256="0" * 64,
-                status="deleted",
-                deleted_at=NOW - timedelta(days=31),
-            )
-        )
-        await session.flush()
-        await session.execute(
-            text(
-                """INSERT INTO file_chunks (file_id,chunk_index,content,size,sha256)
-                   VALUES (:file_id,0,:content,6,:sha256)"""
-            ),
-            {
-                "file_id": file_id,
-                "content": b"secret",
-                "sha256": "2bb80d537b1da3e38bd30361aa855686bde0ba0a5e7e0627f31e1d3da249cc42",
-            },
-        )
-    return file_id
-
-
-async def _database_exists(admin_url: str, database: str) -> bool:
-    engine = create_async_engine(
-        replace_database(admin_url, "postgres"),
-        isolation_level="AUTOCOMMIT",
-    )
-    try:
-        async with engine.connect() as connection:
-            return bool(
-                await connection.scalar(
-                    text("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname=:name)"),
-                    {"name": database},
-                )
-            )
-    finally:
-        await engine.dispose()
-
-
-async def _drop_restore_database(admin_url: str, target_url: str) -> None:
-    database = make_url(target_url).database or ""
-    assert database.startswith("deerflow_restore_")
-    engine = create_async_engine(
-        replace_database(admin_url, "postgres"),
-        isolation_level="AUTOCOMMIT",
-    )
-    try:
-        async with engine.connect() as connection:
-            await connection.execute(
-                text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=:name AND pid<>pg_backend_pid()"),
-                {"name": database},
-            )
-            await connection.execute(text(f'DROP DATABASE IF EXISTS "{database}"'))
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.anyio
-async def test_encrypted_archive_restore_replays_journal_and_rejects_tamper_and_gap(
-    migrated_postgres_database_url: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("AUTH_JWT_SECRET", "task19-release-distinct-auth-secret")
-    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-    from langgraph.store.postgres.aio import AsyncPostgresStore
-
-    psycopg_url = str(migrated_postgres_database_url).replace(
-        "postgresql+asyncpg://",
-        "postgresql://",
-        1,
-    )
-    async with AsyncPostgresSaver.from_conn_string(psycopg_url) as saver:
-        await saver.setup()
-    async with AsyncPostgresStore.from_conn_string(psycopg_url) as store:
-        await store.setup()
-
-    seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    file_id = await _seed_purge_candidate(seed)
-    archive = tmp_path / "release.dfba"
-    manifest = await create_backup(
-        BackupConfig(
-            database_url=migrated_postgres_database_url,
-            output=archive,
-            key=BACKUP_KEY,
-        )
-    )
-    journal = TombstoneJournal(
-        tmp_path / "journal" / "tombstones.jsonl",
-        JOURNAL_KEY,
-    )
-    await RetentionPurger(
-        seed.factory,
-        journal=journal,
-        keyring=_keyring(),
-        audit=_recovery_audit(seed.factory),
-    ).purge(
-        RetentionCandidate.file(
-            project_id=seed.owner_a.project_id,
-            owner_user_id=str(seed.owner_a.user_id),
-            file_id=file_id,
-            deleted_at=NOW - timedelta(days=31),
-            idempotency_key=f"release-restore:{file_id}",
-            request_id="task19-release-restore-purge",
-        ),
-        now=NOW,
-    )
-
-    target_urls = [
-        replace_database(
-            migrated_postgres_database_url,
-            f"deerflow_restore_{os.getpid()}_{uuid.uuid4().hex}",
-        )
-        for _ in range(3)
-    ]
-    try:
-        tampered_archive = tmp_path / "tampered.dfba"
-        shutil.copytree(archive, tampered_archive)
-        chunk = tampered_archive / "chunks" / "00000000.bin"
-        payload = bytearray(chunk.read_bytes())
-        payload[0] ^= 1
-        chunk.write_bytes(payload)
-        with pytest.raises(RestoreAuthenticationFailed):
-            await Restorer(
-                RestoreConfig(
-                    archive=tampered_archive,
-                    target_database_url=target_urls[0],
-                    current_database_url=migrated_postgres_database_url,
-                    journal=journal,
-                    backup_key=BACKUP_KEY,
-                    keyring=_keyring(),
-                )
-            ).restore()
-        assert not await _database_exists(
-            migrated_postgres_database_url,
-            make_url(target_urls[0]).database or "",
-        )
-
-        gap_path = tmp_path / "gap" / "tombstones.jsonl"
-        gap_path.parent.mkdir()
-        shutil.copy2(journal.path, gap_path)
-        lines = gap_path.read_text(encoding="utf-8").splitlines()
-        entry = json.loads(lines[1])
-        entry["sequence"] = 2
-        lines[1] = json.dumps(entry, sort_keys=True, separators=(",", ":"))
-        gap_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        with pytest.raises(TombstoneSequenceGap):
-            await Restorer(
-                RestoreConfig(
-                    archive=archive,
-                    target_database_url=target_urls[1],
-                    current_database_url=migrated_postgres_database_url,
-                    journal=TombstoneJournal(gap_path, JOURNAL_KEY),
-                    backup_key=BACKUP_KEY,
-                    keyring=_keyring(),
-                )
-            ).restore()
-        assert not await _database_exists(
-            migrated_postgres_database_url,
-            make_url(target_urls[1]).database or "",
-        )
-
-        restorer = Restorer(
-            RestoreConfig(
-                archive=archive,
-                target_database_url=target_urls[2],
-                current_database_url=migrated_postgres_database_url,
-                journal=journal,
-                backup_key=BACKUP_KEY,
-                keyring=_keyring(),
-            )
-        )
-        result = await restorer.restore()
-        assert restorer.owns_verified_target(result)
-        assert result.archive_id == manifest.archive_id
-        assert result.tombstones_replayed == 1
-        assert result.probes_complete is True
-        assert result.status == "verified"
-
-        target_engine = create_async_engine(target_urls[2])
-        try:
-            async with async_sessionmaker(target_engine)() as session:
-                assert await session.scalar(select(PrivateFileRow.id).where(PrivateFileRow.id == file_id)) is None
-                proof = await session.get(RestoreProofRow, result.proof_id)
-                state = await session.get(RecoveryJournalStateRow, 1)
-                assert proof is not None and proof.probes_complete is True
-                assert proof.replayed_through_sequence == 1
-                assert state is not None and state.high_watermark == 1
-        finally:
-            await target_engine.dispose()
-    finally:
-        await seed.engine.dispose()
-        for target_url in target_urls:
-            database = make_url(target_url).database or ""
-            if await _database_exists(migrated_postgres_database_url, database):
-                await _drop_restore_database(
-                    migrated_postgres_database_url,
-                    target_url,
-                )
 
 
 def test_cross_platform_release_runner_requires_url_and_fails_a_real_child_skip(tmp_path: Path) -> None:

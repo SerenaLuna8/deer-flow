@@ -66,6 +66,11 @@ def test_gateway_openapi_keeps_project_private_routes() -> None:
     assert f"{prefix}/threads/{{thread_id}}/uploads" in paths
     assert f"{prefix}/artifacts/{{artifact_id}}" in paths
     assert f"{prefix}/threads/{{thread_id}}/runs/{{run_id}}/feedback" in paths
+    assert f"{prefix}/threads/{{thread_id}}/goal" in paths
+    assert f"{prefix}/threads/{{thread_id}}/compact" in paths
+    assert f"{prefix}/threads/{{thread_id}}/branches" in paths
+    assert f"{prefix}/threads/{{thread_id}}/runs/regenerate/prepare" in paths
+    assert f"{prefix}/threads/{{thread_id}}/suggestions" in paths
 
 
 def test_gateway_runtime_has_no_legacy_execution_singletons() -> None:

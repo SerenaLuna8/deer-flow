@@ -323,14 +323,14 @@ async def test_platform_reader_requires_issued_system_governance_context(
             third = await service.append(
                 session,
                 AuditActor.system_admin(context),
-                AuditAction.BACKUP_CREATED,
+                AuditAction.AUDIT_CORRECTED,
                 AuditTarget(
-                    kind=AuditTargetKind.BACKUP,
+                    kind=AuditTargetKind.AUDIT,
                     authority_id=uuid.uuid4(),
                     project_id=None,
                 ),
                 AuditOutcome.SUCCESS,
-                {"table_count": 12, "tombstone_high_watermark": 0},
+                {"correction_kind": "metadata"},
                 request_id=context.request_id,
             )
         page = await service.list_platform_new_session(context)

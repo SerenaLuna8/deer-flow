@@ -1,5 +1,5 @@
-import { ProjectAssetsPage } from "@/components/projects/assets/project-assets-page";
+import { ProjectCredentialPage } from "@/components/projects/credentials/project-credential-page";
 
 export default function ProjectCredentialsPage() {
-  return <ProjectAssetsPage kind="credentials" />;
+  return <ProjectCredentialPage />;
 }

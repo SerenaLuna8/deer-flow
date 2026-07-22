@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import yaml
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -25,13 +25,18 @@ from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAsset
 from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
+    AssetNotFound,
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
 from app.shared_assets.models import AssetScope, SkillArchiveFile, WorkflowStatus
-from app.shared_assets.skill_repository import SkillRepository, SkillVersionRecord
+from app.shared_assets.skill_repository import (
+    SkillRepository,
+    SkillVersionFileMetadataRecord,
+    SkillVersionRecord,
+)
 from deerflow.persistence.shared_assets import SkillRow, SkillVersionFileRow, SkillVersionRow
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.skillscan import (
@@ -43,6 +48,9 @@ from deerflow.skills.types import SkillCategory
 from deerflow.skills.validation import _validate_skill_frontmatter
 
 MAX_SKILL_ARCHIVE_BYTES = 100 * 1024 * 1024
+MAX_SKILL_TEXT_PREVIEW_BYTES = 1024 * 1024
+MAX_SKILL_EDIT_TEXT_BYTES = 5 * 1024 * 1024
+MAX_SKILL_FILE_CHANGES = 256
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _ENV_VAR_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
@@ -83,19 +91,6 @@ _CONFLICT_CONSTRAINTS = frozenset(
 )
 _Actor = ProjectContext | SystemAssetGovernanceContext | SystemAssetReadContext
 _T = TypeVar("_T")
-
-
-@dataclass(frozen=True)
-class _SkillScanConfig:
-    enabled: bool = True
-
-
-@dataclass(frozen=True)
-class _M3SkillScanConfig:
-    skill_scan: _SkillScanConfig = _SkillScanConfig()
-
-
-_M3_SKILL_SCAN_CONFIG = _M3SkillScanConfig()
 
 
 class _DuplicateKeySafeLoader(yaml.SafeLoader):
@@ -161,6 +156,27 @@ class SkillFileView:
     media_type: str
     size_bytes: int
     sha256: str
+
+
+@dataclass(frozen=True)
+class SkillFileContentView:
+    path: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    preview_status: Literal["ready", "binary", "too_large"]
+    encoding: Literal["utf-8"] | None
+    content: str | None
+    source_payload_checksum: str
+    asset_version: int
+
+
+@dataclass(frozen=True)
+class SkillFileChange:
+    op: Literal["create", "replace", "delete"]
+    path: str
+    content: str | None = None
+    media_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -268,6 +284,128 @@ def normalize_skill_files(
     if "SKILL.md" not in paths:
         raise AssetValidationFailed(request_id)
     return normalized
+
+
+def _canonical_skill_path(value: object, request_id: str) -> str:
+    if not isinstance(value, str):
+        raise AssetValidationFailed(request_id)
+    normalized = _validate_archive_file(
+        SkillArchiveFile(value, b"", "text/plain"),
+        request_id,
+    ).path
+    if normalized != value:
+        raise AssetValidationFailed(request_id)
+    return normalized
+
+
+def _validate_file_changes(
+    changes: Sequence[SkillFileChange],
+    request_id: str,
+) -> tuple[SkillFileChange, ...]:
+    try:
+        snapshot = tuple(changes)
+    except TypeError:
+        raise AssetValidationFailed(request_id) from None
+    if not snapshot or len(snapshot) > MAX_SKILL_FILE_CHANGES:
+        raise AssetValidationFailed(request_id)
+
+    normalized: list[SkillFileChange] = []
+    total_text_bytes = 0
+    paths: set[str] = set()
+    for change in snapshot:
+        if not isinstance(change, SkillFileChange) or change.op not in {"create", "replace", "delete"}:
+            raise AssetValidationFailed(request_id)
+        path = _canonical_skill_path(change.path, request_id)
+        if path in paths:
+            raise AssetValidationFailed(request_id)
+        paths.add(path)
+
+        if change.op == "delete":
+            if path == "SKILL.md" or change.content is not None or change.media_type is not None:
+                raise AssetValidationFailed(request_id)
+            normalized.append(SkillFileChange("delete", path))
+            continue
+
+        if not isinstance(change.content, str) or "\x00" in change.content:
+            raise AssetValidationFailed(request_id)
+        try:
+            content = change.content.encode("utf-8")
+        except UnicodeError:
+            raise AssetValidationFailed(request_id) from None
+        if len(content) > MAX_SKILL_TEXT_PREVIEW_BYTES:
+            raise AssetValidationFailed(request_id)
+        total_text_bytes += len(content)
+        if total_text_bytes > MAX_SKILL_EDIT_TEXT_BYTES:
+            raise AssetValidationFailed(request_id)
+
+        if change.op == "create" and not isinstance(change.media_type, str):
+            raise AssetValidationFailed(request_id)
+        if change.media_type is not None and not isinstance(change.media_type, str):
+            raise AssetValidationFailed(request_id)
+        checked = _validate_archive_file(
+            SkillArchiveFile(path, content, change.media_type or "text/plain"),
+            request_id,
+        )
+        if checked.path != path:
+            raise AssetValidationFailed(request_id)
+        normalized.append(
+            SkillFileChange(
+                change.op,
+                path,
+                change.content,
+                checked.media_type if change.media_type is not None else None,
+            )
+        )
+    return tuple(normalized)
+
+
+def _apply_file_changes(
+    files: Sequence[SkillArchiveFile],
+    changes: Sequence[SkillFileChange],
+    request_id: str,
+) -> tuple[SkillArchiveFile, ...]:
+    current = {item.path: item for item in files}
+    for change in _validate_file_changes(changes, request_id):
+        existing = current.get(change.path)
+        if change.op == "create":
+            if existing is not None:
+                raise AssetConflict(request_id)
+            assert change.content is not None and change.media_type is not None
+            current[change.path] = SkillArchiveFile(
+                change.path,
+                change.content.encode("utf-8"),
+                change.media_type,
+            )
+        elif change.op == "replace":
+            if existing is None:
+                raise AssetConflict(request_id)
+            assert change.content is not None
+            current[change.path] = SkillArchiveFile(
+                change.path,
+                change.content.encode("utf-8"),
+                change.media_type or existing.media_type,
+            )
+        else:
+            if existing is None:
+                raise AssetConflict(request_id)
+            del current[change.path]
+    return normalize_skill_files(tuple(current.values()), request_id=request_id)
+
+
+def _decode_preview_content(
+    metadata: SkillVersionFileMetadataRecord,
+    raw: bytes,
+    request_id: str,
+) -> tuple[Literal["ready", "binary"], Literal["utf-8"] | None, str | None]:
+    if len(raw) != metadata.size_bytes or hashlib.sha256(raw).hexdigest() != metadata.sha256:
+        raise AssetValidationFailed(request_id)
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "binary", None, None
+    if "\x00" in decoded:
+        return "binary", None, None
+    return "ready", "utf-8", decoded
 
 
 def _file_views(files: Sequence[SkillArchiveFile]) -> tuple[SkillFileView, ...]:
@@ -385,7 +523,6 @@ def _analyze_skill_files(
             scan_result = enforce_static_scan_result(
                 root,
                 skill_name=parsed.name,
-                app_config=_M3_SKILL_SCAN_CONFIG,
             )
             if scan_result["scanner_errors"]:
                 raise AssetValidationFailed(request_id)
@@ -436,6 +573,71 @@ class SkillService:
         normalized = normalize_skill_files(files, request_id=request_id)
         return await asyncio.to_thread(_analyze_skill_files, normalized, request_id)
 
+    async def preview_version_file(
+        self,
+        actor: ProjectContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+        path: str,
+    ) -> SkillFileContentView:
+        self._require_capability(actor, Capability.SHARED_ASSETS_READ)
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        canonical_path = _canonical_skill_path(path, actor.request_id)
+
+        async def operation(repository: SkillRepository) -> SkillFileContentView:
+            record = await repository.get_project_visible_version_metadata(
+                actor,
+                asset_id,
+                version_id,
+            )
+            file_views = await asyncio.to_thread(
+                self._metadata_file_views,
+                record.files,
+                actor.request_id,
+            )
+            checksum = await asyncio.to_thread(_snapshot_checksum, file_views)
+            if checksum != record.version.payload_checksum:
+                raise AssetValidationFailed(actor.request_id)
+            selected = next(
+                (item for item in record.files if item.path == canonical_path),
+                None,
+            )
+            if selected is None:
+                raise AssetNotFound(actor.request_id)
+
+            status: Literal["ready", "binary", "too_large"]
+            encoding: Literal["utf-8"] | None = None
+            content: str | None = None
+            if selected.size_bytes > MAX_SKILL_TEXT_PREVIEW_BYTES:
+                status = "too_large"
+            else:
+                raw = await repository.load_project_visible_version_file_content(
+                    actor,
+                    asset_id,
+                    version_id,
+                    canonical_path,
+                )
+                status, encoding, content = await asyncio.to_thread(
+                    _decode_preview_content,
+                    selected,
+                    raw,
+                    actor.request_id,
+                )
+            return SkillFileContentView(
+                path=selected.path,
+                media_type=selected.media_type,
+                size_bytes=selected.size_bytes,
+                sha256=selected.sha256,
+                preview_status=status,
+                encoding=encoding,
+                content=content,
+                source_payload_checksum=record.version.payload_checksum,
+                asset_version=record.asset.version,
+            )
+
+        return await self._execute(actor, operation)
+
     async def create_asset(self, actor: _Actor, command: CreateSkill) -> SkillAssetView:
         command = self._validate_create(actor, command)
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
@@ -470,48 +672,72 @@ class SkillService:
             self._require_expected_version(actor, asset, expected_asset_version)
             if asset.status != "active":
                 raise AssetConflict(actor.request_id)
-            if isinstance(actor, ProjectContext):
-                version_number = await repository.next_project_version_number(actor, asset)
-            elif actor.project_id is not None:
-                version_number = await repository.next_override_version_number(actor, asset)
-            else:
-                version_number = await repository.next_system_version_number(actor, asset)
-            version_id = uuid.uuid4()
-            row = SkillVersionRow(
-                id=version_id,
-                skill_id=asset.id,
-                version_number=version_number,
-                workflow_status=WorkflowStatus.DRAFT.value,
-                description=preview.description,
-                frontmatter=dict(preview.frontmatter),
-                compatibility=preview.compatibility,
-                secret_requirements=[{"name": requirement.name, "optional": requirement.optional} for requirement in preview.secret_requirements],
-                scan_decision=preview.scan_decision,
-                scan_summary=dict(preview.scan_summary),
+            return await self._create_version(
+                repository,
+                actor,
+                asset,
+                preview,
                 supersedes_version_id=asset.current_published_version_id,
-                payload_checksum=preview.checksum,
-                created_by_user_id=str(actor.user_id),
             )
-            file_rows = tuple(
-                SkillVersionFileRow(
-                    skill_version_id=version_id,
-                    path=item.path,
-                    media_type=item.media_type,
-                    size_bytes=len(item.content),
-                    sha256=file_view.sha256,
-                    content=item.content,
-                )
-                for item, file_view in zip(preview.files, preview.file_views, strict=True)
+
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "skill.version.create"),
+        )
+
+    async def fork_version(
+        self,
+        actor: ProjectContext,
+        asset_id: uuid.UUID,
+        source_version_id: uuid.UUID,
+        changes: Sequence[SkillFileChange],
+        *,
+        expected_asset_version: int,
+        expected_source_payload_checksum: str,
+    ) -> SkillVersionView:
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        validated_changes = _validate_file_changes(changes, actor.request_id)
+        if not isinstance(expected_source_payload_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", expected_source_payload_checksum) is None:
+            raise AssetValidationFailed(actor.request_id)
+
+        async def operation(repository: SkillRepository) -> SkillVersionView:
+            asset = await repository.get_project_asset(actor, asset_id, for_update=True)
+            self._require_expected_version(actor, asset, expected_asset_version)
+            if asset.status != "active":
+                raise AssetConflict(actor.request_id)
+            source = await repository.get_project_version(
+                actor,
+                asset_id,
+                source_version_id,
             )
-            if isinstance(actor, ProjectContext):
-                record = await repository.create_project_version(actor, asset.id, row, file_rows)
-            elif actor.project_id is not None:
-                record = await repository.create_override_version(actor, asset.id, row, file_rows)
-            else:
-                record = await repository.create_system_version(actor, asset.id, row, file_rows)
-            asset.version += 1
-            await repository.session.flush()
-            return self._version_view(record)
+            if source.row.payload_checksum != expected_source_payload_checksum:
+                raise AssetConflict(actor.request_id)
+            source_files = await asyncio.to_thread(
+                self._verified_archive_files,
+                source,
+                actor.request_id,
+            )
+            next_files = await asyncio.to_thread(
+                _apply_file_changes,
+                source_files,
+                validated_changes,
+                actor.request_id,
+            )
+            preview = await asyncio.to_thread(
+                _analyze_skill_files,
+                next_files,
+                actor.request_id,
+            )
+            return await self._create_version(
+                repository,
+                actor,
+                asset,
+                preview,
+                supersedes_version_id=source.row.id,
+            )
 
         return await self._execute(
             actor,
@@ -663,6 +889,58 @@ class SkillService:
 
         return await self._execute(actor, operation)
 
+    async def _create_version(
+        self,
+        repository: SkillRepository,
+        actor: _Actor,
+        asset: SkillRow,
+        preview: SkillArchivePreview,
+        *,
+        supersedes_version_id: uuid.UUID | None,
+    ) -> SkillVersionView:
+        if isinstance(actor, ProjectContext):
+            version_number = await repository.next_project_version_number(actor, asset)
+        elif actor.project_id is not None:
+            version_number = await repository.next_override_version_number(actor, asset)
+        else:
+            version_number = await repository.next_system_version_number(actor, asset)
+        version_id = uuid.uuid4()
+        row = SkillVersionRow(
+            id=version_id,
+            skill_id=asset.id,
+            version_number=version_number,
+            workflow_status=WorkflowStatus.DRAFT.value,
+            description=preview.description,
+            frontmatter=dict(preview.frontmatter),
+            compatibility=preview.compatibility,
+            secret_requirements=[{"name": requirement.name, "optional": requirement.optional} for requirement in preview.secret_requirements],
+            scan_decision=preview.scan_decision,
+            scan_summary=dict(preview.scan_summary),
+            supersedes_version_id=supersedes_version_id,
+            payload_checksum=preview.checksum,
+            created_by_user_id=str(actor.user_id),
+        )
+        file_rows = tuple(
+            SkillVersionFileRow(
+                skill_version_id=version_id,
+                path=item.path,
+                media_type=item.media_type,
+                size_bytes=len(item.content),
+                sha256=file_view.sha256,
+                content=item.content,
+            )
+            for item, file_view in zip(preview.files, preview.file_views, strict=True)
+        )
+        if isinstance(actor, ProjectContext):
+            record = await repository.create_project_version(actor, asset.id, row, file_rows)
+        elif actor.project_id is not None:
+            record = await repository.create_override_version(actor, asset.id, row, file_rows)
+        else:
+            record = await repository.create_system_version(actor, asset.id, row, file_rows)
+        asset.version += 1
+        await repository.session.flush()
+        return self._version_view(record)
+
     async def _change_status(
         self,
         actor: _Actor,
@@ -794,6 +1072,52 @@ class SkillService:
         if _snapshot_checksum(_file_views(files)) != record.row.payload_checksum:
             raise AssetValidationFailed(request_id)
         return files
+
+    @staticmethod
+    def _metadata_file_views(
+        files: Sequence[SkillVersionFileMetadataRecord],
+        request_id: str,
+    ) -> tuple[SkillFileView, ...]:
+        views: list[SkillFileView] = []
+        paths: set[str] = set()
+        filesystem_identities: set[str] = set()
+        for file in files:
+            path = _canonical_skill_path(file.path, request_id)
+            if path in paths:
+                raise AssetValidationFailed(request_id)
+            paths.add(path)
+            identity = unicodedata.normalize("NFC", path.casefold())
+            if identity in filesystem_identities:
+                raise AssetValidationFailed(request_id)
+            filesystem_identities.add(identity)
+            if not isinstance(file.media_type, str):
+                raise AssetValidationFailed(request_id)
+            checked = _validate_archive_file(
+                SkillArchiveFile(path, b"", file.media_type),
+                request_id,
+            )
+            if checked.media_type != file.media_type:
+                raise AssetValidationFailed(request_id)
+            if not isinstance(file.size_bytes, int) or isinstance(file.size_bytes, bool) or file.size_bytes < 0 or file.size_bytes > MAX_SKILL_ARCHIVE_BYTES:
+                raise AssetValidationFailed(request_id)
+            if not isinstance(file.sha256, str) or re.fullmatch(r"[0-9a-f]{64}", file.sha256) is None:
+                raise AssetValidationFailed(request_id)
+            views.append(
+                SkillFileView(
+                    path=path,
+                    media_type=file.media_type,
+                    size_bytes=file.size_bytes,
+                    sha256=file.sha256,
+                )
+            )
+        views.sort(key=lambda item: item.path)
+        for identity in filesystem_identities:
+            parts = PurePosixPath(identity).parts
+            if any(PurePosixPath(*parts[:index]).as_posix() in filesystem_identities for index in range(1, len(parts))):
+                raise AssetValidationFailed(request_id)
+        if "SKILL.md" not in paths or sum(item.size_bytes for item in views) > MAX_SKILL_ARCHIVE_BYTES:
+            raise AssetValidationFailed(request_id)
+        return tuple(views)
 
     @staticmethod
     def _asset_view(row: SkillRow) -> SkillAssetView:

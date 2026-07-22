@@ -142,11 +142,11 @@ async def test_private_prompt_does_not_read_or_inject_memory_for_inactive_member
 
 
 @pytest.mark.asyncio
-async def test_legacy_async_prompt_keeps_file_memory_path() -> None:
+async def test_unscoped_async_prompt_never_reads_legacy_file_memory() -> None:
     middleware = DynamicContextMiddleware(app_config=_config())
     with mock.patch(
         "deerflow.agents.lead_agent.prompt._get_memory_context",
-        return_value="<memory>\nlegacy file context\n</memory>",
+        side_effect=AssertionError("unscoped prompt must not read file memory"),
     ):
         result = await middleware.abefore_agent(
             {"messages": [HumanMessage(content="Continue", id="legacy-message")]},
@@ -154,7 +154,9 @@ async def test_legacy_async_prompt_keeps_file_memory_path() -> None:
         )
 
     assert result is not None
-    assert "legacy file context" in "\n".join(str(message.content) for message in result["messages"])
+    injected = "\n".join(str(message.content) for message in result["messages"])
+    assert "<current_date>" in injected
+    assert "<memory>" not in injected
 
 
 @pytest.mark.postgres

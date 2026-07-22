@@ -5,6 +5,8 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 
+import { projectKeys } from "@/core/projects/query-keys";
+
 import {
   approveAdminMcpVersion,
   approveProjectMcpVersion,
@@ -12,12 +14,12 @@ import {
   changeProjectAssetStatus,
   createAdminAsset,
   createAdminAssetVersion,
-  createAdminCredential,
   createProjectAsset,
   createProjectAssetVersion,
-  createProjectCredential,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
+  forkProjectSkillVersion,
+  getProjectSkillVersionFile,
   getAdminCredentialRotationStatus,
   listAdminAssetVersions,
   listAdminAssets,
@@ -26,8 +28,6 @@ import {
   listSystemAssetCatalog,
   publishAdminAssetVersion,
   publishProjectAssetVersion,
-  replaceAdminCredential,
-  replaceProjectCredential,
   revokeAdminCredential,
   revokeProjectCredential,
   rollbackProjectSystemBinding,
@@ -41,6 +41,7 @@ import {
   adminCredentialRotationStatusKey,
   projectAssetKey,
   projectAssetVersionsKey,
+  projectSkillVersionFileKey,
   systemCatalogKey,
 } from "./query-keys";
 import type {
@@ -51,7 +52,6 @@ import type {
   AssetKind,
   AssetListKind,
   CreateAssetInput,
-  CreateCredentialInput,
   CredentialRotationStatus,
   DisableSystemBindingInput,
   EnableSystemBindingInput,
@@ -60,9 +60,10 @@ import type {
   McpVersionInput,
   ProjectAssetList,
   ProjectCredentialList,
-  ReplaceCredentialInput,
   RevokeCredentialInput,
   SkillVersionInput,
+  SkillFileForkInput,
+  SkillVersionFileContentResponse,
   VersionHistoryResponse,
 } from "./types";
 
@@ -106,7 +107,12 @@ function useProjectInvalidation(
 ) {
   const queryClient = useQueryClient();
   return () =>
-    invalidateProjectAssetQueries(queryClient, accountId, projectId, kind);
+    Promise.all([
+      invalidateProjectAssetQueries(queryClient, accountId, projectId, kind),
+      queryClient.invalidateQueries({
+        queryKey: projectKeys.workspace(accountId),
+      }),
+    ]);
 }
 
 function useAdminInvalidation(accountId: string, kind: AssetListKind) {
@@ -172,6 +178,30 @@ export function useProjectAssetVersions(
     queryKey: projectAssetVersionsKey(accountId, projectId, kind, assetId),
     queryFn: ({ signal }) =>
       listProjectAssetVersions(projectId, kind, assetId, signal),
+  });
+}
+
+export function useProjectSkillVersionFile(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  path: string,
+  enabled = true,
+) {
+  return useQuery<SkillVersionFileContentResponse>({
+    queryKey: projectSkillVersionFileKey(
+      accountId,
+      projectId,
+      assetId,
+      versionId,
+      path,
+    ),
+    queryFn: ({ signal }) =>
+      getProjectSkillVersionFile(projectId, assetId, versionId, path, signal),
+    enabled: enabled && path !== "",
+    staleTime: 0,
+    gcTime: 0,
   });
 }
 
@@ -278,6 +308,25 @@ export function useCreateProjectAssetVersion(
   });
 }
 
+export function useForkProjectSkillVersion(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useProjectInvalidation(accountId, projectId, "skills");
+  return useMutation({
+    mutationFn: ({
+      assetId,
+      sourceVersionId,
+      input,
+    }: {
+      assetId: string;
+      sourceVersionId: string;
+      input: SkillFileForkInput;
+    }) => forkProjectSkillVersion(projectId, assetId, sourceVersionId, input),
+    onSuccess: invalidate,
+  });
+}
+
 export function useCreateAdminAssetVersion(
   accountId: string,
   kind: MutableAssetKind,
@@ -291,30 +340,6 @@ export function useCreateAdminAssetVersion(
       assetId: string;
       input: VersionAuthoringInput;
     }) => createAdminVersionForKind(kind, assetId, input),
-    onSuccess: invalidate,
-  });
-}
-
-export function useCreateProjectCredential(
-  accountId: string,
-  projectId: string,
-) {
-  const invalidate = useProjectInvalidation(
-    accountId,
-    projectId,
-    "credentials",
-  );
-  return useMutation({
-    mutationFn: (input: CreateCredentialInput) =>
-      createProjectCredential(projectId, input),
-    onSuccess: invalidate,
-  });
-}
-
-export function useCreateAdminCredential(accountId: string) {
-  const invalidate = useAdminInvalidation(accountId, "credentials");
-  return useMutation({
-    mutationFn: (input: CreateCredentialInput) => createAdminCredential(input),
     onSuccess: invalidate,
   });
 }
@@ -394,41 +419,6 @@ export function usePublishAdminAssetVersion(
       versionId: string;
       input: ExpectedAssetVersionInput;
     }) => publishAdminAssetVersion(kind, assetId, versionId, input),
-    onSuccess: invalidate,
-  });
-}
-
-export function useReplaceProjectCredential(
-  accountId: string,
-  projectId: string,
-) {
-  const invalidate = useProjectInvalidation(
-    accountId,
-    projectId,
-    "credentials",
-  );
-  return useMutation({
-    mutationFn: ({
-      credentialId,
-      input,
-    }: {
-      credentialId: string;
-      input: ReplaceCredentialInput;
-    }) => replaceProjectCredential(projectId, credentialId, input),
-    onSuccess: invalidate,
-  });
-}
-
-export function useReplaceAdminCredential(accountId: string) {
-  const invalidate = useAdminInvalidation(accountId, "credentials");
-  return useMutation({
-    mutationFn: ({
-      credentialId,
-      input,
-    }: {
-      credentialId: string;
-      input: ReplaceCredentialInput;
-    }) => replaceAdminCredential(credentialId, input),
     onSuccess: invalidate,
   });
 }

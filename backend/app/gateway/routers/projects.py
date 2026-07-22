@@ -13,6 +13,7 @@ from app.gateway.deps import (
     get_current_user_from_request,
     get_operational_audit_sink,
     get_project_quota_enforcer,
+    get_project_quota_service,
     project_session,
 )
 from app.projects.capabilities import Capability
@@ -61,6 +62,21 @@ class PinProjectRequest(BaseModel):
     pinned: StrictBool
 
 
+class QuotaDimensionSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+    used: int = Field(ge=0)
+    reserved: int = Field(ge=0)
+    limit: int = Field(ge=0)
+
+
+class ProjectQuotaSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+    members: QuotaDimensionSummaryResponse
+    storage_bytes: QuotaDimensionSummaryResponse
+    concurrent_runs: QuotaDimensionSummaryResponse
+    mcp_calls_daily: QuotaDimensionSummaryResponse
+
+
 class ProjectResponse(BaseModel):
     id: uuid.UUID
     slug: str
@@ -75,6 +91,7 @@ class ProjectResponse(BaseModel):
     agent_count: int
     skill_count: int
     mcp_count: int
+    quota_summary: ProjectQuotaSummaryResponse
     status: str
     is_suspended: bool
     membership_version: int
@@ -122,10 +139,11 @@ async def create_project(
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
     session: AsyncSession = Depends(project_session),
     quota=Depends(get_project_quota_enforcer),
+    quota_service=Depends(get_project_quota_service),
     audit=Depends(get_operational_audit_sink),
 ):
     user_id, request_id = identity
-    service = ProjectService(ProjectRepository(session, quota=quota), audit=audit)
+    service = ProjectService(ProjectRepository(session, quota=quota, quota_config=quota_service.config), audit=audit)
     try:
         context = await service.create(user_id, CreateProject(**body.model_dump()), request_id)
         return _response(await service.get(context))
@@ -142,10 +160,11 @@ async def list_projects(
     include_recoverable: bool = False,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
     session: AsyncSession = Depends(project_session),
+    quota_service=Depends(get_project_quota_service),
 ):
     user_id, request_id = identity
     try:
-        page: ProjectPage = await ProjectService(ProjectRepository(session)).list(
+        page: ProjectPage = await ProjectService(ProjectRepository(session, quota_config=quota_service.config)).list(
             user_id,
             query=query,
             pinned=pinned,
@@ -159,16 +178,21 @@ async def list_projects(
         _raise_domain(exc)
 
 
-async def _context_service(project_id: uuid.UUID, identity: tuple[uuid.UUID, str], session: AsyncSession, *, audit=None):
+async def _context_service(project_id: uuid.UUID, identity: tuple[uuid.UUID, str], session: AsyncSession, quota_service, *, audit=None):
     user_id, request_id = identity
     context = await resolve_project_context(session, user_id, project_id, request_id)
-    return context, ProjectService(ProjectRepository(session), audit=audit)
+    return context, ProjectService(ProjectRepository(session, quota_config=quota_service.config), audit=audit)
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: uuid.UUID, identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity), session: AsyncSession = Depends(project_session)):
+async def get_project(
+    project_id: uuid.UUID,
+    identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
+    session: AsyncSession = Depends(project_session),
+    quota_service=Depends(get_project_quota_service),
+):
     try:
-        context, service = await _context_service(project_id, identity, session)
+        context, service = await _context_service(project_id, identity, session, quota_service)
         return _response(await service.get(context))
     except DOMAIN_ERRORS as exc:
         _raise_domain(exc)
@@ -176,28 +200,44 @@ async def get_project(project_id: uuid.UUID, identity: tuple[uuid.UUID, str] = D
 
 @router.patch("/{project_id}", response_model=ProjectResponse)
 async def patch_project(
-    project_id: uuid.UUID, body: PatchProjectRequest, identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity), session: AsyncSession = Depends(project_session), audit=Depends(get_operational_audit_sink)
+    project_id: uuid.UUID,
+    body: PatchProjectRequest,
+    identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
+    session: AsyncSession = Depends(project_session),
+    quota_service=Depends(get_project_quota_service),
+    audit=Depends(get_operational_audit_sink),
 ):
     try:
-        context, service = await _context_service(project_id, identity, session, audit=audit)
+        context, service = await _context_service(project_id, identity, session, quota_service, audit=audit)
         return _response(await service.update(context, ProjectChanges(**body.model_dump())))
     except DOMAIN_ERRORS as exc:
         _raise_domain(exc)
 
 
 @router.post("/{project_id}/enter", response_model=ProjectResponse)
-async def enter_project(project_id: uuid.UUID, identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity), session: AsyncSession = Depends(project_session)):
+async def enter_project(
+    project_id: uuid.UUID,
+    identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
+    session: AsyncSession = Depends(project_session),
+    quota_service=Depends(get_project_quota_service),
+):
     try:
-        context, service = await _context_service(project_id, identity, session)
+        context, service = await _context_service(project_id, identity, session, quota_service)
         return _response(await service.enter(context))
     except DOMAIN_ERRORS as exc:
         _raise_domain(exc)
 
 
 @router.put("/{project_id}/pin", response_model=ProjectResponse)
-async def pin_project(project_id: uuid.UUID, body: PinProjectRequest, identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity), session: AsyncSession = Depends(project_session)):
+async def pin_project(
+    project_id: uuid.UUID,
+    body: PinProjectRequest,
+    identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
+    session: AsyncSession = Depends(project_session),
+    quota_service=Depends(get_project_quota_service),
+):
     try:
-        context, service = await _context_service(project_id, identity, session)
+        context, service = await _context_service(project_id, identity, session, quota_service)
         return _response(await service.pin(context, body.pinned))
     except DOMAIN_ERRORS as exc:
         _raise_domain(exc)

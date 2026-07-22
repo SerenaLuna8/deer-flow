@@ -6,7 +6,7 @@ from deerflow.skills.security_scanner import _extract_json_object, scan_skill_co
 
 
 def _make_env(monkeypatch, response_content):
-    config = SimpleNamespace(skill_evolution=SimpleNamespace(moderation_model_name=None))
+    config = SimpleNamespace()
     fake_response = SimpleNamespace(content=response_content)
 
     class FakeModel:
@@ -77,7 +77,7 @@ async def test_scan_skill_content_passes_run_name_to_model(monkeypatch):
 
 @pytest.mark.anyio
 async def test_scan_skill_content_blocks_when_model_unavailable(monkeypatch):
-    config = SimpleNamespace(skill_evolution=SimpleNamespace(moderation_model_name=None))
+    config = SimpleNamespace()
     monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
     monkeypatch.setattr("deerflow.skills.security_scanner.create_chat_model", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 

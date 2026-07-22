@@ -78,7 +78,7 @@ def test_secret_evidence_is_redacted_everywhere(tmp_path: Path) -> None:
     assert "[redacted]" in (finding["evidence"] or "")
 
     with pytest.raises(StaticScanBlockedError) as excinfo:
-        enforce_static_scan(skill_dir, skill_name="demo-skill", app_config=SimpleNamespace(skill_scan=SimpleNamespace(enabled=True)))
+        enforce_static_scan(skill_dir, skill_name="demo-skill")
 
     assert token not in str(excinfo.value)
     assert all(token not in (blocked_finding["evidence"] or "") for blocked_finding in excinfo.value.findings)
@@ -116,12 +116,13 @@ def test_enforce_static_scan_blocks_only_critical_findings(tmp_path: Path) -> No
     assert _finding_by_rule(excinfo.value.findings, "python-shell-exec")["severity"] == "CRITICAL"
 
 
-def test_skill_scan_enabled_false_skips_native_findings(tmp_path: Path) -> None:
+def test_static_skill_scan_cannot_be_disabled_by_app_config(tmp_path: Path) -> None:
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir, "-----BEGIN RSA PRIVATE KEY-----\nsecret\n-----END RSA PRIVATE KEY-----\n")
     app_config = SimpleNamespace(skill_scan=SimpleNamespace(enabled=False))
 
-    assert enforce_static_scan(skill_dir, skill_name="demo-skill", app_config=app_config) == []
+    with pytest.raises(StaticScanBlockedError):
+        enforce_static_scan(skill_dir, skill_name="demo-skill", app_config=app_config)
 
 
 def test_enforced_scan_result_exposes_analyzer_errors_without_breaking_legacy_api(
@@ -371,7 +372,7 @@ async def test_llm_scanner_receives_static_findings_context(monkeypatch: pytest.
             captured_messages.extend(messages)
             return SimpleNamespace(content='{"decision":"allow","reason":"ok"}')
 
-    config = SimpleNamespace(skill_evolution=SimpleNamespace(moderation_model_name=None))
+    config = SimpleNamespace()
     monkeypatch.setattr("deerflow.skills.security_scanner.create_chat_model", lambda **kwargs: FakeModel())
 
     result = await scan_skill_content(

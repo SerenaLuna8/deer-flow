@@ -17,7 +17,10 @@ import {
   projectCredentialShowsHistory,
 } from "@/components/projects/assets/project-assets-page";
 import { canManageSystemBinding } from "@/components/projects/assets/system-asset-section";
-import { canMoveSystemBinding } from "@/components/projects/assets/system-binding-dialog";
+import {
+  bindingVersionLabel,
+  canMoveSystemBinding,
+} from "@/components/projects/assets/system-binding-dialog";
 import type {
   AssetVersion,
   ProjectAssetList,
@@ -140,6 +143,8 @@ describe("project shared asset pages", () => {
     expect(html).toContain("系统");
     expect(html).toContain("项目");
     expect(html).toContain("固定版本");
+    expect(html).toContain("已启用并固定");
+    expect(html).not.toContain(VERSION_ID);
   });
 
   test("uses item capabilities for binding and editing actions without run CTA", () => {
@@ -214,6 +219,11 @@ describe("project shared asset pages", () => {
     ).toBe(true);
     expect(canMoveSystemBinding(archivedSystem)).toBe(false);
     expect(canMoveSystemBinding(adminData.system_items[0]!)).toBe(true);
+  });
+
+  test("labels binding versions for people without exposing internal UUIDs", () => {
+    expect(bindingVersionLabel(2)).toBe("版本 2");
+    expect(bindingVersionLabel()).toBe("已固定版本");
   });
 
   test("renders Viewer Runner Editor and Admin actions through the production history path", () => {
@@ -465,7 +475,7 @@ describe("project shared asset pages", () => {
 
     expect(source).toContain("createProjectCredential(project.id, input)");
     expect(source).toContain(
-      "replaceProjectCredential(project.id, credential.id, input)",
+      "replaceProjectCredential(projectId, credential.id, input)",
     );
     expect(source).not.toContain("useCreateProjectCredential");
     expect(source).not.toContain("useReplaceProjectCredential");

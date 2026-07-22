@@ -3,6 +3,7 @@ import { describe, expect, test } from "@rstest/core";
 import {
   canUpdateProject,
   filterAndSortProjects,
+  formatProjectQuota,
   projectErrorMessage,
 } from "@/components/projects/project-view-model";
 import { ProjectApiError } from "@/core/projects/api";
@@ -22,6 +23,12 @@ const makeProject = (overrides: Partial<Project>): Project => ({
   agent_count: 0,
   skill_count: 0,
   mcp_count: 0,
+  quota_summary: {
+    members: { used: 1, reserved: 0, limit: 20 },
+    storage_bytes: { used: 0, reserved: 0, limit: 5_368_709_120 },
+    concurrent_runs: { used: 0, reserved: 0, limit: 3 },
+    mcp_calls_daily: { used: 0, reserved: 0, limit: 10_000 },
+  },
   status: "active",
   is_suspended: false,
   membership_version: 1,
@@ -46,6 +53,29 @@ describe("project workbench view model", () => {
     expect(
       filterAndSortProjects(projects, " research ").map((item) => item.slug),
     ).toEqual(["research-lab"]);
+    expect(
+      filterAndSortProjects(projects, "", "pinned").map((item) => item.slug),
+    ).toEqual(["research-lab"]);
+  });
+
+  test("formats the complete project quota summary for workspace cards", () => {
+    expect(
+      formatProjectQuota({
+        members: { used: 3, reserved: 1, limit: 20 },
+        storage_bytes: {
+          used: 1_610_612_736,
+          reserved: 0,
+          limit: 5_368_709_120,
+        },
+        concurrent_runs: { used: 1, reserved: 1, limit: 3 },
+        mcp_calls_daily: { used: 25, reserved: 5, limit: 10_000 },
+      }),
+    ).toEqual({
+      members: "成员 4 / 20",
+      storage: "存储 1.5 GiB / 5 GiB",
+      runs: "运行 2 / 3",
+      mcp: "MCP 30 / 10,000",
+    });
   });
 
   test("uses the server capability instead of role to gate updates", () => {

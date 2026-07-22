@@ -36,6 +36,41 @@ export function canMoveSystemBinding(
   return item.status === "active";
 }
 
+export function bindingVersionLabel(versionNumber?: number): string {
+  return versionNumber === undefined ? "已固定版本" : `版本 ${versionNumber}`;
+}
+
+export function systemBindingDialogAvailability({
+  historyLoading,
+  historyError,
+  historyRetryPending,
+  mutationPending,
+  selectedVersionId,
+  publishedVersionIds,
+  boundVersionId,
+}: {
+  historyLoading: boolean;
+  historyError: boolean;
+  historyRetryPending: boolean;
+  mutationPending: boolean;
+  selectedVersionId: string;
+  publishedVersionIds: readonly string[];
+  boundVersionId?: string | null;
+}) {
+  const hasSelectedPublishedTarget =
+    selectedVersionId !== "" && publishedVersionIds.includes(selectedVersionId);
+  return {
+    canSubmit:
+      !historyLoading &&
+      !historyError &&
+      !mutationPending &&
+      hasSelectedPublishedTarget &&
+      selectedVersionId !== boundVersionId,
+    canRetryHistory: historyError && !historyRetryPending,
+    hasSelectedPublishedTarget,
+  };
+}
+
 export function SystemBindingDialog({
   accountId,
   projectId,
@@ -85,7 +120,9 @@ export function SystemBindingDialog({
   useEffect(() => {
     if (!open) return;
     setSelectedVersionId(
-      item.current_published_version_id ?? item.binding?.version_id ?? "",
+      item.binding?.enabled
+        ? item.binding.version_id
+        : (item.current_published_version_id ?? ""),
     );
   }, [item, open]);
 
@@ -100,13 +137,22 @@ export function SystemBindingDialog({
   const pinned = published.find(
     (version) => version.id === item.binding?.version_id,
   );
+  const availability = systemBindingDialogAvailability({
+    historyLoading: history.isLoading,
+    historyError: Boolean(history.error),
+    historyRetryPending: history.isFetching,
+    mutationPending: pending,
+    selectedVersionId,
+    publishedVersionIds: published.map((version) => version.id),
+    boundVersionId: item.binding?.enabled ? item.binding.version_id : null,
+  });
 
   function save() {
-    if (!selectedVersionId) return;
+    if (!availability.canSubmit || !target) return;
     if (!item.binding?.enabled) {
       enable.mutate({
         asset_id: item.id,
-        version_id: selectedVersionId,
+        version_id: target.id,
         ...(item.binding
           ? { expected_binding_version: item.binding.version }
           : {}),
@@ -129,20 +175,35 @@ export function SystemBindingDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>管理系统绑定</DialogTitle>
+          <DialogTitle>
+            {item.binding?.enabled ? "切换启用版本" : "启用到项目"}
+          </DialogTitle>
           <DialogDescription>
-            {item.display_name}。系统发布新版本不会自动改变当前固定版本。
+            {item.display_name}
+            。项目会固定使用你选择的发布版本，系统更新不会自动切换。
           </DialogDescription>
         </DialogHeader>
         {history.isLoading ? (
           <Skeleton className="h-24 w-full" />
         ) : history.error ? (
-          <p role="alert" className="text-destructive text-sm">
-            {adminAssetErrorMessage(history.error)}
-          </p>
+          <div className="space-y-3">
+            <p role="alert" className="text-destructive text-sm">
+              {adminAssetErrorMessage(history.error)}
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              data-testid="system-binding-history-retry"
+              disabled={!availability.canRetryHistory}
+              onClick={() => void history.refetch()}
+            >
+              {history.isFetching ? "重试中…" : "重试"}
+            </Button>
+          </div>
         ) : canMove ? (
           <label className="grid gap-2 text-sm">
-            固定到已发布版本
+            选择已发布版本
             <select
               value={selectedVersionId}
               onChange={(event) => setSelectedVersionId(event.target.value)}
@@ -151,26 +212,26 @@ export function SystemBindingDialog({
               <option value="">请选择版本</option>
               {published.map((version) => (
                 <option key={version.id} value={version.id}>
-                  版本 {version.version_number} · {version.id}
+                  {bindingVersionLabel(version.version_number)}
                 </option>
               ))}
             </select>
+            {published.length === 0 && (
+              <span className="text-muted-foreground text-xs">
+                当前没有可启用的已发布版本。
+              </span>
+            )}
           </label>
         ) : null}
         <dl className="grid gap-2 text-sm">
           <div>
-            <dt className="text-muted-foreground text-xs">当前固定版本</dt>
-            <dd
-              className="font-mono text-xs"
-              data-testid="binding-pinned-version"
-            >
-              {item.binding?.version_id ?? "未绑定"}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground text-xs">绑定修订版本</dt>
-            <dd data-testid="binding-revision">
-              {item.binding?.version ?? "—"}
+            <dt className="text-muted-foreground text-xs">当前项目版本</dt>
+            <dd data-testid="binding-pinned-version">
+              {pinned
+                ? bindingVersionLabel(pinned.version_number)
+                : item.binding
+                  ? bindingVersionLabel()
+                  : "未绑定"}
             </dd>
           </div>
         </dl>
@@ -192,27 +253,22 @@ export function SystemBindingDialog({
                 })
               }
             >
-              关闭绑定
+              从项目停用
             </Button>
           )}
           {canMove && (
             <Button
               type="button"
-              disabled={
-                pending ||
-                !selectedVersionId ||
-                (item.binding?.enabled &&
-                  item.binding.version_id === selectedVersionId)
-              }
+              disabled={!availability.canSubmit}
               onClick={save}
             >
               {!item.binding?.enabled
-                ? "启用并固定"
+                ? "启用到项目"
                 : target &&
                     pinned &&
                     target.version_number < pinned.version_number
-                  ? "回退固定版本"
-                  : "升级固定版本"}
+                  ? "回退到此版本"
+                  : "切换到新版本"}
             </Button>
           )}
         </DialogFooter>

@@ -5,6 +5,7 @@ import type {
   AssetVersion,
   ProjectAssetItem,
   ProjectCredentialItem,
+  SkillFileForkInput,
 } from "@/core/shared-assets";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
@@ -26,6 +27,16 @@ const SYSTEM_VERSION_1 = "30000000-0000-4000-8000-000000000001";
 const SYSTEM_VERSION_2 = "30000000-0000-4000-8000-000000000002";
 const CREDENTIAL_VERSION_ID = "30000000-0000-4000-8000-000000000005";
 const SYSTEM_CREDENTIAL_VERSION_ID = "30000000-0000-4000-8000-000000000006";
+const SKILL_SOURCE_VERSION_ID = "30000000-0000-4000-8000-000000000021";
+const SKILL_FORK_VERSION_ID = "30000000-0000-4000-8000-000000000022";
+const SKILL_SOURCE_CHECKSUM = "a".repeat(64);
+const SKILL_SOURCE_FILE_CHECKSUM = "b".repeat(64);
+const SKILL_FORK_FILE_CHECKSUM = "c".repeat(64);
+const SKILL_FORK_CHECKSUM = "d".repeat(64);
+const SKILL_SOURCE_CONTENT =
+  "# Review Skill\n\nImmutable source version remains unchanged.";
+const SKILL_FORK_CONTENT =
+  "# Review Skill\n\nForked draft content is isolated from its source.";
 
 const project: Project = {
   id: PROJECT_ID,
@@ -50,6 +61,12 @@ const project: Project = {
   agent_count: 1,
   skill_count: 1,
   mcp_count: 1,
+  quota_summary: {
+    members: { used: 2, reserved: 0, limit: 20 },
+    storage_bytes: { used: 0, reserved: 0, limit: 5_368_709_120 },
+    concurrent_runs: { used: 0, reserved: 0, limit: 3 },
+    mcp_calls_daily: { used: 0, reserved: 0, limit: 10_000 },
+  },
   status: "active",
   is_suspended: false,
   membership_version: 1,
@@ -132,9 +149,17 @@ async function json(route: Route, body: unknown, status = 200) {
 type AssetMock = {
   staleConflicts: () => number;
   validatedMutations: () => number;
+  skillFileRequests: () => Array<{ path: string; versionId: string }>;
+  skillForkRequests: () => Array<{
+    body: SkillFileForkInput;
+    sourceVersionId: string;
+  }>;
 };
 
-async function mockProjectAssets(page: Page): Promise<AssetMock> {
+async function mockProjectAssets(
+  page: Page,
+  options: { skillFileWorkflow?: boolean } = {},
+): Promise<AssetMock> {
   let systemAgent = asset(
     SYSTEM_AGENT_ID,
     "analyst",
@@ -161,12 +186,54 @@ async function mockProjectAssets(page: Page): Promise<AssetMock> {
   );
   let binding: ProjectAssetItem["binding"] = null;
   let agentVersions: AgentVersion[] = [];
-  let skillVersions: SkillVersion[] = [];
+  const sourceSkillVersion: SkillVersion = {
+    id: SKILL_SOURCE_VERSION_ID,
+    skill_id: PROJECT_SKILL_ID,
+    version_number: 1,
+    workflow_status: "published",
+    description: "Immutable source Skill",
+    frontmatter: {},
+    compatibility: null,
+    secret_requirements: [],
+    scan_decision: "allow",
+    scan_rule_ids: [],
+    scan_summary: {},
+    file_views: [
+      {
+        path: "SKILL.md",
+        media_type: "text/markdown",
+        size_bytes: SKILL_SOURCE_CONTENT.length,
+        sha256: SKILL_SOURCE_FILE_CHECKSUM,
+      },
+    ],
+    supersedes_version_id: null,
+    payload_checksum: SKILL_SOURCE_CHECKSUM,
+    created_by_user_id: "user-1",
+    created_at: now,
+  };
+  let skillVersions: SkillVersion[] = options.skillFileWorkflow
+    ? [sourceSkillVersion]
+    : [];
   let mcpVersions: McpVersion[] = [];
   let credential: ProjectCredentialItem | null = null;
   let credentialVersions: CredentialVersion[] = [];
   let staleConflicts = 0;
   let validatedMutations = 0;
+  const skillFileRequests: Array<{ path: string; versionId: string }> = [];
+  const skillForkRequests: Array<{
+    body: SkillFileForkInput;
+    sourceVersionId: string;
+  }> = [];
+  const skillFileContents = new Map<string, string>([
+    [SKILL_SOURCE_VERSION_ID, SKILL_SOURCE_CONTENT],
+  ]);
+
+  if (options.skillFileWorkflow) {
+    projectSkill = {
+      ...projectSkill,
+      current_published_version_id: SKILL_SOURCE_VERSION_ID,
+    };
+  }
 
   async function requireExpectedVersion(
     route: Route,
@@ -321,6 +388,43 @@ async function mockProjectAssets(page: Page): Promise<AssetMock> {
       return;
     }
 
+    const skillFileMatch = new RegExp(
+      `/skills/${PROJECT_SKILL_ID}/versions/([^/]+)/files/content$`,
+    ).exec(path);
+    if (skillFileMatch && method === "GET") {
+      const versionId = skillFileMatch[1]!;
+      const filePath = new URL(request.url()).searchParams.get("path") ?? "";
+      skillFileRequests.push({ path: filePath, versionId });
+      const version = skillVersions.find((item) => item.id === versionId);
+      const content = skillFileContents.get(versionId);
+      const file = version?.file_views.find((item) => item.path === filePath);
+      if (!version || content === undefined || !file) {
+        await json(
+          route,
+          {
+            detail: {
+              code: "asset_not_found",
+              request_id: "request-skill-file-404",
+            },
+          },
+          404,
+        );
+        return;
+      }
+      await json(route, {
+        data: {
+          ...file,
+          preview_status: "ready",
+          encoding: "utf-8",
+          content,
+          source_payload_checksum: version.payload_checksum,
+          asset_version: projectSkill.version,
+        },
+        request_id: `skill-file-${versionId}`,
+      });
+      return;
+    }
+
     const histories: Array<[string, AssetVersion[]]> = [
       [PROJECT_AGENT_ID, agentVersions],
       [PROJECT_SKILL_ID, skillVersions],
@@ -332,6 +436,79 @@ async function mockProjectAssets(page: Page): Promise<AssetMock> {
         await json(route, { data: versions, request_id: `history-${id}` });
         return;
       }
+    }
+
+    const skillForkMatch = new RegExp(
+      `/skills/${PROJECT_SKILL_ID}/versions/([^/]+)/fork$`,
+    ).exec(path);
+    if (skillForkMatch && method === "POST") {
+      const sourceVersionId = skillForkMatch[1]!;
+      const body = request.postDataJSON() as SkillFileForkInput;
+      skillForkRequests.push({ body, sourceVersionId });
+      const sourceVersion = skillVersions.find(
+        (version) => version.id === sourceVersionId,
+      );
+      if (
+        !sourceVersion ||
+        body.expected_asset_version !== projectSkill.version ||
+        body.expected_source_payload_checksum !== sourceVersion.payload_checksum
+      ) {
+        staleConflicts += 1;
+        await json(
+          route,
+          {
+            detail: {
+              code: "asset_conflict",
+              request_id: "request-skill-fork-conflict",
+            },
+          },
+          409,
+        );
+        return;
+      }
+      const replacement = body.changes.find(
+        (change) => change.path === "SKILL.md",
+      );
+      if (replacement?.op !== "replace" || body.changes.length !== 1) {
+        await json(
+          route,
+          {
+            detail: {
+              code: "asset_validation_failed",
+              request_id: "request-skill-fork-invalid",
+            },
+          },
+          422,
+        );
+        return;
+      }
+      validatedMutations += 1;
+      const forkedVersion: SkillVersion = {
+        ...sourceVersion,
+        id: SKILL_FORK_VERSION_ID,
+        version_number: 2,
+        workflow_status: "draft",
+        file_views: [
+          {
+            path: "SKILL.md",
+            media_type: replacement.media_type,
+            size_bytes: replacement.content.length,
+            sha256: SKILL_FORK_FILE_CHECKSUM,
+          },
+        ],
+        supersedes_version_id: sourceVersion.id,
+        payload_checksum: SKILL_FORK_CHECKSUM,
+        created_at: "2026-07-22T01:00:00Z",
+      };
+      skillFileContents.set(SKILL_FORK_VERSION_ID, replacement.content);
+      skillVersions = [forkedVersion, ...skillVersions];
+      projectSkill = { ...projectSkill, version: projectSkill.version + 1 };
+      await json(
+        route,
+        { data: forkedVersion, request_id: "skill-file-fork" },
+        201,
+      );
+      return;
     }
 
     if (
@@ -750,6 +927,8 @@ async function mockProjectAssets(page: Page): Promise<AssetMock> {
   return {
     staleConflicts: () => staleConflicts,
     validatedMutations: () => validatedMutations,
+    skillFileRequests: () => [...skillFileRequests],
+    skillForkRequests: () => [...skillForkRequests],
   };
 }
 
@@ -770,29 +949,110 @@ test("binding remains pinned until explicit upgrade and supports rollback", asyn
   const dialog = page.getByRole("dialog");
   await expect(dialog).toContainText("绑定修订版本");
   await expect(page.getByTestId("binding-revision")).toHaveText("1");
-  await expect(page.getByTestId("binding-pinned-version")).toHaveText(
-    SYSTEM_VERSION_1,
-  );
+  await expect(page.getByTestId("binding-pinned-version")).toHaveText("版本 1");
   const systemCard = page.getByTestId(`system-asset-${SYSTEM_AGENT_ID}`);
-  await expect(systemCard).toContainText(SYSTEM_VERSION_1);
-  await expect(systemCard).toContainText(SYSTEM_VERSION_2);
+  await expect(systemCard).toContainText("已启用并固定");
 
   await page.getByLabel("固定到已发布版本").selectOption(SYSTEM_VERSION_2);
   await page.getByRole("button", { name: "升级固定版本" }).click();
   await expect(page.getByTestId("binding-revision")).toHaveText("2");
-  await expect(page.getByTestId("binding-pinned-version")).toHaveText(
-    SYSTEM_VERSION_2,
-  );
-  await expect(systemCard).toContainText(SYSTEM_VERSION_2);
+  await expect(page.getByTestId("binding-pinned-version")).toHaveText("版本 2");
 
   await page.getByLabel("固定到已发布版本").selectOption(SYSTEM_VERSION_1);
   await page.getByRole("button", { name: "回退固定版本" }).click();
   await expect(page.getByTestId("binding-revision")).toHaveText("3");
-  await expect(page.getByTestId("binding-pinned-version")).toHaveText(
-    SYSTEM_VERSION_1,
-  );
-  await expect(systemCard).toContainText(SYSTEM_VERSION_1);
+  await expect(page.getByTestId("binding-pinned-version")).toHaveText("版本 1");
   expect(mock.validatedMutations()).toBe(3);
+  expect(mock.staleConflicts()).toBe(0);
+});
+
+test("Skill file preview and fork preserve immutable source version", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const mock = await mockProjectAssets(page, { skillFileWorkflow: true });
+
+  await page.goto("/projects/research-lab/skills");
+  await page
+    .locator("button", { hasText: "Review Skill" })
+    .filter({ hasText: "review-skill" })
+    .click();
+
+  const detail = page.getByRole("dialog");
+  const sourceView = detail.locator("pre").filter({
+    hasText: "Immutable source version remains unchanged.",
+  });
+  await expect(sourceView).toContainText(SKILL_SOURCE_CONTENT);
+  await expect(detail.getByRole("button", { name: "源码" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  await detail.getByRole("button", { name: "预览" }).click();
+  await expect(detail.getByRole("button", { name: "预览" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(
+    detail.getByText("Immutable source version remains unchanged.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await detail.getByRole("button", { name: "源码" }).click();
+  await expect(detail.getByRole("button", { name: "源码" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  await detail.getByRole("button", { name: "编辑为新版本" }).click();
+  const editor = detail.getByLabel("编辑 SKILL.md");
+  await expect(editor).toHaveValue(SKILL_SOURCE_CONTENT);
+  await editor.fill(SKILL_FORK_CONTENT);
+  await expect(detail.getByText("已有 1 项未保存修改")).toBeVisible();
+  await detail.getByRole("button", { name: "保存为新版本" }).click();
+
+  const versionSelector = detail.getByLabel("查看版本");
+  await expect(versionSelector).toHaveValue(SKILL_FORK_VERSION_ID);
+  await expect(versionSelector.locator("option:checked")).toHaveText(
+    "版本 2 · 草稿",
+  );
+  await expect(
+    detail.locator("pre").filter({
+      hasText: "Forked draft content is isolated from its source.",
+    }),
+  ).toContainText(SKILL_FORK_CONTENT);
+
+  expect(mock.skillForkRequests()).toEqual([
+    {
+      sourceVersionId: SKILL_SOURCE_VERSION_ID,
+      body: {
+        expected_asset_version: 1,
+        expected_source_payload_checksum: SKILL_SOURCE_CHECKSUM,
+        changes: [
+          {
+            op: "replace",
+            path: "SKILL.md",
+            content: SKILL_FORK_CONTENT,
+            media_type: "text/markdown",
+          },
+        ],
+      },
+    },
+  ]);
+
+  await versionSelector.selectOption(SKILL_SOURCE_VERSION_ID);
+  const immutableSource = detail.locator("pre").filter({
+    hasText: "Immutable source version remains unchanged.",
+  });
+  await expect(immutableSource).toContainText(SKILL_SOURCE_CONTENT);
+  await expect(immutableSource).not.toContainText(SKILL_FORK_CONTENT);
+  expect(mock.skillFileRequests()).toEqual(
+    expect.arrayContaining([
+      { path: "SKILL.md", versionId: SKILL_SOURCE_VERSION_ID },
+      { path: "SKILL.md", versionId: SKILL_FORK_VERSION_ID },
+    ]),
+  );
+  expect(mock.validatedMutations()).toBe(1);
   expect(mock.staleConflicts()).toBe(0);
 });
 

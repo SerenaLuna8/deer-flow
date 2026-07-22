@@ -174,66 +174,6 @@
       "title": "MatrixSummary",
       "type": "object"
     },
-    "RecoverySummary": {
-      "additionalProperties": false,
-      "properties": {
-        "archive_schema_version": {
-          "const": 7,
-          "title": "Archive Schema Version",
-          "type": "integer"
-        },
-        "kind": {
-          "const": "recovery",
-          "default": "recovery",
-          "title": "Kind",
-          "type": "string"
-        },
-        "proof_digest": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Proof Digest",
-          "type": "string"
-        },
-        "restored_count": {
-          "minimum": 0,
-          "title": "Restored Count",
-          "type": "integer"
-        },
-        "rpo_outcome": {
-          "enum": [
-            "archive_point_confirmed",
-            "failed"
-          ],
-          "title": "Rpo Outcome",
-          "type": "string"
-        },
-        "rto_ms": {
-          "minimum": 0,
-          "title": "Rto Ms",
-          "type": "integer"
-        },
-        "schema_revision": {
-          "const": "0001_project_saas_baseline",
-          "title": "Schema Revision",
-          "type": "string"
-        },
-        "tombstone_count": {
-          "minimum": 0,
-          "title": "Tombstone Count",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "archive_schema_version",
-        "schema_revision",
-        "tombstone_count",
-        "proof_digest",
-        "rto_ms",
-        "rpo_outcome",
-        "restored_count"
-      ],
-      "title": "RecoverySummary",
-      "type": "object"
-    },
     "ReviewReport": {
       "additionalProperties": false,
       "properties": {
@@ -415,7 +355,6 @@
               "cleanup": "#/$defs/CleanupSummary",
               "live_model": "#/$defs/LiveModelSummary",
               "matrix": "#/$defs/MatrixSummary",
-              "recovery": "#/$defs/RecoverySummary",
               "security": "#/$defs/SecuritySummary",
               "tests": "#/$defs/TestSummary"
             },
@@ -433,9 +372,6 @@
             },
             {
               "$ref": "#/$defs/LiveModelSummary"
-            },
-            {
-              "$ref": "#/$defs/RecoverySummary"
             },
             {
               "$ref": "#/$defs/CleanupSummary"
@@ -470,7 +406,6 @@
         "host_setup",
         "chromium",
         "deepseek",
-        "recovery",
         "cleanup"
       ],
       "title": "StageId",

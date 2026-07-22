@@ -51,6 +51,9 @@ class InboundMessage:
             legacy global ``channel_name:chat_id[:topic_id]`` key.
         owner_user_id: DeerFlow user id that owns the channel connection.
             Platform user ids stay in ``user_id``.
+        private_scope: Server-resolved project/owner coordinates used only for
+            scoped channel-conversation persistence. Executable inbound work
+            re-resolves current membership and never treats this as authority.
         project_id: Optional project id copied from a server-side connection
             lookup for routing display only. It is not private-work authority;
             the inbound resolver re-resolves project and owner from persistence.
@@ -69,6 +72,7 @@ class InboundMessage:
     topic_id: str | None = None
     connection_id: str | None = None
     owner_user_id: str | None = None
+    private_scope: PrivateResourceScope | None = None
     project_id: str | None = None
     workspace_id: str | None = None
     files: list[dict[str, Any]] = field(default_factory=list)

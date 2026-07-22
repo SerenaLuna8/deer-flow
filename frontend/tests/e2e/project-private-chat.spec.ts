@@ -40,6 +40,12 @@ const project: Project = {
   agent_count: 1,
   skill_count: 0,
   mcp_count: 0,
+  quota_summary: {
+    members: { used: 2, reserved: 0, limit: 20 },
+    storage_bytes: { used: 0, reserved: 0, limit: 5_368_709_120 },
+    concurrent_runs: { used: 0, reserved: 0, limit: 3 },
+    mcp_calls_daily: { used: 0, reserved: 0, limit: 10_000 },
+  },
   status: "active",
   is_suspended: false,
   membership_version: 1,
@@ -115,6 +121,7 @@ type MockPrivateWorkOptions = {
   streamValues?: Record<string, unknown>;
   workspaceChanges?: unknown;
   uploadedFiles?: Array<Record<string, unknown>>;
+  controlBodies?: Array<{ path: string; body: unknown }>;
 };
 
 async function json(route: Route, body: unknown, status = 200) {
@@ -150,6 +157,7 @@ async function mockPrivateWork(
   const requests: string[] = [];
   let threadExists = includeThread;
   let hasStreamed = false;
+  let goal: Record<string, unknown> | null = null;
   await page.route(
     `**/api/projects/${PROJECT_ID}/private-work/**`,
     async (route) => {
@@ -224,6 +232,86 @@ async function mockPrivateWork(
           total_input_tokens: 0,
           total_output_tokens: 0,
           total_tokens: 0,
+        });
+      }
+      if (path.endsWith(`/threads/${THREAD_ID}/goal`)) {
+        if (request.method() === "GET") {
+          return json(route, { goal });
+        }
+        if (request.method() === "DELETE") {
+          goal = null;
+          return json(route, { goal });
+        }
+        const body = request.postDataJSON() as { objective: string };
+        options.controlBodies?.push({ path, body });
+        goal = {
+          objective: body.objective,
+          status: "active",
+          created_at: "2026-07-15T01:00:00Z",
+          updated_at: "2026-07-15T01:00:00Z",
+          continuation_count: 0,
+          max_continuations: 8,
+          no_progress_count: 0,
+          max_no_progress_continuations: 2,
+        };
+        return json(route, { goal });
+      }
+      if (path.endsWith(`/threads/${THREAD_ID}/compact`)) {
+        const body = request.postDataJSON();
+        options.controlBodies?.push({ path, body });
+        return json(route, {
+          thread_id: THREAD_ID,
+          compacted: true,
+          removed_message_count: 4,
+          preserved_message_count: 2,
+          summary_updated: true,
+          checkpoint_id: "checkpoint-compact",
+          total_tokens: 120,
+        });
+      }
+      if (path.endsWith(`/threads/${THREAD_ID}/branches`)) {
+        const body = request.postDataJSON() as { message_id: string };
+        options.controlBodies?.push({ path, body });
+        return json(route, {
+          thread_id: SECOND_THREAD_ID,
+          parent_thread_id: THREAD_ID,
+          parent_checkpoint_id: "checkpoint-branch",
+          branched_from_message_id: body.message_id,
+          workspace_clone_mode: "current_thread_authority_copy",
+        });
+      }
+      if (path.endsWith(`/threads/${THREAD_ID}/runs/regenerate/prepare`)) {
+        const body = request.postDataJSON() as { message_id: string };
+        options.controlBodies?.push({ path, body });
+        return json(route, {
+          input: {
+            messages: [
+              {
+                type: "human",
+                id: "msg-project-submitted",
+                content: [{ type: "text", text: "Hello from project" }],
+                additional_kwargs: {},
+              },
+            ],
+          },
+          checkpoint: {
+            checkpoint_ns: "",
+            checkpoint_id: "checkpoint-before-human",
+            checkpoint_map: null,
+          },
+          metadata: {
+            regenerate_from_message_id: body.message_id,
+            regenerate_from_run_id: "run-original",
+            regenerate_checkpoint_id: "checkpoint-before-human",
+          },
+          target_run_id: "run-original",
+        });
+      }
+      if (path.endsWith(`/threads/${THREAD_ID}/suggestions`)) {
+        const body = request.postDataJSON();
+        options.controlBodies?.push({ path, body });
+        return json(route, {
+          suggestions: ["Review the project result?"],
         });
       }
       if (
@@ -818,7 +906,8 @@ test.beforeEach(async ({ page }) => {
 test("project detail loads history and streams without legacy private-work calls", async ({
   page,
 }) => {
-  const projectRequests = await mockPrivateWork(page);
+  const controlBodies: Array<{ path: string; body: unknown }> = [];
+  const projectRequests = await mockPrivateWork(page, true, { controlBodies });
   const legacyPrivateRequests: string[] = [];
   const legacySuggestionRequests: string[] = [];
   const legacyArtifactRequests: string[] = [];
@@ -859,16 +948,153 @@ test("project detail loads history and streams without legacy private-work calls
   await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Branch conversation" }),
-  ).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Regenerate" })).toHaveCount(0);
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Regenerate" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Review the project result?" }),
+  ).toBeVisible();
 
   expect(projectRequests).toContain(
     `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/stream`,
   );
-  await page.waitForTimeout(200);
+  expect(projectRequests).toContain(
+    `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/suggestions`,
+  );
+  expect(controlBodies).toContainEqual({
+    path: `/api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/suggestions`,
+    body: { n: 3 },
+  });
   expect(legacySuggestionRequests).toEqual([]);
   expect(legacyArtifactRequests).toEqual([]);
   expect(legacyPrivateRequests).toEqual([]);
+});
+
+test("project goal and compact commands use only scoped control routes", async ({
+  page,
+}) => {
+  const controlBodies: Array<{ path: string; body: unknown }> = [];
+  const projectRequests = await mockPrivateWork(page, true, { controlBodies });
+  const globalRequests: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/threads" || path.startsWith("/api/threads/")) {
+      globalRequests.push(`${request.method()} ${path}`);
+    }
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await textarea.fill("/goal Finish the project-scoped repair");
+  await textarea.press("Enter");
+  await expect
+    .poll(() =>
+      projectRequests.includes(
+        `PUT /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/goal`,
+      ),
+    )
+    .toBe(true);
+
+  await textarea.fill("/compact");
+  await page.getByRole("button", { name: "Submit" }).click();
+  await expect
+    .poll(() =>
+      projectRequests.includes(
+        `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/compact`,
+      ),
+    )
+    .toBe(true);
+
+  expect(controlBodies).toContainEqual({
+    path: `/api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/goal`,
+    body: {
+      objective: "Finish the project-scoped repair",
+    },
+  });
+  expect(controlBodies).toContainEqual({
+    path: `/api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/compact`,
+    body: { force: true },
+  });
+  expect(globalRequests).toEqual([]);
+});
+
+test("project branch action stays on the scoped thread endpoint", async ({
+  page,
+}) => {
+  const controlBodies: Array<{ path: string; body: unknown }> = [];
+  const projectRequests = await mockPrivateWork(page, true, {
+    controlBodies,
+    stateMessages: [
+      {
+        type: "human",
+        id: "msg-branch-human",
+        content: [{ type: "text", text: "Create a branchable answer" }],
+      },
+      {
+        type: "ai",
+        id: "msg-branch-ai",
+        content: "This answer can be branched.",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await page.getByRole("button", { name: "Branch conversation" }).click();
+  await expect
+    .poll(() =>
+      projectRequests.includes(
+        `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/branches`,
+      ),
+    )
+    .toBe(true);
+  expect(controlBodies).toContainEqual({
+    path: `/api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/branches`,
+    body: {
+      message_id: "msg-branch-ai",
+      message_ids: ["msg-branch-ai"],
+    },
+  });
+  await expect(page).toHaveURL(
+    `/projects/research-lab/chats/${SECOND_THREAD_ID}`,
+  );
+});
+
+test("project regenerate prepares from scoped history before a scoped run", async ({
+  page,
+}) => {
+  const controlBodies: Array<{ path: string; body: unknown }> = [];
+  const runBodies: unknown[] = [];
+  const projectRequests = await mockPrivateWork(page, true, {
+    controlBodies,
+    runBodies,
+    stateMessages: [
+      {
+        type: "human",
+        id: "msg-project-submitted",
+        content: [{ type: "text", text: "Hello from project" }],
+      },
+      {
+        type: "ai",
+        id: "msg-ai-1",
+        content: "Hello from DeerFlow!",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await page.getByRole("button", { name: "Regenerate" }).click();
+  await expect
+    .poll(() =>
+      projectRequests.includes(
+        `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/regenerate/prepare`,
+      ),
+    )
+    .toBe(true);
+  await expect.poll(() => runBodies).toHaveLength(1);
+  expect(controlBodies).toContainEqual({
+    path: `/api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/regenerate/prepare`,
+    body: { message_id: "msg-ai-1" },
+  });
+  expect(JSON.stringify(runBodies[0])).toContain("checkpoint-before-human");
 });
 
 test("project chat keeps quoted references inside the scoped conversation", async ({

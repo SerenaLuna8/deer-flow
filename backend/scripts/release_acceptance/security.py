@@ -28,10 +28,9 @@ REQUIRED_THREAT_FAMILIES = (
     "stale_runtime_authority",
     "credential_secret_containment",
     "web_session_boundary",
-    "file_archive_sandbox_boundary",
+    "file_sandbox_boundary",
     "durable_stream_boundary",
     "automation_scheduler_boundary",
-    "recovery_integrity",
     "system_governance_observability",
 )
 

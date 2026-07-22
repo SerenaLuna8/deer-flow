@@ -737,8 +737,6 @@ export function InputBox({
       const result = await compactThreadContext(threadId, {
         apiBaseURL: privateWork.apiBaseURL,
         signal,
-        agentName:
-          typeof context.agent_name === "string" ? context.agent_name : null,
       });
       if (
         !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
@@ -781,7 +779,6 @@ export function InputBox({
       finishGoalRequest(compactRequestStateRef.current, request);
     }
   }, [
-    context.agent_name,
     queryClient,
     t.inputBox.compactFailed,
     t.inputBox.compactSkipped,
@@ -1470,21 +1467,6 @@ export function InputBox({
     }
     lastGeneratedForAiIdRef.current = lastAiId;
 
-    const recent = messagesRef.current
-      .filter((m) => m.type === "human" || m.type === "ai")
-      .filter((m) => !isHiddenFromUIMessage(m))
-      .map((m) => {
-        const role = m.type === "human" ? "user" : "assistant";
-        const content = textOfMessage(m) ?? "";
-        return { role, content };
-      })
-      .filter((m) => m.content.trim().length > 0)
-      .slice(-6);
-
-    if (recent.length === 0) {
-      return;
-    }
-
     if (!suggestionsEnabled) {
       setFollowups([]);
       return;
@@ -1501,9 +1483,7 @@ export function InputBox({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: recent,
           n: 3,
-          model_name: context.model_name ?? undefined,
         }),
         signal: controller.signal,
       },
@@ -1530,7 +1510,6 @@ export function InputBox({
 
     return () => controller.abort();
   }, [
-    context.model_name,
     disabled,
     followupSuggestionsEnabled,
     isMock,

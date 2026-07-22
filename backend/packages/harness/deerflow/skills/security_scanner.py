@@ -102,8 +102,7 @@ async def scan_skill_content(
     model_responded = False
     try:
         config = app_config or get_app_config()
-        model_name = config.skill_evolution.moderation_model_name
-        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=config) if model_name else create_chat_model(thinking_enabled=False, app_config=config)
+        model = create_chat_model(thinking_enabled=False, app_config=config)
         response = await model.ainvoke(
             [
                 {"role": "system", "content": rubric},

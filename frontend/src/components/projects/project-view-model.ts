@@ -1,5 +1,7 @@
 import { ProjectApiError } from "@/core/projects/api";
-import type { Project } from "@/core/projects/types";
+import type { Project, ProjectQuotaSummary } from "@/core/projects/types";
+
+export type ProjectListFilter = "all" | "pinned";
 
 export function canUpdateProject(project: Project): boolean {
   return project.capabilities.includes("project.update");
@@ -8,14 +10,16 @@ export function canUpdateProject(project: Project): boolean {
 export function filterAndSortProjects(
   projects: readonly Project[],
   query: string,
+  filter: ProjectListFilter = "all",
 ): Project[] {
   const normalized = query.trim().toLocaleLowerCase();
   return [...projects]
     .filter(
       (project) =>
-        !normalized ||
-        project.display_name.toLocaleLowerCase().includes(normalized) ||
-        project.slug.toLocaleLowerCase().includes(normalized),
+        (filter === "all" || project.is_pinned) &&
+        (!normalized ||
+          project.display_name.toLocaleLowerCase().includes(normalized) ||
+          project.slug.toLocaleLowerCase().includes(normalized)),
     )
     .sort((left, right) => {
       if (left.is_pinned !== right.is_pinned) return left.is_pinned ? -1 : 1;
@@ -23,6 +27,30 @@ export function filterAndSortProjects(
       const rightEntered = right.last_entered_at ?? "";
       return rightEntered.localeCompare(leftEntered);
     });
+}
+
+function formatQuotaCount(value: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(
+    value,
+  );
+}
+
+function formatStorageBytes(value: number): string {
+  const gibibytes = value / 1_073_741_824;
+  return `${new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 1,
+  }).format(gibibytes)} GiB`;
+}
+
+export function formatProjectQuota(summary: ProjectQuotaSummary) {
+  const total = (dimension: ProjectQuotaSummary["members"]) =>
+    dimension.used + dimension.reserved;
+  return {
+    members: `成员 ${formatQuotaCount(total(summary.members))} / ${formatQuotaCount(summary.members.limit)}`,
+    storage: `存储 ${formatStorageBytes(total(summary.storage_bytes))} / ${formatStorageBytes(summary.storage_bytes.limit)}`,
+    runs: `运行 ${formatQuotaCount(total(summary.concurrent_runs))} / ${formatQuotaCount(summary.concurrent_runs.limit)}`,
+    mcp: `MCP ${formatQuotaCount(total(summary.mcp_calls_daily))} / ${formatQuotaCount(summary.mcp_calls_daily.limit)}`,
+  };
 }
 
 export function projectErrorMessage(error: unknown): string {

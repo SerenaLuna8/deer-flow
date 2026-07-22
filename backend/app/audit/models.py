@@ -69,10 +69,6 @@ class AuditAction(StrEnum):
     RUN_TERMINAL = "run.terminal"
     JOB_DEAD = "job.dead"
     JOB_REQUEUED = "job.requeued"
-    BACKUP_CREATED = "backup.created"
-    RESTORE_STARTED = "restore.started"
-    RESTORE_COMPLETED = "restore.completed"
-    RECOVERY_DRILL_COMPLETED = "recovery.drill_completed"
     PURGE_COMPLETED = "purge.completed"
     AUDIT_CORRECTED = "audit.corrected"
 
@@ -86,8 +82,6 @@ class AuditTargetKind(StrEnum):
     QUOTA = "quota"
     RUN = "run"
     JOB = "job"
-    BACKUP = "backup"
-    RESTORE = "restore"
     PURGE = "purge"
     AUDIT = "audit"
 
@@ -104,7 +98,6 @@ class AuditProcess(StrEnum):
     SCHEDULER = "scheduler"
     OPERATOR = "operator"
     MIGRATION = "migration"
-    RECOVERY = "recovery"
 
 
 class AuditPlatformRole(StrEnum):
@@ -271,7 +264,7 @@ _ACTION_CONTRACTS[AuditAction.QUOTA_RECONCILED] = _contract(
     AuditScope.PROJECT,
     "system",
     "process",
-    processes=(AuditProcess.OPERATOR, AuditProcess.RECOVERY),
+    processes=(AuditProcess.OPERATOR,),
 )
 _ACTION_CONTRACTS[AuditAction.RUN_ADMITTED] = AuditActionContract(
     target_kind=AuditTargetKind.RUN,
@@ -335,44 +328,25 @@ _ACTION_CONTRACTS[AuditAction.JOB_REQUEUED] = _contract(
     AuditScope.PROJECT,
     "system",
 )
-_ACTION_CONTRACTS[AuditAction.BACKUP_CREATED] = _contract(
-    AuditTargetKind.BACKUP,
-    AuditScope.PLATFORM,
-    "system",
-    "process",
-    processes=(AuditProcess.OPERATOR,),
-)
-for _action in (
-    AuditAction.RESTORE_STARTED,
-    AuditAction.RESTORE_COMPLETED,
-    AuditAction.RECOVERY_DRILL_COMPLETED,
-):
-    _ACTION_CONTRACTS[_action] = _contract(
-        AuditTargetKind.RESTORE,
-        AuditScope.PLATFORM,
-        "system",
-        "process",
-        processes=(AuditProcess.OPERATOR, AuditProcess.RECOVERY),
-    )
 _ACTION_CONTRACTS[AuditAction.PURGE_COMPLETED] = AuditActionContract(
     target_kind=AuditTargetKind.PURGE,
     variants=(
         _variant(
             AuditScope.PROJECT,
             "process",
-            processes=(AuditProcess.WORKER, AuditProcess.RECOVERY),
+            processes=(AuditProcess.WORKER,),
             metadata_equals=(("resource_kind", "project"),),
         ),
         _variant(
             AuditScope.PROJECT,
             "process",
-            processes=(AuditProcess.WORKER, AuditProcess.RECOVERY),
+            processes=(AuditProcess.WORKER,),
             metadata_equals=(("resource_kind", "file"),),
         ),
         _variant(
             AuditScope.PLATFORM,
             "process",
-            processes=(AuditProcess.RECOVERY,),
+            processes=(AuditProcess.WORKER,),
             metadata_equals=(("resource_kind", "account"),),
         ),
     ),
@@ -713,16 +687,6 @@ class JobAuditMetadata(_AuditMetadata):
     retry_safety: Literal["safe", "unknown", "unsafe"]
 
 
-class BackupAuditMetadata(_AuditMetadata):
-    table_count: StrictInt = Field(ge=0)
-    tombstone_high_watermark: StrictInt = Field(ge=0)
-
-
-class RestoreAuditMetadata(_AuditMetadata):
-    table_count: StrictInt = Field(ge=0)
-    tombstones_replayed: StrictInt = Field(ge=0)
-
-
 class PurgeAuditMetadata(_AuditMetadata):
     resource_kind: Literal["project", "account", "file"]
     purged_count: StrictInt = Field(ge=0)
@@ -764,13 +728,6 @@ _AUDIT_METADATA_MODELS[AuditAction.RUN_ADMITTED] = RunAdmittedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.RUN_TERMINAL] = RunTerminalAuditMetadata
 for _action in (AuditAction.JOB_DEAD, AuditAction.JOB_REQUEUED):
     _AUDIT_METADATA_MODELS[_action] = JobAuditMetadata
-_AUDIT_METADATA_MODELS[AuditAction.BACKUP_CREATED] = BackupAuditMetadata
-for _action in (
-    AuditAction.RESTORE_STARTED,
-    AuditAction.RESTORE_COMPLETED,
-    AuditAction.RECOVERY_DRILL_COMPLETED,
-):
-    _AUDIT_METADATA_MODELS[_action] = RestoreAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.PURGE_COMPLETED] = PurgeAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.AUDIT_CORRECTED] = CorrectionAuditMetadata
 AUDIT_METADATA_MODELS: Mapping[AuditAction, type[_AuditMetadata]] = MappingProxyType(_AUDIT_METADATA_MODELS)

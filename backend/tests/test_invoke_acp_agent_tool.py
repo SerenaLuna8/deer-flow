@@ -671,7 +671,6 @@ def test_get_available_tools_sync_invoke_acp_agent_preserves_thread_workspace(mo
         tools=[],
         models=[],
         tool_search=SimpleNamespace(enabled=False),
-        skill_evolution=SimpleNamespace(enabled=False),
         sandbox=SimpleNamespace(),
         get_model_config=lambda name: None,
         acp_agents={"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")},
@@ -694,7 +693,6 @@ def test_get_available_tools_uses_explicit_app_config_for_acp_agents(monkeypatch
         tools=[],
         models=[],
         tool_search=SimpleNamespace(enabled=False),
-        skill_evolution=SimpleNamespace(enabled=False),
         get_model_config=lambda name: None,
         acp_agents=explicit_agents,
     )

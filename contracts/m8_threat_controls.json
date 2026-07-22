@@ -12,14 +12,18 @@
       ],
       "detective_controls": [
         "closed isolation matrix surface manifest",
-        "zero-delta PostgreSQL denial assertions"
+        "zero-delta PostgreSQL denial assertions",
+        "PostgreSQL channel mapping cross-owner and cross-project isolation with first-writer assertions"
       ],
       "matrix_case_ids": [
         "actor.different_account.project_get",
-        "validation.project.mass_assignment"
+        "validation.project.mass_assignment",
+        "surface.connection.get",
+        "surface.connection.update"
       ],
       "test_selectors": [
-        "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation"
+        "pytest::tests/integration/test_project_isolation_postgres.py::test_project_api_and_repository_enforce_account_isolation",
+        "pytest::tests/integration/test_m4_private_work_postgres.py::test_channel_store_is_postgres_scoped_and_multi_process_safe"
       ],
       "operator_response": "Disable admission, preserve audit evidence, and investigate the affected account and project scopes."
     },
@@ -72,48 +76,51 @@
     {
       "threat_id": "M8-T04",
       "family": "web_session_boundary",
-      "attack_surface": "CSRF, cookie flags, open redirect, unauthenticated admin or project routes, and error detail",
+      "attack_surface": "CSRF, cookie flags, open redirect, unauthenticated admin or project routes, error detail, and multi-Gateway login or registration rate-limit bypass",
       "prevention_controls": [
         "server session and CSRF validation",
         "same-origin project API routes",
-        "public stable error contracts"
+        "public stable error contracts",
+        "PostgreSQL-shared action-domain-separated fixed-window authentication admission"
       ],
       "detective_controls": [
         "account transition cache invalidation",
-        "unauthenticated operations denial evidence"
+        "unauthenticated operations denial evidence",
+        "cross-Gateway atomic admission and later-failure-preserving clear assertions"
       ],
       "matrix_case_ids": [
         "actor.unauthenticated.operations_get",
-        "client.transition.account_switch"
+        "client.transition.account_switch",
+        "rate_limit.auth.shared_admit"
       ],
       "test_selectors": [
         "pytest::tests/test_m6_system_operations_api_postgres.py::test_operations_requires_current_system_admin_and_returns_only_aggregate_public_health",
+        "pytest::tests/test_auth_rate_limit.py::test_login_rate_limit_is_postgresql_admitted_before_password_check",
+        "pytest::tests/test_m8_capacity_postgres.py::test_auth_login_attempts_are_atomic_across_gateway_workers",
+        "pytest::tests/test_m8_capacity_postgres.py::test_auth_success_clear_preserves_a_later_concurrent_failure",
         "playwright::tests/e2e/project-automations.spec.ts::AuthProvider account transition aborts the old list and cannot reuse its cache"
       ],
       "operator_response": "Invalidate active sessions, preserve bounded access logs, and verify public error responses before reopening traffic."
     },
     {
       "threat_id": "M8-T05",
-      "family": "file_archive_sandbox_boundary",
-      "attack_surface": "file path traversal, symlink, archive traversal, temporary file identity race, and sandbox escape boundary",
+      "family": "file_sandbox_boundary",
+      "attack_surface": "file path traversal, symlink, temporary file identity race, and sandbox escape boundary",
       "prevention_controls": [
         "normalized project-private logical paths",
-        "regular-file and inode identity validation",
-        "authenticated archive coordinates"
+        "regular-file and inode identity validation"
       ],
       "detective_controls": [
         "private file scope matrix",
-        "archive restore proof probes"
+        "sandbox escape boundary probes"
       ],
       "matrix_case_ids": [
-        "surface.file.get",
-        "resource.archive.restore"
+        "surface.file.get"
       ],
       "test_selectors": [
-        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider",
-        "pytest::tests/test_m6_restore_postgres.py::test_live_archive_restore_replays_tombstone_runs_probes_and_writes_proof"
+        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider"
       ],
-      "operator_response": "Quarantine the owned path or archive, do not follow links, and require a fresh identity-checked recovery run."
+      "operator_response": "Quarantine the owned path, do not follow links, and require a fresh identity-checked private-file operation."
     },
     {
       "threat_id": "M8-T06",
@@ -160,28 +167,6 @@
         "playwright::tests/e2e/project-automations.spec.ts::manual retry reuses one Idempotency-Key after a safe 503 response"
       ],
       "operator_response": "Disable Scheduler admission, verify the ownership lock, and reconcile occurrences before reenabling it."
-    },
-    {
-      "threat_id": "M8-T08",
-      "family": "recovery_integrity",
-      "attack_surface": "backup tamper, wrong key, journal gap or reorder, source mismatch, restore proof substitution, and deleted-data revival",
-      "prevention_controls": [
-        "authenticated version-7 archive",
-        "hash-chained external tombstone journal",
-        "distinct nonexistent restore target"
-      ],
-      "detective_controls": [
-        "exact schema and source identity probes",
-        "restore proof and deleted-data replay assertions"
-      ],
-      "matrix_case_ids": [
-        "resource.archive.restore",
-        "resource.restore_proof.get"
-      ],
-      "test_selectors": [
-        "pytest::tests/test_m6_restore_postgres.py::test_live_archive_restore_replays_tombstone_runs_probes_and_writes_proof"
-      ],
-      "operator_response": "Reject the restore target, preserve source and journal evidence, rotate compromised keys, and rerun from a new target."
     },
     {
       "threat_id": "M8-T09",

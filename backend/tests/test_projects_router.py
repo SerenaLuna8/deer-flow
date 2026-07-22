@@ -16,7 +16,8 @@ from app.gateway.deps import project_session
 from app.gateway.routers import projects
 from app.projects.capabilities import Capability, capabilities_for
 from app.projects.errors import ProjectDatabaseUnavailable
-from app.projects.models import ProjectRole, ProjectView
+from app.projects.models import ProjectQuotaSummary, ProjectRole, ProjectView, QuotaDimensionSummary
+from deerflow.config.quota_config import QuotaConfig
 
 
 class _NoopQuota:
@@ -24,9 +25,23 @@ class _NoopQuota:
         return None
 
 
+class _NoopQuotaService:
+    config = QuotaConfig()
+
+
+def _quota_summary() -> ProjectQuotaSummary:
+    return ProjectQuotaSummary(
+        members=QuotaDimensionSummary(used=1, reserved=0, limit=20),
+        storage_bytes=QuotaDimensionSummary(used=0, reserved=0, limit=5_368_709_120),
+        concurrent_runs=QuotaDimensionSummary(used=0, reserved=0, limit=3),
+        mcp_calls_daily=QuotaDimensionSummary(used=0, reserved=0, limit=10_000),
+    )
+
+
 def _client() -> TestClient:
     app = FastAPI()
     app.state.project_quota_enforcer = _NoopQuota()
+    app.state.project_quota_service = _NoopQuotaService()
     app.state.operational_audit_sink = AsyncMock()
     app.include_router(projects.router)
 
@@ -85,6 +100,7 @@ def test_project_response_capabilities_follow_declaration_order_and_hide_private
             0,
             0,
             0,
+            _quota_summary(),
             "active",
             False,
             1,
@@ -95,11 +111,13 @@ def test_project_response_capabilities_follow_declaration_order_and_hide_private
     assert response.capabilities == list(Capability)
     assert "created_by_user_id" not in response.model_dump()
     assert "members" not in response.model_dump()
+    assert response.quota_summary.members.limit == 20
 
 
 def test_project_router_requires_authentication() -> None:
     app = FastAPI()
     app.state.project_quota_enforcer = _NoopQuota()
+    app.state.project_quota_service = _NoopQuotaService()
     app.state.operational_audit_sink = AsyncMock()
     app.include_router(projects.router)
 
@@ -132,6 +150,7 @@ async def test_project_session_maps_uninitialized_engine_to_stable_503(monkeypat
 
 def test_project_database_failure_is_503_without_driver_details(monkeypatch) -> None:
     app = FastAPI()
+    app.state.project_quota_service = _NoopQuotaService()
     app.include_router(projects.router)
 
     async def fake_session():
@@ -157,6 +176,7 @@ async def test_project_api_postgres_full_authorization_and_personal_state(
     identity = {"user_id": users["admin"]}
     app = FastAPI()
     app.state.project_quota_enforcer = _NoopQuota()
+    app.state.project_quota_service = _NoopQuotaService()
     app.state.operational_audit_sink = AsyncMock()
     app.include_router(projects.router)
 

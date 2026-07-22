@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 from pydantic import ValidationError
 from support.memory_run_store import MemoryRunStore
 
@@ -147,18 +148,15 @@ class TestDatabaseConfig:
 
     def test_example_config_uses_postgres_only_contract(self):
         config_example = Path(__file__).resolve().parents[2] / "config.example.yaml"
-        text = config_example.read_text()
-        database_section = text[text.index("# Database\n") : text.index("# Scheduled Tasks Configuration")]
+        config = yaml.safe_load(config_example.read_text(encoding="utf-8"))
 
-        assert "url: $DATABASE_URL" in database_section
-        assert "pool_size: 5" in database_section
-        assert "max_overflow: 10" in database_section
-        assert "pool_timeout_seconds: 30" in database_section
-        assert "statement_timeout_seconds: 30" in database_section
-        assert "backend:" not in database_section
-        assert "sqlite" not in database_section.lower()
-        assert "checkpointer:" not in database_section
-        assert "extra postgres" not in database_section
+        assert config["database"] == {
+            "url": "$DATABASE_URL",
+            "pool_size": 5,
+            "max_overflow": 10,
+            "pool_timeout_seconds": 30,
+            "statement_timeout_seconds": 30,
+        }
 
 
 # -- MemoryRunStore --

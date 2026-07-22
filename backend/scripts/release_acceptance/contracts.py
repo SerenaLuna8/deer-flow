@@ -80,11 +80,8 @@ FROZEN_MATRIX_DIMENSIONS: dict[str, tuple[str, ...]] = {
         "retention",
         "admin",
         "channel",
-        "archive",
-        "journal",
-        "restore_proof",
     ),
-    "scopes": ("account", "workspace", "project_shared", "project_private", "project_governance", "system_governance", "recovery"),
+    "scopes": ("account", "workspace", "project_shared", "project_private", "project_governance", "system_governance"),
     "ownerships": ("not_applicable", "own", "other_owner", "server_owned"),
     "operations": (
         "create",
@@ -567,8 +564,12 @@ def _is_scoped_route(module_name: str, route_path: str) -> bool:
 
 def _resource_family(value: str) -> str:
     normalized = _normalized_identifier(value)
+    # A Skill version file is a project-shared immutable Skill resource, not
+    # project-private user file storage. Keep the more specific authority when
+    # both words appear in route/repository/frontend identifiers.
+    if "skill" in normalized and "file" in normalized:
+        return "skill"
     candidates = (
-        ("restore_proof", ("restore_proof", "restoreproof")),
         ("run_event", ("run_event", "stream", "event")),
         ("dead_job", ("dead_job", "deadjob", "dead")),
         ("membership", ("membership", "member")),
@@ -584,8 +585,6 @@ def _resource_family(value: str) -> str:
         ("memory", ("memory",)),
         ("occurrence", ("occurrence",)),
         ("retention", ("retention", "purge")),
-        ("journal", ("journal", "tombstone")),
-        ("archive", ("archive", "backup")),
         ("channel", ("channel", "webhook")),
         ("quota", ("quota",)),
         ("usage", ("usage",)),
@@ -614,6 +613,13 @@ def _resource_family(value: str) -> str:
 
 def _operation_for_name(name: str, *, method: str | None = None, route_path: str = "") -> str:
     normalized = _normalized_identifier(f"{name}_{route_path}")
+    # These semantic verbs must win before substring heuristics. In particular,
+    # ``asset_id`` contains ``set_`` and would otherwise misclassify both routes
+    # as updates. Forking creates a new immutable version; preview is read-only.
+    if normalized.startswith("fork_"):
+        return "create"
+    if normalized.startswith("preview_"):
+        return "get"
     if any(
         needle in normalized
         for needle in (

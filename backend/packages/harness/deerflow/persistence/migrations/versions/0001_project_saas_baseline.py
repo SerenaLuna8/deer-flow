@@ -264,8 +264,6 @@ _FINAL_POSTGRES_DDL = (
     "CREATE TRIGGER trg_project_usage_ledger_append_only BEFORE UPDATE OR DELETE ON project_usage_ledger FOR EACH ROW EXECUTE FUNCTION reject_m7_append_only_mutation()",
     "CREATE TRIGGER trg_audit_logs_append_only BEFORE UPDATE OR DELETE ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_m7_append_only_mutation()",
     "CREATE TRIGGER trg_dead_jobs_append_only BEFORE UPDATE OR DELETE ON dead_jobs FOR EACH ROW EXECUTE FUNCTION reject_m7_append_only_mutation()",
-    "CREATE TRIGGER trg_deletion_tombstones_append_only BEFORE UPDATE OR DELETE ON deletion_tombstones FOR EACH ROW EXECUTE FUNCTION reject_m7_append_only_mutation()",
-    "CREATE TRIGGER trg_restore_proofs_append_only BEFORE UPDATE OR DELETE ON restore_proofs FOR EACH ROW EXECUTE FUNCTION reject_m7_append_only_mutation()",
     "\n"
     "CREATE OR REPLACE FUNCTION enforce_stream_terminal_invariant()\n"
     "RETURNS trigger AS $$\n"
@@ -311,7 +309,6 @@ _FINAL_POSTGRES_DDL = (
     "CREATE TRIGGER trg_project_system_skill_bindings_updated_at BEFORE UPDATE ON project_system_skill_bindings FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
     "CREATE TRIGGER trg_project_usage_counters_updated_at BEFORE UPDATE ON project_usage_counters FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
     "CREATE TRIGGER trg_projects_updated_at BEFORE UPDATE ON projects FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
-    "CREATE TRIGGER trg_recovery_journal_state_updated_at BEFORE UPDATE ON recovery_journal_state FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
     "CREATE TRIGGER trg_runs_updated_at BEFORE UPDATE ON runs FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
     "CREATE TRIGGER trg_scheduled_task_runs_updated_at BEFORE UPDATE ON scheduled_task_runs FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
     "CREATE TRIGGER trg_scheduled_tasks_updated_at BEFORE UPDATE ON scheduled_tasks FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
@@ -351,24 +348,6 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("job_id"),
     )
     op.create_index("ix_dead_jobs_project_dead", "dead_jobs", ["project_id", sa.literal_column("dead_at DESC"), "job_id"], unique=False)
-    op.create_table(
-        "deletion_tombstones",
-        sa.Column("journal_sequence", sa.BigInteger(), nullable=False),
-        sa.Column("ciphertext_digest", sa.CHAR(length=64), nullable=False),
-        sa.Column("record_digest", sa.CHAR(length=64), nullable=False),
-        sa.Column("resource_kind", sa.String(length=32), nullable=False),
-        sa.Column("resource_ref_key_id", sa.String(length=64), nullable=False),
-        sa.Column("resource_ref_hmac", sa.CHAR(length=64), nullable=False),
-        sa.Column("purge_status", sa.String(length=16), server_default="journaled", nullable=False),
-        sa.Column("committed_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("purged_at", sa.DateTime(timezone=True), nullable=True),
-        sa.CheckConstraint("purge_status IN ('journaled', 'purged')", name="ck_deletion_tombstones_status"),
-        sa.CheckConstraint("journal_sequence >= 1", name="ck_deletion_tombstones_sequence"),
-        sa.PrimaryKeyConstraint("journal_sequence"),
-        sa.UniqueConstraint("ciphertext_digest"),
-        sa.UniqueConstraint("record_digest"),
-    )
-    op.create_index("ix_deletion_tombstones_committed", "deletion_tombstones", ["committed_at", "journal_sequence"], unique=False)
     op.create_table(
         "jobs",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -425,6 +404,9 @@ def upgrade() -> None:
     op.create_index("ix_jobs_active_lease", "jobs", ["lease_expires_at", "id"], unique=False, postgresql_where=sa.text("status IN ('leased', 'running')"))
     op.create_index("ix_jobs_claim", "jobs", ["status", "available_at", sa.literal_column("priority DESC"), "created_at"], unique=False)
     op.create_index("ix_jobs_private_scope", "jobs", ["project_id", "owner_user_id", "created_at"], unique=False)
+    # Shared fixed-window counters. The historical M2 table name is retained,
+    # while domain-separated hashes isolate invitation, login, and registration
+    # policies without introducing process-local state.
     op.create_table(
         "project_invitation_rate_limits",
         sa.Column("key_hash", sa.CHAR(length=64), nullable=False),
@@ -437,43 +419,6 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("key_hash"),
     )
     op.create_index(op.f("ix_project_invitation_rate_limits_expires_at"), "project_invitation_rate_limits", ["expires_at"], unique=False)
-    op.create_table(
-        "recovery_journal_state",
-        sa.Column("id", sa.SmallInteger(), server_default=sa.text("1"), nullable=False),
-        sa.Column("source_installation_id", sa.CHAR(length=64), nullable=False),
-        sa.Column("journal_id", sa.Uuid(), nullable=False),
-        sa.Column("high_watermark", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
-        sa.Column("head_digest", sa.CHAR(length=64), server_default="0000000000000000000000000000000000000000000000000000000000000000", nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.CheckConstraint("high_watermark >= 0", name="ck_recovery_journal_state_sequence"),
-        sa.CheckConstraint("id = 1", name="ck_recovery_journal_state_singleton"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("journal_id"),
-    )
-    op.create_table(
-        "restore_proofs",
-        sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("archive_id", sa.Uuid(), nullable=False),
-        sa.Column("archive_digest", sa.CHAR(length=64), nullable=False),
-        sa.Column("archive_schema_version", sa.SmallInteger(), nullable=False),
-        sa.Column("schema_digest", sa.CHAR(length=64), nullable=False),
-        sa.Column("target_database_ref_key_id", sa.String(length=64), nullable=False),
-        sa.Column("target_database_ref_hmac", sa.CHAR(length=64), nullable=False),
-        sa.Column("schema_revision", sa.String(length=64), nullable=False),
-        sa.Column("archive_tombstone_sequence", sa.BigInteger(), nullable=False),
-        sa.Column("replayed_through_sequence", sa.BigInteger(), nullable=False),
-        sa.Column("journal_id", sa.Uuid(), nullable=False),
-        sa.Column("final_journal_head_digest", sa.CHAR(length=64), nullable=False),
-        sa.Column("probes_complete", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("restored_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.CheckConstraint(
-            "archive_schema_version = 7 AND schema_revision = '0001_project_saas_baseline' AND schema_digest = '75a88f91b80d3043c94c669e44b84975ad4e2bf5fa532ed45c8936de723244f5'",
-            name="ck_restore_proofs_archive_schema",
-        ),
-        sa.CheckConstraint("archive_tombstone_sequence >= 0 AND replayed_through_sequence >= archive_tombstone_sequence", name="ck_restore_proofs_sequences"),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_restore_proofs_archive", "restore_proofs", ["archive_id", sa.literal_column("restored_at DESC")], unique=False)
     op.create_table(
         "runs",
         sa.Column("run_id", sa.String(length=64), nullable=False),

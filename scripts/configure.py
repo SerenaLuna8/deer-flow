@@ -27,15 +27,11 @@ def main() -> int:
     ]
 
     if any(path.exists() for path in existing_config):
-        print(
-            "Error: configuration file already exists "
-            "(config.yaml/config.yml/configure.yml). Aborting."
-        )
+        print("Error: configuration file already exists (config.yaml/config.yml/configure.yml). Aborting.")
         return 1
 
     try:
         copy_if_missing(project_root / "config.example.yaml", project_root / "config.yaml")
-        copy_if_missing(project_root / ".env.example", project_root / ".env")
         copy_if_missing(
             project_root / "frontend" / ".env.example",
             project_root / "frontend" / ".env",
@@ -44,10 +40,7 @@ def main() -> int:
         print("Error while generating configuration files:")
         print(f"  {exc}")
         if isinstance(exc, PermissionError):
-            print(
-                "Hint: Check file permissions and ensure the files are not "
-                "read-only or locked by another process."
-            )
+            print("Hint: Check file permissions and ensure the files are not read-only or locked by another process.")
         return 1
 
     print("✓ Configuration files generated")

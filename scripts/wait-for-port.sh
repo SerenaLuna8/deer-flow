@@ -41,7 +41,7 @@ is_port_listening() {
     fi
 
     if command -v lsof >/dev/null 2>&1; then
-        if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+        if lsof -nP -a -i4TCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0
         fi
         return 1

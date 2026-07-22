@@ -1,5 +1,5 @@
-import { ProjectAssetsPage } from "@/components/projects/assets/project-assets-page";
+import { ProjectMcpPage as ProjectMcpAssetPage } from "@/components/projects/assets/project-mcp-page";
 
 export default function ProjectMcpPage() {
-  return <ProjectAssetsPage kind="mcp-servers" />;
+  return <ProjectMcpAssetPage />;
 }

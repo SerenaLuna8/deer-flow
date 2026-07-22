@@ -24,8 +24,6 @@ FINAL_REQUIRED_RELATIONS = (
     "run_events",
     "project_usage_ledger",
     "audit_logs",
-    "deletion_tombstones",
-    "restore_proofs",
 )
 
 

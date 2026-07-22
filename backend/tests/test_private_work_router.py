@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -16,9 +17,13 @@ from support.m4_private_threads import (
 )
 
 from app.gateway.deps import private_work_context
-from app.gateway.routers.private_work import router
+from app.gateway.routers.private_work import _thread_response, router
 from app.private_work.checkpointer import ProjectScopedCheckpointer
-from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.private_work.thread_repository import (
+    PrivateThreadRecord,
+    PrivateThreadRepository,
+    ThreadAgentRef,
+)
 from app.private_work.thread_service import PrivateThreadService
 
 
@@ -105,6 +110,32 @@ def _create_body(
     }
 
 
+def test_thread_response_preserves_record_timestamps() -> None:
+    created_at = datetime(2026, 7, 20, 8, 30, tzinfo=UTC)
+    updated_at = datetime(2026, 7, 21, 9, 45, tzinfo=UTC)
+    record = PrivateThreadRecord(
+        thread_id=str(uuid.uuid4()),
+        project_id=uuid.uuid4(),
+        owner_user_id=str(uuid.uuid4()),
+        agent_asset_id=uuid.uuid4(),
+        agent_scope="project",
+        display_name="Timestamped Thread",
+        status="idle",
+        metadata={},
+        frozen_at=None,
+        deleted_at=None,
+        checkpoint_delete_status="not_requested",
+        version=1,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+    response = _thread_response(record)
+
+    assert response.model_dump()["created_at"] == created_at.isoformat()
+    assert response.model_dump()["updated_at"] == updated_at.isoformat()
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_runner_thread_crud_search_and_state(harness: _Harness) -> None:
@@ -115,7 +146,12 @@ async def test_runner_thread_crud_search_and_state(harness: _Harness) -> None:
         json=_create_body(harness.seed, thread_id=thread_id),
     )
     assert created.status_code == 201
-    assert created.json() == {
+    created_payload = created.json()
+    created_at = created_payload.pop("created_at")
+    updated_at = created_payload.pop("updated_at")
+    assert datetime.fromisoformat(created_at).tzinfo is not None
+    assert updated_at == created_at
+    assert created_payload == {
         "thread_id": str(thread_id),
         "agent_asset_id": str(harness.seed.project_agent_id),
         "agent_scope": "project",
@@ -131,10 +167,15 @@ async def test_runner_thread_crud_search_and_state(harness: _Harness) -> None:
         json={"limit": 20, "offset": 0},
     )
     assert searched.status_code == 200
-    assert [item["thread_id"] for item in searched.json()["items"]] == [str(thread_id)]
+    searched_item = searched.json()["items"][0]
+    assert searched_item["thread_id"] == str(thread_id)
+    assert searched_item["created_at"] == created_at
+    assert searched_item["updated_at"] == updated_at
 
     fetched = await harness.request("GET", f"/threads/{thread_id}")
     assert fetched.status_code == 200
+    assert fetched.json()["created_at"] == created_at
+    assert fetched.json()["updated_at"] == updated_at
     patched = await harness.request(
         "PATCH",
         f"/threads/{thread_id}",
@@ -143,6 +184,8 @@ async def test_runner_thread_crud_search_and_state(harness: _Harness) -> None:
     assert patched.status_code == 200
     assert patched.json()["display_name"] == "Renamed"
     assert patched.json()["version"] == 2
+    assert patched.json()["created_at"] == created_at
+    assert datetime.fromisoformat(patched.json()["updated_at"]) >= datetime.fromisoformat(updated_at)
 
     state = await harness.request("GET", f"/threads/{thread_id}/state")
     assert state.status_code == 200

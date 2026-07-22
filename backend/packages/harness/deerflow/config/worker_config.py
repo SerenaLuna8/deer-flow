@@ -14,7 +14,6 @@ class WorkerConfig(BaseModel):
     heartbeat_seconds: int = Field(default=20, ge=1, le=1200)
     max_concurrent_jobs: int = Field(default=4, ge=1, le=128)
     shutdown_grace_seconds: int = Field(default=30, ge=1, le=600)
-    default_max_attempts: int = Field(default=3, ge=1, le=20)
     retry_initial_seconds: int = Field(default=2, ge=1, le=3600)
     retry_max_seconds: int = Field(default=300, ge=1, le=86400)
 

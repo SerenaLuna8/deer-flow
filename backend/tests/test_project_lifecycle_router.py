@@ -10,11 +10,25 @@ from fastapi.testclient import TestClient
 from app.gateway.deps import project_session
 from app.gateway.routers import project_lifecycle
 from app.projects.errors import ProjectDeletionStateConflict
-from app.projects.models import ProjectRole, ProjectView
+from app.projects.models import ProjectQuotaSummary, ProjectRole, ProjectView, QuotaDimensionSummary
+from deerflow.config.quota_config import QuotaConfig
 
 USER_ID = uuid.uuid4()
 PROJECT_ID = uuid.uuid4()
 NOW = datetime(2026, 7, 12, 9, 0, tzinfo=UTC)
+
+
+class _NoopQuotaService:
+    config = QuotaConfig()
+
+
+def _quota_summary() -> ProjectQuotaSummary:
+    return ProjectQuotaSummary(
+        members=QuotaDimensionSummary(used=1, reserved=0, limit=20),
+        storage_bytes=QuotaDimensionSummary(used=0, reserved=0, limit=5_368_709_120),
+        concurrent_runs=QuotaDimensionSummary(used=0, reserved=0, limit=3),
+        mcp_calls_daily=QuotaDimensionSummary(used=0, reserved=0, limit=10_000),
+    )
 
 
 def _view(*, status: str) -> ProjectView:
@@ -32,6 +46,7 @@ def _view(*, status: str) -> ProjectView:
         agent_count=0,
         skill_count=0,
         mcp_count=0,
+        quota_summary=_quota_summary(),
         status=status,
         is_suspended=False,
         membership_version=2,
@@ -43,6 +58,7 @@ def _view(*, status: str) -> ProjectView:
 def _client() -> TestClient:
     app = FastAPI()
     app.state.operational_audit_sink = AsyncMock()
+    app.state.project_quota_service = _NoopQuotaService()
     app.include_router(project_lifecycle.router)
 
     async def fake_session():

@@ -21,7 +21,6 @@ export type PrivateWorkRequestOptions = Pick<
 
 export type CompactThreadContextOptions = PrivateWorkRequestOptions & {
   signal?: AbortSignal;
-  agentName?: string | null;
 };
 
 function threadAPIBaseURL(options: PrivateWorkRequestOptions): string {
@@ -120,7 +119,6 @@ export async function compactThreadContext(
       },
       body: JSON.stringify({
         force: true,
-        ...(options.agentName ? { agent_name: options.agentName } : {}),
       }),
       signal: options.signal,
     },

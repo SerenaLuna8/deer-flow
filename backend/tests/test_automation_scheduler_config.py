@@ -13,7 +13,6 @@ def test_scheduler_config_uses_conservative_disabled_defaults() -> None:
     assert config.model_dump() == {
         "enabled": False,
         "poll_interval_seconds": 5,
-        "lease_seconds": 120,
         "max_concurrent_runs": 3,
         "min_once_delay_seconds": 60,
     }
@@ -23,8 +22,7 @@ def test_scheduler_config_uses_conservative_disabled_defaults() -> None:
     "overrides",
     [
         {"poll_interval_seconds": 0},
-        {"poll_interval_seconds": 30, "lease_seconds": 30},
-        {"poll_interval_seconds": 30, "lease_seconds": 29},
+        {"lease_seconds": 120},
         {"max_concurrent_runs": 0},
         {"min_once_delay_seconds": -1},
     ],
@@ -50,7 +48,6 @@ def test_scheduler_config_values_support_standard_env_resolution(
 ) -> None:
     monkeypatch.setenv("TEST_AUTOMATION_SCHEDULER_ENABLED", "true")
     monkeypatch.setenv("TEST_AUTOMATION_POLL_SECONDS", "15")
-    monkeypatch.setenv("TEST_AUTOMATION_LEASE_SECONDS", "90")
     monkeypatch.setenv("TEST_AUTOMATION_MAX_RUNS", "7")
     monkeypatch.setenv("TEST_AUTOMATION_ONCE_DELAY", "0")
 
@@ -59,7 +56,6 @@ def test_scheduler_config_values_support_standard_env_resolution(
             "scheduler": {
                 "enabled": "$TEST_AUTOMATION_SCHEDULER_ENABLED",
                 "poll_interval_seconds": "$TEST_AUTOMATION_POLL_SECONDS",
-                "lease_seconds": "$TEST_AUTOMATION_LEASE_SECONDS",
                 "max_concurrent_runs": "$TEST_AUTOMATION_MAX_RUNS",
                 "min_once_delay_seconds": "$TEST_AUTOMATION_ONCE_DELAY",
             }
@@ -70,7 +66,6 @@ def test_scheduler_config_values_support_standard_env_resolution(
     assert config == SchedulerConfig(
         enabled=True,
         poll_interval_seconds=15,
-        lease_seconds=90,
         max_concurrent_runs=7,
         min_once_delay_seconds=0,
     )

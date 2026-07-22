@@ -17,6 +17,43 @@ const PrivateWorkContext = createContext<PrivateWorkAccess | undefined>(
   undefined,
 );
 
+type DeferredScopeRelease = {
+  scope: ProjectClientScope;
+  cancelled: boolean;
+};
+
+function sameProjectScope(
+  left: ProjectClientScope,
+  right: ProjectClientScope,
+): boolean {
+  return (
+    left.accountId === right.accountId && left.projectId === right.projectId
+  );
+}
+
+export function createDeferredPrivateWorkScopeRelease(
+  schedule: (task: () => void) => void = queueMicrotask,
+) {
+  const pending = new Set<DeferredScopeRelease>();
+  return {
+    retain(scope: ProjectClientScope) {
+      for (const release of pending) {
+        if (sameProjectScope(release.scope, scope)) {
+          release.cancelled = true;
+        }
+      }
+    },
+    defer(scope: ProjectClientScope, dispose: () => void) {
+      const release: DeferredScopeRelease = { scope, cancelled: false };
+      pending.add(release);
+      schedule(() => {
+        pending.delete(release);
+        if (!release.cancelled) dispose();
+      });
+    },
+  };
+}
+
 export function PrivateWorkProvider({
   access,
   children,
@@ -42,6 +79,11 @@ export function ProjectPrivateWorkProvider({
   > | null>(null);
   registryRef.current ??= createPrivateWorkScopeRegistry();
   const registry = registryRef.current;
+  const deferredReleaseRef = useRef<ReturnType<
+    typeof createDeferredPrivateWorkScopeRelease
+  > | null>(null);
+  deferredReleaseRef.current ??= createDeferredPrivateWorkScopeRelease();
+  const deferredRelease = deferredReleaseRef.current;
   const scope = useMemo(
     () => ({ accountId, projectId }),
     [accountId, projectId],
@@ -49,10 +91,13 @@ export function ProjectPrivateWorkProvider({
   const access = useMemo(() => registry.acquire(scope), [registry, scope]);
 
   useEffect(() => {
+    deferredRelease.retain(scope);
     return () => {
-      void transitionPrivateWorkScope(registry, queryClient, scope, null);
+      deferredRelease.defer(scope, () => {
+        void transitionPrivateWorkScope(registry, queryClient, scope, null);
+      });
     };
-  }, [queryClient, registry, scope]);
+  }, [deferredRelease, queryClient, registry, scope]);
 
   return <PrivateWorkProvider access={access}>{children}</PrivateWorkProvider>;
 }

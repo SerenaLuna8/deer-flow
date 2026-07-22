@@ -1,5 +1,6 @@
 import { describe, expect, test, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { headers } from "next/headers";
 import {
   createElement,
   type ComponentType,
@@ -20,6 +21,7 @@ rs.mock("next/navigation", () => ({
   usePathname: () => "/admin/operations",
   useRouter: () => ({ push: rs.fn() }),
 }));
+rs.mock("next/headers", () => ({ headers: rs.fn() }));
 rs.mock("@/core/auth/server", () => ({ getServerSideUser: rs.fn() }));
 rs.mock("@/core/static-mode", () => ({ isStaticWebsiteOnly: () => false }));
 rs.mock("@/core/api/fetcher", () => ({
@@ -97,7 +99,6 @@ const overview: OperationsOverviewData = {
     worker_fleet: "unavailable",
     scheduler: "disabled",
     stream: "polling",
-    recovery: "unavailable",
     quota: "ready",
     audit: "ready",
     role: "gateway",
@@ -328,7 +329,6 @@ describe("M6 system operations console", () => {
         worker_fleet: "closed",
         scheduler: "closed",
         stream: "closed",
-        recovery: "closed",
         quota: "closed",
         audit: "closed",
         role: "gateway",
@@ -514,6 +514,7 @@ describe("M6 system operations console", () => {
     rs.mocked(getServerSideUser).mockResolvedValueOnce({
       tag: "unauthenticated",
     });
+    rs.mocked(headers).mockResolvedValueOnce(new Headers() as never);
     await expect(
       AdminLayout({ children: createElement("p", null, "restricted") }),
     ).rejects.toMatchObject({

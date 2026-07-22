@@ -116,7 +116,7 @@ export function projectMemoryPermissions(capabilities: readonly Capability[]) {
     canReload: canModify,
     canImport: canModify,
     canModify,
-    canDelete: canModify,
+    canDelete: canRead,
   };
 }
 

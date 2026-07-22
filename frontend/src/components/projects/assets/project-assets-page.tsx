@@ -13,6 +13,7 @@ import {
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import { AssetVersionHistory } from "@/components/assets/asset-version-history";
+import { ProjectAgentStartContinuation } from "@/components/projects/private-work/project-agent-start-continuation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -52,6 +53,54 @@ import { SystemAssetSection } from "./system-asset-section";
 import { SystemBindingDialog } from "./system-binding-dialog";
 
 type MutableKind = Exclude<AssetListKind, "credentials">;
+type CredentialPayloadGroup = "env" | "headers" | "oauth";
+
+export type CredentialPayloadField = {
+  group: CredentialPayloadGroup;
+  field: string;
+};
+
+const CREDENTIAL_PAYLOAD_GROUPS = ["env", "headers", "oauth"] as const;
+
+export function credentialPayloadFieldsFromVersions(
+  versions: AssetVersion[],
+  currentVersionId: string | null,
+): CredentialPayloadField[] | null {
+  if (!currentVersionId) return null;
+  const current = versions.find(
+    (version) =>
+      "credential_id" in version &&
+      version.id === currentVersionId &&
+      version.status === "active",
+  );
+  if (!current || !("credential_id" in current)) return null;
+
+  const schemaGroups = Object.keys(current.payload_schema);
+  if (
+    schemaGroups.length === 0 ||
+    schemaGroups.some(
+      (group) =>
+        !CREDENTIAL_PAYLOAD_GROUPS.includes(group as CredentialPayloadGroup),
+    )
+  ) {
+    return null;
+  }
+
+  const result: CredentialPayloadField[] = [];
+  for (const group of CREDENTIAL_PAYLOAD_GROUPS) {
+    const fields = current.payload_schema[group];
+    if (!fields) continue;
+    if (
+      fields.length === 0 ||
+      new Set(fields).size !== fields.length ||
+      fields.some((field) => !field || field.length > 255)
+    ) {
+      return null;
+    }
+    for (const field of fields) result.push({ group, field });
+  }
+  return result.length > 0 ? result : null;
+}
 
 export function ProjectAssetCatalogView({
   kind: _kind,
@@ -481,10 +530,14 @@ function MutableProjectAssets({
   accountId,
   projectId,
   kind,
+  startChatIntent,
+  startChatIntentId,
 }: {
   accountId: string;
   projectId: string;
   kind: MutableKind;
+  startChatIntent: boolean;
+  startChatIntentId: string | null;
 }) {
   const project = useCurrentProject();
   const query = useProjectAssets(accountId, projectId, kind);
@@ -529,6 +582,14 @@ function MutableProjectAssets({
   const canCreate = project.capabilities.includes("shared_assets.edit");
   return (
     <>
+      {kind === "agents" && (
+        <ProjectAgentStartContinuation
+          project={project}
+          catalog={data}
+          requested={startChatIntent}
+          intentId={startChatIntentId}
+        />
+      )}
       {canCreate && (
         <div className="mb-6 flex justify-end">
           <Button type="button" onClick={() => setCreateOpen(true)}>
@@ -596,7 +657,7 @@ function MutableProjectAssets({
   );
 }
 
-function ProjectCredentials({
+export function ProjectCredentialsWorkspace({
   accountId,
   projectId,
 }: {
@@ -672,33 +733,81 @@ function ProjectCredentials({
         }}
       />
       {replaceCredential && (
-        <CredentialSecretDialog
-          mode="replace"
-          open
-          expectedVersion={replaceCredential.version}
-          pending={secureWrite.pending}
-          errorMessage={secureWrite.errorMessage}
-          onOpenChange={(open) => !open && setReplaceCredential(null)}
-          onReplace={(input: ReplaceCredentialInput) => {
-            const credential = replaceCredential;
-            void secureWrite
-              .run(() =>
-                replaceProjectCredential(project.id, credential.id, input),
-              )
-              .then((success) => success && setReplaceCredential(null));
-          }}
+        <ProjectCredentialReplaceDialog
+          accountId={accountId}
+          projectId={projectId}
+          credential={replaceCredential}
+          secureWrite={secureWrite}
+          onClose={() => setReplaceCredential(null)}
         />
       )}
     </>
   );
 }
 
+function ProjectCredentialReplaceDialog({
+  accountId,
+  projectId,
+  credential,
+  secureWrite,
+  onClose,
+}: {
+  accountId: string;
+  projectId: string;
+  credential: ProjectCredentialItem;
+  secureWrite: ReturnType<typeof useSecureProjectCredentialWrite>;
+  onClose: () => void;
+}) {
+  const history = useProjectAssetVersions(
+    accountId,
+    projectId,
+    "credentials",
+    credential.id,
+  );
+  const initialFields = history.data
+    ? credentialPayloadFieldsFromVersions(
+        history.data.data,
+        credential.current_version_id,
+      )
+    : null;
+  const historyMessage = history.error
+    ? adminAssetErrorMessage(history.error)
+    : history.data && !initialFields
+      ? "无法确认当前 Credential 的字段结构，请重新加载后再试。"
+      : null;
+  const disabled =
+    history.isLoading || Boolean(history.error) || initialFields === null;
+
+  return (
+    <CredentialSecretDialog
+      mode="replace"
+      open
+      expectedVersion={credential.version}
+      initialFields={initialFields ?? []}
+      disabled={disabled}
+      pending={secureWrite.pending}
+      errorMessage={historyMessage ?? secureWrite.errorMessage}
+      onRetry={history.error ? () => void history.refetch() : undefined}
+      onOpenChange={(open) => !open && onClose()}
+      onReplace={(input: ReplaceCredentialInput) => {
+        void secureWrite
+          .run(() => replaceProjectCredential(projectId, credential.id, input))
+          .then((success) => success && onClose());
+      }}
+    />
+  );
+}
+
 function AuthenticatedProjectAssetPage({
   accountId,
   kind,
+  startChatIntent,
+  startChatIntentId,
 }: {
   accountId: string;
   kind: AssetListKind;
+  startChatIntent: boolean;
+  startChatIntentId: string | null;
 }) {
   const project = useCurrentProject();
   const meta = PAGE_META[kind];
@@ -712,20 +821,40 @@ function AuthenticatedProjectAssetPage({
         <p className="text-muted-foreground mt-2">{meta.description}</p>
       </header>
       {kind === "credentials" ? (
-        <ProjectCredentials accountId={accountId} projectId={project.id} />
+        <ProjectCredentialsWorkspace
+          accountId={accountId}
+          projectId={project.id}
+        />
       ) : (
         <MutableProjectAssets
           accountId={accountId}
           projectId={project.id}
           kind={kind}
+          startChatIntent={startChatIntent}
+          startChatIntentId={startChatIntentId}
         />
       )}
     </main>
   );
 }
 
-export function ProjectAssetsPage({ kind }: { kind: AssetListKind }) {
+export function ProjectAssetsPage({
+  kind,
+  startChatIntent = false,
+  startChatIntentId = null,
+}: {
+  kind: AssetListKind;
+  startChatIntent?: boolean;
+  startChatIntentId?: string | null;
+}) {
   const { user } = useAuth();
   if (!user) return null;
-  return <AuthenticatedProjectAssetPage accountId={user.id} kind={kind} />;
+  return (
+    <AuthenticatedProjectAssetPage
+      accountId={user.id}
+      kind={kind}
+      startChatIntent={startChatIntent}
+      startChatIntentId={startChatIntentId}
+    />
+  );
 }

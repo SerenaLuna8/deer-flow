@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import uuid
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -179,6 +180,26 @@ def test_private_work_router_exposes_minimum_run_lifecycle() -> None:
     assert ("/api/projects/{project_id}/private-work/threads/{thread_id}/runs", "GET") in routes
     assert ("/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{run_id}", "GET") in routes
     assert ("/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{run_id}", "DELETE") in routes
+
+
+def test_terminal_run_delete_requires_read_own_without_create_authority() -> None:
+    source = inspect.getsource(PrivateRunService.delete)
+
+    assert "Capability.PRIVATE_WORK_READ_OWN" in source
+    assert "Capability.PRIVATE_WORK_CREATE" not in source
+
+
+def test_private_work_router_exposes_project_scoped_chat_controls() -> None:
+    routes = {(route.path, method) for route in private_work_router.router.routes for method in route.methods or ()}
+    prefix = "/api/projects/{project_id}/private-work/threads/{thread_id}"
+
+    assert (f"{prefix}/goal", "GET") in routes
+    assert (f"{prefix}/goal", "PUT") in routes
+    assert (f"{prefix}/goal", "DELETE") in routes
+    assert (f"{prefix}/compact", "POST") in routes
+    assert (f"{prefix}/branches", "POST") in routes
+    assert (f"{prefix}/runs/regenerate/prepare", "POST") in routes
+    assert (f"{prefix}/suggestions", "POST") in routes
 
 
 def test_public_private_run_strips_non_interactive() -> None:
@@ -478,13 +499,20 @@ async def test_run_service_revalidates_membership_capability_and_runtime_depende
     )
 
     assert (await harness.request("GET", f"/threads/{viewer_thread}/runs", identity="viewer")).status_code == 200
-    forbidden = await harness.request(
+    deleted = await harness.request(
         "DELETE",
         f"/threads/{viewer_thread}/runs/{viewer_run}",
         identity="viewer",
     )
-    assert forbidden.status_code == 403
-    assert forbidden.json()["detail"]["code"] == "PRIVATE_WORK_FORBIDDEN"
+    assert deleted.status_code == 200
+    assert deleted.json() == {"success": True}
+    assert (
+        await harness.request(
+            "GET",
+            f"/threads/{viewer_thread}/runs/{viewer_run}",
+            identity="viewer",
+        )
+    ).status_code == 404
 
     async with harness.seed.factory() as session, session.begin():
         await session.execute(

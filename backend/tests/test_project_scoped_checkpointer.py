@@ -138,6 +138,65 @@ async def test_scoped_checkpointer_overwrites_client_scope_and_marker(
 
 @pytest.mark.asyncio
 @pytest.mark.postgres
+async def test_scoped_checkpointer_can_commit_inside_caller_held_authority_lock(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.checkpointer import PRIVATE_SCOPE_MARKER, ProjectScopedCheckpointer
+    from app.private_work.thread_repository import PrivateThreadRepository
+
+    record = await _create_thread(seed, "caller-authorized-checkpoint-thread")
+    raw = InMemorySaver()
+    wrapper = ProjectScopedCheckpointer(raw, seed.factory).for_context(seed.owner_a)
+
+    async with seed.factory() as session:
+        async with session.begin():
+            locked = await PrivateThreadRepository(session).get(
+                scope=seed.owner_a.resource_scope,
+                thread_id=record.thread_id,
+                lock=True,
+            )
+            assert locked is not None
+            written = await wrapper.aput_already_authorized(
+                _config(
+                    record.thread_id,
+                    project_id="forged-project",
+                    owner_user_id="forged-owner",
+                ),
+                empty_checkpoint(),
+                {
+                    "source": "update",
+                    "step": 1,
+                    "parents": {},
+                    PRIVATE_SCOPE_MARKER: {
+                        "project_id": "forged-project",
+                        "owner_user_id": "forged-owner",
+                    },
+                },
+                {},
+                session=session,
+            )
+
+    item = await raw.aget_tuple(written)
+    assert item is not None
+    assert item.metadata[PRIVATE_SCOPE_MARKER] == {
+        "project_id": str(seed.owner_a.project_id),
+        "owner_user_id": str(seed.owner_a.user_id),
+    }
+    assert "forged-project" not in repr(item.config)
+
+    async with seed.factory() as session:
+        with pytest.raises(PrivateWorkUnavailable):
+            await wrapper.aput_already_authorized(
+                _config(record.thread_id),
+                empty_checkpoint(),
+                {"source": "update", "step": 2, "parents": {}},
+                {},
+                session=session,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
 async def test_scoped_checkpointer_rejects_cross_owner_project_deleted_and_frozen(
     seed: M4ThreadSeed,
 ) -> None:
