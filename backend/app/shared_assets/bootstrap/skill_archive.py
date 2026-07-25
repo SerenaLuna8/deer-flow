@@ -13,8 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from app.shared_assets.bootstrap.catalog import BootstrapCatalogError
 from app.shared_assets.models import SkillArchiveFile
-
-_MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
+from app.shared_assets.skill_archive import (
+    MAX_SKILL_ARCHIVE_BYTES,
+    MAX_SKILL_ARCHIVE_FILES,
+)
 
 
 class _ArchiveFile(BaseModel):
@@ -29,7 +31,10 @@ class _SkillArchive(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal[1]
-    files: tuple[_ArchiveFile, ...] = Field(min_length=1, max_length=4096)
+    files: tuple[_ArchiveFile, ...] = Field(
+        min_length=1,
+        max_length=MAX_SKILL_ARCHIVE_FILES,
+    )
 
     @model_validator(mode="after")
     def _unique_safe_paths(self) -> _SkillArchive:
@@ -53,7 +58,7 @@ def load_skill_archive(payload: bytes) -> tuple[SkillArchiveFile, ...]:
         for item in archive.files:
             content = base64.b64decode(item.content_base64, validate=True)
             total_bytes += len(content)
-            if total_bytes > _MAX_ARCHIVE_BYTES:
+            if total_bytes > MAX_SKILL_ARCHIVE_BYTES:
                 raise BootstrapCatalogError("bootstrap Skill archive is too large")
             files.append(
                 SkillArchiveFile(

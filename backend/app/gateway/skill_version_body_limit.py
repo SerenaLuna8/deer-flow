@@ -1,4 +1,4 @@
-"""Bound Skill-version archive requests before FastAPI parses their JSON body."""
+"""Bound Skill archive requests before FastAPI parses JSON or multipart bodies."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 # A maximum 100 MiB decoded archive expands to just over 133 MiB in base64.
-# 160 MiB leaves bounded room for the 4,096 JSON file entries, paths, media
+# 160 MiB leaves bounded room for the 16,384 JSON file entries, paths, media
 # types, and envelope while still placing a hard ceiling on request memory.
 SKILL_VERSION_REQUEST_BODY_LIMIT_BYTES = 160 * 1024 * 1024
 
@@ -16,13 +16,15 @@ _ERROR_CODE = "skill_version_request_body_too_large"
 _ERROR_MESSAGE = "Skill version request body is too large."
 
 
-def _is_skill_version_archive_request(scope: Scope) -> bool:
+def _is_skill_archive_request(scope: Scope) -> bool:
     if scope.get("type") != "http" or scope.get("method") != "POST":
         return False
 
     segments = str(scope.get("path", "")).strip("/").split("/")
-    return (len(segments) == 6 and segments[0:2] == ["api", "projects"] and segments[3] == "skills" and segments[5] == "versions") or (
-        len(segments) == 8 and segments[0:3] == ["api", "admin", "projects"] and segments[4:6] == ["assets", "skills"] and segments[7] == "versions"
+    return (
+        (len(segments) == 5 and segments[0:2] == ["api", "projects"] and segments[3:5] == ["skills", "import"])
+        or (len(segments) == 6 and segments[0:2] == ["api", "projects"] and segments[3] == "skills" and segments[5] == "versions")
+        or (len(segments) == 8 and segments[0:3] == ["api", "admin", "projects"] and segments[4:6] == ["assets", "skills"] and segments[7] == "versions")
     )
 
 
@@ -78,7 +80,7 @@ class SkillVersionRequestBodyLimitMiddleware:
         self.max_body_bytes = max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if not _is_skill_version_archive_request(scope):
+        if not _is_skill_archive_request(scope):
             await self.app(scope, receive, send)
             return
 

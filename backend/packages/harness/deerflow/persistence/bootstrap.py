@@ -20,6 +20,7 @@ from deerflow.persistence.final_schema_contract import (
     BASELINE_M7_CATALOG_SIGNATURE,
     FINAL_APP_TABLES,
     LANGGRAPH_TABLES,
+    PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE,
     inventory_is_m7_allowed,
     inventory_user_schema_objects,
     read_m7_catalog_signature,
@@ -27,7 +28,8 @@ from deerflow.persistence.final_schema_contract import (
 )
 
 BASELINE_SCHEMA_REVISION = "0001_project_saas_baseline"
-CURRENT_SCHEMA_REVISION = "0002_project_skill_hard_delete"
+PROJECT_SKILL_HARD_DELETE_SCHEMA_REVISION = "0002_project_skill_hard_delete"
+CURRENT_SCHEMA_REVISION = "0003_project_skill_unique_name"
 # Current-schema alias retained for the M7 readiness contract.
 M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 
@@ -125,8 +127,12 @@ async def classify_database(
         if await verify_m7_catalog(connection):
             return "current"
         raise M7RecreateRequired()
-    if revision == BASELINE_SCHEMA_REVISION:
-        if await read_m7_catalog_signature(connection) == BASELINE_M7_CATALOG_SIGNATURE:
+    known_ancestor_signature = {
+        BASELINE_SCHEMA_REVISION: BASELINE_M7_CATALOG_SIGNATURE,
+        PROJECT_SKILL_HARD_DELETE_SCHEMA_REVISION: PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE,
+    }.get(revision)
+    if known_ancestor_signature is not None:
+        if await read_m7_catalog_signature(connection) == known_ancestor_signature:
             return "upgradeable"
         raise M7RecreateRequired()
     raise M7RecreateRequired()
@@ -244,6 +250,7 @@ async def _run_alembic_offload(function, *args) -> None:
 __all__ = [
     "BASELINE_SCHEMA_REVISION",
     "CURRENT_SCHEMA_REVISION",
+    "PROJECT_SKILL_HARD_DELETE_SCHEMA_REVISION",
     "M7RecreateRequired",
     "M7_FINAL_SCHEMA_REVISION",
     "SchemaMigrationRequired",

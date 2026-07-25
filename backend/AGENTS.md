@@ -80,9 +80,13 @@ does not acquire the Scheduler ownership lock or start polling.
 ## Forward-only PostgreSQL migrations
 
 `0001_project_saas_baseline.py` is the immutable merged baseline.
-`0002_project_skill_hard_delete.py` is the current linear head and adds the controlled
-project-Skill package deletion boundary. Every later schema change adds another linear Alembic
-revision; never edit, squash, or restamp an existing revision.
+`0002_project_skill_hard_delete.py` adds the controlled project-Skill package deletion boundary,
+and `0003_project_skill_unique_name.py` is the current linear head that makes project Skill
+display names case-insensitively unique within each project. Every later schema change adds
+another linear Alembic revision; never edit, squash, or restamp an existing revision.
+When upgrading an exact `0001` or `0002` ancestor, `0003` preserves every Skill row, keeps the
+earliest `(created_at, id)` display name in each project-local case-insensitive duplicate group,
+and deterministically suffixes later names without changing their slug, ID, or asset version.
 
 `make setup-db` requires an explicit administrator URL and application URL. It creates the
 named empty target if needed, applies the complete committed migration chain through head,
@@ -201,7 +205,8 @@ project Skill bytes below `/mnt/skills/custom/<asset_uuid>` in a run-owned read-
 New project Skills are created in `suspended` state. Authors may create, fork, replace, and
 publish versions while suspended; activation is a separate capability-checked transition that
 requires a published version. Resolution and runtime materialization accept only active,
-published Skills.
+published Skills. Project Skill display names are case-insensitively unique within one project;
+different projects may use the same display name.
 Agent version authoring rejects a dependency set containing duplicate Skill slugs across
 system and project scope before that layout can become ambiguous. Worker materializes MCP
 secrets only after current capability, exact selected version/checksum,
@@ -251,9 +256,14 @@ reservation before physical deletion. Project Skill deletion is unavailable for 
 and fails closed while an immutable Agent dependency or admitted Run snapshot still references
 the package.
 Gateway authoring and the explicit project-Skill import CLI use the same `AppConfig.quotas`
-defaults. Archive-creation requests have a scoped 160 MiB JSON/base64 wire limit at both the
-ASGI receive boundary and each Nginx entry point, before JSON/Pydantic parsing; the decoded
-archive remains limited to 100 MiB and 4096 files.
+defaults. Archive-creation requests have a scoped 160 MiB wire limit at both the ASGI receive
+boundary and each Nginx entry point, before JSON/Pydantic or multipart route processing.
+Direct version authoring retains its JSON/base64 contract; project creation also accepts one
+multipart `.zip`, `.skill` (ZIP), `.tar`, `.tar.gz`, or `.tgz` package, strips one common wrapper
+directory, and atomically creates the suspended asset plus its first published version. Decoded
+archives remain limited to 100 MiB and 16384 regular files; traversal and non-regular archive
+members are rejected. TAR limits cover the complete decompressed byte stream, including
+headers and PAX/GNU extended metadata, rather than only regular-file bodies.
 
 Audit uses closed action/actor/target/outcome contracts and action-specific strict metadata.
 Private target identifiers are domain-separated HMACs; raw project-owner resources, prompt,

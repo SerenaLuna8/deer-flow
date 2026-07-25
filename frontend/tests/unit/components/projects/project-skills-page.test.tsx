@@ -50,4 +50,28 @@ describe("Skill asset detail", () => {
       expect(html).not.toContain(unsupported);
     }
   });
+
+  test("bounds the duplicate metadata snapshot for a very large Skill version", () => {
+    const largeVersion = {
+      ...version,
+      file_views: Array.from({ length: 12_139 }, (_, index) => ({
+        path: `templates/assets/file-${String(index).padStart(5, "0")}.txt`,
+        media_type: "text/plain",
+        size_bytes: index + 1,
+        sha256: `${index}`.padStart(64, "0"),
+      })),
+    };
+
+    const html = renderToStaticMarkup(
+      <SkillAssetDetail version={largeVersion} />,
+    );
+
+    expect(html).toContain("共 12139 个文件");
+    expect(html).toContain("file-00000.txt");
+    expect(html).toContain("file-00019.txt");
+    expect(html).not.toContain("file-00020.txt");
+    expect(html).not.toContain("file-12138.txt");
+    expect(html).toContain("其余 12119 个文件");
+    expect(html.match(/SHA-256/g)).toHaveLength(20);
+  });
 });

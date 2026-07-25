@@ -35,6 +35,11 @@ from app.shared_assets.errors import (
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
 from app.shared_assets.models import AssetScope, SkillArchiveFile, WorkflowStatus
+from app.shared_assets.skill_archive import (
+    MAX_SKILL_ARCHIVE_BYTES,
+    MAX_SKILL_ARCHIVE_FILES,
+    load_skill_archive_package,
+)
 from app.shared_assets.skill_repository import (
     SkillRepository,
     SkillVersionFileMetadataRecord,
@@ -53,11 +58,9 @@ from deerflow.skills.validation import _validate_skill_frontmatter
 if TYPE_CHECKING:
     from app.quotas.integration import ProjectQuotaEnforcer
 
-MAX_SKILL_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_SKILL_TEXT_PREVIEW_BYTES = 1024 * 1024
 MAX_SKILL_EDIT_TEXT_BYTES = 5 * 1024 * 1024
 MAX_SKILL_FILE_CHANGES = 256
-MAX_SKILL_ARCHIVE_FILES = 4096
 MAX_PROJECT_SKILL_BATCH_ITEMS = 256
 MAX_PROJECT_SKILL_BATCH_FILES = MAX_SKILL_ARCHIVE_FILES
 MAX_PROJECT_SKILL_BATCH_BYTES = MAX_SKILL_ARCHIVE_BYTES
@@ -97,6 +100,7 @@ _EXECUTABLE_MEDIA_TYPES = frozenset(
 )
 _CONFLICT_CONSTRAINTS = frozenset(
     {
+        "uq_skills_project_display_name",
         "uq_skills_project_slug",
         "uq_skills_system_slug",
         "uq_skill_versions_asset_number",
@@ -210,6 +214,12 @@ class ProjectSkillArchiveImportResult:
     unchanged_count: int
     created_count: int
     replaced_count: int
+
+
+@dataclass(frozen=True)
+class ProjectSkillArchiveCreateResult:
+    asset: SkillAssetView
+    version: SkillVersionView
 
 
 @dataclass(frozen=True)
@@ -672,6 +682,51 @@ class SkillService:
         request_id = getattr(actor, "request_id", "unknown")
         normalized = normalize_skill_files(files, request_id=request_id)
         return await asyncio.to_thread(_analyze_skill_files, normalized, request_id)
+
+    async def create_project_from_archive_upload(
+        self,
+        actor: ProjectContext,
+        payload: bytes,
+        *,
+        filename: str,
+    ) -> ProjectSkillArchiveCreateResult:
+        """Create and publish one suspended Project Skill in one transaction."""
+
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        files = await asyncio.to_thread(
+            load_skill_archive_package,
+            payload,
+            filename=filename,
+            request_id=actor.request_id,
+        )
+        prepared = await self._prepare_project_archive_imports(
+            actor,
+            (ProjectSkillArchiveImport(files=files),),
+        )
+        if len(prepared) != 1:
+            raise AssetValidationFailed(actor.request_id)
+
+        async def operation(
+            repository: SkillRepository,
+        ) -> ProjectSkillArchiveCreateResult:
+            plan = await self._plan_project_archive_import(
+                repository,
+                actor,
+                prepared,
+                execute=True,
+                replace=False,
+            )
+            if len(plan) != 1 or plan[0].action != "create":
+                raise AssetConflict(actor.request_id)
+            return await self._execute_project_archive_create(
+                repository,
+                actor,
+                plan[0].prepared,
+            )
+
+        return await self._execute(actor, operation)
 
     async def import_project_archives_atomic(
         self,
@@ -1252,7 +1307,7 @@ class SkillService:
         repository: SkillRepository,
         actor: ProjectContext,
         prepared: _PreparedProjectSkillArchive,
-    ) -> None:
+    ) -> ProjectSkillArchiveCreateResult:
         asset = await self._create_asset_in_transaction(
             repository,
             actor,
@@ -1295,6 +1350,18 @@ class SkillService:
         )
         if published.workflow_status is not WorkflowStatus.PUBLISHED or published.payload_checksum != prepared.preview.checksum:
             raise AssetValidationFailed(actor.request_id)
+        created = await repository.get_project_asset(
+            actor,
+            asset.id,
+            for_update=False,
+        )
+        return ProjectSkillArchiveCreateResult(
+            asset=self._asset_view(
+                created,
+                description=published.description,
+            ),
+            version=published,
+        )
 
     async def _execute_project_archive_replace(
         self,

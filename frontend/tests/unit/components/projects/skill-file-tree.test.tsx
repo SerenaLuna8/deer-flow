@@ -1,7 +1,11 @@
 import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { SkillFileTree } from "@/components/projects/assets/skill-file-tree";
+import {
+  SKILL_FILE_TREE_PAGE_SIZE,
+  SkillFileTree,
+  skillFileTreePageWindow,
+} from "@/components/projects/assets/skill-file-tree";
 import {
   addSkillFolder,
   buildSkillFileTree,
@@ -51,5 +55,54 @@ describe("Skill file tree", () => {
     expect(html).toContain('aria-selected="true"');
     expect(html).toContain('aria-expanded="true"');
     expect(html.match(/aria-selected="true"/g)).toHaveLength(1);
+  });
+
+  test("keeps a folder with more than 5000 direct children on one fixed-size page", () => {
+    const largeFolderFiles = Array.from({ length: 5_039 }, (_, index) => ({
+      path: `templates/icons/tabler-outline/icon-${String(index).padStart(4, "0")}.svg`,
+      media_type: "image/svg+xml",
+      size_bytes: 64,
+      sha256: `${index}`.padStart(64, "0"),
+    }));
+    const tree = buildSkillFileTree(
+      listWorkingSkillFiles(largeFolderFiles, []),
+      [],
+    );
+    const html = renderToStaticMarkup(
+      <SkillFileTree
+        nodes={tree}
+        selection={null}
+        expandedFolders={
+          new Set([
+            "templates",
+            "templates/icons",
+            "templates/icons/tabler-outline",
+          ])
+        }
+        onSelectFile={() => undefined}
+        onSelectFolder={() => undefined}
+        onToggleFolder={() => undefined}
+      />,
+    );
+
+    expect(SKILL_FILE_TREE_PAGE_SIZE).toBe(100);
+    expect(html.match(/role="treeitem"/g)).toHaveLength(103);
+    expect(html).toContain("icon-0000.svg");
+    expect(html).toContain("icon-0099.svg");
+    expect(html).not.toContain("icon-0100.svg");
+    expect(html).not.toContain("icon-5038.svg");
+    expect(html).toContain("第 1 / 51 页");
+
+    const tablerFolder =
+      tree[0]?.kind === "folder" &&
+      tree[0].children[0]?.kind === "folder" &&
+      tree[0].children[0].children[0]?.kind === "folder"
+        ? tree[0].children[0].children[0]
+        : null;
+    expect(tablerFolder).not.toBeNull();
+    const lastPage = skillFileTreePageWindow(tablerFolder?.children ?? [], 50);
+    expect(lastPage.page).toBe(50);
+    expect(lastPage.pageCount).toBe(51);
+    expect(lastPage.items).toHaveLength(39);
   });
 });

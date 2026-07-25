@@ -25,6 +25,7 @@ import {
   enableAdminProjectSystemBinding,
   forkProjectSkillVersion,
   getProjectSkillVersionFile,
+  importProjectSkillArchive,
   listAdminAssets,
   listAdminProjectAssets,
   listProjectAssetVersions,
@@ -333,6 +334,98 @@ describe("shared asset api", () => {
         }),
       }),
     ]);
+  });
+
+  test("imports one project Skill archive as multipart without overriding its content type", async () => {
+    const importedVersion = {
+      id: versionId,
+      skill_id: asset.id,
+      version_number: 1,
+      workflow_status: "published",
+      description: "Meeting notes",
+      frontmatter: { name: "meeting-brief" },
+      compatibility: null,
+      secret_requirements: [],
+      scan_decision: "allow",
+      scan_rule_ids: [],
+      scan_summary: {},
+      file_views: [
+        {
+          path: "SKILL.md",
+          media_type: "text/markdown",
+          size_bytes: 24,
+          sha256: "c".repeat(64),
+        },
+      ],
+      supersedes_version_id: null,
+      payload_checksum: "d".repeat(64),
+      created_by_user_id: "user-1",
+      created_at: "2026-07-26T00:00:00Z",
+    };
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(201, {
+        item: {
+          ...asset,
+          slug: "meeting-brief",
+          display_name: "meeting-brief",
+          status: "suspended",
+        },
+        version: importedVersion,
+        request_id: "req-skill-import",
+      }),
+    );
+    const archive = new File(["archive"], "meeting-brief.zip", {
+      type: "application/zip",
+    });
+    const signal = new AbortController().signal;
+
+    const result = await importProjectSkillArchive(PROJECT_ID, archive, signal);
+
+    expect(result.version.id).toBe(versionId);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/skills/import`,
+      expect.objectContaining({
+        method: "POST",
+        signal,
+      }),
+    );
+    const init = mockedFetch.mock.calls[0]?.[1];
+    expect(init?.body).toBeInstanceOf(FormData);
+    expect((init?.body as FormData).get("archive")).toMatchObject({
+      name: archive.name,
+      size: archive.size,
+      type: archive.type,
+    });
+    expect(init?.headers).toBeUndefined();
+  });
+
+  test("maps both known envelopes and plain HTTP 413 upload limits safely", async () => {
+    mockedFetch
+      .mockResolvedValueOnce(
+        jsonResponse(413, {
+          detail: {
+            code: "skill_archive_upload_too_large",
+            message: "private upload limit",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response("payload too large", {
+          status: 413,
+          headers: { "Content-Type": "text/plain" },
+        }),
+      );
+    const archive = new File(["archive"], "meeting-brief.zip");
+
+    for (let index = 0; index < 2; index += 1) {
+      await expect(
+        importProjectSkillArchive(PROJECT_ID, archive),
+      ).rejects.toMatchObject({
+        status: 413,
+        code: "ASSET_UPLOAD_TOO_LARGE",
+        message: "Skill archive upload too large",
+      });
+    }
   });
 
   test("uses only the authenticated fetcher for project, admin, and system catalog lists", async () => {

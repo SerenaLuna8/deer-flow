@@ -273,8 +273,8 @@ This gateway provides project-scoped runtime endpoints and administrative operat
         reliability_http_exception_handler,
     )
 
-    # Bound base64 Skill archives at the ASGI receive boundary so oversized
-    # JSON cannot be loaded into memory before Pydantic validation.
+    # Bound JSON/base64 and multipart Skill archives at the ASGI receive
+    # boundary so oversized bodies never reach route-level parsing.
     app.add_middleware(SkillVersionRequestBodyLimitMiddleware)
 
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)

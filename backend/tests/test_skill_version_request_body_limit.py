@@ -17,6 +17,7 @@ from app.gateway.skill_version_body_limit import (
 )
 
 PROJECT_SKILL_VERSION_PATH = "/api/projects/11111111-1111-1111-1111-111111111111/skills/22222222-2222-2222-2222-222222222222/versions"
+PROJECT_SKILL_IMPORT_PATH = "/api/projects/11111111-1111-1111-1111-111111111111/skills/import"
 ADMIN_PROJECT_SKILL_VERSION_PATH = "/api/admin/projects/11111111-1111-1111-1111-111111111111/assets/skills/22222222-2222-2222-2222-222222222222/versions"
 
 
@@ -82,7 +83,11 @@ async def _drive(
 
 @pytest.mark.parametrize(
     "path",
-    [PROJECT_SKILL_VERSION_PATH, ADMIN_PROJECT_SKILL_VERSION_PATH],
+    [
+        PROJECT_SKILL_VERSION_PATH,
+        PROJECT_SKILL_IMPORT_PATH,
+        ADMIN_PROJECT_SKILL_VERSION_PATH,
+    ],
 )
 def test_declared_oversized_skill_version_body_is_rejected_before_downstream(
     path: str,
@@ -235,7 +240,7 @@ def test_all_nginx_entrypoints_match_the_gateway_wire_limit() -> None:
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parents[2]
-    location = "location ~ ^/api/(?:projects/[^/]+/skills/[^/]+/versions|admin/projects/[^/]+/assets/skills/[^/]+/versions)/?$ {"
+    location = "location ~ ^/api/(?:projects/[^/]+/skills/(?:import|[^/]+/versions)|admin/projects/[^/]+/assets/skills/[^/]+/versions)/?$ {"
     for relative_path in (
         "docker/nginx/nginx.conf",
         "docker/nginx/nginx.local.conf",
@@ -246,7 +251,13 @@ def test_all_nginx_entrypoints_match_the_gateway_wire_limit() -> None:
         location_index = next(index for index, line in enumerate(lines) if line.strip() == location)
         indentation = lines[location_index][: -len(lines[location_index].lstrip())]
         end_index = next(index for index in range(location_index + 1, len(lines)) if lines[index] == f"{indentation}}}")
-        assert "client_max_body_size 160M;" in "\n".join(
-            lines[location_index:end_index],
-        ), relative_path
+        archive_location = "\n".join(lines[location_index:end_index])
+        assert "client_max_body_size 160M;" in archive_location, relative_path
+        for directive in (
+            "proxy_request_buffering off;",
+            "proxy_connect_timeout 600s;",
+            "proxy_send_timeout 600s;",
+            "proxy_read_timeout 600s;",
+        ):
+            assert directive in archive_location, relative_path
         assert content.count("client_max_body_size 160M;") == 1, relative_path

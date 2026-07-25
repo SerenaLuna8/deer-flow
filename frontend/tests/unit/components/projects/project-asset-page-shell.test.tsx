@@ -12,6 +12,7 @@ import {
   defaultProjectAssetSource,
   filterProjectAssetItems,
   handleRequestedVersion,
+  importedSkillSelectionReady,
   projectAssetSourceOptions,
   ProjectAssetListView,
   rememberRequestedVersion,
@@ -19,6 +20,7 @@ import {
   versionDialogSubmissionMatches,
 } from "@/components/projects/assets/project-asset-page-shell";
 import {
+  projectAssetCreateErrorMessage,
   projectAssetDetailLifecycleActions,
   projectSkillStatusToggleState,
   projectSkillCanDelete,
@@ -29,7 +31,11 @@ import {
 } from "@/components/projects/assets/project-skill-delete-dialog";
 import { Dialog } from "@/components/ui/dialog";
 import { Sheet } from "@/components/ui/sheet";
-import type { ProjectAssetItem, ProjectAssetList } from "@/core/shared-assets";
+import {
+  SharedAssetApiError,
+  type ProjectAssetItem,
+  type ProjectAssetList,
+} from "@/core/shared-assets";
 
 const PROJECT_ID = "33333333-3333-4333-8333-333333333333";
 const SYSTEM_ID = "11111111-1111-4111-8111-111111111111";
@@ -432,6 +438,40 @@ describe("project asset list", () => {
     expect(
       handleRequestedVersion(superseded, PROJECT_ASSET_ID, newerVersion),
     ).toEqual({});
+  });
+
+  test("waits for the refreshed project Skill list before opening an imported version", () => {
+    const selection = {
+      assetId: PROJECT_ASSET_ID,
+      versionId: LATEST_VERSION_ID,
+    };
+
+    expect(
+      importedSkillSelectionReady(
+        { system_items: catalog.system_items, project_items: [] },
+        selection,
+      ),
+    ).toBeNull();
+    expect(importedSkillSelectionReady(catalog, selection)).toEqual(selection);
+    expect(importedSkillSelectionReady(catalog, null)).toBeNull();
+  });
+
+  test("explains same-project name conflicts only for blank Skill creation", () => {
+    const conflict = new SharedAssetApiError(
+      409,
+      "ASSET_CONFLICT",
+      "Asset state conflict",
+    );
+
+    expect(projectAssetCreateErrorMessage("skills", conflict)).toBe(
+      "当前项目已存在同名 Skill，请更换名称或标识。",
+    );
+    expect(projectAssetCreateErrorMessage("agents", conflict)).toBe(
+      "资产状态已变化，请刷新后重试。",
+    );
+    expect(projectAssetCreateErrorMessage("mcp-servers", conflict)).toBe(
+      "资产状态已变化，请刷新后重试。",
+    );
   });
 
   test("replaces project Skill archive with a delayed permanent-package delete confirmation", () => {

@@ -72,7 +72,7 @@ class CatalogInvariant:
     digest: str
 
 
-# Frozen 0001 ancestor signature. It remains necessary to distinguish the one
+# Frozen 0001 ancestor signature. It remains necessary to distinguish an exact
 # safely migratable predecessor from an unknown or drifted nonempty schema.
 BASELINE_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
@@ -101,12 +101,20 @@ BASELINE_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
 }
 
-# Revision 0002 changes only one stored function body. Its digest is updated
-# from a migrated disposable PostgreSQL database by the schema contract tests.
-FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = dict(BASELINE_M7_CATALOG_SIGNATURE)
-FINAL_M7_CATALOG_SIGNATURE["functions"] = CatalogInvariant(
+# Revision 0002 changes only one stored function body.
+PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = dict(BASELINE_M7_CATALOG_SIGNATURE)
+PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE["functions"] = CatalogInvariant(
     count=10,
     digest="7615014bca82a5dd868f6793c6bb613d338f19a8c312fb04b018066811502acd",
+)
+
+# Revision 0003 adds one project-scoped, case-insensitive Skill display-name
+# unique index. The digest is captured from a migrated disposable PostgreSQL
+# database by the schema contract tests.
+FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = dict(PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE)
+FINAL_M7_CATALOG_SIGNATURE["indexes"] = CatalogInvariant(
+    count=162,
+    digest="785267fcc0d0b4c7dbf2bdcbcf7092df82a02b954cd3d44baf66ed176c61cbd3",
 )
 
 
@@ -491,6 +499,7 @@ __all__ = [
     "FINAL_APP_TABLES",
     "FINAL_APP_SEQUENCES",
     "FINAL_M7_CATALOG_SIGNATURE",
+    "PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE",
     "M7_CANONICAL_SCHEMA_DIGEST",
     "LANGGRAPH_INDEXES",
     "LANGGRAPH_ROOT_OBJECTS",

@@ -30,6 +30,7 @@ import {
   forkProjectSkillVersion,
   getProjectSkillVersionFile,
   getAdminCredentialRotationStatus,
+  importProjectSkillArchive,
   listAdminAssetVersions,
   listAdminAssets,
   listAdminProjectAssetVersions,
@@ -351,6 +352,30 @@ export function useCreateProjectAsset(
     mutationFn: (input: CreateAssetInput) =>
       runMutation((signal) =>
         createProjectAsset(projectId, kind, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
+  });
+}
+
+export function useImportProjectSkillArchive(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useProjectInvalidation(accountId, projectId, "skills");
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "skills",
+      "import",
+    ),
+    mutationFn: (archive: File) =>
+      runMutation((signal) =>
+        importProjectSkillArchive(projectId, archive, signal),
       ),
     onSuccess: whenActive(invalidate),
   });

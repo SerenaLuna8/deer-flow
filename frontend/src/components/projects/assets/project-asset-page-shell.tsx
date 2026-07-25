@@ -7,6 +7,7 @@ import {
   PlusIcon,
   SearchIcon,
   SparklesIcon,
+  UploadIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -38,6 +39,7 @@ import {
   useChangeProjectAssetStatus,
   useDisableProjectSystemBinding,
   useEnableProjectSystemBinding,
+  useImportProjectSkillArchive,
   useProjectAssets,
   type AssetKind,
   type AssetListKind,
@@ -52,7 +54,14 @@ import { ProjectPageHeader } from "../project-page-header";
 import { dependencyVersionOptions } from "./asset-dependency-options";
 import { ProjectAssetDetailSheet } from "./project-asset-detail-sheet";
 import type { ProjectAssetVersionRenderContext } from "./project-asset-detail-sheet";
-import { projectSkillStatusToggleState } from "./project-asset-view-model";
+import {
+  projectAssetCreateErrorMessage,
+  projectSkillStatusToggleState,
+} from "./project-asset-view-model";
+import {
+  ProjectSkillImportDialog,
+  projectSkillImportErrorMessage,
+} from "./project-skill-import-dialog";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 export type ProjectAssetSourceFilter = "system" | "project";
@@ -160,6 +169,25 @@ export function rememberRequestedVersion(
   return current[assetId] === versionId
     ? current
     : { ...current, [assetId]: versionId };
+}
+
+export type ImportedSkillSelection = {
+  assetId: string;
+  versionId: string;
+};
+
+export function importedSkillSelectionReady(
+  data: Pick<ProjectAssetList, "system_items" | "project_items"> | undefined,
+  selection: ImportedSkillSelection | null,
+): ImportedSkillSelection | null {
+  if (
+    !data ||
+    !selection ||
+    !data.project_items.some((item) => item.id === selection.assetId)
+  ) {
+    return null;
+  }
+  return selection;
 }
 
 export function handleRequestedVersion(
@@ -492,6 +520,7 @@ function ProjectAssetCatalog({
     BINDING_KIND[kind],
   );
   const changeStatus = useChangeProjectAssetStatus(accountId, project.id, kind);
+  const importSkill = useImportProjectSkillArchive(accountId, project.id);
   const modelCatalog = useModels({ enabled: kind === "agents" });
   const skillDependencies = useProjectAssets(
     accountId,
@@ -507,6 +536,7 @@ function ProjectAssetCatalog({
   );
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] =
     useState<ProjectAssetSourceFilter>("project");
@@ -527,6 +557,8 @@ function ProjectAssetCatalog({
   const [createdVersions, setCreatedVersions] = useState<
     Record<string, string>
   >({});
+  const [importedSkillSelection, setImportedSkillSelection] =
+    useState<ImportedSkillSelection | null>(null);
   const [versionSubmission, setVersionSubmission] = useState<{
     token: VersionDialogSubmissionToken;
     pending: boolean;
@@ -645,6 +677,23 @@ function ProjectAssetCatalog({
   }, [data, selectedAssetId]);
 
   useEffect(() => {
+    const readySelection = importedSkillSelectionReady(
+      data,
+      importedSkillSelection,
+    );
+    if (!readySelection) return;
+    setSelectedAssetId(readySelection.assetId);
+    setCreatedVersions((current) =>
+      rememberRequestedVersion(
+        current,
+        readySelection.assetId,
+        readySelection.versionId,
+      ),
+    );
+    setImportedSkillSelection(null);
+  }, [data, importedSkillSelection]);
+
+  useEffect(() => {
     if (selectedAssetId && data && !selectedItem) setSelectedAssetId(null);
   }, [data, selectedAssetId, selectedItem]);
 
@@ -708,6 +757,21 @@ function ProjectAssetCatalog({
           ),
       },
     );
+  }
+
+  async function submitProjectSkillArchive(archive: File) {
+    try {
+      const result = await importSkill.mutateAsync(archive);
+      setImportOpen(false);
+      setSourceTouched(true);
+      setSourceFilter("project");
+      setImportedSkillSelection({
+        assetId: result.item.id,
+        versionId: result.version.id,
+      });
+    } catch {
+      // The dialog renders the mutation's mapped public error.
+    }
   }
 
   if (query.isLoading) {
@@ -830,15 +894,30 @@ function ProjectAssetCatalog({
           ) : null}
 
           {canCreate && sourceFilter === "project" ? (
-            <Button
-              type="button"
-              size="sm"
-              className="shrink-0"
-              onClick={() => setCreateOpen(true)}
-            >
-              <PlusIcon aria-hidden className="size-4" />
-              新建{KIND_META[kind].singular}
-            </Button>
+            <div className="flex shrink-0 items-center gap-2">
+              {kind === "skills" ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    importSkill.reset();
+                    setImportOpen(true);
+                  }}
+                >
+                  <UploadIcon aria-hidden className="size-4" />
+                  上传压缩包
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => setCreateOpen(true)}
+              >
+                <PlusIcon aria-hidden className="size-4" />
+                新建{KIND_META[kind].singular}
+              </Button>
+            </div>
           ) : null}
         </div>
 
@@ -912,11 +991,31 @@ function ProjectAssetCatalog({
         open={createOpen}
         pending={createAsset.isPending}
         errorMessage={
-          createAsset.error ? adminAssetErrorMessage(createAsset.error) : null
+          createAsset.error
+            ? projectAssetCreateErrorMessage(kind, createAsset.error)
+            : null
         }
         onOpenChange={setCreateOpen}
         onSubmit={(input) => createAsset.mutate(input)}
       />
+
+      {kind === "skills" ? (
+        <ProjectSkillImportDialog
+          open={importOpen}
+          pending={importSkill.isPending}
+          errorMessage={
+            importSkill.error
+              ? projectSkillImportErrorMessage(importSkill.error)
+              : null
+          }
+          onOpenChange={(next) => {
+            if (!next) importSkill.reset();
+            setImportOpen(next);
+          }}
+          onSelectionChange={() => importSkill.reset()}
+          onSubmit={(archive) => void submitProjectSkillArchive(archive)}
+        />
+      ) : null}
 
       {versionAsset && (
         <CreateVersionDialog

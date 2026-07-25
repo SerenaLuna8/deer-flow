@@ -5,9 +5,11 @@ import dataclasses
 import hashlib
 import hmac
 import importlib
+import io
 import logging
 import threading
 import uuid
+import zipfile
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -99,6 +101,17 @@ def _archive(
     )
 
 
+def _archive_upload(*, name: str = "uploaded-project-skill") -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            f"{name}/SKILL.md",
+            (f"---\nname: {name}\ndescription: Uploaded project Skill\n---\n\nUse the bundled script.\n").encode(),
+        )
+        archive.writestr(f"{name}/scripts/run.py", b"print('ok')\n")
+    return buffer.getvalue()
+
+
 def _quota_source_ref(payload: bytes) -> QuotaSourceRef:
     return QuotaSourceRef(
         key_id="skill-test-quota",
@@ -131,7 +144,7 @@ def _service(
 @pytest.mark.postgres
 @pytest.mark.asyncio
 @pytest.mark.parametrize("legacy_counter_reserved", [0, 37])
-async def test_0001_project_skill_delete_after_0002_migration_settles_legacy_storage_once(
+async def test_0001_project_skill_delete_after_current_migration_settles_legacy_storage_once(
     postgres_database_url: str,
     legacy_counter_reserved: int,
 ) -> None:
@@ -808,6 +821,86 @@ async def test_concurrent_skill_publish_has_one_optimistic_winner(
         )
         assert sum(not isinstance(result, Exception) for result in results) == 1
         assert sum(isinstance(result, AssetConflict) for result in results) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_skill_archive_upload_is_atomic_per_project_and_reusable_across_projects(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    first_editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="skill-upload-first",
+    )
+    second_editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="skill-upload-second",
+    )
+    service = _service(service_module, factory)
+    payload = _archive_upload()
+    try:
+        same_project_results = await asyncio.gather(
+            service.create_project_from_archive_upload(
+                first_editor,
+                payload,
+                filename="uploaded-project-skill.zip",
+            ),
+            service.create_project_from_archive_upload(
+                first_editor,
+                payload,
+                filename="uploaded-project-skill.zip",
+            ),
+            return_exceptions=True,
+        )
+
+        created = [
+            result
+            for result in same_project_results
+            if isinstance(
+                result,
+                service_module.ProjectSkillArchiveCreateResult,
+            )
+        ]
+        assert len(created) == 1
+        assert sum(isinstance(result, AssetConflict) for result in same_project_results) == 1
+        assert created[0].asset.status == "suspended"
+        assert created[0].asset.current_published_version_id == (created[0].version.id)
+        assert created[0].version.workflow_status is WorkflowStatus.PUBLISHED
+
+        other_project = await service.create_project_from_archive_upload(
+            second_editor,
+            payload,
+            filename="uploaded-project-skill.zip",
+        )
+        assert other_project.asset.slug == created[0].asset.slug
+        assert other_project.asset.project_id == second_editor.project_id
+
+        async with factory() as session:
+            first_skill_count = await session.scalar(
+                select(func.count())
+                .select_from(SkillRow)
+                .where(
+                    SkillRow.project_id == first_editor.project_id,
+                    SkillRow.slug == "uploaded-project-skill",
+                )
+            )
+            first_version_count = await session.scalar(
+                select(func.count())
+                .select_from(SkillVersionRow)
+                .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+                .where(
+                    SkillRow.project_id == first_editor.project_id,
+                    SkillRow.slug == "uploaded-project-skill",
+                )
+            )
+        assert first_skill_count == 1
+        assert first_version_count == 1
     finally:
         await engine.dispose()
 

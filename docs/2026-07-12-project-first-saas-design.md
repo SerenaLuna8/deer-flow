@@ -307,10 +307,10 @@ authenticated user
 
 ## 10. 共享资产与凭据
 
-- Agent、Skill、MCP 同时支持 `system` 和 `project` scope；同名资产不覆盖，所有引用使用 UUID 和 scope。
+- Agent、Skill、MCP 同时支持 `system` 和 `project` scope；项目 Skill 显示名称在同一项目内大小写不敏感且不可重复，不同项目仍可同名；所有引用使用 UUID 和 scope。
 - 系统 Agent、Skill、MCP 由 packaged bootstrap catalog 管理，运行期只向 `system_admin` 提供 catalog 治理元数据；`skills/public/` 中的 21 个完整多文件 Skill 在开发期生成 digest 校验的 system Skill archives，并只在全新数据库 setup 时写入 catalog。项目绑定仍显式固定 system version，catalog 更新不自动升级既有绑定。项目 Agent 页面隐藏系统 Agent，新会话直接使用已绑定的系统 Main Agent。
 - 项目资产由当前项目 Admin、Editor 按 capability 创建和发布；使用 credential 的项目 MCP 必须由项目 Admin 审批。
-- 项目 Skill 的 manifest name 必须等于资产 slug；每个 archive 及一次批量导入合计最多 100 MiB、4096 个文件。Gateway 与统一 Nginx 入口仅对 archive 创建路由开放 160 MiB JSON/base64 wire body，并在 JSON 解析前拒绝越界请求。所有不可变项目 Skill 版本文件均计入项目 `storage_bytes`，Gateway 与显式导入 CLI 共用部署配额配置。项目 Skill 不提供归档；详情页经过二次确认和 5 秒等待后永久删除整个包及全部版本，并在同一事务释放逐版本配额。系统 Skill 或仍被 Agent/Run snapshot 引用的项目 Skill 拒绝删除。
+- 项目 Skill 的 manifest name 必须等于资产 slug；每个 archive 及一次批量导入合计最多 100 MiB、16384 个文件。项目创建支持 multipart `.zip`、`.skill`（ZIP）、`.tar`、`.tar.gz` 和 `.tgz`，安全解析后剥离单一外层目录，并在一个事务中创建默认停用的资产和已发布首版。Gateway 与统一 Nginx 入口仅对 archive 创建路由开放 160 MiB JSON/base64 或 multipart wire body，并在 JSON/Pydantic 或 multipart 路由处理前拒绝越界请求。所有不可变项目 Skill 版本文件均计入项目 `storage_bytes`，Gateway 与显式导入 CLI 共用部署配额配置。项目 Skill 不提供归档；详情页经过二次确认和 5 秒等待后永久删除整个包及全部版本，并在同一事务释放逐版本配额。系统 Skill 或仍被 Agent/Run snapshot 引用的项目 Skill 拒绝删除。
 - Agent、Skill 和 MCP 每次执行记录准确版本 ID。
 - Run 只按准入 snapshot 中的精确资产版本、checksum、绑定和授权闭包重新校验；全局 catalog generation 只作诊断元数据，其他项目的资产写入不会使已准入 Run 失效。
 - 新项目不复制或自动启用系统资产；项目 Admin 通过显式绑定启用系统资产并固定具体 version。
@@ -387,11 +387,13 @@ V1 初始默认值：
 ## 16. 向前迁移策略
 
 `0001_project_saas_baseline` 是冻结且不可改写的合并基线；
-`0002_project_skill_hard_delete` 是当前线性 head。后续 schema 变化继续新增线性 Alembic revision，
+`0003_project_skill_unique_name` 是当前线性 head。后续 schema 变化继续新增线性 Alembic revision，
 已经可能进入数据库的 migration 不得修改、压缩或重新 stamp。
+`0003` 对旧 revision 已存在的同项目大小写重复 Skill 显示名称执行确定性、保留行的迁移：
+每组按 `(created_at, id)` 保留最早名称，其余名称追加不冲突的数字后缀，并保持 slug、ID 和版本不变。
 
 新安装顺序是：创建空数据库 → `make setup-db` → `make check-db` → `make start`。Setup 从空库执行
-完整的 `0001 → 0002` chain，然后初始化 packaged system asset catalog、LangGraph schema 和 default
+完整的 `0001 → 0002 → 0003` chain，然后初始化 packaged system asset catalog、LangGraph schema 和 default
 project。
 
 存量库顺序是：停止应用进程 → `make migrate-db` → `make check-db` → `make start`。只有当前 revision
@@ -407,7 +409,7 @@ stamp、自动 repair、清空、删除或 downgrade。
 - 跨项目和跨用户私有访问返回 `404`。
 - 当前项目内治理能力不足返回 `403`。
 - 跨账号通知读取、计数、标记已读和执行操作统一返回 `404`，通知响应不返回邀请 token 或 token hash。
-- slug 冲突、最后一名 Admin、邀请竞争和过期版本返回稳定 `409`。
+- slug 冲突、同项目 Skill 显示名称冲突、最后一名 Admin、邀请竞争和过期版本返回稳定 `409`。
 - 配额限制返回稳定 `429`。
 - 数据库或 Worker 暂时不可用返回 `503`。
 - 错误响应包含稳定公共错误码和 `request_id`，不返回原始 SQL 错误。
@@ -432,7 +434,7 @@ stamp、自动 repair、清空、删除或 downgrade。
 - SSE 断线或进程重启后的游标续传；
 - 凭据加密、轮换和脱敏；
 - 项目删除、撤销删除、成员退出、重新加入和数据清除；
-- 空库安装完整 `0001 → 0002` chain 幂等、精确 `0001` 祖先升级后数据保留，以及未知结构 fail-before-DDL；
+- 空库安装完整 `0001 → 0002 → 0003` chain 幂等、精确 `0001` 或 `0002` 祖先升级后数据保留，以及未知结构 fail-before-DDL；
 - 前端账户、项目切换和退出登录后的缓存隔离。
 
 除非隔离、隐私、schema 初始化、凭据和项目生命周期测试全部通过，否则不得发布。

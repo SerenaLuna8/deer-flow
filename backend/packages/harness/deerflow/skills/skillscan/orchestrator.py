@@ -19,6 +19,7 @@ import posixpath
 import re
 import stat
 import zipfile
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -34,12 +35,26 @@ from deerflow.skills.skillscan.models import (
 
 logger = logging.getLogger(__name__)
 
-MAX_TOTAL_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_TOTAL_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_FILE_BYTES = 64 * 1024 * 1024
 
 _BLOCK_SEVERITY = "CRITICAL"
 _NESTED_ZIP_PEEK_MEMBER_LIMIT = 256
-_MAX_ARCHIVE_MEMBERS = 4096
+_MAX_ARCHIVE_MEMBERS = 16_384
+_MAX_LOG_FINDING_SAMPLES = 5
+_MAX_LOG_PATH_CHARS = 160
+_MAX_LOG_TOKEN_CHARS = 80
+_MAX_DETAILED_BLOCKED_FINDINGS = 5
+_MAX_DETAILED_BLOCKED_CHARS = 2048
+_SINGLE_ENVIRONMENT_ACCESSORS = frozenset(
+    {
+        "__contains__",
+        "__getitem__",
+        "get",
+        "pop",
+        "setdefault",
+    }
+)
 
 _SPECS = [
     RuleSpec("package-path-traversal", "CRITICAL", "Archive member path traverses outside the skill root.", "Remove parent-directory traversal from the package path."),
@@ -140,6 +155,47 @@ def format_static_findings(findings: list[SecurityFinding]) -> str:
     return "; ".join(parts)
 
 
+def _bounded_log_text(value: object, *, limit: int) -> str:
+    sanitized = "".join(character if character.isprintable() and character not in "\r\n" else "?" for character in str(value))
+    if len(sanitized) <= limit:
+        return sanitized
+    return sanitized[: max(0, limit - 3)] + "..."
+
+
+def _format_findings_summary(
+    findings: list[SecurityFinding],
+) -> str:
+    severity_counts = Counter(_bounded_log_text(finding["severity"], limit=_MAX_LOG_TOKEN_CHARS) for finding in findings)
+    rule_counts = Counter(_bounded_log_text(finding["rule_id"], limit=_MAX_LOG_TOKEN_CHARS) for finding in findings)
+    severities = ",".join(f"{severity}={count}" for severity, count in sorted(severity_counts.items()))
+    rules = ",".join(f"{rule_id}={count}" for rule_id, count in sorted(rule_counts.items()))
+    samples: list[str] = []
+    for finding in findings[:_MAX_LOG_FINDING_SAMPLES]:
+        location = _bounded_log_text(
+            finding["file"] or "<archive>",
+            limit=_MAX_LOG_PATH_CHARS,
+        )
+        if finding["line"] is not None:
+            location = f"{location}:{finding['line']}"
+        rule_id = _bounded_log_text(
+            finding["rule_id"],
+            limit=_MAX_LOG_TOKEN_CHARS,
+        )
+        samples.append(f"{rule_id}@{location}")
+    omitted = max(0, len(findings) - len(samples))
+    return f"total={len(findings)}; severities={severities}; rules={rules}; samples=[{','.join(samples)}]; omitted={omitted}"
+
+
+def _format_blocked_findings(
+    findings: list[SecurityFinding],
+) -> str:
+    if len(findings) <= _MAX_DETAILED_BLOCKED_FINDINGS:
+        detail = format_static_findings(findings)
+        if len(detail) <= _MAX_DETAILED_BLOCKED_CHARS:
+            return detail
+    return _format_findings_summary(findings)
+
+
 def enforce_static_scan_result(
     skill_dir: Path,
     *,
@@ -152,16 +208,40 @@ def enforce_static_scan_result(
     result = scan_skill_dir(Path(skill_dir))
     blocked = [finding for finding in result["findings"] if finding["severity"] == _BLOCK_SEVERITY]
     if blocked:
+        detail = _format_blocked_findings(blocked)
+        bounded_skill_name = (
+            _bounded_log_text(
+                skill_name,
+                limit=_MAX_LOG_PATH_CHARS,
+            )
+            if skill_name
+            else None
+        )
         raise StaticScanBlockedError(
             blocked,
             skill_name=skill_name,
-            message=f"Static security scan blocked skill '{skill_name}': {format_static_findings(blocked)}" if skill_name else f"Static security scan blocked skill content: {format_static_findings(blocked)}",
+            message=(f"Static security scan blocked skill '{bounded_skill_name}': {detail}" if bounded_skill_name else f"Static security scan blocked skill content: {detail}"),
         )
     if result["scanner_errors"]:
-        logger.warning("SkillScan analyzer errors for %s: %s", skill_name or skill_dir, "; ".join(result["scanner_errors"]))
+        logger.warning(
+            "SkillScan analyzer errors for %s: total=%d; samples=%s",
+            _bounded_log_text(
+                skill_name or skill_dir,
+                limit=_MAX_LOG_PATH_CHARS,
+            ),
+            len(result["scanner_errors"]),
+            "; ".join(_bounded_log_text(error, limit=_MAX_LOG_PATH_CHARS) for error in result["scanner_errors"][:_MAX_LOG_FINDING_SAMPLES]),
+        )
     warnings = [finding for finding in result["findings"] if finding["severity"] != _BLOCK_SEVERITY]
     if warnings:
-        logger.warning("SkillScan warning findings for %s: %s", skill_name or skill_dir, format_static_findings(warnings))
+        logger.warning(
+            "SkillScan warning findings for %s: %s",
+            _bounded_log_text(
+                skill_name or skill_dir,
+                limit=_MAX_LOG_PATH_CHARS,
+            ),
+            _format_findings_summary(warnings),
+        )
     return {
         "findings": [dict(finding) for finding in result["findings"]],  # type: ignore[misc]
         "blocked": result["blocked"],
@@ -359,6 +439,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         return findings
 
     aliases = _collect_python_aliases(tree)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     has_sensitive_read = False
     has_env_dump = False
     has_network_sink = False
@@ -377,7 +458,11 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
                 has_network_sink = True
                 network_node = network_node or node
 
-        if isinstance(node, ast.Attribute) and _python_name(node, aliases) == "os.environ":
+        if _python_name(node, aliases) == "os.environ" and _python_environment_reference_is_bulk(
+            node,
+            parents.get(node),
+            parents,
+        ):
             has_env_dump = True
             env_node = env_node or node
 
@@ -419,6 +504,44 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
     if has_env_dump and has_network_sink:
         findings.append(_finding_for_node("python-env-dump-exfil", rel_path, env_node or network_node, "environment dump + network sink"))
     return findings
+
+
+def _python_environment_reference_is_bulk(
+    node: ast.AST,
+    parent: ast.AST | None,
+    parents: dict[ast.AST, ast.AST],
+) -> bool:
+    """Distinguish whole-environment reads from one-key access.
+
+    The reference itself is sufficient for bulk shapes such as assignment,
+    iteration, ``dict(os.environ)``, mapping unpack, or passing the mapping to
+    another function. A subscript, membership check, or known one-key mapping
+    accessor does not copy or traverse the process environment.
+    """
+
+    if isinstance(parent, ast.Subscript) and parent.value is node and _is_safe_environment_key_expression(parent.slice):
+        return False
+    if isinstance(parent, ast.Attribute) and parent.value is node and parent.attr in _SINGLE_ENVIRONMENT_ACCESSORS:
+        call = parents.get(parent)
+        if isinstance(call, ast.Call) and call.func is parent and _is_safe_single_environment_accessor_call(parent.attr, call):
+            return False
+    if isinstance(parent, ast.Compare) and len(parent.ops) == 1 and len(parent.comparators) == 1 and parent.comparators[0] is node and isinstance(parent.ops[0], (ast.In, ast.NotIn)) and _is_safe_environment_key_expression(parent.left):
+        return False
+    return True
+
+
+def _is_safe_environment_key_expression(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) or (isinstance(node, ast.Constant) and isinstance(node.value, str))
+
+
+def _is_safe_single_environment_accessor_call(
+    accessor: str,
+    call: ast.Call,
+) -> bool:
+    if call.keywords or any(isinstance(argument, ast.Starred) for argument in call.args):
+        return False
+    maximum_arguments = 1 if accessor in {"__contains__", "__getitem__"} else 2
+    return 1 <= len(call.args) <= maximum_arguments and _is_safe_environment_key_expression(call.args[0])
 
 
 def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:

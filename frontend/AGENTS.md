@@ -138,6 +138,12 @@ without a published version and honor the server-provided execute capability and
 Shared-asset mutations use the active project scope's abort controller and are removed with
 their project query/mutation roots during scope transition.
 
+Project Skill package import accepts `.zip`, `.skill`, `.tar`, `.tar.gz`, and `.tgz` through the
+scoped multipart upload API. A successful import creates and publishes the first immutable
+version while leaving the new Skill disabled, refreshes the project Skill catalog, and opens the
+returned version. Duplicate-name, invalid-package, and size-limit responses must use safe,
+actionable messages without exposing parser or storage details.
+
 New project Skills start disabled. Project-owned Skill rows and detail sheets expose the same
 enable/disable switch: enabling requires `shared_assets.manage_bindings` plus a published version,
 while a disabled Skill remains editable and publishable. The version workbench renders archive

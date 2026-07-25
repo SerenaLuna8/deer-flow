@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from postgres_utils import temporary_postgres_database
 from sqlalchemy import select, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, async_sessionmaker, create_async_engine
 from support.m4_private_threads import seed_m4_thread_database
 
@@ -22,10 +22,13 @@ from app.private_work.asset_runtime import PrivateAssetRuntime
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
 from app.shared_assets.agent_service import AgentService
+from app.shared_assets.errors import AssetConflict
 from app.shared_assets.models import AgentPayload, SkillArchiveFile
-from app.shared_assets.skill_service import SkillService
+from app.shared_assets.skill_service import CreateSkill, SkillService
 from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.auth_sessions import AuthSessionRepository, AuthSessionRow
 from deerflow.persistence.base import Base
@@ -42,7 +45,8 @@ from scripts.check_postgres import check_postgres
 from scripts.setup_postgres import PostgresSetupError, _bootstrap_existing
 
 BASELINE_REVISION = "0001_project_saas_baseline"
-CURRENT_REVISION = "0002_project_skill_hard_delete"
+INTERMEDIATE_REVISION = "0002_project_skill_hard_delete"
+CURRENT_REVISION = "0003_project_skill_unique_name"
 FROZEN_BASELINE_SHA256 = "a2239e89966891c13d75a307d54deec2e45f03eb19b10ac8f3bf06d2ffb3eb71"
 
 LEGACY_RELATIONS = {
@@ -319,11 +323,12 @@ async def _native_relational_catalog(
     return snapshot
 
 
-def test_migration_history_preserves_frozen_0001_and_has_one_0002_head() -> None:
+def test_migration_history_preserves_frozen_history_and_has_one_0003_head() -> None:
     revision_files = sorted(path for path in _versions_dir().glob("*.py") if path.name != "__init__.py")
     assert [path.name for path in revision_files] == [
         "0001_project_saas_baseline.py",
         "0002_project_skill_hard_delete.py",
+        "0003_project_skill_unique_name.py",
     ]
     assert hashlib.sha256(revision_files[0].read_bytes()).hexdigest() == FROZEN_BASELINE_SHA256
 
@@ -334,15 +339,24 @@ def test_migration_history_preserves_frozen_0001_and_has_one_0002_head() -> None
     assert baseline_module.revision == BASELINE_REVISION
     assert baseline_module.down_revision is None
 
-    head_spec = importlib.util.spec_from_file_location("project_skill_hard_delete", revision_files[1])
+    intermediate_spec = importlib.util.spec_from_file_location("project_skill_hard_delete", revision_files[1])
+    assert intermediate_spec is not None and intermediate_spec.loader is not None
+    intermediate_module = importlib.util.module_from_spec(intermediate_spec)
+    intermediate_spec.loader.exec_module(intermediate_module)
+    assert intermediate_module.revision == INTERMEDIATE_REVISION
+    assert intermediate_module.down_revision == BASELINE_REVISION
+
+    head_spec = importlib.util.spec_from_file_location("project_skill_unique_name", revision_files[2])
     assert head_spec is not None and head_spec.loader is not None
     head_module = importlib.util.module_from_spec(head_spec)
     head_spec.loader.exec_module(head_module)
     assert head_module.revision == CURRENT_REVISION
-    assert head_module.down_revision == BASELINE_REVISION
+    assert head_module.down_revision == INTERMEDIATE_REVISION
     assert bootstrap_module._get_head_revision() == CURRENT_REVISION
     with pytest.raises(RuntimeError, match="M7 baseline downgrade is unsupported"):
         baseline_module.downgrade()
+    with pytest.raises(RuntimeError, match="forward-only schema downgrade is unsupported"):
+        intermediate_module.downgrade()
     with pytest.raises(RuntimeError, match="forward-only schema downgrade is unsupported"):
         head_module.downgrade()
 
@@ -365,6 +379,152 @@ async def test_empty_database_installs_current_forward_head(
             assert await connection.scalar(text("SELECT to_regclass('user_notifications')")) == "user_notifications"
             relations = set((await connection.execute(text("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"))).scalars())
             assert not (relations & LEGACY_RELATIONS)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_project_skill_display_name_is_case_insensitively_unique_per_project_under_concurrency(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    user_id = uuid.uuid4()
+    first_project_id = uuid.uuid4()
+    second_project_id = uuid.uuid4()
+    first_membership_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    try:
+        await bootstrap_module.bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                       (id,email,system_role,created_at,needs_setup,token_version)
+                       VALUES (:id,:email,'user',:now,false,0)"""
+                ),
+                {
+                    "id": str(user_id),
+                    "email": f"skill-name-{user_id}@example.com",
+                    "now": now,
+                },
+            )
+            for project_id, slug in (
+                (first_project_id, "skill-name-first"),
+                (second_project_id, "skill-name-second"),
+            ):
+                await connection.execute(
+                    text(
+                        """INSERT INTO projects
+                           (id,slug,display_name,created_by_user_id,created_at,updated_at)
+                           VALUES (:id,:slug,:name,:user_id,:now,:now)"""
+                    ),
+                    {
+                        "id": project_id,
+                        "slug": slug,
+                        "name": slug,
+                        "user_id": str(user_id),
+                        "now": now,
+                    },
+                )
+            await connection.execute(
+                text(
+                    """INSERT INTO project_memberships
+                       (id,project_id,user_id,role,status,version)
+                       VALUES (:id,:project_id,:user_id,'admin','active',1)"""
+                ),
+                {
+                    "id": first_membership_id,
+                    "project_id": first_project_id,
+                    "user_id": str(user_id),
+                },
+            )
+
+        async def insert_skill(
+            *,
+            project_id: uuid.UUID,
+            slug: str,
+            display_name: str,
+        ) -> None:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """INSERT INTO skills
+                           (id,scope,project_id,slug,display_name,created_by_user_id)
+                           VALUES (:id,'project',:project_id,:slug,:display_name,:user_id)"""
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "project_id": project_id,
+                        "slug": slug,
+                        "display_name": display_name,
+                        "user_id": str(user_id),
+                    },
+                )
+
+        same_project_results = await asyncio.gather(
+            insert_skill(
+                project_id=first_project_id,
+                slug="concurrent-name-a",
+                display_name="Shared Name",
+            ),
+            insert_skill(
+                project_id=first_project_id,
+                slug="concurrent-name-b",
+                display_name="shared name",
+            ),
+            return_exceptions=True,
+        )
+        assert sum(result is None for result in same_project_results) == 1
+        assert sum(isinstance(result, IntegrityError) for result in same_project_results) == 1
+
+        await insert_skill(
+            project_id=second_project_id,
+            slug="same-name-other-project",
+            display_name="SHARED NAME",
+        )
+        actor = ProjectContext(
+            user_id=user_id,
+            project_id=first_project_id,
+            membership_id=first_membership_id,
+            role=ProjectRole.ADMIN,
+            capabilities=capabilities_for(ProjectRole.ADMIN),
+            membership_version=1,
+            request_id="req-project-skill-name-conflict",
+        )
+        service = SkillService(async_sessionmaker(engine, expire_on_commit=False))
+        with pytest.raises(AssetConflict) as conflict:
+            await service.create_asset(
+                actor,
+                CreateSkill(
+                    slug="service-name-conflict",
+                    display_name="sHaReD nAmE",
+                ),
+            )
+        assert conflict.value.request_id == actor.request_id
+
+        async with engine.connect() as connection:
+            index_definition = await connection.scalar(
+                text(
+                    """SELECT indexdef FROM pg_indexes
+                       WHERE schemaname=current_schema()
+                         AND indexname='uq_skills_project_display_name'"""
+                )
+            )
+            assert index_definition is not None
+            assert "UNIQUE INDEX" in index_definition
+            assert "project_id" in index_definition
+            assert "lower((display_name)::text)" in index_definition
+            assert "WHERE ((scope)::text = 'project'::text)" in index_definition
+            assert (
+                await connection.scalar(
+                    text(
+                        """SELECT count(*) FROM skills
+                           WHERE lower(display_name)=lower('Shared Name')"""
+                    )
+                )
+                == 2
+            )
     finally:
         await engine.dispose()
 
@@ -399,7 +559,269 @@ async def test_exact_0001_ancestor_requires_and_accepts_explicit_migration(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_0001_skill_and_run_snapshot_remain_readable_and_materializable_after_0002(
+async def test_exact_0002_ancestor_requires_and_accepts_explicit_migration(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await asyncio.to_thread(
+            bootstrap_module._upgrade,
+            bootstrap_module._get_alembic_config(engine),
+            INTERMEDIATE_REVISION,
+        )
+        async with engine.connect() as connection:
+            assert await bootstrap_module.classify_database(connection) == "upgradeable"
+        with pytest.raises(bootstrap_module.SchemaMigrationRequired):
+            await bootstrap_module.validate_schema(engine)
+        with pytest.raises(bootstrap_module.SchemaMigrationRequired):
+            await bootstrap_module.bootstrap_schema(engine)
+
+        await bootstrap_module.migrate_schema(engine)
+
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_REVISION
+            assert await bootstrap_module.classify_database(connection) == "current"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_0003_migration_deduplicates_legacy_project_skill_names_without_losing_rows(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    user_id = uuid.UUID("10000000-0000-0000-0000-000000000001")
+    first_project_id = uuid.UUID("20000000-0000-0000-0000-000000000001")
+    second_project_id = uuid.UUID("20000000-0000-0000-0000-000000000002")
+    skill_ids = {
+        "first_keeper": uuid.UUID("30000000-0000-0000-0000-000000000001"),
+        "first_second": uuid.UUID("30000000-0000-0000-0000-000000000002"),
+        "first_third": uuid.UUID("30000000-0000-0000-0000-000000000003"),
+        "first_reserved": uuid.UUID("30000000-0000-0000-0000-000000000004"),
+        "long_keeper": uuid.UUID("30000000-0000-0000-0000-000000000005"),
+        "long_second": uuid.UUID("30000000-0000-0000-0000-000000000006"),
+        "second_keeper": uuid.UUID("30000000-0000-0000-0000-000000000007"),
+        "second_duplicate": uuid.UUID("30000000-0000-0000-0000-000000000008"),
+    }
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+    long_name = "长" * 120
+    try:
+        await asyncio.to_thread(
+            bootstrap_module._upgrade,
+            bootstrap_module._get_alembic_config(engine),
+            INTERMEDIATE_REVISION,
+        )
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                       (id,email,system_role,created_at,needs_setup,token_version)
+                       VALUES (:id,'legacy-skill-names@example.com','user',:now,false,0)"""
+                ),
+                {"id": str(user_id), "now": base_time},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO projects
+                       (id,slug,display_name,created_by_user_id,created_at,updated_at)
+                       VALUES (:id,:slug,:display_name,:user_id,:now,:now)"""
+                ),
+                [
+                    {
+                        "id": first_project_id,
+                        "slug": "legacy-skill-names-first",
+                        "display_name": "Legacy Skill Names First",
+                        "user_id": str(user_id),
+                        "now": base_time,
+                    },
+                    {
+                        "id": second_project_id,
+                        "slug": "legacy-skill-names-second",
+                        "display_name": "Legacy Skill Names Second",
+                        "user_id": str(user_id),
+                        "now": base_time,
+                    },
+                ],
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO skills
+                       (id,scope,project_id,slug,display_name,version,
+                        created_by_user_id,created_at,updated_at)
+                       VALUES
+                       (:id,'project',:project_id,:slug,:display_name,:version,
+                        :user_id,:created_at,:created_at)"""
+                ),
+                [
+                    {
+                        "id": skill_ids["first_keeper"],
+                        "project_id": first_project_id,
+                        "slug": "first-keeper",
+                        "display_name": "nAmE",
+                        "version": 7,
+                        "user_id": str(user_id),
+                        "created_at": base_time,
+                    },
+                    {
+                        "id": skill_ids["first_second"],
+                        "project_id": first_project_id,
+                        "slug": "first-second",
+                        "display_name": "Name",
+                        "version": 8,
+                        "user_id": str(user_id),
+                        "created_at": base_time + timedelta(seconds=1),
+                    },
+                    {
+                        "id": skill_ids["first_third"],
+                        "project_id": first_project_id,
+                        "slug": "first-third",
+                        "display_name": "NAME",
+                        "version": 9,
+                        "user_id": str(user_id),
+                        "created_at": base_time + timedelta(seconds=1),
+                    },
+                    {
+                        "id": skill_ids["first_reserved"],
+                        "project_id": first_project_id,
+                        "slug": "first-reserved",
+                        "display_name": "name (2)",
+                        "version": 10,
+                        "user_id": str(user_id),
+                        "created_at": base_time,
+                    },
+                    {
+                        "id": skill_ids["long_keeper"],
+                        "project_id": first_project_id,
+                        "slug": "long-keeper",
+                        "display_name": long_name,
+                        "version": 11,
+                        "user_id": str(user_id),
+                        "created_at": base_time,
+                    },
+                    {
+                        "id": skill_ids["long_second"],
+                        "project_id": first_project_id,
+                        "slug": "long-second",
+                        "display_name": long_name,
+                        "version": 12,
+                        "user_id": str(user_id),
+                        "created_at": base_time + timedelta(seconds=1),
+                    },
+                    {
+                        "id": skill_ids["second_keeper"],
+                        "project_id": second_project_id,
+                        "slug": "second-keeper",
+                        "display_name": "Name",
+                        "version": 13,
+                        "user_id": str(user_id),
+                        "created_at": base_time,
+                    },
+                    {
+                        "id": skill_ids["second_duplicate"],
+                        "project_id": second_project_id,
+                        "slug": "second-duplicate",
+                        "display_name": "name",
+                        "version": 14,
+                        "user_id": str(user_id),
+                        "created_at": base_time + timedelta(seconds=1),
+                    },
+                ],
+            )
+            before_identity = tuple(
+                (
+                    row.id,
+                    row.slug,
+                    row.version,
+                )
+                for row in (
+                    await connection.execute(
+                        text(
+                            """SELECT id,slug,version FROM skills
+                               ORDER BY id"""
+                        )
+                    )
+                )
+            )
+
+        await bootstrap_module.migrate_schema(engine)
+
+        async with engine.connect() as connection:
+            rows = {
+                row.id: row.display_name
+                for row in (
+                    await connection.execute(
+                        text(
+                            """SELECT id,display_name FROM skills
+                               ORDER BY id"""
+                        )
+                    )
+                )
+            }
+            after_identity = tuple(
+                (
+                    row.id,
+                    row.slug,
+                    row.version,
+                )
+                for row in (
+                    await connection.execute(
+                        text(
+                            """SELECT id,slug,version FROM skills
+                               ORDER BY id"""
+                        )
+                    )
+                )
+            )
+            assert after_identity == before_identity
+            assert rows == {
+                skill_ids["first_keeper"]: "nAmE",
+                skill_ids["first_second"]: "nAmE (3)",
+                skill_ids["first_third"]: "nAmE (4)",
+                skill_ids["first_reserved"]: "name (2)",
+                skill_ids["long_keeper"]: long_name,
+                skill_ids["long_second"]: f"{'长' * 116} (2)",
+                skill_ids["second_keeper"]: "Name",
+                skill_ids["second_duplicate"]: "Name (2)",
+            }
+            assert all(len(display_name) <= 120 for display_name in rows.values())
+            assert (
+                await connection.scalar(
+                    text(
+                        """SELECT count(*) FROM (
+                               SELECT project_id,lower(display_name)
+                               FROM skills
+                               WHERE scope='project'
+                               GROUP BY project_id,lower(display_name)
+                               HAVING count(*) > 1
+                           ) duplicate_names"""
+                    )
+                )
+                == 0
+            )
+
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """INSERT INTO skills
+                           (id,scope,project_id,slug,display_name,created_by_user_id)
+                           VALUES (:id,'project',:project_id,'post-migration-conflict',
+                                   'NAME',:user_id)"""
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "project_id": first_project_id,
+                        "user_id": str(user_id),
+                    },
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_0001_skill_and_run_snapshot_remain_readable_and_materializable_after_0003(
     postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(postgres_database_url)
@@ -535,7 +957,7 @@ async def test_0001_skill_and_run_snapshot_remain_readable_and_materializable_af
             role=seed.owner_a.role,
             capabilities=seed.owner_a.capabilities,
             membership_version=seed.owner_a.membership_version,
-            request_id="req-v1-skill-after-0002",
+            request_id="req-v1-skill-after-0003",
         )
         assert await SkillService(factory).load_version_files(
             actor,

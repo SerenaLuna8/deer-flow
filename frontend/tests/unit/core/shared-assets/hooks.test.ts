@@ -15,6 +15,7 @@ import {
   enableProjectSystemBinding,
   forkProjectSkillVersion,
   getProjectSkillVersionFile,
+  importProjectSkillArchive,
   listAdminAssetVersions,
   listAdminProjectAssets,
   listProjectAssetVersions,
@@ -38,6 +39,7 @@ import {
   useForkProjectSkillVersion,
   useProjectAssetVersions,
   useProjectSkillVersionFile,
+  useImportProjectSkillArchive,
   useSystemAssetCatalog,
   usePublishProjectAssetVersion,
   useRevokeAdminCredential,
@@ -66,6 +68,7 @@ rs.mock("@/core/shared-assets/api", () => ({
   enableProjectSystemBinding: rs.fn(),
   forkProjectSkillVersion: rs.fn(),
   getProjectSkillVersionFile: rs.fn(),
+  importProjectSkillArchive: rs.fn(),
   listAdminAssetVersions: rs.fn(),
   listAdminProjectAssets: rs.fn(),
   listAdminAssets: rs.fn(),
@@ -129,6 +132,7 @@ beforeEach(() => {
     enableProjectSystemBinding,
     forkProjectSkillVersion,
     getProjectSkillVersionFile,
+    importProjectSkillArchive,
     listAdminAssetVersions,
     listAdminProjectAssets,
     listProjectAssetVersions,
@@ -228,6 +232,40 @@ describe("shared asset hooks", () => {
       input,
       mutationController.signal,
     );
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "skills",
+      ],
+    });
+  });
+
+  test("imports a project Skill archive through the active scope and refreshes the Skill catalog", async () => {
+    const upload = mutation(useImportProjectSkillArchive(accountId, projectId));
+    const archive = new File(["archive"], "meeting-brief.zip");
+
+    await upload.mutationFn(archive as never);
+    await upload.onSuccess();
+
+    expect(importProjectSkillArchive).toHaveBeenCalledWith(
+      projectId,
+      archive,
+      mutationController.signal,
+    );
+    expect(upload.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "skills",
+      "mutation",
+      "import",
+    ]);
     expect(client.invalidateQueries).toHaveBeenCalledWith({
       queryKey: [
         "account",

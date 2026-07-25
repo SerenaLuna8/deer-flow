@@ -5,9 +5,11 @@ import dataclasses
 import hashlib
 import importlib
 import inspect
+import io
 import json
 import logging
 import uuid
+import zipfile
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
@@ -59,6 +61,14 @@ def _manifest(extra: str = "", *, name: str = "demo-skill") -> bytes:
 
 def _files(*extra: SkillArchiveFile, name: str = "demo-skill") -> tuple[SkillArchiveFile, ...]:
     return (SkillArchiveFile("SKILL.md", _manifest(name=name), "text/markdown"), *extra)
+
+
+def _uploaded_zip(*, manifest: bytes | None = None) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("uploaded-skill/SKILL.md", manifest or _manifest(name="uploaded-skill"))
+        archive.writestr("uploaded-skill/scripts/run.py", b"print('ok')\n")
+    return buffer.getvalue()
 
 
 class _ServiceWithoutSessions:
@@ -1485,16 +1495,17 @@ def test_skill_archive_enforces_100_mib_total_boundary() -> None:
     assert exc_info.value.request_id == "req-boundary"
 
 
-def test_skill_archive_rejects_more_than_4096_files_before_materializing() -> None:
+def test_skill_archive_rejects_more_than_16384_files_before_materializing() -> None:
     service_module = importlib.import_module("app.shared_assets.skill_service")
     files = (
         SkillArchiveFile("SKILL.md", _manifest(), "text/markdown"),
-        *(SkillArchiveFile(f"references/{index:04d}.txt", b"", "text/plain") for index in range(4096)),
+        *(SkillArchiveFile(f"references/{index:05d}.txt", b"", "text/plain") for index in range(16_384)),
     )
 
     with pytest.raises(AssetValidationFailed) as exc_info:
         service_module.normalize_skill_files(files, request_id="req-file-count")
     assert exc_info.value.request_id == "req-file-count"
+    assert service_module.MAX_SKILL_ARCHIVE_FILES == 16_384
 
 
 @pytest.mark.asyncio
@@ -1580,6 +1591,29 @@ async def test_project_archive_import_derives_matching_asset_slug_from_manifest(
 
     assert prepared[0].command.slug == "import-compatible"
     assert prepared[0].preview.frontmatter["name"] == prepared[0].command.slug
+
+
+@pytest.mark.asyncio
+async def test_uploaded_archive_is_fully_validated_before_opening_a_transaction() -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    actor = _editor_context()
+
+    class ExplodingSessionFactory:
+        def __call__(self):
+            raise AssertionError("invalid archive must not open a database transaction")
+
+    service = service_module.SkillService(ExplodingSessionFactory())
+
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service.create_project_from_archive_upload(
+            actor,
+            _uploaded_zip(
+                manifest=b"---\nname: uploaded-skill\n---\n\nMissing description.\n",
+            ),
+            filename="uploaded-skill.zip",
+        )
+
+    assert exc_info.value.request_id == actor.request_id
 
 
 @pytest.mark.asyncio
@@ -1729,6 +1763,7 @@ async def test_present_secret_control_must_have_canonical_type(declaration: str)
     ("constraint_name", "error_type"),
     [
         ("uq_skills_project_slug", AssetConflict),
+        ("uq_skills_project_display_name", AssetConflict),
         ("uq_skill_versions_asset_number", AssetConflict),
         ("ck_skill_versions_checksum", AssetStorageUnavailable),
         (None, AssetStorageUnavailable),

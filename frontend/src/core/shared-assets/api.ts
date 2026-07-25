@@ -32,6 +32,7 @@ import {
   migrateCredentialGrantsInputSchema,
   projectAssetListSchema,
   projectCredentialListSchema,
+  projectSkillImportResponseSchema,
   replaceCredentialInputSchema,
   revokeCredentialInputSchema,
   skillVersionHistoryResponseSchema,
@@ -62,6 +63,7 @@ import {
   type MigrateCredentialGrantsInput,
   type ProjectAssetList,
   type ProjectCredentialList,
+  type ProjectSkillImportResponse,
   type ReplaceCredentialInput,
   type RevokeCredentialInput,
   type SkillVersionInput,
@@ -122,6 +124,7 @@ export const SHARED_ASSET_ERROR_CODES = [
   "ASSET_VALIDATION_FAILED",
   "ASSET_STORAGE_QUOTA_EXCEEDED",
   "ASSET_STORAGE_UNAVAILABLE",
+  "ASSET_UPLOAD_TOO_LARGE",
   "AUTH_REQUIRED",
   "ASSET_NETWORK_ERROR",
   "ASSET_RESPONSE_INVALID",
@@ -374,6 +377,38 @@ export async function createProjectAsset(
   signal?: AbortSignal,
 ): Promise<AssetMutationResponse> {
   return await createAsset(projectAssetUrl(projectId, kind), input, signal);
+}
+
+export async function importProjectSkillArchive(
+  projectId: string,
+  archive: File,
+  signal?: AbortSignal,
+): Promise<ProjectSkillImportResponse> {
+  if (archive.name.trim() === "" || archive.size === 0) {
+    throw new SharedAssetApiError(
+      422,
+      "ASSET_VALIDATION_FAILED",
+      "Asset validation failed",
+    );
+  }
+  const body = new FormData();
+  body.append("archive", archive, archive.name);
+  const response = await request(
+    `${projectAssetUrl(projectId, "skills")}/import`,
+    {
+      method: "POST",
+      body,
+      signal,
+    },
+  );
+  if (response.status === 413) {
+    throw new SharedAssetApiError(
+      413,
+      "ASSET_UPLOAD_TOO_LARGE",
+      "Skill archive upload too large",
+    );
+  }
+  return parseResponse(response, projectSkillImportResponseSchema);
 }
 
 export async function createAdminProjectAsset(

@@ -9,7 +9,17 @@ from dataclasses import is_dataclass
 from datetime import datetime
 from typing import Annotated, Any, Literal, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,6 +57,7 @@ from app.shared_assets import (
     WorkflowStatus,
 )
 from app.shared_assets.contexts import SystemAssetReadContext, resolve_asset_reader
+from app.shared_assets.skill_archive import MAX_SKILL_ARCHIVE_UPLOAD_BYTES
 from app.shared_assets.skill_service import (
     MAX_SKILL_ARCHIVE_BYTES,
     MAX_SKILL_ARCHIVE_FILES,
@@ -470,6 +481,12 @@ class SkillVersionResponse(_StrictModel):
     request_id: str
 
 
+class SkillArchiveImportResponse(_StrictModel):
+    item: AssetItemResponse
+    version: SkillVersionItemResponse
+    request_id: str
+
+
 class SkillFileContentResponse(_StrictModel):
     data: SkillFileContentItemResponse
     request_id: str
@@ -808,6 +825,30 @@ def _decode_skill_files(body: SkillVersionRequest, request_id: str) -> tuple[Ski
         raise_asset_domain(AssetValidationFailed(request_id))
 
 
+async def _read_skill_archive_upload(
+    archive: UploadFile,
+    request_id: str,
+) -> tuple[bytes, str]:
+    filename = archive.filename
+    if not isinstance(filename, str) or not filename.strip():
+        raise AssetValidationFailed(request_id)
+    payload = bytearray()
+    try:
+        while True:
+            remaining = MAX_SKILL_ARCHIVE_UPLOAD_BYTES - len(payload)
+            chunk = await archive.read(min(1024 * 1024, remaining + 1))
+            if not chunk:
+                break
+            payload.extend(chunk)
+            if len(payload) > MAX_SKILL_ARCHIVE_UPLOAD_BYTES:
+                raise AssetValidationFailed(request_id)
+    finally:
+        await archive.close()
+    if not payload:
+        raise AssetValidationFailed(request_id)
+    return bytes(payload), filename
+
+
 def _mcp_definition(body: McpVersionRequest) -> McpDefinition:
     return McpDefinition(
         description=body.description,
@@ -1081,6 +1122,37 @@ async def fork_project_skill_version(
         ),
         SkillVersionResponse,
     )
+
+
+@project_router.post(
+    "/skills/import",
+    response_model=SkillArchiveImportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_project_skill_archive(
+    archive: Annotated[UploadFile, File(description="Skill package archive")],
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[SkillService, Depends(get_skill_service)],
+):
+    try:
+        payload, filename = await _read_skill_archive_upload(
+            archive,
+            context.request_id,
+        )
+        result = await service.create_project_from_archive_upload(
+            context,
+            payload,
+            filename=filename,
+        )
+        return SkillArchiveImportResponse(
+            item=_asset_item(result.asset),
+            version=SkillVersionItemResponse.model_validate(
+                _response_data(result.version),
+            ),
+            request_id=context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
 
 
 @project_router.get("/agents", response_model=ScopedAssetListResponse)

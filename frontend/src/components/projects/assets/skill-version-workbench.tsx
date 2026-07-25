@@ -120,6 +120,18 @@ function foldersThrough(path: string): string[] {
   return parts.map((_, index) => parts.slice(0, index + 1).join("/"));
 }
 
+export function initialSkillFilePath(
+  files: readonly { path: string }[],
+): string {
+  return (
+    files.find((file) => file.path === "SKILL.md")?.path ?? files[0]?.path ?? ""
+  );
+}
+
+export function selectedSkillFileAncestorFolders(path: string): string[] {
+  return foldersThrough(directoryPath(path));
+}
+
 export function SkillVersionWorkbench({
   accountId,
   projectId,
@@ -137,10 +149,7 @@ export function SkillVersionWorkbench({
   onDirtyChange: (dirty: boolean) => void;
   onVersionCreated: (versionId: string) => void;
 }) {
-  const initialPath =
-    version.file_views.find((file) => file.path === "SKILL.md")?.path ??
-    version.file_views[0]?.path ??
-    "";
+  const initialPath = initialSkillFilePath(version.file_views);
   const [selection, setSelection] = useState<SkillFileTreeSelection | null>(
     initialPath ? { kind: "file", path: initialPath } : null,
   );
@@ -148,12 +157,7 @@ export function SkillVersionWorkbench({
   const [changes, setChanges] = useState<SkillFileChange[]>([]);
   const [explicitFolders, setExplicitFolders] = useState<string[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
-    () =>
-      new Set(
-        version.file_views.flatMap((file) =>
-          foldersThrough(directoryPath(file.path)),
-        ),
-      ),
+    () => new Set(selectedSkillFileAncestorFolders(initialPath)),
   );
   const [loadedSources, setLoadedSources] = useState<Record<string, string>>(
     {},
@@ -255,6 +259,7 @@ export function SkillVersionWorkbench({
 
   function selectFile(path: string) {
     setSelection({ kind: "file", path });
+    expandFolder(directoryPath(path));
     setDisplayMode("source");
     setLocalError(null);
   }

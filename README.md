@@ -85,7 +85,7 @@ make config
 
 ### 3. 初始化 PostgreSQL
 
-`0001_project_saas_baseline` 是不可改写的冻结基线，当前 head 为线性的 `0002_project_skill_hard_delete`。系统支持初始化全新 PostgreSQL 目标库，也支持把精确匹配 `0001` catalog 的存量库显式向前迁移到 `0002`。运行时不会建库、执行 migration、stamp 或修复 schema。应用 role 需要预先存在，并建议使用非 superuser role。
+`0001_project_saas_baseline` 是不可改写的冻结基线，当前 head 为线性的 `0003_project_skill_unique_name`。系统支持初始化全新 PostgreSQL 目标库，也支持把精确匹配 `0001` 或 `0002` catalog 的存量库显式向前迁移到 `0003`。运行时不会建库、执行 migration、stamp 或修复 schema。应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
 # 全新数据库
@@ -94,13 +94,15 @@ export DATABASE_URL='<DeerFlow 目标库 URL>'
 make setup-db
 make check-db
 
-# 已存在且处于精确 0001 祖先 revision 的数据库
+# 已存在且处于精确 0001 或 0002 祖先 revision 的数据库
 export DATABASE_URL='<现有 DeerFlow 数据库 URL>'
 make migrate-db
 make check-db
 ```
 
-`make setup-db` 从空库安装完整的 `0001 → 0002` migration chain，并初始化系统资产 catalog、LangGraph schema 和默认项目；`make migrate-db` 只对已验证的已知旧 revision 执行 pending migrations，不创建数据库，也不重复执行 catalog、LangGraph 或默认项目初始化；`make check-db` 只读校验 current/head revision 与必需对象。已知祖先 revision 会提示显式迁移，未知 revision、未纳管非空 schema 或 catalog drift 会拒绝自动处理。命令不会输出完整连接 URL 或密码。
+`make setup-db` 从空库安装完整的 `0001 → 0002 → 0003` migration chain，并初始化系统资产 catalog、LangGraph schema 和默认项目；`make migrate-db` 只对已验证的已知旧 revision 执行 pending migrations，不创建数据库，也不重复执行 catalog、LangGraph 或默认项目初始化；`make check-db` 只读校验 current/head revision 与必需对象。已知祖先 revision 会提示显式迁移，未知 revision、未纳管非空 schema 或 catalog drift 会拒绝自动处理。命令不会输出完整连接 URL 或密码。
+
+从 `0001` 或 `0002` 升级时，`0003` 会保留全部项目 Skill，并在同一项目内按 `created_at`、`id` 确定性保留最早的显示名称；旧数据中的大小写重复名称会依次追加 ` (2)`、` (3)` 等后缀，遇到已有名称继续递增，且不会改动 Skill 的 slug、ID 或版本。
 
 ### 4. 启动
 
@@ -151,7 +153,7 @@ Kubernetes/Helm 资源位于 `deploy/helm/`。Docker Compose、Kubernetes 和不
 
 System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 packaged catalog 写入 PostgreSQL。运行进程只读取数据库中的资产版本和 Run 准入时固定的 snapshot。仓库内 `skills/public/` 的 21 个完整 Skill 目录会在开发期生成带 digest 的 packaged system Skill archive，并在 `make setup-db` 时作为系统资产写入；`make migrate-db` 只执行 pending schema migrations，不重复 seed。Setup 不会为项目自动绑定这些 Skill，项目管理员可在“系统提供”列表中逐项启用或停用，也不应再把同一目录重复导入为项目 Skill。
 
-项目 Skill 的 `SKILL.md` frontmatter `name` 必须与资产 slug 完全一致；新建后默认停用，但停用状态仍可编辑和发布，只有已发布版本才能通过列表或详情开关启用。版本文件按真实目录树展示，只打开当前选中文件；新建文件需指定目标文件夹，并可在流程中创建嵌套目录。单个 archive 及批量导入均限制为合计 100 MiB、最多 4096 个文件。Gateway 和统一 Nginx 入口只在 Skill archive 创建路由上允许最多 160 MiB 的 JSON/base64 wire body，并在 JSON 解析前拒绝越界请求。每个不可变项目 Skill 版本的完整文件大小都会计入项目 `storage_bytes` 配额。项目自建 Skill 不提供归档或暂停：详情页二次确认并等待 5 秒后执行整包永久删除，原子删除全部文件和版本并释放对应配额；仍被 Agent 或已准入 Run 引用时返回 `409`，系统 Skill 永远不可删除。Worker 把系统 Skill 投影到 `/mnt/skills/public/<name>`，把项目 Skill 投影到 `/mnt/skills/custom/<asset_uuid>`；执行前按准入时固定的精确版本、checksum 和绑定重新校验，其他项目的 catalog 更新不会使当前 Run 失效。
+项目 Skill 的显示名称在同一项目内大小写不敏感且不可重复，不同项目可使用相同名称；`SKILL.md` frontmatter `name` 必须与资产 slug 完全一致。新建后默认停用，但停用状态仍可编辑和发布，只有已发布版本才能通过列表或详情开关启用。版本文件按真实目录树展示，只打开当前选中文件；新建文件需指定目标文件夹，并可在流程中创建嵌套目录。创建时可用 `multipart/form-data` 上传 `.zip`、`.skill`（ZIP）、`.tar`、`.tar.gz` 或 `.tgz`；单一外层目录会自动剥离，资产创建和首版发布在同一事务完成，资产仍保持停用。单个 archive 及批量导入均限制为合计 100 MiB、最多 16384 个文件。Gateway 和统一 Nginx 入口只在 Skill archive 创建路由上允许最多 160 MiB 的 JSON/base64 或 multipart wire body，并在 JSON/Pydantic 或 multipart 路由处理前拒绝越界请求。每个不可变项目 Skill 版本的完整文件大小都会计入项目 `storage_bytes` 配额。项目自建 Skill 不提供归档或暂停：详情页二次确认并等待 5 秒后执行整包永久删除，原子删除全部文件和版本并释放对应配额；仍被 Agent 或已准入 Run 引用时返回 `409`，系统 Skill 永远不可删除。Worker 把系统 Skill 投影到 `/mnt/skills/public/<name>`，把项目 Skill 投影到 `/mnt/skills/custom/<asset_uuid>`；执行前按准入时固定的精确版本、checksum 和绑定重新校验，其他项目的 catalog 更新不会使当前 Run 失效。
 
 ## 项目结构
 

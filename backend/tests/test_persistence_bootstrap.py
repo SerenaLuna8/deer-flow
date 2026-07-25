@@ -11,12 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from deerflow.persistence import bootstrap
 from deerflow.persistence.final_schema_contract import (
     ALEMBIC_INDEXES,
-    BASELINE_M7_CATALOG_SIGNATURE,
     FINAL_APP_SEQUENCES,
 )
 
 BASELINE_REVISION = "0001_project_saas_baseline"
-CURRENT_REVISION = "0002_project_skill_hard_delete"
+INTERMEDIATE_REVISION = "0002_project_skill_hard_delete"
+CURRENT_REVISION = "0003_project_skill_unique_name"
 
 
 def _exact_app_only_objects() -> frozenset[str]:
@@ -58,17 +58,30 @@ async def test_classify_database_accepts_exact_current_schema(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_classify_database_accepts_only_exact_baseline_as_upgradeable(
+@pytest.mark.parametrize(
+    ("revision", "signature_name"),
+    [
+        (BASELINE_REVISION, "BASELINE_M7_CATALOG_SIGNATURE"),
+        (
+            INTERMEDIATE_REVISION,
+            "PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE",
+        ),
+    ],
+)
+async def test_classify_database_accepts_only_exact_known_ancestor_as_upgradeable(
     monkeypatch,
+    revision: str,
+    signature_name: str,
 ) -> None:
     connection = AsyncMock()
-    connection.scalar.return_value = BASELINE_REVISION
+    connection.scalar.return_value = revision
     monkeypatch.setattr(
         bootstrap,
         "inventory_user_schema_objects",
         AsyncMock(return_value=_exact_app_only_objects()),
     )
-    read_signature = AsyncMock(return_value=BASELINE_M7_CATALOG_SIGNATURE)
+    expected_signature = getattr(bootstrap, signature_name)
+    read_signature = AsyncMock(return_value=expected_signature)
     monkeypatch.setattr(bootstrap, "read_m7_catalog_signature", read_signature)
 
     assert await bootstrap.classify_database(connection) == "upgradeable"

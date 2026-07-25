@@ -521,6 +521,14 @@ export const assetMutationResponseSchema = z
   })
   .strict();
 
+export const projectSkillImportResponseSchema = z
+  .object({
+    item: assetSummarySchema,
+    version: skillVersionSchema,
+    request_id: z.string().min(1),
+  })
+  .strict();
+
 export const credentialMutationResponseSchema = z
   .object({
     item: credentialMetadataSchema,
@@ -706,6 +714,9 @@ export type ProjectCredentialList = z.infer<typeof projectCredentialListSchema>;
 export type AdminAssetList = z.infer<typeof adminAssetListSchema>;
 export type AdminCredentialList = z.infer<typeof adminCredentialListSchema>;
 export type AssetMutationResponse = z.infer<typeof assetMutationResponseSchema>;
+export type ProjectSkillImportResponse = z.infer<
+  typeof projectSkillImportResponseSchema
+>;
 export type CredentialMutationResponse = z.infer<
   typeof credentialMutationResponseSchema
 >;

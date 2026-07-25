@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import uuid
 from datetime import UTC, datetime
@@ -37,6 +38,7 @@ from app.shared_assets.mcp_service import (
 )
 from app.shared_assets.models import AssetKind, AssetScope, WorkflowStatus
 from app.shared_assets.skill_service import (
+    ProjectSkillArchiveCreateResult,
     SkillAssetView,
     SkillFileContentView,
     SkillVersionView,
@@ -373,6 +375,85 @@ def _skill_version(asset_id: uuid.UUID, *, source_id: uuid.UUID | None = None) -
     )
 
 
+def test_project_skill_archive_upload_returns_created_suspended_skill_and_published_version() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version = dataclasses.replace(
+        _skill_version(asset_id),
+        version_number=1,
+        workflow_status=WorkflowStatus.PUBLISHED,
+        description="Imported skill",
+    )
+    asset = SkillAssetView(
+        id=asset_id,
+        scope=AssetScope.PROJECT,
+        project_id=PROJECT_ID,
+        slug="imported-skill",
+        display_name="imported-skill",
+        status="suspended",
+        current_published_version_id=version.id,
+        version=3,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+        updated_at=NOW,
+        description=version.description,
+    )
+    service.create_project_from_archive_upload.return_value = ProjectSkillArchiveCreateResult(
+        asset=asset,
+        version=version,
+    )
+
+    response = _client(skill_service=service).post(
+        f"/api/projects/{PROJECT_ID}/skills/import",
+        files={
+            "archive": (
+                "imported-skill.tar.gz",
+                b"compressed-package",
+                "application/gzip",
+            )
+        },
+    )
+
+    assert response.status_code == 201
+    assert set(response.json()) == {"item", "version", "request_id"}
+    assert response.json()["item"]["status"] == "suspended"
+    assert response.json()["item"]["current_published_version_id"] == str(
+        version.id,
+    )
+    assert response.json()["version"]["workflow_status"] == "published"
+    actor, payload = service.create_project_from_archive_upload.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert payload == b"compressed-package"
+    assert service.create_project_from_archive_upload.await_args.kwargs == {
+        "filename": "imported-skill.tar.gz",
+    }
+
+
+def test_project_skill_archive_upload_validation_failure_has_stable_422_contract() -> None:
+    service = AsyncMock()
+    service.create_project_from_archive_upload.side_effect = AssetValidationFailed("req-project-assets")
+
+    response = _client(skill_service=service).post(
+        f"/api/projects/{PROJECT_ID}/skills/import",
+        files={
+            "archive": (
+                "unsupported.rar",
+                b"not-a-supported-package",
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": {
+            "code": "asset_validation_failed",
+            "message": "Asset validation failed",
+            "request_id": "req-project-assets",
+        }
+    }
+
+
 def test_project_skill_file_content_preview_is_typed_and_never_cached() -> None:
     service = AsyncMock()
     asset_id = uuid.uuid4()
@@ -689,6 +770,9 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
     fork_path = openapi["paths"]["/api/projects/{project_id}/skills/{asset_id}/versions/{source_version_id}/fork"]
     assert fork_path["post"]["responses"]["201"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/SkillVersionResponse"}
     assert fork_path["post"]["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/SkillForkRequest"}
+    import_path = openapi["paths"]["/api/projects/{project_id}/skills/import"]
+    assert import_path["post"]["responses"]["201"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/SkillArchiveImportResponse"}
+    assert "multipart/form-data" in import_path["post"]["requestBody"]["content"]
     for model_name in (
         "SkillFileContentResponse",
         "SkillFileContentItemResponse",

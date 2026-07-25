@@ -20,12 +20,17 @@ const SCAN_LABEL = {
   block: "阻止",
 } as const;
 
+export const SKILL_FILE_SNAPSHOT_LIMIT = 20;
+
 type SkillWorkspaceProps = Omit<
   ComponentProps<typeof SkillVersionWorkbench>,
   "version"
 >;
 
 function SkillMetadata({ version }: { version: SkillAssetVersion }) {
+  const snapshotFiles = version.file_views.slice(0, SKILL_FILE_SNAPSHOT_LIMIT);
+  const remainingFileCount = version.file_views.length - snapshotFiles.length;
+
   return (
     <div className="space-y-6">
       <section className="space-y-2">
@@ -63,14 +68,19 @@ function SkillMetadata({ version }: { version: SkillAssetVersion }) {
         <div>
           <h3 className="text-sm font-semibold">文件快照</h3>
           <p className="text-muted-foreground mt-1 text-xs">
-            此处展示版本中已验证的文件元数据。
+            共 {version.file_views.length}{" "}
+            个文件。此处展示版本中已验证的文件元数据
+            {remainingFileCount > 0
+              ? `，仅列出前 ${SKILL_FILE_SNAPSHOT_LIMIT} 条`
+              : ""}
+            。
           </p>
         </div>
         {version.file_views.length === 0 ? (
           <p className="text-muted-foreground text-sm">没有文件元数据。</p>
         ) : (
           <div className="divide-border/70 overflow-hidden rounded-xl border">
-            {version.file_views.map((file) => (
+            {snapshotFiles.map((file) => (
               <div key={file.path} className="space-y-1 px-4 py-3 text-sm">
                 <p className="font-mono font-medium break-all">{file.path}</p>
                 <p className="text-muted-foreground text-xs">
@@ -81,6 +91,15 @@ function SkillMetadata({ version }: { version: SkillAssetVersion }) {
                 </p>
               </div>
             ))}
+            {remainingFileCount > 0 ? (
+              <div
+                role="status"
+                className="bg-muted/25 text-muted-foreground border-t px-4 py-3 text-xs"
+              >
+                其余 {remainingFileCount}{" "}
+                个文件未在此重复渲染，请在上方文件树中按目录查看。
+              </div>
+            ) : null}
           </div>
         )}
       </section>

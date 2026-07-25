@@ -68,6 +68,13 @@ class SkillRow(Base):
             unique=True,
             postgresql_where=text("scope = 'project'"),
         ),
+        Index(
+            "uq_skills_project_display_name",
+            project_id,
+            func.lower(display_name),
+            unique=True,
+            postgresql_where=text("scope = 'project'"),
+        ),
     )
 
 

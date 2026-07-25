@@ -1,5 +1,10 @@
+import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import type { Capability } from "@/core/projects/types";
-import type { AssetListKind, ProjectAssetItem } from "@/core/shared-assets";
+import {
+  SharedAssetApiError,
+  type AssetListKind,
+  type ProjectAssetItem,
+} from "@/core/shared-assets";
 
 type ProjectLifecycleItem = Pick<ProjectAssetItem, "capabilities" | "status">;
 type ProjectSkillDeleteItem = Pick<ProjectAssetItem, "capabilities" | "scope">;
@@ -8,6 +13,20 @@ type ProjectSkillStatusItem = Pick<
   "capabilities" | "current_published_version_id" | "scope" | "status"
 >;
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
+
+export function projectAssetCreateErrorMessage(
+  kind: MutableAssetKind,
+  error: unknown,
+): string {
+  if (
+    kind === "skills" &&
+    error instanceof SharedAssetApiError &&
+    error.status === 409
+  ) {
+    return "当前项目已存在同名 Skill，请更换名称或标识。";
+  }
+  return adminAssetErrorMessage(error);
+}
 
 export type ProjectAssetDetailLifecycleAction<Kind extends MutableAssetKind> =
   Kind extends "skills" ? never : "archive" | "suspend";

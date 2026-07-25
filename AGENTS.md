@@ -87,11 +87,11 @@ Config schema and resolution are documented in [backend/AGENTS.md](backend/AGENT
 
 For a new installation, provision an empty PostgreSQL database, run `make setup-db`, then run
 `make start`. The immutable `0001_project_saas_baseline` is the frozen baseline and
-`0002_project_skill_hard_delete` is the current head. Setup applies the complete committed
+`0003_project_skill_unique_name` is the current head. Setup applies the complete committed
 Alembic chain, seeds the packaged system catalog, initializes the LangGraph schema, and
 bootstraps the default project.
 
-An existing database at the exact `0001` ancestor is upgraded by stopping application
+An existing database at an exact known `0001` or `0002` ancestor is upgraded by stopping application
 processes, running `make migrate-db`, then running `make check-db` before restart.
 `migrate-db` applies only committed pending migrations through head; it does not create a
 database, seed the catalog, initialize LangGraph, or bootstrap a project. Runtime startup and
@@ -187,7 +187,7 @@ These apply repo-wide; module guides own the module-specific detail.
   Chromium E2E、构建与安全检查的唯一 CI 编排。不要为这些命令再新增独立重复 workflow；Replay E2E、
   发布、容器、Helm Chart 和版本检查仍保持专用 workflow。
 - **Forward-only schema migrations** — `0001_project_saas_baseline.py` 是禁止改写的冻结基线，
-  当前 head 是线性的 `0002_project_skill_hard_delete.py`；后续变化继续追加新 revision，绝不重写、
+  当前 head 是线性的 `0003_project_skill_unique_name.py`；后续变化继续追加新 revision，绝不重写、
   压缩或 stamp 历史。`make setup-db` 在空库执行完整 migration chain 并初始化 builtin catalog、
   LangGraph schema 与 default project；`make migrate-db` 只将处于精确已知祖先 revision 的存量库升级
   到 head，不执行这些 bootstrap side effects；运行时和 `make check-db` 只读校验。未知 revision 或

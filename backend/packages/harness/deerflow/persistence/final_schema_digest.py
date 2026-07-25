@@ -1,5 +1,5 @@
 """Dependency-free frozen digest for the one M7 PostgreSQL schema."""
 
-M7_CANONICAL_SCHEMA_DIGEST = "560706680c3a8a86d4258cc0ecc8fbcab7d9253632f34cbd272c29e8e60151f3"
+M7_CANONICAL_SCHEMA_DIGEST = "b40e5b14ae668c30eaa0ebccd27f9b9521fe3d8485ffd9ee567f7d59ef37eca6"
 
 __all__ = ["M7_CANONICAL_SCHEMA_DIGEST"]

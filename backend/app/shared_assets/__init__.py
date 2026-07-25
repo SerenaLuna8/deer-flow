@@ -49,6 +49,7 @@ from app.shared_assets.resolver import (
 )
 from app.shared_assets.skill_service import (
     CreateSkill,
+    ProjectSkillArchiveCreateResult,
     SkillArchivePreview,
     SkillAssetView,
     SkillFileChange,
@@ -92,6 +93,7 @@ __all__ = [
     "McpVersionView",
     "MaterializedMcpSecrets",
     "ProjectAssetResolver",
+    "ProjectSkillArchiveCreateResult",
     "ResolvedAgentSnapshot",
     "ResolvedAssetSnapshot",
     "ResolvedMcpSnapshot",
