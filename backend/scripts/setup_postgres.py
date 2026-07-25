@@ -23,10 +23,11 @@ from app.projects.errors import ProjectBootstrapFailed
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import (
     M7RecreateRequired,
+    SchemaMigrationRequired,
+    SchemaSetupRequired,
     _get_head_revision,
-)
-from deerflow.persistence.bootstrap import (
-    migrate_schema as bootstrap_schema,
+    bootstrap_schema,
+    migrate_schema,
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -214,17 +215,23 @@ async def _complete_bootstrap_lock(database_url: str):
         await lock_engine.dispose()
 
 
-async def _bootstrap_existing(database_url: str) -> str:
+async def _bootstrap_existing(
+    database_url: str,
+    *,
+    migrate_only: bool = False,
+) -> str:
     engine = _create_setup_engine(DatabaseConfig(url=database_url))
     primary_error: BaseException | None = None
     try:
         async with _complete_bootstrap_lock(database_url):
             async with engine.connect() as connection:
                 await connection.execute(text("SELECT 1"))
-            await bootstrap_schema(engine)
-            await _bootstrap_builtin_catalog(engine)
-            await _bootstrap_langgraph_schemas(database_url)
-            await _bootstrap_default_project_schema(engine)
+            schema_operation = migrate_schema if migrate_only else bootstrap_schema
+            await schema_operation(engine)
+            if not migrate_only:
+                await _bootstrap_builtin_catalog(engine)
+                await _bootstrap_langgraph_schemas(database_url)
+                await _bootstrap_default_project_schema(engine)
         return _get_head_revision()
     except ProjectBootstrapFailed as exc:
         primary_error = exc
@@ -232,6 +239,12 @@ async def _bootstrap_existing(database_url: str) -> str:
     except M7RecreateRequired as exc:
         primary_error = exc
         raise PostgresSetupError("M7_RECREATE_REQUIRED: 目标库 revision 未知或 schema catalog 已漂移；DeerFlow 不会自动删除、覆盖或修复现有数据") from None
+    except SchemaMigrationRequired as exc:
+        primary_error = exc
+        raise PostgresSetupError("DATABASE_MIGRATION_REQUIRED: 目标库版本落后；请运行 `make migrate-db` 完成向前迁移") from None
+    except SchemaSetupRequired as exc:
+        primary_error = exc
+        raise PostgresSetupError("DATABASE_SETUP_REQUIRED: 目标库尚未初始化；请运行 `make setup-db`") from None
     except RuntimeError as exc:
         primary_error = exc
         raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None
@@ -281,7 +294,7 @@ async def setup_postgres(
         target.database,
         owner_name=target.username,
     )
-    revision = await _bootstrap_existing(database_url)
+    revision = await _bootstrap_existing(database_url, migrate_only=False)
     return SetupResult(
         host=target.host,
         port=target.port,
@@ -299,7 +312,7 @@ async def migrate_postgres(database_url: str, *, expected_database: str | None =
         expected_database = validate_identifier(expected_database, kind="database")
         if target.database != expected_database:
             raise ValueError("DATABASE_URL database does not match --database")
-    revision = await _bootstrap_existing(database_url)
+    revision = await _bootstrap_existing(database_url, migrate_only=True)
     return SetupResult(
         host=target.host,
         port=target.port,

@@ -86,16 +86,17 @@ Config schema and resolution are documented in [backend/AGENTS.md](backend/AGENT
 ## PostgreSQL schema lifecycle
 
 For a new installation, provision an empty PostgreSQL database, run `make setup-db`, then run
-`make start`. Before the first release, all current schema requirements are consolidated into the
-single `0001_project_saas_baseline` revision. Setup applies the committed Alembic chain through the
-current head, seeds the packaged system catalog, initializes the LangGraph schema, and bootstraps
-the default project.
+`make start`. The immutable `0001_project_saas_baseline` is the frozen baseline and
+`0002_project_skill_hard_delete` is the current head. Setup applies the complete committed
+Alembic chain, seeds the packaged system catalog, initializes the LangGraph schema, and
+bootstraps the default project.
 
-After future revisions are added, an existing database at a known ancestor revision is upgraded by
-stopping application processes, running `make migrate-db`, then running `make check-db` before
-restart. `migrate-db` applies only committed pending migrations through head; it does not create a
-database. Runtime startup and `check-db` are read-only schema consumers and never create, migrate,
-stamp, or repair database objects.
+An existing database at the exact `0001` ancestor is upgraded by stopping application
+processes, running `make migrate-db`, then running `make check-db` before restart.
+`migrate-db` applies only committed pending migrations through head; it does not create a
+database, seed the catalog, initialize LangGraph, or bootstrap a project. Runtime startup and
+`check-db` are read-only schema consumers and never create, migrate, stamp, or repair database
+objects.
 
 An unknown revision, an unversioned nonempty schema, or catalog drift is rejected without
 automatic repair. Downgrade, manual stamp, automatic deletion, and destructive reset are
@@ -118,7 +119,7 @@ make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install backend and frontend dependencies
 make setup-db    # 显式创建并完整初始化 PostgreSQL 目标库
-make migrate-db  # 未来新增 revision 后，显式向前迁移存量库
+make migrate-db  # 将处于精确已知祖先 revision 的存量库显式迁移到 head
 make rotate-credentials ARGS="--dry-run --key-id m3-next"  # 分批轮换 credential envelope
 make check-db    # 只读检查连接、Alembic head 与必需表
 make release-acceptance  # M8 宿主机完整 candidate/review/final 验收（要求显式 live 环境）
@@ -185,12 +186,12 @@ These apply repo-wide; module guides own the module-specific detail.
   pytest（已递归收集 `tests/blocking_io/`）、固定 23 文件 PostgreSQL 门禁、前端单元测试、确定性
   Chromium E2E、构建与安全检查的唯一 CI 编排。不要为这些命令再新增独立重复 workflow；Replay E2E、
   发布、容器、Helm Chart 和版本检查仍保持专用 workflow。
-- **Forward-only schema migrations** — 项目尚未上线，因此当前全部 schema 已合并进唯一的
-  `0001_project_saas_baseline.py`。从这份合并基线开始禁止改写已发布 revision；未来 schema 变化必须
-  从 `0002` 起追加线性 Alembic revision。`make setup-db` 在空库执行 migration chain 并初始化 builtin
-  catalog、LangGraph schema 与 default project；`make migrate-db` 保留给未来版本，只将处于已知祖先
-  revision 的存量库显式升级到 head；运行时和 `make check-db` 只读校验。未知 revision 或 catalog drift
-  拒绝自动处理。真实测试只准使用随机 `deerflow_test_*`，绝不连接业务库。
+- **Forward-only schema migrations** — `0001_project_saas_baseline.py` 是禁止改写的冻结基线，
+  当前 head 是线性的 `0002_project_skill_hard_delete.py`；后续变化继续追加新 revision，绝不重写、
+  压缩或 stamp 历史。`make setup-db` 在空库执行完整 migration chain 并初始化 builtin catalog、
+  LangGraph schema 与 default project；`make migrate-db` 只将处于精确已知祖先 revision 的存量库升级
+  到 head，不执行这些 bootstrap side effects；运行时和 `make check-db` 只读校验。未知 revision 或
+  catalog drift 拒绝自动处理。真实测试只准使用随机 `deerflow_test_*`，绝不连接业务库。
 - **平台资产管理** — `/admin/assets` 由 server layout 强制限制为 `system_admin`，普通用户返回
   404。Credential create/replace 使用 imperative authenticated API，不得把 secret-bearing input
   放入 TanStack Query/Mutation cache；MCP Credential slot 只能走 submit/approve。轮换状态 GET

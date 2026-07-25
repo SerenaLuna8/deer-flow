@@ -185,6 +185,27 @@ describe("project governance redesign", () => {
     expect(description.metadata.map((item) => item.label)).not.toContain(
       "member_limit",
     );
+
+    const deleted = describeAuditItem(
+      {
+        id: "55555555-5555-4555-8555-555555555555",
+        occurred_at: "2026-07-25T15:00:00Z",
+        actor: "user",
+        action: "asset.deleted",
+        target_kind: "asset",
+        outcome: "success",
+        public_error_code: null,
+        metadata: { asset_kind: "skill" },
+      },
+      "zh-CN",
+    );
+    expect(deleted).toEqual(
+      expect.objectContaining({
+        action: "已删除资产",
+        target: "资产",
+        metadata: [{ label: "资产类型", value: "Skill" }],
+      }),
+    );
   });
 
   test("renders localized audit events without inventing actor or target names", () => {

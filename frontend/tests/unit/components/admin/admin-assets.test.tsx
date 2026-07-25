@@ -32,6 +32,7 @@ rs.mock("@/core/static-mode", () => ({ isStaticWebsiteOnly: () => false }));
 import AdminLayout from "@/app/admin/layout";
 import {
   AgentVersionFields,
+  skillMarkdownTemplate,
   McpVersionFields,
   SkillVersionFields,
 } from "@/components/admin/assets/admin-asset-dialogs";
@@ -200,9 +201,13 @@ describe("admin asset access and credential safety", () => {
   });
 
   test("authoring fields use Chinese labels for ordinary UI terms", () => {
-    const html = [AgentVersionFields, SkillVersionFields, McpVersionFields]
-      .map((Fields) => renderToStaticMarkup(createElement(Fields)))
-      .join("\n");
+    const html = [
+      renderToStaticMarkup(createElement(AgentVersionFields)),
+      renderToStaticMarkup(
+        createElement(SkillVersionFields, { assetSlug: "review-skill" }),
+      ),
+      renderToStaticMarkup(createElement(McpVersionFields)),
+    ].join("\n");
 
     for (const label of [
       "逻辑模型",
@@ -229,6 +234,21 @@ describe("admin asset access and credential safety", () => {
     ]) {
       expect(html).not.toContain(english);
     }
+  });
+
+  test("blank Skill authoring provides a valid immutable SKILL.md envelope", () => {
+    const template = skillMarkdownTemplate("review-skill");
+    const html = renderToStaticMarkup(
+      createElement(SkillVersionFields, { assetSlug: "review-skill" }),
+    );
+
+    expect(template).toContain("---\nname: review-skill\n");
+    expect(template).toMatch(/\ndescription: .+\n---\n/u);
+    expect(html).toContain("SKILL.md");
+    expect(html).toContain("text/markdown");
+    expect(html).toContain("name: review-skill");
+    expect(html).not.toContain('name="path"');
+    expect(html).not.toContain('name="media_type"');
   });
 
   test("agent authoring selects configured logical models and named dependencies", () => {
@@ -492,6 +512,15 @@ describe("admin asset access and credential safety", () => {
         new SharedAssetApiError(409, "ASSET_CONFLICT", "Asset state conflict"),
       ),
     ).toBe("资产状态已变化，请刷新后重试。");
+    expect(
+      adminAssetErrorMessage(
+        new SharedAssetApiError(
+          429,
+          "ASSET_STORAGE_QUOTA_EXCEEDED",
+          "Project Skill storage quota exceeded",
+        ),
+      ),
+    ).toBe("项目 Skill 存储配额已用尽，请清理不再需要的 Skill 后重试。");
     expect(adminAssetErrorMessage(new Error("private backend detail"))).toBe(
       "操作失败，请稍后重试。",
     );

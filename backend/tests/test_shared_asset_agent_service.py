@@ -132,6 +132,37 @@ async def test_oversized_agent_model_ref_is_rejected_before_storage_is_opened() 
 
 
 @pytest.mark.asyncio
+async def test_agent_dependency_closure_rejects_duplicate_skill_slugs() -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    actor = _editor_context()
+    system_version_id = uuid.uuid4()
+    project_version_id = uuid.uuid4()
+    repository = AsyncMock()
+    repository.resolve_project_skill_versions.return_value = (
+        system_version_id,
+        project_version_id,
+    )
+    repository.resolve_project_mcp_versions.return_value = ()
+    repository.lock_skill_version_slugs.return_value = (
+        "duplicate-skill",
+        "duplicate-skill",
+    )
+
+    with pytest.raises(AssetValidationFailed) as exc_info:
+        await service_module.AgentService(lambda: None)._validate_dependency_closure(
+            repository,
+            actor,
+            (system_version_id, project_version_id),
+            (),
+        )
+
+    assert exc_info.value.request_id == actor.request_id
+    repository.lock_skill_version_slugs.assert_awaited_once_with(
+        (system_version_id, project_version_id),
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("constraint_name", "error_type"),
     [

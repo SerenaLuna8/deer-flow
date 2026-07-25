@@ -80,6 +80,90 @@ final result: passed
 
 ---
 
+# DeerFlow 项目 Skill 列表与文件工作区 Design QA
+
+## 对照基线
+
+- Source visual truth:
+  `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-0d2284d3-f6ad-40c0-846a-260366410d8a.png`
+- Browser implementation:
+  `http://localhost:2026/projects/default-project/skills`
+- Project Skill list screenshot:
+  `/private/tmp/deer-flow-skill-qa/skill-list-default-disabled.png`
+- File-folder picker screenshot:
+  `/private/tmp/deer-flow-skill-qa/skill-new-file-folder-picker.png`
+- Detail file-tree screenshot:
+  `/private/tmp/deer-flow-skill-qa/skill-detail-folder-tree.png`
+- Reference comparison:
+  `/private/tmp/deer-flow-skill-qa/design-reference-vs-implementation.jpg`
+- Viewport: `1892 × 1254` CSS px
+- Source pixels: `1892 × 1254`
+- Implementation pixels: `1892 × 1254`
+- State:
+  项目自建 Skill 已发布但保持停用；`references/guide.md` 为当前选中文件。
+
+## Findings
+
+- 无剩余 P0、P1 或 P2 问题。
+- 项目自建列表和详情使用同一启停状态；无发布版本时开关禁用并显示“请先发布版本”。
+- 详情顶部仅保留名称、启停开关和关闭按钮，不再显示来源/状态标签、重复 slug 或“暂停”操作。
+- 文件区使用真实可展开目录树，目录层级和当前选中文件清晰可见；右侧只渲染当前文件。
+- 新建文件必须选择目标文件夹，并显示完整路径；流程内可继续创建子文件夹。
+- 用户明确要求不融入参考图的多文件标签和面包屑，因此实现保留现有详情结构，只采用目录树、文件选择和编辑区域。
+- 启停请求完成后详情侧栏与当前文件保持打开，不再因项目上下文刷新而关闭。
+
+## Required Fidelity Surfaces
+
+- Fonts and typography:
+  复用 DeerFlow 现有字体、标题、辅助信息和等宽源码样式。
+- Spacing and layout rhythm:
+  详情侧栏保持原有信息卡、版本区和折叠检查区；文件树与当前文件采用稳定的左右两栏。
+- Colors and visual tokens:
+  复用现有 `border`、`muted`、`selection`、`success` 与危险操作令牌。
+- Image quality and asset fidelity:
+  本轮没有新增图片；文件、文件夹、源码和预览图标来自现有 Lucide 图标库。
+- Copy and content:
+  新建 Skill 自动生成非空 `SKILL.md` 基础模板；空目录持久化限制在流程中明确说明。
+- Interaction and accessibility:
+  文件树使用 `tree` / `treeitem`，启停使用 `switch`，目录和文件创建对话框都有明确可访问名称。
+
+## Comparison History
+
+1. Pass 1:
+   目录树、单文件显示和目录选择已符合用户选定区域，但真实浏览器发现详情页启停后侧栏会被项目查询刷新关闭。
+2. Fix:
+   Skill 状态变更改为只刷新资产列表，避免重载项目上下文，并补充回归测试。
+3. Pass 2:
+   真实浏览器依次验证启用、停用、文件选择和目录树，详情保持原位；最终参考图并排对照未发现剩余 P0、P1 或 P2 问题。
+
+## Browser Verification
+
+- Primary interactions tested:
+  - 创建项目 Skill 后默认停用
+  - 空白版本生成非空 `SKILL.md`
+  - 未发布版本的启用开关禁用
+  - 发布后在列表和详情启用、停用
+  - 启停后详情保持打开
+  - 创建 `references/` 文件夹
+  - 在目标目录创建并打开 `references/guide.md`
+  - 详情文件树选择嵌套文件
+  - 永久删除提示包含全部版本与文件，确认按钮等待 5 秒
+- Clean-tab console errors: `0`
+- Temporary QA Skill:
+  验收完成后通过五秒确认永久删除，项目恢复为原有一条自建 Skill。
+
+## Automated Verification
+
+- Frontend unit tests: `1049 passed`
+- Frontend lint and TypeScript: passed
+- Backend full tests: `6853 passed, 966 skipped`
+- Backend focused Ruff and formatting: passed
+- Git diff check: passed
+
+final result: passed
+
+---
+
 # DeerFlow 对话澄清卡片方案 2 Design QA
 
 ## 对照基线

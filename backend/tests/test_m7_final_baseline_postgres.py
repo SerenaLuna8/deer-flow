@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,16 +18,31 @@ from support.m4_private_threads import seed_m4_thread_database
 import deerflow.persistence.models  # noqa: F401
 from app.final_schema import M7_FINAL_SCHEMA_REVISION
 from app.gateway.auth.sessions import generate_session_id, hash_session_id
+from app.private_work.asset_runtime import PrivateAssetRuntime
+from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.projects.context import ProjectContext
+from app.shared_assets.agent_service import AgentService
+from app.shared_assets.models import AgentPayload, SkillArchiveFile
+from app.shared_assets.skill_service import SkillService
 from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.auth_sessions import AuthSessionRepository, AuthSessionRow
 from deerflow.persistence.base import Base
+from deerflow.persistence.shared_assets import (
+    AgentRow,
+    AgentVersionRow,
+    AgentVersionSkillRefRow,
+    SkillRow,
+    SkillVersionFileRow,
+    SkillVersionRow,
+)
 from deerflow.persistence.user.model import UserRow
 from scripts.check_postgres import check_postgres
 from scripts.setup_postgres import PostgresSetupError, _bootstrap_existing
 
-CURRENT_REVISION = "0001_project_saas_baseline"
+BASELINE_REVISION = "0001_project_saas_baseline"
+CURRENT_REVISION = "0002_project_skill_hard_delete"
 FROZEN_BASELINE_SHA256 = "a2239e89966891c13d75a307d54deec2e45f03eb19b10ac8f3bf06d2ffb3eb71"
 
 LEGACY_RELATIONS = {
@@ -95,6 +111,22 @@ EXPECTED_LANGGRAPH_INDEX_OWNERS = {
     ("store_prefix_idx", "store"),
     ("store_migrations_pkey", "store_migrations"),
 }
+
+
+def _v1_skill_checksum(path: str, content: bytes) -> str:
+    canonical = json.dumps(
+        [
+            {
+                "path": path,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+            }
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _versions_dir() -> Path:
@@ -287,20 +319,32 @@ async def _native_relational_catalog(
     return snapshot
 
 
-def test_migration_history_has_single_merged_0001_head() -> None:
+def test_migration_history_preserves_frozen_0001_and_has_one_0002_head() -> None:
     revision_files = sorted(path for path in _versions_dir().glob("*.py") if path.name != "__init__.py")
-    assert [path.name for path in revision_files] == ["0001_project_saas_baseline.py"]
+    assert [path.name for path in revision_files] == [
+        "0001_project_saas_baseline.py",
+        "0002_project_skill_hard_delete.py",
+    ]
     assert hashlib.sha256(revision_files[0].read_bytes()).hexdigest() == FROZEN_BASELINE_SHA256
 
     baseline_spec = importlib.util.spec_from_file_location("m7_final_baseline", revision_files[0])
     assert baseline_spec is not None and baseline_spec.loader is not None
     baseline_module = importlib.util.module_from_spec(baseline_spec)
     baseline_spec.loader.exec_module(baseline_module)
-    assert baseline_module.revision == CURRENT_REVISION
+    assert baseline_module.revision == BASELINE_REVISION
     assert baseline_module.down_revision is None
+
+    head_spec = importlib.util.spec_from_file_location("project_skill_hard_delete", revision_files[1])
+    assert head_spec is not None and head_spec.loader is not None
+    head_module = importlib.util.module_from_spec(head_spec)
+    head_spec.loader.exec_module(head_module)
+    assert head_module.revision == CURRENT_REVISION
+    assert head_module.down_revision == BASELINE_REVISION
     assert bootstrap_module._get_head_revision() == CURRENT_REVISION
     with pytest.raises(RuntimeError, match="M7 baseline downgrade is unsupported"):
         baseline_module.downgrade()
+    with pytest.raises(RuntimeError, match="forward-only schema downgrade is unsupported"):
+        head_module.downgrade()
 
 
 def test_final_metadata_and_contract_have_no_staged_relations() -> None:
@@ -310,7 +354,7 @@ def test_final_metadata_and_contract_have_no_staged_relations() -> None:
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_empty_database_installs_merged_0001_head(
+async def test_empty_database_installs_current_forward_head(
     postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(postgres_database_url)
@@ -322,6 +366,199 @@ async def test_empty_database_installs_merged_0001_head(
             relations = set((await connection.execute(text("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"))).scalars())
             assert not (relations & LEGACY_RELATIONS)
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_exact_0001_ancestor_requires_and_accepts_explicit_migration(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await asyncio.to_thread(
+            bootstrap_module._upgrade,
+            bootstrap_module._get_alembic_config(engine),
+            BASELINE_REVISION,
+        )
+        async with engine.connect() as connection:
+            assert await bootstrap_module.classify_database(connection) == "upgradeable"
+        with pytest.raises(bootstrap_module.SchemaMigrationRequired):
+            await bootstrap_module.validate_schema(engine)
+        with pytest.raises(bootstrap_module.SchemaMigrationRequired):
+            await bootstrap_module.bootstrap_schema(engine)
+
+        await bootstrap_module.migrate_schema(engine)
+
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_REVISION
+            assert await bootstrap_module.classify_database(connection) == "current"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_0001_skill_and_run_snapshot_remain_readable_and_materializable_after_0002(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    seed = None
+    runtime = None
+    try:
+        await asyncio.to_thread(
+            bootstrap_module._upgrade,
+            bootstrap_module._get_alembic_config(engine),
+            BASELINE_REVISION,
+        )
+        seed = await seed_m4_thread_database(postgres_database_url)
+        factory = seed.factory
+        skill_id = uuid.uuid4()
+        skill_version_id = uuid.uuid4()
+        agent_id = uuid.uuid4()
+        agent_version_id = uuid.uuid4()
+        skill_content = b"---\nname: v1-migration-skill\ndescription: Existing revision 0001 Skill\n---\n\nKeep this package executable after migration.\n"
+        skill_checksum = _v1_skill_checksum("SKILL.md", skill_content)
+        agent_payload = AgentPayload(
+            description="Existing revision 0001 Agent",
+            soul="Use the exact persisted Skill.",
+            model_ref="test-model",
+            tool_groups=(),
+            skill_version_ids=(skill_version_id,),
+            mcp_version_ids=(),
+        )
+        agent_checksum = AgentService._payload_checksum(agent_payload)
+
+        async with factory() as session, session.begin():
+            skill = SkillRow(
+                id=skill_id,
+                scope="project",
+                project_id=seed.owner_a.project_id,
+                slug="v1-migration-skill",
+                display_name="V1 Migration Skill",
+                created_by_user_id=str(seed.owner_a.user_id),
+            )
+            session.add(skill)
+            await session.flush()
+            skill_version = SkillVersionRow(
+                id=skill_version_id,
+                skill_id=skill_id,
+                version_number=1,
+                workflow_status="draft",
+                description="Existing revision 0001 Skill",
+                frontmatter={
+                    "name": "v1-migration-skill",
+                    "description": "Existing revision 0001 Skill",
+                },
+                compatibility=None,
+                secret_requirements=[],
+                scan_decision="allow",
+                scan_summary={},
+                payload_checksum=skill_checksum,
+                created_by_user_id=str(seed.owner_a.user_id),
+            )
+            session.add(skill_version)
+            await session.flush()
+            session.add(
+                SkillVersionFileRow(
+                    skill_version_id=skill_version_id,
+                    path="SKILL.md",
+                    media_type="text/markdown",
+                    size_bytes=len(skill_content),
+                    sha256=hashlib.sha256(skill_content).hexdigest(),
+                    content=skill_content,
+                )
+            )
+            await session.flush()
+            skill_version.workflow_status = "published"
+            skill.current_published_version_id = skill_version_id
+
+            agent = AgentRow(
+                id=agent_id,
+                scope="project",
+                project_id=seed.owner_a.project_id,
+                slug="v1-migration-agent",
+                display_name="V1 Migration Agent",
+                created_by_user_id=str(seed.owner_a.user_id),
+            )
+            session.add(agent)
+            await session.flush()
+            agent_version = AgentVersionRow(
+                id=agent_version_id,
+                agent_id=agent_id,
+                version_number=1,
+                workflow_status="draft",
+                description=agent_payload.description,
+                soul=agent_payload.soul,
+                model_ref=agent_payload.model_ref,
+                tool_groups=list(agent_payload.tool_groups),
+                payload_checksum=agent_checksum,
+                created_by_user_id=str(seed.owner_a.user_id),
+            )
+            session.add(agent_version)
+            await session.flush()
+            session.add(
+                AgentVersionSkillRefRow(
+                    agent_version_id=agent_version_id,
+                    skill_version_id=skill_version_id,
+                    sort_order=0,
+                )
+            )
+            await session.flush()
+            agent_version.workflow_status = "published"
+            agent.current_published_version_id = agent_version_id
+            await session.flush()
+
+        thread_id = f"v1-migration-{uuid.uuid4().hex}"
+        async with factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(agent_id, "project"),
+            )
+        admitted = await PrivateRunAdmissionService(factory).admit(
+            seed.owner_a,
+            thread_id,
+            PrivateRunCreate(),
+        )
+        assert [item.payload_checksum for item in admitted.snapshot.assets] == [
+            agent_checksum,
+            skill_checksum,
+        ]
+
+        await bootstrap_module.migrate_schema(engine)
+
+        actor = ProjectContext(
+            user_id=seed.owner_a.user_id,
+            project_id=seed.owner_a.project_id,
+            membership_id=seed.owner_a.membership_id,
+            role=seed.owner_a.role,
+            capabilities=seed.owner_a.capabilities,
+            membership_version=seed.owner_a.membership_version,
+            request_id="req-v1-skill-after-0002",
+        )
+        assert await SkillService(factory).load_version_files(
+            actor,
+            skill_id,
+            skill_version_id,
+        ) == (
+            SkillArchiveFile(
+                path="SKILL.md",
+                content=skill_content,
+                media_type="text/markdown",
+            ),
+        )
+
+        runtime = await PrivateAssetRuntime(factory).materialize(
+            seed.owner_a,
+            admitted,
+        )
+        assert (runtime.skill_root / "custom" / skill_id.hex / "SKILL.md").read_bytes() == skill_content
+    finally:
+        if runtime is not None:
+            await runtime.aclose()
+        if seed is not None:
+            await seed.engine.dispose()
         await engine.dispose()
 
 

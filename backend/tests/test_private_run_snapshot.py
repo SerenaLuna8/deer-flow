@@ -5,6 +5,7 @@ import dataclasses
 import json
 import uuid
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -68,6 +69,42 @@ class SnapshotScenario:
                 mcp_version_ids=(self.mcp_version_id,),
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_run_snapshot_skill_resolution_takes_shared_row_locks() -> None:
+    project_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    asset = SimpleNamespace(
+        scope="project",
+        project_id=project_id,
+        status="active",
+    )
+    version = SimpleNamespace(workflow_status="published")
+
+    class Result:
+        def one_or_none(self):
+            return asset, version
+
+    class Session:
+        statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            return Result()
+
+    session = Session()
+
+    rows = await RunSnapshotRepository._skills(
+        session,
+        (version_id,),
+        project_id,
+    )
+
+    assert rows == [(asset, version)]
+    assert session.statement is not None
+    assert session.statement._for_update_arg is not None
+    assert session.statement._for_update_arg.read is True
 
 
 @pytest_asyncio.fixture()

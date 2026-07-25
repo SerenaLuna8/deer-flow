@@ -3,11 +3,11 @@
 import {
   Code2Icon,
   EyeIcon,
-  FileCode2Icon,
+  FilePlus2Icon,
   FileWarningIcon,
+  FolderPlusIcon,
   Loader2Icon,
   PencilIcon,
-  PlusIcon,
   RotateCcwIcon,
   SaveIcon,
   Trash2Icon,
@@ -35,25 +35,25 @@ import {
   type SkillFileChange,
 } from "@/core/shared-assets";
 import { SafeStreamdown } from "@/core/streamdown/components";
-import { cn } from "@/lib/utils";
 
 import type { SkillAssetVersion } from "./skill-asset-detail";
+import { SkillFileTree } from "./skill-file-tree";
 import {
   addSkillFile,
+  addSkillFolder,
+  buildSkillFileTree,
+  defaultSkillFileFolder,
   deleteSkillFile,
   editSkillFile,
+  joinSkillFilePath,
+  listSkillFolderPaths,
   listWorkingSkillFiles,
   markdownPreviewContent,
   renameSkillFile,
+  type SkillFileTreeSelection,
 } from "./skill-file-workbench-state";
 
 type PathDialogMode = "add" | "rename";
-
-const FILE_STATE_LABEL = {
-  unchanged: null,
-  modified: "已修改",
-  added: "新增",
-} as const;
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -80,6 +80,12 @@ function mediaTypeForPath(path: string): string {
 function pathErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     if (error.message.includes("already exists")) return "这个文件路径已存在。";
+    if (error.message.includes("Parent folder"))
+      return "请选择已经存在的父文件夹。";
+    if (error.message.includes("Folder name"))
+      return "文件夹名称只能是一段有效名称，不能包含斜杠。";
+    if (error.message.includes("Filename"))
+      return "文件名不能为空，也不能包含斜杠。";
     if (error.message.includes("SKILL.md"))
       return "根目录 SKILL.md 不能重命名或删除。";
   }
@@ -97,6 +103,21 @@ function basename(path: string): string {
 function dirname(path: string): string {
   const parts = path.split("/");
   return parts.length > 1 ? parts.slice(0, -1).join("/") : "根目录";
+}
+
+function directoryPath(path: string): string {
+  const directory = dirname(path);
+  return directory === "根目录" ? "" : directory;
+}
+
+function folderPathWithName(parent: string, name: string): string {
+  return parent ? `${parent}/${name}` : name;
+}
+
+function foldersThrough(path: string): string[] {
+  if (!path) return [];
+  const parts = path.split("/");
+  return parts.map((_, index) => parts.slice(0, index + 1).join("/"));
 }
 
 export function SkillVersionWorkbench({
@@ -120,9 +141,20 @@ export function SkillVersionWorkbench({
     version.file_views.find((file) => file.path === "SKILL.md")?.path ??
     version.file_views[0]?.path ??
     "";
-  const [selectedPath, setSelectedPath] = useState(initialPath);
+  const [selection, setSelection] = useState<SkillFileTreeSelection | null>(
+    initialPath ? { kind: "file", path: initialPath } : null,
+  );
   const [editing, setEditing] = useState(false);
   const [changes, setChanges] = useState<SkillFileChange[]>([]);
+  const [explicitFolders, setExplicitFolders] = useState<string[]>([]);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
+    () =>
+      new Set(
+        version.file_views.flatMap((file) =>
+          foldersThrough(directoryPath(file.path)),
+        ),
+      ),
+  );
   const [loadedSources, setLoadedSources] = useState<Record<string, string>>(
     {},
   );
@@ -131,7 +163,15 @@ export function SkillVersionWorkbench({
   );
   const [pathDialog, setPathDialog] = useState<PathDialogMode | null>(null);
   const [pathInput, setPathInput] = useState("");
+  const [fileNameInput, setFileNameInput] = useState("");
+  const [targetFolder, setTargetFolder] = useState("");
+  const [inlineFolderOpen, setInlineFolderOpen] = useState(false);
+  const [inlineFolderName, setInlineFolderName] = useState("");
   const [pathError, setPathError] = useState<string | null>(null);
+  const [folderDialogOpen, setFolderDialogOpen] = useState(false);
+  const [folderParent, setFolderParent] = useState("");
+  const [folderNameInput, setFolderNameInput] = useState("");
+  const [folderError, setFolderError] = useState<string | null>(null);
   const [deletePath, setDeletePath] = useState<string | null>(null);
   const [discardOpen, setDiscardOpen] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -141,6 +181,15 @@ export function SkillVersionWorkbench({
     () => listWorkingSkillFiles(version.file_views, changes),
     [changes, version.file_views],
   );
+  const folderPaths = useMemo(
+    () => listSkillFolderPaths(workingFiles, explicitFolders),
+    [explicitFolders, workingFiles],
+  );
+  const fileTree = useMemo(
+    () => buildSkillFileTree(workingFiles, explicitFolders),
+    [explicitFolders, workingFiles],
+  );
+  const selectedPath = selection?.kind === "file" ? selection.path : "";
   const selectedFile =
     workingFiles.find((file) => file.path === selectedPath) ?? null;
   const selectedChange = changes.find(
@@ -168,6 +217,10 @@ export function SkillVersionWorkbench({
     selectedFile && isMarkdown(selectedFile.path, selectedFile.media_type),
   );
   const dirty = changes.length > 0;
+  const emptyExplicitFolders = explicitFolders.filter(
+    (folder) =>
+      !workingFiles.some((file) => file.path.startsWith(`${folder}/`)),
+  );
 
   useEffect(() => {
     if (serverFile?.preview_status !== "ready" || serverFile.content === null)
@@ -201,34 +254,71 @@ export function SkillVersionWorkbench({
   );
 
   function selectFile(path: string) {
-    setSelectedPath(path);
+    setSelection({ kind: "file", path });
     setDisplayMode("source");
     setLocalError(null);
   }
 
+  function selectFolder(path: string) {
+    setSelection({ kind: "folder", path });
+    setDisplayMode("source");
+    setLocalError(null);
+  }
+
+  function toggleFolder(path: string) {
+    setExpandedFolders((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+
+  function expandFolder(path: string) {
+    setExpandedFolders(
+      (current) => new Set([...current, ...foldersThrough(path)]),
+    );
+  }
+
   function beginPathDialog(mode: PathDialogMode) {
     setPathDialog(mode);
-    setPathInput(mode === "rename" ? selectedPath : "references/notes.md");
+    if (mode === "rename") {
+      setPathInput(selectedPath);
+    } else {
+      setFileNameInput("");
+      setTargetFolder(defaultSkillFileFolder(selection));
+      setInlineFolderOpen(false);
+      setInlineFolderName("");
+    }
     setPathError(null);
   }
 
   function commitPathDialog() {
     try {
       if (pathDialog === "add") {
+        const nextPath = joinSkillFilePath(targetFolder, fileNameInput);
+        if (folderPaths.includes(nextPath)) {
+          throw new Error("Skill file path already exists");
+        }
         const next = addSkillFile(
           changes,
           version.file_views,
-          pathInput,
+          nextPath,
           "",
-          mediaTypeForPath(pathInput),
+          mediaTypeForPath(nextPath),
         );
         setChanges(next);
-        setSelectedPath(pathInput);
+        setSelection({ kind: "file", path: nextPath });
+        expandFolder(targetFolder);
       } else if (
         pathDialog === "rename" &&
         selectedFile &&
         sourceContent !== null
       ) {
+        const previousFolder = directoryPath(selectedFile.path);
+        if (folderPaths.includes(pathInput)) {
+          throw new Error("Skill file path already exists");
+        }
         const next = renameSkillFile(
           changes,
           version.file_views,
@@ -238,7 +328,15 @@ export function SkillVersionWorkbench({
           mediaTypeForPath(pathInput),
         );
         setChanges(next);
-        setSelectedPath(pathInput);
+        if (previousFolder && previousFolder !== directoryPath(pathInput)) {
+          setExplicitFolders((current) =>
+            current.includes(previousFolder)
+              ? current
+              : [...current, previousFolder],
+          );
+        }
+        setSelection({ kind: "file", path: pathInput });
+        expandFolder(directoryPath(pathInput));
       }
       setPathDialog(null);
       setPathError(null);
@@ -248,17 +346,86 @@ export function SkillVersionWorkbench({
     }
   }
 
+  function createFolder({
+    parent,
+    name,
+    select,
+  }: {
+    parent: string;
+    name: string;
+    select: boolean;
+  }) {
+    const normalizedName = name.trim();
+    const next = addSkillFolder(
+      explicitFolders,
+      workingFiles,
+      parent,
+      normalizedName,
+    );
+    const path = folderPathWithName(parent, normalizedName);
+    setExplicitFolders(next);
+    expandFolder(path);
+    if (select) selectFolder(path);
+    return path;
+  }
+
+  function commitFolderDialog() {
+    try {
+      createFolder({
+        parent: folderParent,
+        name: folderNameInput,
+        select: true,
+      });
+      setFolderDialogOpen(false);
+      setFolderError(null);
+      setFolderNameInput("");
+    } catch (error) {
+      setFolderError(pathErrorMessage(error));
+    }
+  }
+
+  function commitInlineFolder() {
+    try {
+      const path = createFolder({
+        parent: targetFolder,
+        name: inlineFolderName,
+        select: false,
+      });
+      setTargetFolder(path);
+      setInlineFolderOpen(false);
+      setInlineFolderName("");
+      setPathError(null);
+    } catch (error) {
+      setPathError(pathErrorMessage(error));
+    }
+  }
+
+  function beginFolderDialog() {
+    setFolderParent(defaultSkillFileFolder(selection));
+    setFolderNameInput("");
+    setFolderError(null);
+    setFolderDialogOpen(true);
+  }
+
   function confirmDelete() {
     if (!deletePath) return;
     try {
+      const previousFolder = directoryPath(deletePath);
       const next = deleteSkillFile(changes, version.file_views, deletePath);
       setChanges(next);
+      if (previousFolder) {
+        setExplicitFolders((current) =>
+          current.includes(previousFolder)
+            ? current
+            : [...current, previousFolder],
+        );
+      }
       const nextFiles = listWorkingSkillFiles(version.file_views, next);
-      setSelectedPath(
+      const nextPath =
         nextFiles.find((file) => file.path === "SKILL.md")?.path ??
-          nextFiles[0]?.path ??
-          "",
-      );
+        nextFiles[0]?.path ??
+        "";
+      setSelection(nextPath ? { kind: "file", path: nextPath } : null);
       setDeletePath(null);
       setDisplayMode("source");
     } catch (error) {
@@ -269,11 +436,12 @@ export function SkillVersionWorkbench({
 
   function discardChanges() {
     setChanges([]);
+    setExplicitFolders([]);
     setLoadedSources({});
     setEditing(false);
     setDiscardOpen(false);
     setLocalError(null);
-    setSelectedPath(initialPath);
+    setSelection(initialPath ? { kind: "file", path: initialPath } : null);
     setDisplayMode("source");
   }
 
@@ -293,8 +461,9 @@ export function SkillVersionWorkbench({
         setLocalError("服务返回了无效的 Skill 版本。请重试。");
         return;
       }
-      setSelectedPath(initialPath);
+      setSelection(initialPath ? { kind: "file", path: initialPath } : null);
       setChanges([]);
+      setExplicitFolders([]);
       setLoadedSources({});
       setEditing(false);
       onDirtyChange(false);
@@ -332,7 +501,7 @@ export function SkillVersionWorkbench({
       </div>
 
       {editing && (
-        <div className="border-primary/20 bg-primary/5 flex flex-col gap-3 rounded-xl border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="border-primary/20 bg-primary/5 rounded-xl border px-4 py-3">
           <div>
             <p className="text-sm font-medium">
               正在基于版本 {version.version_number} 编辑副本
@@ -340,93 +509,71 @@ export function SkillVersionWorkbench({
             <p className="text-muted-foreground mt-1 text-xs">
               {dirty ? `已有 ${changes.length} 项未保存修改` : "尚未修改文件"}
             </p>
+            {emptyExplicitFolders.length > 0 && (
+              <p className="text-muted-foreground mt-1 text-xs">
+                {emptyExplicitFolders.length}{" "}
+                个空文件夹仅在当前编辑中显示；请在其中创建文件后再保存版本。
+              </p>
+            )}
           </div>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => beginPathDialog("add")}
-          >
-            <PlusIcon aria-hidden className="size-4" />
-            新建文件
-          </Button>
         </div>
       )}
 
-      {workingFiles.length === 0 ? (
+      {workingFiles.length === 0 && folderPaths.length === 0 ? (
         <p className="text-muted-foreground rounded-xl border border-dashed p-5 text-sm">
           这个版本没有可显示的文件。
         </p>
       ) : (
-        <div className="border-border/70 overflow-hidden rounded-2xl border md:grid md:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="border-border/70 overflow-hidden rounded-2xl border md:grid md:grid-cols-[260px_minmax(0,1fr)]">
           <div className="bg-muted/20 border-border/70 border-b p-3 md:border-r md:border-b-0">
-            <label className="block md:hidden">
-              <span className="text-muted-foreground mb-2 block text-xs font-medium">
+            <div className="mb-3 flex items-center justify-between gap-2 px-1">
+              <p className="text-sm font-semibold">
                 文件{" "}
-                {workingFiles.findIndex((file) => file.path === selectedPath) +
-                  1}
-                /{workingFiles.length}
-              </span>
-              <select
-                aria-label="选择 Skill 文件"
-                value={selectedPath}
-                onChange={(event) => selectFile(event.target.value)}
-                className="border-input bg-background h-10 w-full rounded-lg border px-3 text-sm"
-              >
-                {workingFiles.map((file) => (
-                  <option key={file.path} value={file.path}>
-                    {file.path}
-                    {file.state === "unchanged"
-                      ? ""
-                      : ` · ${FILE_STATE_LABEL[file.state]}`}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <nav aria-label="Skill 文件" className="hidden space-y-1 md:block">
-              <p className="text-muted-foreground px-2 pb-2 text-[11px] font-medium tracking-wide uppercase">
-                文件 · {workingFiles.length}
+                <span className="text-muted-foreground font-normal">
+                  · {workingFiles.length}
+                </span>
               </p>
-              {workingFiles.map((file) => {
-                const active = file.path === selectedPath;
-                return (
-                  <button
-                    key={file.path}
-                    type="button"
-                    className={cn(
-                      "hover:bg-background focus-visible:ring-ring flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none",
-                      active && "bg-background shadow-sm",
-                    )}
-                    style={{
-                      paddingLeft: `${8 + Math.min(file.path.split("/").length - 1, 4) * 12}px`,
-                    }}
-                    aria-current={active ? "page" : undefined}
-                    onClick={() => selectFile(file.path)}
-                  >
-                    <FileCode2Icon
-                      aria-hidden
-                      className="text-muted-foreground size-4 shrink-0"
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium">
-                        {basename(file.path)}
-                      </span>
-                      {file.path.includes("/") && (
-                        <span className="text-muted-foreground block truncate text-[10px]">
-                          {dirname(file.path)}
-                        </span>
-                      )}
-                    </span>
-                    {file.state !== "unchanged" && (
-                      <span className="text-primary text-[10px] font-medium">
-                        {FILE_STATE_LABEL[file.state]}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </nav>
+            </div>
+            {editing && (
+              <div className="mb-3 grid grid-cols-2 gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="bg-background min-w-0 px-2"
+                  onClick={() => beginPathDialog("add")}
+                >
+                  <FilePlus2Icon aria-hidden className="size-4" />
+                  新建文件
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="bg-background min-w-0 px-2"
+                  onClick={beginFolderDialog}
+                >
+                  <FolderPlusIcon aria-hidden className="size-4" />
+                  新建文件夹
+                </Button>
+              </div>
+            )}
+            <SkillFileTree
+              nodes={fileTree}
+              selection={selection}
+              expandedFolders={expandedFolders}
+              onSelectFile={selectFile}
+              onSelectFolder={selectFolder}
+              onToggleFolder={toggleFolder}
+            />
+            {editing && emptyExplicitFolders.length > 0 && (
+              <p
+                role="status"
+                className="text-muted-foreground mt-3 border-t px-1 pt-3 text-[11px] leading-4"
+              >
+                空文件夹不会写入版本快照。
+              </p>
+            )}
           </div>
 
           <div className="min-w-0">
@@ -435,7 +582,7 @@ export function SkillVersionWorkbench({
                 <div className="border-border/70 flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <p className="truncate font-mono text-sm font-semibold">
-                      {selectedFile.path}
+                      {basename(selectedFile.path)}
                     </p>
                     <p className="text-muted-foreground mt-1 truncate text-[11px]">
                       {selectedFile.media_type} ·{" "}
@@ -601,6 +748,11 @@ export function SkillVersionWorkbench({
                 )}
               </>
             )}
+            {!selectedFile && (
+              <div className="text-muted-foreground flex min-h-[50vh] items-center justify-center p-6 text-center text-sm md:min-h-[520px]">
+                选择一个文件查看内容。
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -652,27 +804,135 @@ export function SkillVersionWorkbench({
               {pathDialog === "rename" ? "重命名文件" : "新建文件"}
             </DialogTitle>
             <DialogDescription>
-              使用相对路径，例如 references/guide.md。保存 Skill
-              时会统一校验路径与内容。
+              {pathDialog === "rename"
+                ? "使用项目内的相对 POSIX 路径。"
+                : "填写文件名并选择所在文件夹；创建后会立即打开这个文件。"}
             </DialogDescription>
           </DialogHeader>
-          <label className="space-y-2">
-            <span className="text-sm font-medium">文件路径</span>
-            <Input
-              autoFocus
-              value={pathInput}
-              onChange={(event) => {
-                setPathInput(event.target.value);
-                setPathError(null);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  commitPathDialog();
-                }
-              }}
-            />
-          </label>
+          {pathDialog === "rename" ? (
+            <label className="space-y-2">
+              <span className="text-sm font-medium">文件路径</span>
+              <Input
+                autoFocus
+                value={pathInput}
+                onChange={(event) => {
+                  setPathInput(event.target.value);
+                  setPathError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitPathDialog();
+                  }
+                }}
+              />
+            </label>
+          ) : (
+            <div className="space-y-4">
+              <label className="space-y-2">
+                <span className="text-sm font-medium">文件名</span>
+                <Input
+                  autoFocus
+                  value={fileNameInput}
+                  placeholder="guide.md"
+                  onChange={(event) => {
+                    setFileNameInput(event.target.value);
+                    setPathError(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !inlineFolderOpen) {
+                      event.preventDefault();
+                      commitPathDialog();
+                    }
+                  }}
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="text-sm font-medium">所在文件夹</span>
+                <select
+                  aria-label="所在文件夹"
+                  value={targetFolder}
+                  className="border-input bg-background h-10 w-full rounded-md border px-3 text-sm"
+                  onChange={(event) => {
+                    setTargetFolder(event.target.value);
+                    setPathError(null);
+                  }}
+                >
+                  <option value="">根目录</option>
+                  {folderPaths.map((folder) => (
+                    <option key={folder} value={folder}>
+                      {"　".repeat(Math.max(0, folder.split("/").length - 1))}
+                      {folder}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="bg-muted/35 rounded-lg px-3 py-2 text-xs">
+                <span className="text-muted-foreground">完整路径：</span>
+                <span className="font-mono break-all">
+                  {fileNameInput
+                    ? folderPathWithName(targetFolder, fileNameInput)
+                    : "等待输入文件名"}
+                </span>
+              </div>
+              {!inlineFolderOpen ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setInlineFolderOpen(true);
+                    setInlineFolderName("");
+                    setPathError(null);
+                  }}
+                >
+                  <FolderPlusIcon aria-hidden className="size-4" />
+                  在所选目录中新建文件夹
+                </Button>
+              ) : (
+                <div className="border-border/70 space-y-3 rounded-lg border p-3">
+                  <div>
+                    <p className="text-sm font-medium">新建子文件夹</p>
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      父级：{targetFolder || "根目录"}
+                    </p>
+                  </div>
+                  <Input
+                    aria-label="新文件夹名称"
+                    value={inlineFolderName}
+                    placeholder="references"
+                    onChange={(event) => {
+                      setInlineFolderName(event.target.value);
+                      setPathError(null);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        commitInlineFolder();
+                      }
+                    }}
+                  />
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setInlineFolderOpen(false)}
+                    >
+                      取消
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={commitInlineFolder}
+                    >
+                      创建并选中
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           {pathError && (
             <p role="alert" className="text-destructive text-sm">
               {pathError}
@@ -688,6 +948,81 @@ export function SkillVersionWorkbench({
             </Button>
             <Button type="button" onClick={commitPathDialog}>
               {pathDialog === "rename" ? "确认重命名" : "创建文件"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={folderDialogOpen}
+        onOpenChange={(open) => {
+          setFolderDialogOpen(open);
+          if (!open) setFolderError(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>新建文件夹</DialogTitle>
+            <DialogDescription>
+              选择父级并输入文件夹名称。新目录会立即显示在文件树中。
+            </DialogDescription>
+          </DialogHeader>
+          <label className="space-y-2">
+            <span className="text-sm font-medium">文件夹名称</span>
+            <Input
+              autoFocus
+              value={folderNameInput}
+              placeholder="references"
+              onChange={(event) => {
+                setFolderNameInput(event.target.value);
+                setFolderError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitFolderDialog();
+                }
+              }}
+            />
+          </label>
+          <label className="space-y-2">
+            <span className="text-sm font-medium">父级文件夹</span>
+            <select
+              aria-label="父级文件夹"
+              value={folderParent}
+              className="border-input bg-background h-10 w-full rounded-md border px-3 text-sm"
+              onChange={(event) => {
+                setFolderParent(event.target.value);
+                setFolderError(null);
+              }}
+            >
+              <option value="">根目录</option>
+              {folderPaths.map((folder) => (
+                <option key={folder} value={folder}>
+                  {"　".repeat(Math.max(0, folder.split("/").length - 1))}
+                  {folder}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="text-muted-foreground text-xs leading-5">
+            版本快照只保存文件。空文件夹会在当前编辑中显示，但必须包含文件后才能随新版本保留。
+          </p>
+          {folderError && (
+            <p role="alert" className="text-destructive text-sm">
+              {folderError}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setFolderDialogOpen(false)}
+            >
+              取消
+            </Button>
+            <Button type="button" onClick={commitFolderDialog}>
+              创建文件夹
             </Button>
           </DialogFooter>
         </DialogContent>

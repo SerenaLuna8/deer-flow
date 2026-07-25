@@ -15,6 +15,7 @@ QuotaDimension = Literal[
     "concurrent_runs",
     "mcp_calls_daily",
 ]
+ProjectStorageQuotaOperation = Literal["reserve", "release"]
 
 QUOTA_DIMENSIONS: tuple[QuotaDimension, ...] = (
     "members",
@@ -75,6 +76,14 @@ class QuotaReconciliationAuthority:
     operation: str
 
 
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+class ProjectStorageQuotaAuthority:
+    """Explicit internal authority for one project-owned storage mutation."""
+
+    project_id: uuid.UUID
+    operation: ProjectStorageQuotaOperation
+
+
 _COMPENSATION_AUTHORITIES: dict[
     int,
     tuple[
@@ -87,6 +96,13 @@ _RECONCILIATION_AUTHORITIES: dict[
     tuple[
         weakref.ReferenceType[QuotaReconciliationAuthority],
         tuple[uuid.UUID, str],
+    ],
+] = {}
+_PROJECT_STORAGE_AUTHORITIES: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[ProjectStorageQuotaAuthority],
+        tuple[uuid.UUID, ProjectStorageQuotaOperation],
     ],
 ] = {}
 _AUTHORITY_LOCK = Lock()
@@ -175,6 +191,42 @@ def _is_issued_quota_reconciliation_authority(
     return issued is not None and issued[0]() is value and issued[1] == (value.project_id, value.operation)
 
 
+def _issue_project_storage_quota_authority(
+    project_id: object,
+    *,
+    operation: ProjectStorageQuotaOperation,
+) -> ProjectStorageQuotaAuthority:
+    if operation not in {"reserve", "release"}:
+        raise QuotaForbidden("trusted project storage quota authority is required")
+    try:
+        selected = uuid.UUID(str(project_id))
+    except (AttributeError, TypeError, ValueError):
+        raise QuotaForbidden("trusted project storage quota authority is required") from None
+    authority = object.__new__(ProjectStorageQuotaAuthority)
+    object.__setattr__(authority, "project_id", selected)
+    object.__setattr__(authority, "operation", operation)
+    _register_authority(
+        authority,
+        _PROJECT_STORAGE_AUTHORITIES,
+        (selected, operation),
+    )
+    return authority
+
+
+def _is_issued_project_storage_quota_authority(
+    value: object,
+) -> TypeGuard[ProjectStorageQuotaAuthority]:
+    if type(value) is not ProjectStorageQuotaAuthority:
+        return False
+    with _AUTHORITY_LOCK:
+        issued = _PROJECT_STORAGE_AUTHORITIES.get(id(value))
+    try:
+        snapshot = (value.project_id, value.operation)
+    except AttributeError:
+        return False
+    return issued is not None and issued[0]() is value and issued[1] == snapshot
+
+
 @dataclass(frozen=True, slots=True)
 class QuotaSourceRef:
     key_id: str
@@ -252,6 +304,8 @@ class QuotaReconciliationReport:
 
 __all__ = [
     "EffectiveQuotaLimits",
+    "ProjectStorageQuotaAuthority",
+    "ProjectStorageQuotaOperation",
     "ProjectQuotaLimits",
     "ProjectQuotaPolicy",
     "ProjectQuotaUsage",

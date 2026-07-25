@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select, text, update
@@ -35,10 +38,124 @@ from deerflow.persistence.jobs.model import JobRow, WorkerNodeRow
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.private_work.model import PrivateFileRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.shared_assets import (
+    SkillRow,
+    SkillVersionFileRow,
+    SkillVersionRow,
+)
 from deerflow.persistence.user.model import UserRow
 
 NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
 EXPIRED = NOW - timedelta(days=31)
+
+
+@pytest.mark.anyio
+async def test_project_purge_releases_skill_storage_before_deleting_shared_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.private_work import retention_purge
+
+    project_id = uuid.uuid4()
+    candidate = RetentionCandidate.project(
+        project_id=project_id,
+        deletion_effective_at=NOW,
+        idempotency_key=f"skill-storage:{project_id}",
+        request_id="retention-skill-storage",
+    )
+    calls: list[str] = []
+
+    async def release_private(*_args, **_kwargs):
+        calls.append("release-private")
+
+    async def release_skills(*_args, **_kwargs):
+        calls.append("release-skills")
+
+    async def purge_private(*_args, **_kwargs):
+        calls.append("purge-private")
+
+    async def purge_shared(*_args, **_kwargs):
+        calls.append("purge-shared")
+
+    async def reconcile_storage(*_args, **_kwargs):
+        calls.append("reconcile-storage")
+
+    monkeypatch.setattr(retention_purge, "release_private_storage_quota", release_private)
+    monkeypatch.setattr(
+        retention_purge,
+        "release_project_skill_storage_quota",
+        release_skills,
+    )
+    monkeypatch.setattr(retention_purge, "purge_private_scope", purge_private)
+    monkeypatch.setattr(retention_purge, "purge_project_shared_scope", purge_shared)
+
+    quota = AsyncMock()
+    quota.reconcile_project_storage.side_effect = reconcile_storage
+
+    await RetentionPurgeRepository().physically_purge(
+        object(),  # type: ignore[arg-type]
+        candidate,
+        quota=quota,
+    )
+
+    assert calls == [
+        "release-private",
+        "release-skills",
+        "purge-private",
+        "purge-shared",
+        "reconcile-storage",
+    ]
+
+
+@pytest.mark.anyio
+async def test_project_skill_storage_release_groups_exact_version_bytes() -> None:
+    from app.private_work.retention_purge import (
+        release_project_skill_storage_quota,
+    )
+
+    project_id = uuid.uuid4()
+    first_version = uuid.uuid4()
+    second_version = uuid.uuid4()
+
+    class Result:
+        def all(self):
+            return [
+                SimpleNamespace(skill_version_id=first_version, size_bytes=3),
+                SimpleNamespace(skill_version_id=first_version, size_bytes=5),
+                SimpleNamespace(skill_version_id=second_version, size_bytes=7),
+            ]
+
+    class Session:
+        statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            return Result()
+
+    session = Session()
+    quota = AsyncMock()
+
+    await release_project_skill_storage_quota(
+        session,  # type: ignore[arg-type]
+        project_id=project_id,
+        quota=quota,
+        request_id="retention-exact-skill-release",
+    )
+
+    assert "skill_version_files" in str(session.statement)
+    assert "skills.scope" in str(session.statement)
+    assert quota.release_skill_version_if_reserved.await_count == 2
+    quota.release_skill_version_if_reserved.assert_any_await(
+        session,
+        project_id=project_id,
+        version_id=first_version,
+        size=8,
+    )
+    quota.release_skill_version_if_reserved.assert_any_await(
+        session,
+        project_id=project_id,
+        version_id=second_version,
+        size=7,
+    )
 
 
 @pytest.mark.anyio
@@ -1208,7 +1325,8 @@ async def test_project_purge_removes_shared_asset_bodies_secrets_and_invitations
             expected_asset_version=scenario.project_mcp_asset_version,
         )
 
-        skills = SkillService(scenario.session_factory)
+        quota = _quota(scenario.session_factory)
+        skills = SkillService(scenario.session_factory, quota=quota)
         project_skill = await skills.create_asset(
             scenario.project_admin,
             CreateSkill("retention-project-skill", "Retention Project Skill"),
@@ -1231,6 +1349,82 @@ async def test_project_purge_removes_shared_asset_bodies_secrets_and_invitations
             project_skill_version.id,
             expected_asset_version=project_skill.version + 1,
         )
+        project_skill_storage_bytes = sum(
+            len(file.content)
+            for file in (
+                SkillArchiveFile(
+                    "SKILL.md",
+                    b"---\nname: retention-project-skill\ndescription: purge sentinel body\n---\n\nprivate project instructions\n",
+                    "text/markdown",
+                ),
+            )
+        )
+        legacy_skill_id = uuid.uuid4()
+        legacy_version_id = uuid.uuid4()
+        legacy_content = b"legacy retention skill without a version reservation"
+        legacy_storage_bytes = len(legacy_content)
+        async with scenario.session_factory() as session, session.begin():
+            session.add(
+                SkillRow(
+                    id=legacy_skill_id,
+                    scope="project",
+                    project_id=scenario.project_admin.project_id,
+                    slug="retention-legacy-project-skill",
+                    display_name="Retention Legacy Project Skill",
+                    created_by_user_id=str(scenario.project_admin.user_id),
+                )
+            )
+            session.add(
+                SkillVersionRow(
+                    id=legacy_version_id,
+                    skill_id=legacy_skill_id,
+                    version_number=1,
+                    workflow_status="draft",
+                    description="legacy retention row",
+                    frontmatter={},
+                    secret_requirements=[],
+                    scan_decision="allow",
+                    scan_summary={},
+                    payload_checksum="0" * 64,
+                    created_by_user_id=str(scenario.project_admin.user_id),
+                )
+            )
+            await session.flush()
+            session.add(
+                SkillVersionFileRow(
+                    skill_version_id=legacy_version_id,
+                    path="SKILL.md",
+                    media_type="text/markdown",
+                    size_bytes=legacy_storage_bytes,
+                    sha256=hashlib.sha256(legacy_content).hexdigest(),
+                    content=legacy_content,
+                )
+            )
+            await session.execute(
+                text(
+                    """UPDATE project_usage_counters
+                          SET reserved=reserved+:legacy_bytes,
+                              version=version+1
+                        WHERE project_id=:project_id
+                          AND dimension='storage_bytes'
+                          AND bucket='lifetime'"""
+                ),
+                {
+                    "project_id": scenario.project_admin.project_id,
+                    "legacy_bytes": legacy_storage_bytes,
+                },
+            )
+        async with scenario.session_factory() as session:
+            reserved_before_purge = await session.scalar(
+                text(
+                    """SELECT reserved FROM project_usage_counters
+                       WHERE project_id=:project_id
+                         AND dimension='storage_bytes'
+                         AND bucket='lifetime'"""
+                ),
+                {"project_id": scenario.project_admin.project_id},
+            )
+        assert reserved_before_purge == project_skill_storage_bytes + legacy_storage_bytes
 
         other_credential = await scenario.credentials.create(
             scenario.other_project_admin,
@@ -1331,7 +1525,7 @@ async def test_project_purge_removes_shared_asset_bodies_secrets_and_invitations
         settlement = await RetentionPurgeJobHandler(
             scenario.session_factory,
             audit=_audit(scenario.session_factory),
-            quota=_quota(scenario.session_factory),
+            quota=quota,
             clock=lambda: NOW,
         )(claim, object())  # type: ignore[arg-type]
         await settlement.commit()
@@ -1409,6 +1603,30 @@ async def test_project_purge_removes_shared_asset_bodies_secrets_and_invitations
                     },
                 )
                 == 2
+            )
+            assert (
+                await session.scalar(
+                    text(
+                        """SELECT reserved FROM project_usage_counters
+                           WHERE project_id=:project_id
+                             AND dimension='storage_bytes'
+                             AND bucket='lifetime'"""
+                    ),
+                    parameters,
+                )
+                == 0
+            )
+            assert (
+                await session.scalar(
+                    text(
+                        """SELECT count(*) FROM project_usage_ledger
+                           WHERE project_id=:project_id
+                             AND dimension='storage_bytes'
+                             AND source_kind='reconcile_adjustment'"""
+                    ),
+                    parameters,
+                )
+                == 1
             )
             assert (
                 await session.scalar(

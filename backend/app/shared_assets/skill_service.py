@@ -13,19 +13,22 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Literal, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 import yaml
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from yaml.events import AliasEvent
 
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
+from app.quotas.models import QuotaError, QuotaExceeded
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
     AssetNotFound,
+    AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
@@ -47,11 +50,20 @@ from deerflow.skills.skillscan import (
 from deerflow.skills.types import SkillCategory
 from deerflow.skills.validation import _validate_skill_frontmatter
 
+if TYPE_CHECKING:
+    from app.quotas.integration import ProjectQuotaEnforcer
+
 MAX_SKILL_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_SKILL_TEXT_PREVIEW_BYTES = 1024 * 1024
 MAX_SKILL_EDIT_TEXT_BYTES = 5 * 1024 * 1024
 MAX_SKILL_FILE_CHANGES = 256
+MAX_SKILL_ARCHIVE_FILES = 4096
 MAX_PROJECT_SKILL_BATCH_ITEMS = 256
+MAX_PROJECT_SKILL_BATCH_FILES = MAX_SKILL_ARCHIVE_FILES
+MAX_PROJECT_SKILL_BATCH_BYTES = MAX_SKILL_ARCHIVE_BYTES
+MAX_SKILL_FRONTMATTER_BYTES = 256 * 1024
+MAX_SKILL_FRONTMATTER_NODES = 2048
+MAX_SKILL_FRONTMATTER_DEPTH = 32
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _ENV_VAR_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
@@ -95,7 +107,41 @@ _T = TypeVar("_T")
 
 
 class _DuplicateKeySafeLoader(yaml.SafeLoader):
-    """Safe YAML loader that rejects shadowed keys at every mapping level."""
+    """Safe YAML loader with bounded structure and no aliases."""
+
+    def __init__(self, stream) -> None:
+        super().__init__(stream)
+        self._skill_node_count = 0
+        self._skill_depth = 0
+
+    def compose_node(self, parent, index):
+        if self.check_event(AliasEvent):
+            raise yaml.composer.ComposerError(
+                None,
+                None,
+                "YAML aliases are not allowed",
+                self.peek_event().start_mark,
+            )
+        self._skill_node_count += 1
+        if self._skill_node_count > MAX_SKILL_FRONTMATTER_NODES:
+            raise yaml.composer.ComposerError(
+                None,
+                None,
+                "YAML node limit exceeded",
+                self.peek_event().start_mark,
+            )
+        self._skill_depth += 1
+        if self._skill_depth > MAX_SKILL_FRONTMATTER_DEPTH:
+            raise yaml.composer.ComposerError(
+                None,
+                None,
+                "YAML depth limit exceeded",
+                self.peek_event().start_mark,
+            )
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._skill_depth -= 1
 
 
 def _construct_unique_mapping(
@@ -298,6 +344,8 @@ def normalize_skill_files(
         snapshot = tuple(files)
     except TypeError:
         raise AssetValidationFailed(request_id) from None
+    if not snapshot or len(snapshot) > MAX_SKILL_ARCHIVE_FILES:
+        raise AssetValidationFailed(request_id)
     normalized = tuple(sorted((_validate_archive_file(item, request_id) for item in snapshot), key=lambda item: item.path))
     paths = {item.path for item in normalized}
     if len(paths) != len(normalized):
@@ -451,6 +499,9 @@ def _file_views(files: Sequence[SkillArchiveFile]) -> tuple[SkillFileView, ...]:
 
 
 def _snapshot_checksum(file_views: Sequence[SkillFileView]) -> str:
+    # Keep the revision-0001 persisted checksum contract. Runtime Skill
+    # materialization is byte-based; media_type is validated separately, and a
+    # published file row is immutable at the database boundary.
     canonical = json.dumps(
         [
             {
@@ -467,6 +518,10 @@ def _snapshot_checksum(file_views: Sequence[SkillFileView]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _snapshot_checksum_for_files(files: Sequence[SkillArchiveFile]) -> str:
+    return _snapshot_checksum(_file_views(files))
+
+
 def _preflight_skill_frontmatter(
     skill_file: Path,
     request_id: str,
@@ -475,7 +530,10 @@ def _preflight_skill_frontmatter(
     match = _FRONTMATTER_PATTERN.match(manifest_text)
     if match is None:
         raise AssetValidationFailed(request_id)
-    frontmatter = yaml.load(match.group(1), Loader=_DuplicateKeySafeLoader)
+    serialized_frontmatter = match.group(1)
+    if len(serialized_frontmatter.encode("utf-8")) > MAX_SKILL_FRONTMATTER_BYTES:
+        raise AssetValidationFailed(request_id)
+    frontmatter = yaml.load(serialized_frontmatter, Loader=_DuplicateKeySafeLoader)
     if not isinstance(frontmatter, dict) or any(not isinstance(key, str) for key in frontmatter):
         raise AssetValidationFailed(request_id)
 
@@ -546,7 +604,16 @@ def _analyze_skill_files(
                 raise AssetValidationFailed(request_id)
             compatibility = compatibility.strip() if isinstance(compatibility, str) else None
             try:
-                sanitized_frontmatter = json.loads(json.dumps(sanitized_frontmatter, ensure_ascii=False))
+                canonical_frontmatter = json.dumps(
+                    sanitized_frontmatter,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                if len(canonical_frontmatter.encode("utf-8")) > MAX_SKILL_FRONTMATTER_BYTES:
+                    raise AssetValidationFailed(request_id)
+                sanitized_frontmatter = json.loads(canonical_frontmatter)
             except (TypeError, ValueError, RecursionError):
                 raise AssetValidationFailed(request_id) from None
 
@@ -559,7 +626,7 @@ def _analyze_skill_files(
             findings = scan_result["findings"]
     except AssetValidationFailed:
         raise
-    except (OSError, UnicodeError, yaml.YAMLError, StaticScanBlockedError, StaticScannerError, ValueError):
+    except (OSError, RecursionError, UnicodeError, yaml.YAMLError, StaticScanBlockedError, StaticScannerError, ValueError):
         raise AssetValidationFailed(request_id) from None
 
     views = _file_views(files)
@@ -589,9 +656,12 @@ class SkillService:
         self,
         session_factory: Callable[[], AsyncSession],
         governance_sink: SharedAssetGovernanceEventSink | None = None,
+        *,
+        quota: ProjectQuotaEnforcer | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._governance_sink = governance_sink or SharedAssetGovernanceEventSink()
+        self._quota = quota
 
     async def preview_archive(
         self,
@@ -786,7 +856,7 @@ class SkillService:
         async def operation(repository: SkillRepository) -> SkillVersionView:
             asset = await repository.get_project_asset(actor, asset_id, for_update=True)
             self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status != "active":
+            if asset.status not in {"active", "suspended"}:
                 raise AssetConflict(actor.request_id)
             source = await repository.get_project_version(
                 actor,
@@ -811,6 +881,7 @@ class SkillService:
                 next_files,
                 actor.request_id,
             )
+            self._require_archive_name_matches_asset(actor, asset, preview)
             return await self._create_version(
                 repository,
                 actor,
@@ -850,20 +921,67 @@ class SkillService:
             governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "skill.publish"),
         )
 
-    async def archive(
+    async def delete(
         self,
-        actor: _Actor,
+        actor: ProjectContext,
         asset_id: uuid.UUID,
         *,
         expected_asset_version: int,
-    ) -> SkillAssetView:
+    ) -> None:
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
-        return await self._change_status(
+
+        async def operation(repository: SkillRepository) -> None:
+            asset = await repository.get_project_asset(
+                actor,
+                asset_id,
+                for_update=True,
+            )
+            self._require_expected_version(
+                actor,
+                asset,
+                expected_asset_version,
+            )
+            versions = await repository.plan_project_asset_deletion(actor, asset)
+            quota = self._quota
+            if versions and quota is None:
+                raise AssetStorageUnavailable(actor.request_id)
+            for version in versions:
+                assert quota is not None
+                try:
+                    await quota.release_skill_version_if_reserved(
+                        repository.session,
+                        actor.project_id,
+                        version_id=version.version_id,
+                        size=version.size_bytes,
+                    )
+                except QuotaError:
+                    raise AssetStorageUnavailable(actor.request_id) from None
+            await repository.delete_project_asset(
+                actor,
+                asset,
+                tuple(version.version_id for version in versions),
+            )
+            if quota is not None:
+                try:
+                    await quota.reconcile_project_storage(
+                        repository.session,
+                        actor.project_id,
+                    )
+                except QuotaError:
+                    raise AssetStorageUnavailable(actor.request_id) from None
+
+        await self._execute(
             actor,
-            asset_id,
-            expected_asset_version=expected_asset_version,
-            status="archived",
-            audit_action="skill.archive",
+            operation,
+            governance=lambda session, _result: self._record_governance(
+                session,
+                actor,
+                asset_id,
+                None,
+                "skill.delete",
+            ),
         )
 
     async def suspend(
@@ -880,6 +998,55 @@ class SkillService:
             expected_asset_version=expected_asset_version,
             status="suspended",
             audit_action="skill.suspend",
+        )
+
+    async def activate(
+        self,
+        actor: _Actor,
+        asset_id: uuid.UUID,
+        *,
+        expected_asset_version: int,
+    ) -> SkillAssetView:
+        self._require_capability(actor, Capability.SHARED_ASSETS_MANAGE_BINDINGS)
+
+        async def operation(repository: SkillRepository) -> SkillAssetView:
+            asset = await self._get_asset(
+                repository,
+                actor,
+                asset_id,
+                for_update=True,
+            )
+            self._require_expected_version(
+                actor,
+                asset,
+                expected_asset_version,
+            )
+            if asset.status != "suspended" or asset.current_published_version_id is None:
+                raise AssetConflict(actor.request_id)
+            current = await self._get_version(
+                repository,
+                actor,
+                asset.id,
+                asset.current_published_version_id,
+                for_update=True,
+            )
+            if current.row.workflow_status != WorkflowStatus.PUBLISHED.value:
+                raise AssetConflict(actor.request_id)
+            asset.status = "active"
+            asset.version += 1
+            await repository.session.flush()
+            return self._asset_view(asset)
+
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                result.id,
+                None,
+                "skill.activate",
+            ),
         )
 
     async def get(self, actor: _Actor, asset_id: uuid.UUID) -> SkillAssetView:
@@ -968,11 +1135,30 @@ class SkillService:
         if not snapshot or len(snapshot) > MAX_PROJECT_SKILL_BATCH_ITEMS:
             raise AssetValidationFailed(actor.request_id)
 
-        prepared: list[_PreparedProjectSkillArchive] = []
-        identities: set[str] = set()
+        normalized_imports: list[ProjectSkillArchiveImport] = []
+        aggregate_file_count = 0
+        aggregate_bytes = 0
         for item in snapshot:
             if type(item) is not ProjectSkillArchiveImport:
                 raise AssetValidationFailed(actor.request_id)
+            try:
+                files = tuple(item.files)
+            except TypeError:
+                raise AssetValidationFailed(actor.request_id) from None
+            aggregate_file_count += len(files)
+            if aggregate_file_count > MAX_PROJECT_SKILL_BATCH_FILES:
+                raise AssetValidationFailed(actor.request_id)
+            for file in files:
+                if not isinstance(file, SkillArchiveFile) or not isinstance(file.content, bytes):
+                    raise AssetValidationFailed(actor.request_id)
+                aggregate_bytes += len(file.content)
+                if aggregate_bytes > MAX_PROJECT_SKILL_BATCH_BYTES:
+                    raise AssetValidationFailed(actor.request_id)
+            normalized_imports.append(ProjectSkillArchiveImport(files=files))
+
+        prepared: list[_PreparedProjectSkillArchive] = []
+        identities: set[str] = set()
+        for item in normalized_imports:
             preview = await self.preview_archive(actor, item.files)
             name = preview.frontmatter.get("name")
             if not isinstance(name, str):
@@ -1032,7 +1218,7 @@ class SkillService:
                 selected.id,
                 for_update=execute,
             )
-            if asset.status != "active" or asset.current_published_version_id is None:
+            if asset.status not in {"active", "suspended"} or asset.current_published_version_id is None:
                 raise AssetConflict(actor.request_id)
             source = await repository.get_project_version(
                 actor,
@@ -1042,12 +1228,16 @@ class SkillService:
             )
             if source.row.workflow_status != WorkflowStatus.PUBLISHED.value:
                 raise AssetConflict(actor.request_id)
-            await asyncio.to_thread(
+            source_files = await asyncio.to_thread(
                 self._verified_archive_files,
                 source,
                 actor.request_id,
             )
-            action: Literal["replace", "unchanged"] = "unchanged" if source.row.payload_checksum == item.preview.checksum else "replace"
+            source_checksum = await asyncio.to_thread(
+                _snapshot_checksum_for_files,
+                source_files,
+            )
+            action: Literal["replace", "unchanged"] = "unchanged" if source_checksum == item.preview.checksum else "replace"
             plan.append(
                 _ProjectSkillArchivePlanItem(
                     action=action,
@@ -1175,8 +1365,9 @@ class SkillService:
     ) -> SkillVersionView:
         asset = await self._get_asset(repository, actor, asset_id, for_update=True)
         self._require_expected_version(actor, asset, expected_asset_version)
-        if asset.status != "active":
+        if asset.status not in {"active", "suspended"}:
             raise AssetConflict(actor.request_id)
+        self._require_archive_name_matches_asset(actor, asset, preview)
         return await self._create_version(
             repository,
             actor,
@@ -1196,7 +1387,7 @@ class SkillService:
     ) -> SkillVersionView:
         asset = await self._get_asset(repository, actor, asset_id, for_update=True)
         self._require_expected_version(actor, asset, expected_asset_version)
-        if asset.status != "active":
+        if asset.status not in {"active", "suspended"}:
             raise AssetConflict(actor.request_id)
         record = await self._get_version(repository, actor, asset_id, version_id, for_update=True)
         if record.row.workflow_status != WorkflowStatus.DRAFT.value:
@@ -1207,6 +1398,7 @@ class SkillService:
             actor.request_id,
         )
         current = await asyncio.to_thread(_analyze_skill_files, files, actor.request_id)
+        self._require_archive_name_matches_asset(actor, asset, current)
         expected_requirements = [{"name": requirement.name, "optional": requirement.optional} for requirement in current.secret_requirements]
         if (
             current.checksum != record.row.payload_checksum
@@ -1240,6 +1432,20 @@ class SkillService:
         else:
             version_number = await repository.next_system_version_number(actor, asset)
         version_id = uuid.uuid4()
+        if asset.scope == AssetScope.PROJECT.value:
+            if asset.project_id is None or self._quota is None:
+                raise AssetStorageUnavailable(actor.request_id)
+            try:
+                await self._quota.reserve_skill_version(
+                    repository.session,
+                    project_id=asset.project_id,
+                    version_id=version_id,
+                    size=sum(item.size_bytes for item in preview.file_views),
+                )
+            except QuotaExceeded:
+                raise AssetStorageQuotaExceeded(actor.request_id) from None
+            except QuotaError:
+                raise AssetStorageUnavailable(actor.request_id) from None
         row = SkillVersionRow(
             id=version_id,
             skill_id=asset.id,
@@ -1288,7 +1494,7 @@ class SkillService:
         async def operation(repository: SkillRepository) -> SkillAssetView:
             asset = await self._get_asset(repository, actor, asset_id, for_update=True)
             self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status == status:
+            if asset.status != "active" or status != "suspended":
                 raise AssetConflict(actor.request_id)
             asset.status = status
             asset.version += 1
@@ -1383,6 +1589,15 @@ class SkillService:
     def _require_expected_version(actor: _Actor, asset: SkillRow, expected: int) -> None:
         if not isinstance(expected, int) or isinstance(expected, bool) or asset.version != expected:
             raise AssetConflict(actor.request_id)
+
+    @staticmethod
+    def _require_archive_name_matches_asset(
+        actor: _Actor,
+        asset: SkillRow,
+        preview: SkillArchivePreview,
+    ) -> None:
+        if preview.frontmatter.get("name") != asset.slug:
+            raise AssetValidationFailed(actor.request_id)
 
     @staticmethod
     def _archive_files(

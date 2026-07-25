@@ -502,6 +502,11 @@ class AgentService:
             raise AssetForbidden("unknown")
         if set(resolved_skill_ids) != set(skill_version_ids) or set(resolved_mcp_ids) != set(mcp_version_ids):
             raise AssetValidationFailed(actor.request_id)
+        skill_slugs = await repository.lock_skill_version_slugs(
+            skill_version_ids,
+        )
+        if len(skill_slugs) != len(skill_version_ids) or len({slug.casefold() for slug in skill_slugs}) != len(skill_slugs):
+            raise AssetValidationFailed(actor.request_id)
 
     @staticmethod
     def _payload_checksum(payload: AgentPayload) -> str:

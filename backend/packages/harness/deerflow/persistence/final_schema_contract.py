@@ -72,10 +72,9 @@ class CatalogInvariant:
     digest: str
 
 
-# Generated from the current single baseline by ``read_m7_catalog_signature``.
-# Category separation makes a drift review identify the affected invariant without
-# exposing data or relying on PostgreSQL object OIDs.
-FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
+# Frozen 0001 ancestor signature. It remains necessary to distinguish the one
+# safely migratable predecessor from an unknown or drifted nonempty schema.
+BASELINE_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
         count=51,
         digest="a63041054a602b144a85042934cd56404a4ba7c5d91058aab5a66a89bab226ea",
@@ -101,6 +100,14 @@ FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
         digest="71201311a82c867e46fb8e1d9728588f7ceb87b46064f2a0e4317d52b4999c2c",
     ),
 }
+
+# Revision 0002 changes only one stored function body. Its digest is updated
+# from a migrated disposable PostgreSQL database by the schema contract tests.
+FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = dict(BASELINE_M7_CATALOG_SIGNATURE)
+FINAL_M7_CATALOG_SIGNATURE["functions"] = CatalogInvariant(
+    count=10,
+    digest="7615014bca82a5dd868f6793c6bb613d338f19a8c312fb04b018066811502acd",
+)
 
 
 def _catalog_signature_digest(signature: dict[str, CatalogInvariant]) -> str:
@@ -478,6 +485,7 @@ def inventory_is_m7_allowed(objects: frozenset[str]) -> bool:
 
 
 __all__ = [
+    "BASELINE_M7_CATALOG_SIGNATURE",
     "CatalogInvariant",
     "ALEMBIC_INDEXES",
     "FINAL_APP_TABLES",

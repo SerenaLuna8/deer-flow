@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import importlib
 import json
 import uuid
@@ -12,6 +14,9 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.projects.context import ProjectContext, resolve_project_context
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.models import QuotaSourceRef
+from app.quotas.service import QuotaService
 from app.shared_assets.binding_service import BindingService
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import AssetForbidden, AssetNotFound
@@ -21,6 +26,7 @@ from app.shared_assets.models import (
     AssetSelection,
     SkillArchiveFile,
 )
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.shared_assets import CredentialRow
 
 
@@ -115,13 +121,34 @@ def _agent_payload() -> AgentPayload:
     )
 
 
-def _skill_archive() -> tuple[SkillArchiveFile, ...]:
+def _skill_archive(name: str) -> tuple[SkillArchiveFile, ...]:
     return (
         SkillArchiveFile(
             "SKILL.md",
-            b"---\nname: history-skill\ndescription: History\n---\n\nRead history.\n",
+            f"---\nname: {name}\ndescription: History\n---\n\nRead history.\n".encode(),
             "text/markdown",
         ),
+    )
+
+
+def _quota_source_ref(payload: bytes) -> QuotaSourceRef:
+    return QuotaSourceRef(
+        key_id="history-skill-quota",
+        hmac_hex=hmac.new(
+            b"history-skill-quota-key" * 2,
+            payload,
+            hashlib.sha256,
+        ).hexdigest(),
+    )
+
+
+def _skill_quota(factory) -> ProjectQuotaEnforcer:
+    return ProjectQuotaEnforcer(
+        QuotaService(
+            factory,
+            QuotaConfig(),
+            source_ref_hasher=_quota_source_ref,
+        )
     )
 
 
@@ -177,15 +204,16 @@ async def _create_asset_with_version(
         )
     elif kind == "skill":
         module = importlib.import_module("app.shared_assets.skill_service")
-        service = module.SkillService(factory)
+        slug = f"{label}-skill"
+        service = module.SkillService(factory, quota=_skill_quota(factory))
         asset = await service.create_asset(
             actor,
-            module.CreateSkill(f"{label}-skill", f"{label} Skill"),
+            module.CreateSkill(slug, f"{label} Skill"),
         )
         draft = await service.create_version_from_archive(
             actor,
             asset.id,
-            _skill_archive(),
+            _skill_archive(slug),
             expected_asset_version=1,
         )
     else:
@@ -208,7 +236,14 @@ async def _create_asset_with_version(
     return service, asset, draft
 
 
-async def _create_next_draft(kind: str, service, actor, asset_id: uuid.UUID):
+async def _create_next_draft(
+    kind: str,
+    service,
+    actor,
+    asset_id: uuid.UUID,
+    *,
+    asset_slug: str,
+):
     if kind == "agent":
         return await service.create_version(
             actor,
@@ -220,7 +255,7 @@ async def _create_next_draft(kind: str, service, actor, asset_id: uuid.UUID):
         return await service.create_version_from_archive(
             actor,
             asset_id,
-            _skill_archive(),
+            _skill_archive(asset_slug),
             expected_asset_version=3,
         )
     module = importlib.import_module("app.shared_assets.mcp_service")
@@ -421,7 +456,13 @@ async def test_project_history_exposes_only_published_system_versions(
             draft.id,
             expected_asset_version=2,
         )
-        newer_draft = await _create_next_draft(kind, service, system, asset.id)
+        newer_draft = await _create_next_draft(
+            kind,
+            service,
+            system,
+            asset.id,
+            asset_slug=asset.slug,
+        )
 
         history = await service.get_version_history(context, asset.id)
 

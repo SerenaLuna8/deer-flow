@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
+import hmac
 import importlib
 import logging
 import threading
@@ -11,13 +12,25 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.projects.context import ProjectContext, resolve_project_context
-from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound, AssetValidationFailed
-from app.shared_assets.models import SkillArchiveFile, WorkflowStatus
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.models import QuotaSourceRef
+from app.quotas.service import QuotaService
+from app.shared_assets.agent_service import AgentService, CreateAgent
+from app.shared_assets.errors import (
+    AssetConflict,
+    AssetForbidden,
+    AssetNotFound,
+    AssetStorageQuotaExceeded,
+    AssetValidationFailed,
+)
+from app.shared_assets.models import AgentPayload, SkillArchiveFile, WorkflowStatus
+from deerflow.config.quota_config import QuotaConfig
+from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.shared_assets import SkillRow, SkillVersionFileRow, SkillVersionRow
 
 
@@ -71,15 +84,188 @@ async def _seed_actor_and_project(
         return await resolve_project_context(session, user_id, project_id, f"req-{label}")
 
 
-def _archive(*, required_secret: bool = False) -> tuple[SkillArchiveFile, ...]:
+def _archive(
+    *,
+    name: str = "project-skill",
+    required_secret: bool = False,
+) -> tuple[SkillArchiveFile, ...]:
     secret = ""
     if required_secret:
         secret = "required-secrets:\n  - name: API_TOKEN\n    optional: false\n"
-    manifest = (f"---\nname: project-skill\ndescription: A project-scoped test skill\ncompatibility: deerflow>=1\n{secret}---\n\nUse the bundled script.\n").encode()
+    manifest = (f"---\nname: {name}\ndescription: A project-scoped test skill\ncompatibility: deerflow>=1\n{secret}---\n\nUse the bundled script.\n").encode()
     return (
         SkillArchiveFile("SKILL.md", manifest, "text/markdown"),
         SkillArchiveFile("scripts/run.py", b"print('ok')\n", "text/x-python"),
     )
+
+
+def _quota_source_ref(payload: bytes) -> QuotaSourceRef:
+    return QuotaSourceRef(
+        key_id="skill-test-quota",
+        hmac_hex=hmac.new(
+            b"skill-test-quota-key" * 2,
+            payload,
+            hashlib.sha256,
+        ).hexdigest(),
+    )
+
+
+def _service(
+    service_module,
+    factory: async_sessionmaker,
+    *,
+    storage_limit: int = 5_368_709_120,
+):
+    return service_module.SkillService(
+        factory,
+        quota=ProjectQuotaEnforcer(
+            QuotaService(
+                factory,
+                QuotaConfig(default_storage_bytes_limit=storage_limit),
+                source_ref_hasher=_quota_source_ref,
+            )
+        ),
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_counter_reserved", [0, 37])
+async def test_0001_project_skill_delete_after_0002_migration_settles_legacy_storage_once(
+    postgres_database_url: str,
+    legacy_counter_reserved: int,
+) -> None:
+    """A baseline Skill has no per-version reservation but remains deletable."""
+
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    skill_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    content = b"x" * 37
+    sha256 = hashlib.sha256(content).hexdigest()
+    try:
+        await asyncio.to_thread(
+            bootstrap_module._upgrade,
+            bootstrap_module._get_alembic_config(engine),
+            bootstrap_module.BASELINE_SCHEMA_REVISION,
+        )
+        editor = await _seed_actor_and_project(
+            engine,
+            factory,
+            label=f"legacy-skill-{legacy_counter_reserved}",
+        )
+        async with factory() as session, session.begin():
+            session.add(
+                SkillRow(
+                    id=skill_id,
+                    scope="project",
+                    project_id=editor.project_id,
+                    slug=f"legacy-skill-{legacy_counter_reserved}",
+                    display_name="Legacy Skill",
+                    created_by_user_id=str(editor.user_id),
+                )
+            )
+            session.add(
+                SkillVersionRow(
+                    id=version_id,
+                    skill_id=skill_id,
+                    version_number=1,
+                    workflow_status="draft",
+                    description="legacy",
+                    frontmatter={},
+                    secret_requirements=[],
+                    scan_decision="allow",
+                    scan_summary={},
+                    payload_checksum="0" * 64,
+                    created_by_user_id=str(editor.user_id),
+                )
+            )
+            await session.flush()
+            session.add(
+                SkillVersionFileRow(
+                    skill_version_id=version_id,
+                    path="SKILL.md",
+                    media_type="text/markdown",
+                    size_bytes=len(content),
+                    sha256=sha256,
+                    content=content,
+                )
+            )
+            if legacy_counter_reserved:
+                await session.execute(
+                    text(
+                        """INSERT INTO project_usage_counters
+                           (project_id, dimension, bucket, used, reserved, version)
+                           VALUES (:project_id, 'storage_bytes', 'lifetime', 0, :reserved, 1)"""
+                    ),
+                    {
+                        "project_id": editor.project_id,
+                        "reserved": legacy_counter_reserved,
+                    },
+                )
+
+        await bootstrap_module.migrate_schema(engine)
+        service = _service(service_module, factory)
+        await service.delete(
+            editor,
+            skill_id,
+            expected_asset_version=1,
+        )
+
+        async with factory() as session:
+            assert await session.get(SkillRow, skill_id) is None
+            counter = await session.scalar(
+                text(
+                    """SELECT reserved FROM project_usage_counters
+                       WHERE project_id=:project_id
+                         AND dimension='storage_bytes'
+                         AND bucket='lifetime'"""
+                ),
+                {"project_id": editor.project_id},
+            )
+            assert counter == 0
+            ledger_count = await session.scalar(
+                text(
+                    """SELECT count(*) FROM project_usage_ledger
+                       WHERE project_id=:project_id
+                         AND dimension='storage_bytes'"""
+                ),
+                {"project_id": editor.project_id},
+            )
+            assert ledger_count == (1 if legacy_counter_reserved else 0)
+            assert (
+                await session.scalar(
+                    text(
+                        """SELECT count(*) FROM project_usage_ledger
+                           WHERE project_id=:project_id
+                             AND source_kind IN ('release', 'release_threshold')"""
+                    ),
+                    {"project_id": editor.project_id},
+                )
+                == 0
+            )
+
+        with pytest.raises(AssetNotFound):
+            await service.delete(
+                editor,
+                skill_id,
+                expected_asset_version=1,
+            )
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    text(
+                        """SELECT count(*) FROM project_usage_ledger
+                           WHERE project_id=:project_id
+                             AND dimension='storage_bytes'"""
+                    ),
+                    {"project_id": editor.project_id},
+                )
+                == ledger_count
+            )
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -89,11 +275,17 @@ async def test_project_skill_publishes_complete_snapshot_and_hides_cross_project
     service_module = importlib.import_module("app.shared_assets.skill_service")
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    editor = await _seed_actor_and_project(engine, factory, label="skill-first")
+    editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="skill-first",
+        role="admin",
+    )
     outsider = await _seed_actor_and_project(engine, factory, label="skill-other")
-    service = service_module.SkillService(factory)
+    service = _service(service_module, factory)
     try:
         asset = await service.create_asset(editor, service_module.CreateSkill("project-skill", "Project Skill"))
+        assert asset.status == "suspended"
         draft = await service.create_version_from_archive(
             editor,
             asset.id,
@@ -103,8 +295,16 @@ async def test_project_skill_publishes_complete_snapshot_and_hides_cross_project
         with pytest.raises(AssetNotFound):
             await service.load_version_files(editor, asset.id, draft.id)
         published = await service.publish(editor, asset.id, draft.id, expected_asset_version=2)
+        with pytest.raises(AssetNotFound):
+            await service.load_version_files(editor, asset.id, published.id)
+        activated = await service.activate(
+            editor,
+            asset.id,
+            expected_asset_version=3,
+        )
 
         assert published.workflow_status is WorkflowStatus.PUBLISHED
+        assert activated.status == "active"
         assert (await service.get(editor, asset.id)).current_published_version_id == published.id
         assert (await service.get_version_history(editor, asset.id)) == (published,)
         loaded = await service.load_version_files(editor, asset.id, published.id)
@@ -123,8 +323,93 @@ async def test_project_skill_publishes_complete_snapshot_and_hides_cross_project
                     text("UPDATE skill_version_files SET content='changed' WHERE skill_version_id=:id"),
                     {"id": published.id},
                 )
+        for marker in (None, uuid.uuid4()):
+            with pytest.raises(DBAPIError):
+                async with engine.begin() as connection:
+                    await connection.execute(
+                        text(
+                            """UPDATE skills
+                                  SET status='archived',
+                                      current_published_version_id=NULL
+                                WHERE id=:asset_id"""
+                        ),
+                        {"asset_id": asset.id},
+                    )
+                    if marker is not None:
+                        await connection.scalar(
+                            text(
+                                """SELECT set_config(
+                                    'deerflow.skill_hard_delete_asset_id',
+                                    :marker,
+                                    true
+                                )"""
+                            ),
+                            {"marker": str(marker)},
+                        )
+                    await connection.execute(
+                        text(
+                            """DELETE FROM skill_version_files
+                                WHERE skill_version_id=:version_id"""
+                        ),
+                        {"version_id": published.id},
+                    )
         with pytest.raises(dataclasses.FrozenInstanceError):
             published.payload_checksum = "0" * 64
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_skill_versions_reserve_full_storage_and_reject_over_limit_atomically(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(engine, factory, label="skill-quota")
+    archive = _archive(name="quota-skill")
+    archive_size = sum(len(file.content) for file in archive)
+    service = _service(
+        service_module,
+        factory,
+        storage_limit=archive_size,
+    )
+    try:
+        asset = await service.create_asset(
+            editor,
+            service_module.CreateSkill("quota-skill", "Quota Skill"),
+        )
+        first = await service.create_version_from_archive(
+            editor,
+            asset.id,
+            archive,
+            expected_asset_version=1,
+        )
+
+        with pytest.raises(AssetStorageQuotaExceeded) as exc_info:
+            await service.create_version_from_archive(
+                editor,
+                asset.id,
+                archive,
+                expected_asset_version=2,
+            )
+        assert exc_info.value.request_id == editor.request_id
+
+        async with factory() as session:
+            reserved = await session.scalar(
+                text(
+                    """SELECT reserved FROM project_usage_counters
+                       WHERE project_id=:project_id
+                         AND dimension='storage_bytes'
+                         AND bucket='lifetime'"""
+                ),
+                {"project_id": editor.project_id},
+            )
+            version_count = await session.scalar(select(func.count()).select_from(SkillVersionRow).where(SkillVersionRow.skill_id == asset.id))
+            persisted_bytes = await session.scalar(select(func.coalesce(func.sum(SkillVersionFileRow.size_bytes), 0)).where(SkillVersionFileRow.skill_version_id == first.id))
+        assert reserved == archive_size
+        assert version_count == 1
+        assert persisted_bytes == archive_size
     finally:
         await engine.dispose()
 
@@ -137,7 +422,7 @@ async def test_skill_secret_requirement_is_sanitized_without_credential_material
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     editor = await _seed_actor_and_project(engine, factory, label="skill-secret")
-    service = service_module.SkillService(factory)
+    service = _service(service_module, factory)
     try:
         async with engine.connect() as connection:
             credential_count_before = (await connection.execute(text("SELECT count(*) FROM credentials"))).scalar_one()
@@ -147,7 +432,7 @@ async def test_skill_secret_requirement_is_sanitized_without_credential_material
         draft = await service.create_version_from_archive(
             editor,
             asset.id,
-            _archive(required_secret=True),
+            _archive(name="secret-skill", required_secret=True),
             expected_asset_version=1,
         )
 
@@ -181,7 +466,7 @@ async def test_duplicate_secret_key_is_rejected_before_version_persistence_witho
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     editor = await _seed_actor_and_project(engine, factory, label="skill-duplicate-secret")
-    service = service_module.SkillService(factory)
+    service = _service(service_module, factory)
     raw_value = "raw-" + "super-secret"
     manifest = (
         "---\n"
@@ -244,13 +529,13 @@ async def test_publish_revalidates_draft_file_semantics_and_preserves_request_id
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     editor = await _seed_actor_and_project(engine, factory, label="skill-revalidate")
-    service = service_module.SkillService(factory)
+    service = _service(service_module, factory)
     try:
         asset = await service.create_asset(editor, service_module.CreateSkill("revalidate-skill", "Revalidate Skill"))
         draft = await service.create_version_from_archive(
             editor,
             asset.id,
-            _archive(),
+            _archive(name="revalidate-skill"),
             expected_asset_version=1,
         )
         async with engine.begin() as connection:
@@ -284,7 +569,7 @@ async def test_publish_revalidates_draft_file_semantics_and_preserves_request_id
 
 
 @pytest.mark.asyncio
-async def test_archived_snapshot_remains_loadable_while_suspended_snapshot_fails_closed(
+async def test_project_skill_delete_removes_every_version_and_suspended_snapshot_fails_closed(
     migrated_postgres_database_url: str,
 ) -> None:
     service_module = importlib.import_module("app.shared_assets.skill_service")
@@ -292,41 +577,146 @@ async def test_archived_snapshot_remains_loadable_while_suspended_snapshot_fails
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin = await _seed_actor_and_project(engine, factory, label="skill-lifecycle", role="admin")
     editor = await _seed_actor_and_project(engine, factory, label="skill-editor")
-    service = service_module.SkillService(factory)
+    service = _service(service_module, factory)
     try:
-        archived_asset = await service.create_asset(admin, service_module.CreateSkill("archived-skill", "Archived Skill"))
-        archived_draft = await service.create_version_from_archive(
+        deleted_asset = await service.create_asset(admin, service_module.CreateSkill("deleted-skill", "Deleted Skill"))
+        deleted_draft = await service.create_version_from_archive(
             admin,
-            archived_asset.id,
-            _archive(),
+            deleted_asset.id,
+            _archive(name="deleted-skill"),
             expected_asset_version=1,
         )
-        archived_version = await service.publish(admin, archived_asset.id, archived_draft.id, expected_asset_version=2)
-        archived = await service.archive(admin, archived_asset.id, expected_asset_version=3)
-        assert archived.status == "archived"
-        assert await service.load_version_files(admin, archived_asset.id, archived_version.id) == _archive()
-        with pytest.raises(AssetConflict):
-            await service.create_version_from_archive(
+        deleted_version = await service.publish(admin, deleted_asset.id, deleted_draft.id, expected_asset_version=2)
+        await service.create_version_from_archive(
+            admin,
+            deleted_asset.id,
+            _archive(name="deleted-skill"),
+            expected_asset_version=3,
+        )
+
+        await service.delete(
+            admin,
+            deleted_asset.id,
+            expected_asset_version=4,
+        )
+
+        with pytest.raises(AssetNotFound):
+            await service.get(admin, deleted_asset.id)
+        with pytest.raises(AssetNotFound):
+            await service.load_version_files(
                 admin,
-                archived_asset.id,
-                _archive(),
-                expected_asset_version=4,
+                deleted_asset.id,
+                deleted_version.id,
             )
+        async with factory() as session:
+            assert await session.scalar(select(func.count()).select_from(SkillRow).where(SkillRow.id == deleted_asset.id)) == 0
+            assert await session.scalar(select(func.count()).select_from(SkillVersionRow).where(SkillVersionRow.skill_id == deleted_asset.id)) == 0
+            reserved = await session.scalar(
+                text(
+                    """SELECT reserved FROM project_usage_counters
+                       WHERE project_id=:project_id
+                         AND dimension='storage_bytes'
+                         AND bucket='lifetime'"""
+                ),
+                {"project_id": admin.project_id},
+            )
+            assert reserved == 0
 
         suspended_asset = await service.create_asset(admin, service_module.CreateSkill("suspended-skill", "Suspended Skill"))
         suspended_draft = await service.create_version_from_archive(
             admin,
             suspended_asset.id,
-            _archive(),
+            _archive(name="suspended-skill"),
             expected_asset_version=1,
         )
         suspended_version = await service.publish(admin, suspended_asset.id, suspended_draft.id, expected_asset_version=2)
-        suspended = await service.suspend(admin, suspended_asset.id, expected_asset_version=3)
+        assert (await service.get(admin, suspended_asset.id)).status == "suspended"
+        with pytest.raises(AssetNotFound):
+            await service.load_version_files(admin, suspended_asset.id, suspended_version.id)
+        activated = await service.activate(
+            admin,
+            suspended_asset.id,
+            expected_asset_version=3,
+        )
+        assert activated.status == "active"
+        assert await service.load_version_files(
+            admin,
+            suspended_asset.id,
+            suspended_version.id,
+        ) == _archive(name="suspended-skill")
+        suspended = await service.suspend(admin, suspended_asset.id, expected_asset_version=4)
         assert suspended.status == "suspended"
         with pytest.raises(AssetNotFound):
             await service.load_version_files(admin, suspended_asset.id, suspended_version.id)
         with pytest.raises(AssetForbidden):
             await service.suspend(editor, uuid.uuid4(), expected_asset_version=1)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_skill_delete_rejects_immutable_agent_version_reference(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="skill-delete-agent-ref",
+        role="admin",
+    )
+    skills = _service(service_module, factory)
+    agents = AgentService(factory)
+    try:
+        skill = await skills.create_asset(
+            editor,
+            service_module.CreateSkill("referenced-skill", "Referenced Skill"),
+        )
+        draft = await skills.create_version_from_archive(
+            editor,
+            skill.id,
+            _archive(name="referenced-skill"),
+            expected_asset_version=1,
+        )
+        published = await skills.publish(
+            editor,
+            skill.id,
+            draft.id,
+            expected_asset_version=2,
+        )
+        await skills.activate(
+            editor,
+            skill.id,
+            expected_asset_version=3,
+        )
+        agent = await agents.create_asset(
+            editor,
+            CreateAgent("referencing-agent", "Referencing Agent"),
+        )
+        await agents.create_version(
+            editor,
+            agent.id,
+            AgentPayload(
+                description="References the immutable Skill version",
+                soul="Use the selected Skill.",
+                model_ref="test-model",
+                tool_groups=(),
+                skill_version_ids=(published.id,),
+                mcp_version_ids=(),
+            ),
+            expected_asset_version=1,
+        )
+
+        with pytest.raises(AssetConflict) as exc_info:
+            await skills.delete(
+                editor,
+                skill.id,
+                expected_asset_version=4,
+            )
+        assert exc_info.value.request_id == editor.request_id
+        assert (await skills.get(editor, skill.id)).id == skill.id
     finally:
         await engine.dispose()
 
@@ -343,7 +733,7 @@ async def test_bound_system_skill_snapshot_is_visible_only_in_bound_project(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     project = await _seed_actor_and_project(engine, factory, label="skill-bound")
     outsider = await _seed_actor_and_project(engine, factory, label="skill-unbound")
-    service = service_module.SkillService(factory)
+    service = _service(service_module, factory)
     try:
         await bootstrap_module.bootstrap_system_assets(factory)
         async with factory() as session:
@@ -401,13 +791,13 @@ async def test_concurrent_skill_publish_has_one_optimistic_winner(
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     editor = await _seed_actor_and_project(engine, factory, label="skill-race")
-    service = service_module.SkillService(factory)
+    service = _service(service_module, factory)
     try:
         asset = await service.create_asset(editor, service_module.CreateSkill("race-skill", "Race Skill"))
         draft = await service.create_version_from_archive(
             editor,
             asset.id,
-            _archive(),
+            _archive(name="race-skill"),
             expected_asset_version=1,
         )
 
@@ -432,7 +822,7 @@ async def test_loading_snapshot_holds_asset_lock_against_concurrent_suspend(
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin = await _seed_actor_and_project(engine, factory, label="skill-load-lock", role="admin")
-    service = service_module.SkillService(factory)
+    service = _service(service_module, factory)
     release = asyncio.Event()
     entered = asyncio.Event()
     original = repository_module.SkillRepository.load_project_version
@@ -449,10 +839,15 @@ async def test_loading_snapshot_holds_asset_lock_against_concurrent_suspend(
         draft = await service.create_version_from_archive(
             admin,
             asset.id,
-            _archive(),
+            _archive(name="load-lock-skill"),
             expected_asset_version=1,
         )
         published = await service.publish(admin, asset.id, draft.id, expected_asset_version=2)
+        await service.activate(
+            admin,
+            asset.id,
+            expected_asset_version=3,
+        )
         load_task = asyncio.create_task(service.load_version_files(admin, asset.id, published.id))
         await asyncio.wait_for(entered.wait(), timeout=2)
         try:
@@ -465,7 +860,9 @@ async def test_loading_snapshot_holds_asset_lock_against_concurrent_suspend(
                     )
         finally:
             release.set()
-        assert await asyncio.wait_for(load_task, timeout=2) == _archive()
+        assert await asyncio.wait_for(load_task, timeout=2) == _archive(
+            name="load-lock-skill",
+        )
     finally:
         release.set()
         await engine.dispose()
@@ -481,8 +878,13 @@ async def test_skill_snapshot_hashing_yields_to_event_loop(
     service_module = importlib.import_module("app.shared_assets.skill_service")
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    editor = await _seed_actor_and_project(engine, factory, label=f"skill-offload-{operation}")
-    service = service_module.SkillService(factory)
+    editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label=f"skill-offload-{operation}",
+        role="admin",
+    )
+    service = _service(service_module, factory)
     entered = threading.Event()
     release = threading.Event()
     hash_threads: list[int] = []
@@ -511,12 +913,17 @@ async def test_skill_snapshot_hashing_yields_to_event_loop(
         draft = await service.create_version_from_archive(
             editor,
             asset.id,
-            _archive(),
+            _archive(name=f"offload-{operation}"),
             expected_asset_version=1,
         )
         version = draft
         if operation == "load":
             version = await service.publish(editor, asset.id, draft.id, expected_asset_version=2)
+            await service.activate(
+                editor,
+                asset.id,
+                expected_asset_version=3,
+            )
 
         monkeypatch.setattr(
             service_module,

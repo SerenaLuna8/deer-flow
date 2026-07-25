@@ -8,7 +8,14 @@ import {
   SearchIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import {
   CreateAssetDialog,
@@ -28,6 +35,7 @@ import type { Project } from "@/core/projects/types";
 import {
   useCreateProjectAsset,
   useCreateProjectAssetVersion,
+  useChangeProjectAssetStatus,
   useDisableProjectSystemBinding,
   useEnableProjectSystemBinding,
   useProjectAssets,
@@ -44,6 +52,7 @@ import { ProjectPageHeader } from "../project-page-header";
 import { dependencyVersionOptions } from "./asset-dependency-options";
 import { ProjectAssetDetailSheet } from "./project-asset-detail-sheet";
 import type { ProjectAssetVersionRenderContext } from "./project-asset-detail-sheet";
+import { projectSkillStatusToggleState } from "./project-asset-view-model";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 export type ProjectAssetSourceFilter = "system" | "project";
@@ -138,6 +147,53 @@ export function systemBindingToggleState(item: ProjectAssetItem): {
   };
 }
 
+export type VersionDialogSubmissionToken = {
+  assetId: string;
+  generation: number;
+};
+
+export function rememberRequestedVersion(
+  current: Record<string, string>,
+  assetId: string,
+  versionId: string,
+): Record<string, string> {
+  return current[assetId] === versionId
+    ? current
+    : { ...current, [assetId]: versionId };
+}
+
+export function handleRequestedVersion(
+  current: Record<string, string>,
+  assetId: string,
+  versionId: string,
+): Record<string, string> {
+  if (current[assetId] !== versionId) return current;
+  const next = { ...current };
+  delete next[assetId];
+  return next;
+}
+
+export function versionDialogSubmissionMatches(
+  active: VersionDialogSubmissionToken | null,
+  submission: VersionDialogSubmissionToken,
+): boolean {
+  return (
+    active?.assetId === submission.assetId &&
+    active.generation === submission.generation
+  );
+}
+
+export function closeCompletedVersionDialog(
+  current: ProjectAssetItem | null,
+  active: VersionDialogSubmissionToken | null,
+  completed: VersionDialogSubmissionToken,
+): ProjectAssetItem | null {
+  return current?.id === completed.assetId &&
+    versionDialogSubmissionMatches(active, completed)
+    ? null
+    : current;
+}
+
 function AssetList({
   kind,
   source,
@@ -145,9 +201,13 @@ function AssetList({
   selectedAssetId,
   onSelect,
   onToggleSystemBinding,
+  onToggleProjectSkillStatus,
   bindingIntent,
   bindingErrorAssetId,
   bindingError,
+  skillStatusIntent,
+  skillStatusErrorAssetId,
+  skillStatusError,
 }: {
   kind: MutableAssetKind;
   source: ProjectAssetSourceFilter;
@@ -155,9 +215,16 @@ function AssetList({
   selectedAssetId: string | null;
   onSelect: (item: ProjectAssetItem) => void;
   onToggleSystemBinding: (item: ProjectAssetItem, checked: boolean) => void;
+  onToggleProjectSkillStatus?: (
+    item: ProjectAssetItem,
+    checked: boolean,
+  ) => void;
   bindingIntent?: { assetId: string; checked: boolean } | null;
   bindingErrorAssetId?: string | null;
   bindingError?: unknown;
+  skillStatusIntent?: { assetId: string; checked: boolean } | null;
+  skillStatusErrorAssetId?: string | null;
+  skillStatusError?: unknown;
 }) {
   const Icon = KIND_META[kind].icon;
   const sourceLabel = source === "system" ? "系统提供" : "项目自建";
@@ -184,10 +251,21 @@ function AssetList({
         const pending = bindingIntent?.assetId === item.id;
         const bindingBusy = bindingIntent !== null;
         const checked = pending ? bindingIntent.checked : toggleState.checked;
-        const error =
+        const bindingItemError =
           bindingErrorAssetId === item.id && bindingError
             ? adminAssetErrorMessage(bindingError)
             : null;
+        const skillToggleState = projectSkillStatusToggleState(item);
+        const skillStatusPending = skillStatusIntent?.assetId === item.id;
+        const skillStatusBusy = skillStatusIntent !== null;
+        const skillChecked = skillStatusPending
+          ? skillStatusIntent.checked
+          : skillToggleState.checked;
+        const skillStatusItemError =
+          skillStatusErrorAssetId === item.id && skillStatusError
+            ? adminAssetErrorMessage(skillStatusError)
+            : null;
+        const error = bindingItemError ?? skillStatusItemError;
         return (
           <div
             key={item.id}
@@ -215,7 +293,7 @@ function AssetList({
                     <span className="truncate text-base font-semibold">
                       {item.display_name}
                     </span>
-                    {item.status !== "active" ? (
+                    {kind !== "skills" && item.status !== "active" ? (
                       <AssetStatusBadge status={item.status} />
                     ) : null}
                   </span>
@@ -286,6 +364,29 @@ function AssetList({
                   onCheckedChange={(next) => onToggleSystemBinding(item, next)}
                 />
               </div>
+            ) : kind === "skills" ? (
+              <div className="flex min-w-28 shrink-0 flex-col items-center justify-center gap-1.5 px-5 py-5">
+                <Switch
+                  checked={skillChecked}
+                  disabled={
+                    skillToggleState.disabled ||
+                    skillStatusBusy ||
+                    !onToggleProjectSkillStatus
+                  }
+                  className="data-[state=checked]:bg-success focus-visible:ring-selection/30"
+                  aria-busy={skillStatusPending || undefined}
+                  aria-label={`${skillChecked ? "停用" : "启用"} ${item.display_name}`}
+                  title={skillToggleState.disabledReason ?? undefined}
+                  onCheckedChange={(next) =>
+                    onToggleProjectSkillStatus?.(item, next)
+                  }
+                />
+                {skillToggleState.disabledReason ? (
+                  <span className="text-muted-foreground text-xs whitespace-nowrap">
+                    {skillToggleState.disabledReason}
+                  </span>
+                ) : null}
+              </div>
             ) : null}
 
             {error ? (
@@ -310,9 +411,13 @@ export function ProjectAssetListView({
   selectedAssetId,
   onSelect,
   onToggleSystemBinding,
+  onToggleProjectSkillStatus,
   bindingIntent,
   bindingErrorAssetId,
   bindingError,
+  skillStatusIntent,
+  skillStatusErrorAssetId,
+  skillStatusError,
 }: {
   kind: MutableAssetKind;
   data: ProjectAssetList;
@@ -320,9 +425,16 @@ export function ProjectAssetListView({
   selectedAssetId: string | null;
   onSelect: (item: ProjectAssetItem) => void;
   onToggleSystemBinding: (item: ProjectAssetItem, checked: boolean) => void;
+  onToggleProjectSkillStatus?: (
+    item: ProjectAssetItem,
+    checked: boolean,
+  ) => void;
   bindingIntent?: { assetId: string; checked: boolean } | null;
   bindingErrorAssetId?: string | null;
   bindingError?: unknown;
+  skillStatusIntent?: { assetId: string; checked: boolean } | null;
+  skillStatusErrorAssetId?: string | null;
+  skillStatusError?: unknown;
 }) {
   return (
     <AssetList
@@ -332,9 +444,13 @@ export function ProjectAssetListView({
       selectedAssetId={selectedAssetId}
       onSelect={onSelect}
       onToggleSystemBinding={onToggleSystemBinding}
+      onToggleProjectSkillStatus={onToggleProjectSkillStatus}
       bindingIntent={bindingIntent}
       bindingErrorAssetId={bindingErrorAssetId}
       bindingError={bindingError}
+      skillStatusIntent={skillStatusIntent}
+      skillStatusErrorAssetId={skillStatusErrorAssetId}
+      skillStatusError={skillStatusError}
     />
   );
 }
@@ -375,6 +491,7 @@ function ProjectAssetCatalog({
     project.id,
     BINDING_KIND[kind],
   );
+  const changeStatus = useChangeProjectAssetStatus(accountId, project.id, kind);
   const modelCatalog = useModels({ enabled: kind === "agents" });
   const skillDependencies = useProjectAssets(
     accountId,
@@ -398,17 +515,102 @@ function ProjectAssetCatalog({
     assetId: string;
     checked: boolean;
   } | null>(null);
+  const [skillStatusIntent, setSkillStatusIntent] = useState<{
+    assetId: string;
+    checked: boolean;
+  } | null>(null);
   const [versionAsset, setVersionAsset] = useState<ProjectAssetItem | null>(
     null,
   );
+  const versionDialogGeneration = useRef(0);
+  const activeVersionDialog = useRef<VersionDialogSubmissionToken | null>(null);
+  const [createdVersions, setCreatedVersions] = useState<
+    Record<string, string>
+  >({});
+  const [versionSubmission, setVersionSubmission] = useState<{
+    token: VersionDialogSubmissionToken;
+    pending: boolean;
+    error: unknown;
+  } | null>(null);
 
   useEffect(() => {
     if (createAsset.isSuccess) setCreateOpen(false);
   }, [createAsset.isSuccess]);
 
-  useEffect(() => {
-    if (createVersion.isSuccess) setVersionAsset(null);
-  }, [createVersion.isSuccess]);
+  const handleRequestedVersionHandled = useCallback(
+    (assetId: string, versionId: string) => {
+      setCreatedVersions((current) =>
+        handleRequestedVersion(current, assetId, versionId),
+      );
+    },
+    [],
+  );
+
+  const rememberVersion = useCallback((assetId: string, versionId: string) => {
+    setCreatedVersions((current) =>
+      rememberRequestedVersion(current, assetId, versionId),
+    );
+  }, []);
+
+  function openVersionDialog(item: ProjectAssetItem) {
+    const token = {
+      assetId: item.id,
+      generation: ++versionDialogGeneration.current,
+    };
+    activeVersionDialog.current = token;
+    createVersion.reset();
+    setVersionSubmission(null);
+    setVersionAsset(item);
+  }
+
+  function closeVersionDialog() {
+    const token = activeVersionDialog.current;
+    activeVersionDialog.current = null;
+    createVersion.reset();
+    setVersionAsset(null);
+    setVersionSubmission((current) =>
+      current && token && versionDialogSubmissionMatches(current.token, token)
+        ? null
+        : current,
+    );
+  }
+
+  async function submitVersion(input: VersionAuthoringInput) {
+    const target = versionAsset;
+    const token = activeVersionDialog.current;
+    if (!target || token?.assetId !== target.id) return;
+    setVersionSubmission({
+      token,
+      pending: true,
+      error: null,
+    });
+    try {
+      const result = await createVersion.mutateAsync({
+        assetId: target.id,
+        input,
+      });
+      const active = activeVersionDialog.current;
+      if (!versionDialogSubmissionMatches(active, token)) return;
+      activeVersionDialog.current = null;
+      rememberVersion(target.id, result.data.id);
+      setVersionAsset((current) =>
+        closeCompletedVersionDialog(current, active, token),
+      );
+      setVersionSubmission((current) =>
+        current && versionDialogSubmissionMatches(current.token, token)
+          ? null
+          : current,
+      );
+    } catch (error) {
+      setVersionSubmission((current) =>
+        current &&
+        versionDialogSubmissionMatches(activeVersionDialog.current, token) &&
+        versionDialogSubmissionMatches(current.token, token)
+          ? { token, pending: false, error }
+          : current,
+      );
+    }
+  }
 
   const data = query.data as ProjectAssetList | undefined;
   useEffect(() => {
@@ -486,6 +688,28 @@ function ProjectAssetCatalog({
     settle();
   }
 
+  function toggleProjectSkillStatus(item: ProjectAssetItem, checked: boolean) {
+    if (kind !== "skills") return;
+    const state = projectSkillStatusToggleState(item);
+    if (state.disabled || state.checked === checked) return;
+
+    changeStatus.reset();
+    setSkillStatusIntent({ assetId: item.id, checked });
+    changeStatus.mutate(
+      {
+        assetId: item.id,
+        action: checked ? "activate" : "suspend",
+        input: { expected_asset_version: item.version },
+      },
+      {
+        onSettled: () =>
+          setSkillStatusIntent((current) =>
+            current?.assetId === item.id ? null : current,
+          ),
+      },
+    );
+  }
+
   if (query.isLoading) {
     return (
       <div className="space-y-4" aria-label="正在加载资产">
@@ -533,6 +757,9 @@ function ProjectAssetCatalog({
     : disableBinding.error
       ? disableBinding.variables?.assetId
       : null;
+  const skillStatusErrorAssetId = changeStatus.error
+    ? changeStatus.variables?.assetId
+    : null;
 
   return (
     <>
@@ -637,9 +864,13 @@ function ProjectAssetCatalog({
                   selectedAssetId={selectedAssetId}
                   onSelect={(item) => setSelectedAssetId(item.id)}
                   onToggleSystemBinding={toggleSystemBinding}
+                  onToggleProjectSkillStatus={toggleProjectSkillStatus}
                   bindingIntent={bindingIntent}
                   bindingErrorAssetId={bindingErrorAssetId}
                   bindingError={bindingError}
+                  skillStatusIntent={skillStatusIntent}
+                  skillStatusErrorAssetId={skillStatusErrorAssetId}
+                  skillStatusError={changeStatus.error}
                 />
               )}
             </TabsContent>
@@ -655,8 +886,22 @@ function ProjectAssetCatalog({
           kind={kind}
           item={selectedItem}
           open
+          requestedVersionId={createdVersions[selectedItem.id] ?? null}
           onOpenChange={(next) => !next && setSelectedAssetId(null)}
-          onCreateVersion={setVersionAsset}
+          onCreateVersion={openVersionDialog}
+          onDeleted={(assetId) => {
+            setSelectedAssetId((current) =>
+              current === assetId ? null : current,
+            );
+            setCreatedVersions((current) => {
+              if (!(assetId in current)) return current;
+              const next = { ...current };
+              delete next[assetId];
+              return next;
+            });
+          }}
+          onVersionCreated={rememberVersion}
+          onRequestedVersionHandled={handleRequestedVersionHandled}
           renderVersion={renderVersion}
         />
       )}
@@ -675,13 +920,26 @@ function ProjectAssetCatalog({
 
       {versionAsset && (
         <CreateVersionDialog
+          key={`${versionAsset.id}:${activeVersionDialog.current?.generation ?? "closed"}`}
           kind={kind}
           asset={versionAsset}
           open
-          pending={createVersion.isPending}
+          pending={
+            versionSubmission !== null &&
+            versionDialogSubmissionMatches(
+              activeVersionDialog.current,
+              versionSubmission.token,
+            ) &&
+            versionSubmission.pending
+          }
           errorMessage={
-            createVersion.error
-              ? adminAssetErrorMessage(createVersion.error)
+            versionSubmission !== null &&
+            versionDialogSubmissionMatches(
+              activeVersionDialog.current,
+              versionSubmission.token,
+            ) &&
+            versionSubmission.error
+              ? adminAssetErrorMessage(versionSubmission.error)
               : null
           }
           modelOptions={modelCatalog.models.map((model) => ({
@@ -696,13 +954,8 @@ function ProjectAssetCatalog({
           )}
           modelsLoading={modelCatalog.isLoading}
           modelsError={Boolean(modelCatalog.error)}
-          onOpenChange={(next) => !next && setVersionAsset(null)}
-          onSubmit={(input: VersionAuthoringInput) =>
-            createVersion.mutate({
-              assetId: versionAsset.id,
-              input,
-            })
-          }
+          onOpenChange={(next) => !next && closeVersionDialog()}
+          onSubmit={(input: VersionAuthoringInput) => void submitVersion(input)}
         />
       )}
     </>

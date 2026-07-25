@@ -423,7 +423,7 @@ async def test_admission_fails_closed_on_scope_drift_without_partial_run_or_snap
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_admission_rejects_non_executable_agent_and_generation_race_without_partial_run(
+async def test_admission_rejects_non_executable_agent_but_ignores_unrelated_generation_race(
     migrated_postgres_database_url: str,
 ) -> None:
     from sqlalchemy import func, select
@@ -467,15 +467,15 @@ async def test_admission_rejects_non_executable_agent_and_generation_race_withou
                 await session.execute(text("UPDATE asset_catalog_state SET generation=generation+1 WHERE id=1"))
                 return snapshot
 
-        with pytest.raises(PrivateWorkAssetStale):
-            await PrivateRunAdmissionService(
-                seed.factory,
-                resolver=RacingResolver(seed.factory),
-            ).admit(seed.owner_a, racing_thread_id, PrivateRunCreate())
+        admitted = await PrivateRunAdmissionService(
+            seed.factory,
+            resolver=RacingResolver(seed.factory),
+        ).admit(seed.owner_a, racing_thread_id, PrivateRunCreate())
+        assert admitted.thread_id == racing_thread_id
 
         async with seed.factory() as session:
             count = await session.scalar(select(func.count()).select_from(RunRow).where(RunRow.thread_id.in_((suspended_thread_id, racing_thread_id))))
-        assert count == 0
+        assert count == 1
     finally:
         await seed.engine.dispose()
 

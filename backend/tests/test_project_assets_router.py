@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import importlib
 import uuid
 from datetime import UTC, datetime
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.gateway.deps import get_current_user_from_request
@@ -470,6 +471,75 @@ def test_project_skill_fork_route_uses_strict_discriminated_changes() -> None:
     assert invalid.status_code == 422
 
 
+def test_project_skill_delete_returns_204_and_forwards_expected_revision() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+
+    response = _client(skill_service=service).request(
+        "DELETE",
+        f"/api/projects/{PROJECT_ID}/skills/{asset_id}",
+        json={"expected_asset_version": 7},
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+    service.delete.assert_awaited_once()
+    actor, selected_asset_id = service.delete.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert selected_asset_id == asset_id
+    assert service.delete.await_args.kwargs == {"expected_asset_version": 7}
+
+
+def test_project_skill_activate_route_forwards_expected_revision() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    activated = SkillAssetView(
+        id=asset_id,
+        scope=AssetScope.PROJECT,
+        project_id=PROJECT_ID,
+        slug="activated-skill",
+        display_name="Activated Skill",
+        status="active",
+        current_published_version_id=uuid.uuid4(),
+        version=4,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service.activate.return_value = activated
+
+    response = _client(skill_service=service).post(
+        f"/api/projects/{PROJECT_ID}/skills/{asset_id}/activate",
+        json={"expected_asset_version": 3},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["item"]["status"] == "active"
+    service.activate.assert_awaited_once()
+    actor, selected_asset_id = service.activate.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert selected_asset_id == asset_id
+    assert service.activate.await_args.kwargs == {"expected_asset_version": 3}
+
+
+def test_project_skill_archive_is_not_exposed() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    client = _client(skill_service=service)
+
+    response = client.post(
+        f"/api/projects/{PROJECT_ID}/skills/{asset_id}/archive",
+        json={"expected_asset_version": 1},
+    )
+
+    assert response.status_code == 404
+    service.archive.assert_not_awaited()
+    paths = client.app.openapi()["paths"]
+    assert "/api/projects/{project_id}/skills/{asset_id}/archive" not in paths
+    assert "/api/projects/{project_id}/skills/{asset_id}/activate" in paths
+    assert "/api/projects/{project_id}/skills/{asset_id}/suspend" in paths
+
+
 def _mcp_version_with_read_only_mappings(asset_id: uuid.UUID) -> McpVersionView:
     return McpVersionView(
         id=uuid.uuid4(),
@@ -622,6 +692,8 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
     for model_name in (
         "SkillFileContentResponse",
         "SkillFileContentItemResponse",
+        "SkillFileRequest",
+        "SkillVersionRequest",
         "SkillForkRequest",
         "SkillFileCreateChangeRequest",
         "SkillFileReplaceChangeRequest",
@@ -642,6 +714,42 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
     } & set(credential_item["properties"])
     assert components["CredentialGrantMigrationRequest"]["additionalProperties"] is False
     assert components["CredentialGrantMigrationResponse"]["additionalProperties"] is False
+
+    skill_file = components["SkillFileRequest"]["properties"]
+    assert skill_file["path"]["maxLength"] == 1024
+    assert skill_file["content_base64"]["maxLength"] == project_assets.MAX_SKILL_BASE64_FILE_CHARS
+    assert skill_file["media_type"]["maxLength"] == 255
+    skill_files = components["SkillVersionRequest"]["properties"]["files"]
+    assert skill_files["minItems"] == 1
+    assert skill_files["maxItems"] == project_assets.MAX_SKILL_ARCHIVE_FILES
+
+
+def test_skill_base64_aggregate_is_rejected_before_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = project_assets.SkillVersionRequest.model_validate(
+        {
+            "files": [
+                {
+                    "path": "SKILL.md",
+                    "content_base64": "eA==",
+                    "media_type": "text/markdown",
+                },
+            ],
+            "expected_asset_version": 1,
+        }
+    )
+    monkeypatch.setattr(project_assets, "MAX_SKILL_ARCHIVE_BASE64_CHARS", 3)
+
+    with pytest.raises(HTTPException) as exc_info:
+        project_assets._decode_skill_files(body, "req-base64-bound")
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == {
+        "code": "asset_validation_failed",
+        "message": "Asset validation failed",
+        "request_id": "req-base64-bound",
+    }
 
 
 def test_credential_history_response_is_secret_storage_safe() -> None:
@@ -748,6 +856,23 @@ def test_project_asset_domain_errors_have_stable_contract(error, status: int, co
             "message": error.public_message,
             "request_id": "req-project-assets",
         }
+    }
+
+
+def test_project_skill_storage_quota_error_is_429_with_retry_after() -> None:
+    errors = importlib.import_module("app.shared_assets.errors")
+
+    with pytest.raises(HTTPException) as exc_info:
+        project_assets.raise_asset_domain(
+            errors.AssetStorageQuotaExceeded("req-skill-quota"),
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.headers == {"Retry-After": "1"}
+    assert exc_info.value.detail == {
+        "code": "asset_storage_quota_exceeded",
+        "message": "Project Skill storage quota exceeded",
+        "request_id": "req-skill-quota",
     }
 
 

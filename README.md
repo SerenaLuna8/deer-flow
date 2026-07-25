@@ -85,7 +85,7 @@ make config
 
 ### 3. 初始化 PostgreSQL
 
-DeerFlow 当前尚未上线，现有全部 schema 已合并到唯一的 `0001_project_saas_baseline`。系统支持初始化全新 PostgreSQL 目标库，并保留存量库显式向前迁移能力，供未来从 `0002` 开始的新增版本使用。运行时不会建库、执行 migration、stamp 或修复 schema。应用 role 需要预先存在，并建议使用非 superuser role。
+`0001_project_saas_baseline` 是不可改写的冻结基线，当前 head 为线性的 `0002_project_skill_hard_delete`。系统支持初始化全新 PostgreSQL 目标库，也支持把精确匹配 `0001` catalog 的存量库显式向前迁移到 `0002`。运行时不会建库、执行 migration、stamp 或修复 schema。应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
 # 全新数据库
@@ -94,13 +94,13 @@ export DATABASE_URL='<DeerFlow 目标库 URL>'
 make setup-db
 make check-db
 
-# 未来新增 0002+ 后：已存在且处于已知祖先 revision 的数据库
+# 已存在且处于精确 0001 祖先 revision 的数据库
 export DATABASE_URL='<现有 DeerFlow 数据库 URL>'
 make migrate-db
 make check-db
 ```
 
-`make setup-db` 当前从空库安装合并后的单一 `0001` head，并初始化系统资产 catalog、LangGraph schema 和默认项目；`make migrate-db` 保留给未来版本，只对已验证的已知旧 revision 执行 pending migrations，不创建数据库；`make check-db` 只读校验 current/head revision 与必需对象。已知祖先 revision 会提示显式迁移，未知 revision、未纳管非空 schema 或 catalog drift 会拒绝自动处理。命令不会输出完整连接 URL 或密码。
+`make setup-db` 从空库安装完整的 `0001 → 0002` migration chain，并初始化系统资产 catalog、LangGraph schema 和默认项目；`make migrate-db` 只对已验证的已知旧 revision 执行 pending migrations，不创建数据库，也不重复执行 catalog、LangGraph 或默认项目初始化；`make check-db` 只读校验 current/head revision 与必需对象。已知祖先 revision 会提示显式迁移，未知 revision、未纳管非空 schema 或 catalog drift 会拒绝自动处理。命令不会输出完整连接 URL 或密码。
 
 ### 4. 启动
 
@@ -149,7 +149,9 @@ Kubernetes/Helm 资源位于 `deploy/helm/`。Docker Compose、Kubernetes 和不
 
 工作区顶部提供账号级通知铃铛和未读角标。向已注册邮箱发出的项目邀请会产生站内通知，接收者可在通知中直接接受并加入项目；通知列表、已读状态和接受操作严格绑定当前服务端认证账号。未注册邮箱不预建站内通知，仍通过不含服务端明文 token 的一次性邀请链接完成注册和兑换。通知 API 不返回邀请 token、token hash 或其他账号的通知数据。
 
-System Agent、Skill 和 MCP 在显式数据库准备过程中由受校验的 packaged catalog 写入 PostgreSQL。运行进程只读取数据库中的资产版本和 Run 准入时固定的 snapshot。仓库内 `skills/public/` 的 21 个完整 Skill 目录会在开发期生成带 digest 的 packaged system Skill archive，并在 `make setup-db` 或存量库 `make migrate-db` 完成 schema 准备后作为系统资产写入；运行时仍不会扫描该目录。Setup 和 migration 都不会为项目自动绑定这些 Skill，项目管理员可在“系统提供”列表中逐项启用或停用，也不应再把同一目录重复导入为项目 Skill。
+System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 packaged catalog 写入 PostgreSQL。运行进程只读取数据库中的资产版本和 Run 准入时固定的 snapshot。仓库内 `skills/public/` 的 21 个完整 Skill 目录会在开发期生成带 digest 的 packaged system Skill archive，并在 `make setup-db` 时作为系统资产写入；`make migrate-db` 只执行 pending schema migrations，不重复 seed。Setup 不会为项目自动绑定这些 Skill，项目管理员可在“系统提供”列表中逐项启用或停用，也不应再把同一目录重复导入为项目 Skill。
+
+项目 Skill 的 `SKILL.md` frontmatter `name` 必须与资产 slug 完全一致；新建后默认停用，但停用状态仍可编辑和发布，只有已发布版本才能通过列表或详情开关启用。版本文件按真实目录树展示，只打开当前选中文件；新建文件需指定目标文件夹，并可在流程中创建嵌套目录。单个 archive 及批量导入均限制为合计 100 MiB、最多 4096 个文件。Gateway 和统一 Nginx 入口只在 Skill archive 创建路由上允许最多 160 MiB 的 JSON/base64 wire body，并在 JSON 解析前拒绝越界请求。每个不可变项目 Skill 版本的完整文件大小都会计入项目 `storage_bytes` 配额。项目自建 Skill 不提供归档或暂停：详情页二次确认并等待 5 秒后执行整包永久删除，原子删除全部文件和版本并释放对应配额；仍被 Agent 或已准入 Run 引用时返回 `409`，系统 Skill 永远不可删除。Worker 把系统 Skill 投影到 `/mnt/skills/public/<name>`，把项目 Skill 投影到 `/mnt/skills/custom/<asset_uuid>`；执行前按准入时固定的精确版本、checksum 和绑定重新校验，其他项目的 catalog 更新不会使当前 Run 失效。
 
 ## 项目结构
 
@@ -186,7 +188,7 @@ deer-flow/
 | `make dev` / `make start` | 启动本地全栈 |
 | `make gateway` / `make worker` / `make scheduler` | 单独启动后端进程 |
 | `make setup-db` | 在空库安装当前 head 并初始化 PostgreSQL |
-| `make migrate-db` | 未来新增 revision 后，将已知旧版本显式向前迁移到 head |
+| `make migrate-db` | 将精确匹配已知祖先 catalog 的存量库显式向前迁移到 head |
 | `make check-db` | 只读检查 PostgreSQL revision 与必需对象 |
 | `cd backend && make lint && make test` | 后端格式、静态检查与测试 |
 | `cd frontend && pnpm check && pnpm test` | 前端 lint、类型检查与单元测试 |

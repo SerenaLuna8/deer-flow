@@ -21,7 +21,6 @@ from app.private_work.authorization import (
 )
 from app.private_work.connection_service import ProjectConnectionService
 from app.private_work.errors import (
-    PrivateWorkAssetStale,
     PrivateWorkForbidden,
     PrivateWorkNotFound,
 )
@@ -31,7 +30,14 @@ from app.private_work.memory_service import PrivateMemoryService
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.projects.context import ProjectContext
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.service import QuotaService
+from app.reliability.owner_refs import AuditHmacKeyring
+from app.shared_assets.models import SkillArchiveFile
+from app.shared_assets.skill_service import CreateSkill, SkillService
 from deerflow.agents.memory.storage import create_empty_memory
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRepository,
     ChannelCredentialCipher,
@@ -365,23 +371,69 @@ async def test_exact_agent_snapshots_checkpoint_scope_and_revocation_fail_closed
             "owner_user_id": str(scenario.seed.owner_a.user_id),
         }
 
-        stale_thread = await scenario.thread_service.create(
+        generation_thread = await scenario.thread_service.create(
             scenario.seed.owner_a,
-            thread_id="release-stale-generation",
+            thread_id="release-unrelated-generation",
             agent=ThreadAgentRef(scenario.seed.project_agent_id, "project"),
         )
-        stale = await PrivateRunAdmissionService(scenario.seed.factory).admit(
+        generation_admitted = await PrivateRunAdmissionService(scenario.seed.factory).admit(
             scenario.seed.owner_a,
-            stale_thread.thread_id,
+            generation_thread.thread_id,
             PrivateRunCreate(),
         )
-        async with scenario.seed.factory() as session, session.begin():
-            await session.execute(text("UPDATE asset_catalog_state SET generation=generation+1 WHERE id=1"))
-        with pytest.raises(PrivateWorkAssetStale):
-            await PrivateAssetRuntime(scenario.seed.factory).materialize(
-                scenario.seed.owner_a,
-                stale,
-            )
+        project_b_private = scenario.seed.project_b_owner_a
+        project_b = ProjectContext(
+            user_id=project_b_private.user_id,
+            project_id=project_b_private.project_id,
+            membership_id=project_b_private.membership_id,
+            role=project_b_private.role,
+            capabilities=project_b_private.capabilities,
+            membership_version=project_b_private.membership_version,
+            request_id="release-project-b-skill",
+        )
+        project_b_skills = SkillService(
+            scenario.seed.factory,
+            quota=ProjectQuotaEnforcer(
+                QuotaService(
+                    scenario.seed.factory,
+                    QuotaConfig(),
+                    source_ref_hasher=AuditHmacKeyring.from_environment(),
+                )
+            ),
+        )
+        project_b_skill = await project_b_skills.create_asset(
+            project_b,
+            CreateSkill(
+                slug="release-project-b-skill",
+                display_name="Release Project B Skill",
+            ),
+        )
+        project_b_draft = await project_b_skills.create_version_from_archive(
+            project_b,
+            project_b_skill.id,
+            (
+                SkillArchiveFile(
+                    path="SKILL.md",
+                    content=(b"---\nname: release-project-b-skill\ndescription: unrelated project B catalog mutation\n---\n\nKeep project A admitted snapshots valid.\n"),
+                    media_type="text/markdown",
+                ),
+            ),
+            expected_asset_version=1,
+        )
+        await project_b_skills.publish(
+            project_b,
+            project_b_skill.id,
+            project_b_draft.id,
+            expected_asset_version=2,
+        )
+        async with scenario.seed.factory() as session:
+            current_generation = await session.scalar(text("SELECT generation FROM asset_catalog_state WHERE id=1"))
+        assert current_generation > generation_admitted.snapshot.catalog_generation
+        generation_runtime = await PrivateAssetRuntime(scenario.seed.factory).materialize(
+            scenario.seed.owner_a,
+            generation_admitted,
+        )
+        await generation_runtime.aclose()
 
         admitted = admitted_runs[0]
         boundary = PrivateRunAuthorizationBoundary(

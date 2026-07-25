@@ -26,22 +26,31 @@ from app.audit.service import AuditService
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext, resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.service import QuotaService
 from app.reliability.owner_refs import AuditHmacKeyring, AuditHmacKeyringInvalid
 from app.shared_assets.audit import DurableSharedAssetGovernanceEventSink
 from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
     AssetNotFound,
+    AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
 from app.shared_assets.models import SkillArchiveFile
 from app.shared_assets.skill_service import (
+    MAX_PROJECT_SKILL_BATCH_BYTES,
+    MAX_PROJECT_SKILL_BATCH_FILES,
+    MAX_PROJECT_SKILL_BATCH_ITEMS,
     MAX_SKILL_ARCHIVE_BYTES,
+    MAX_SKILL_ARCHIVE_FILES,
     ProjectSkillArchiveImport,
     SkillService,
 )
+from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.user.model import UserRow
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -169,6 +178,8 @@ def _walk_skill_directory(
     directory: Path,
     *,
     resolved_source_root: Path,
+    max_files: int,
+    max_bytes: int,
 ) -> tuple[SkillArchiveFile, ...]:
     files: list[SkillArchiveFile] = []
     total_bytes = 0
@@ -197,8 +208,10 @@ def _walk_skill_directory(
                 raise _invalid_source_tree() from None
             if size_bytes < 0 or size_bytes > MAX_SKILL_ARCHIVE_BYTES:
                 raise _invalid_source_tree()
+            if len(files) >= min(MAX_SKILL_ARCHIVE_FILES, max_files):
+                raise _invalid_source_tree()
             total_bytes += size_bytes
-            if total_bytes > MAX_SKILL_ARCHIVE_BYTES:
+            if total_bytes > min(MAX_SKILL_ARCHIVE_BYTES, max_bytes):
                 raise _invalid_source_tree()
             files.append(
                 SkillArchiveFile(
@@ -224,7 +237,11 @@ def load_project_skill_sources(source_root: Path | str) -> tuple[ProjectSkillSou
         raise _invalid_source_tree() from None
 
     sources: list[ProjectSkillSource] = []
+    total_files = 0
+    total_bytes = 0
     for entry in _directory_entries(root):
+        if len(sources) >= MAX_PROJECT_SKILL_BATCH_ITEMS:
+            raise _invalid_source_tree()
         mode = _entry_mode(entry)
         if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
             raise _invalid_source_tree()
@@ -240,9 +257,13 @@ def load_project_skill_sources(source_root: Path | str) -> tuple[ProjectSkillSou
             skill_root,
             skill_root,
             resolved_source_root=resolved_root,
+            max_files=MAX_PROJECT_SKILL_BATCH_FILES - total_files,
+            max_bytes=MAX_PROJECT_SKILL_BATCH_BYTES - total_bytes,
         )
         if not files:
             raise _invalid_source_tree()
+        total_files += len(files)
+        total_bytes += sum(len(file.content) for file in files)
         sources.append(ProjectSkillSource(directory_name=entry.name, files=files))
     return tuple(sources)
 
@@ -301,6 +322,7 @@ async def _run_import(
     project_slug: str,
     execute: bool,
     replace: bool,
+    quota_config: QuotaConfig | None,
 ) -> ProjectSkillImportSummary:
     sources = load_project_skill_sources(source_root)
     try:
@@ -318,6 +340,8 @@ async def _run_import(
             request_id=request_id,
         )
         if execute:
+            if quota_config is None:
+                raise ProjectSkillImportError("project Skill quota configuration is unavailable")
             try:
                 keyring = AuditHmacKeyring.from_environment()
             except AuditHmacKeyringInvalid:
@@ -326,6 +350,13 @@ async def _run_import(
                 factory,
                 governance_sink=DurableSharedAssetGovernanceEventSink(
                     AuditService(factory, keyring),
+                ),
+                quota=ProjectQuotaEnforcer(
+                    QuotaService(
+                        factory,
+                        quota_config,
+                        source_ref_hasher=keyring,
+                    )
                 ),
             )
         else:
@@ -356,6 +387,7 @@ async def import_project_skills(
     user_email: str,
     project_slug: str,
     execute: bool,
+    quota_config: QuotaConfig | None,
     replace: bool = False,
 ) -> ProjectSkillImportSummary:
     """通过 ``SkillService`` 在一个事务内执行完整批次和 durable audit。"""
@@ -368,6 +400,7 @@ async def import_project_skills(
             project_slug=project_slug,
             execute=execute,
             replace=replace,
+            quota_config=quota_config,
         )
     except ProjectSkillImportError:
         raise
@@ -381,6 +414,8 @@ async def import_project_skills(
         raise ProjectSkillImportError("project Skill changed concurrently") from None
     except AssetNotFound:
         raise ProjectSkillImportError("project Skill existing state is unavailable") from None
+    except AssetStorageQuotaExceeded:
+        raise ProjectSkillImportError("project Skill storage quota exceeded") from None
     except (AssetStorageUnavailable, SQLAlchemyError):
         raise ProjectSkillImportError("project Skill import database is unavailable") from None
     except Exception:
@@ -408,6 +443,13 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_configured_quota() -> QuotaConfig:
+    try:
+        return get_app_config().quotas
+    except Exception:
+        raise ProjectSkillImportError("project Skill quota configuration is unavailable") from None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     database_url = os.environ.get("DATABASE_URL")
@@ -418,6 +460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.disable(logging.CRITICAL)
     try:
         try:
+            quota_config = _load_configured_quota() if args.execute else None
             summary = asyncio.run(
                 import_project_skills(
                     database_url,
@@ -426,6 +469,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     project_slug=args.project_slug,
                     execute=args.execute,
                     replace=args.replace,
+                    quota_config=quota_config,
                 )
             )
         except ProjectSkillImportError as error:

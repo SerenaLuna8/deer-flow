@@ -22,6 +22,11 @@ from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.quotas.model import ProjectUsageLedgerRow
 from deerflow.persistence.quotas.sql import QuotaRepository
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.shared_assets import (
+    SkillRow,
+    SkillVersionFileRow,
+    SkillVersionRow,
+)
 
 
 class QuotaReconciler:
@@ -65,12 +70,26 @@ class QuotaReconciler:
                 )
             )
         elif dimension == "storage_bytes":
-            value = await session.scalar(
+            private_file_bytes = await session.scalar(
                 select(func.coalesce(func.sum(PrivateFileRow.size), 0)).where(
                     PrivateFileRow.project_id == project_id,
                     PrivateFileRow.status == "ready",
                 )
             )
+            project_skill_bytes = await session.scalar(
+                select(func.coalesce(func.sum(SkillVersionFileRow.size_bytes), 0))
+                .select_from(SkillVersionFileRow)
+                .join(
+                    SkillVersionRow,
+                    SkillVersionRow.id == SkillVersionFileRow.skill_version_id,
+                )
+                .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+                .where(
+                    SkillRow.scope == "project",
+                    SkillRow.project_id == project_id,
+                )
+            )
+            value = int(private_file_bytes or 0) + int(project_skill_bytes or 0)
         elif dimension == "concurrent_runs":
             value = await session.scalar(
                 select(func.count())

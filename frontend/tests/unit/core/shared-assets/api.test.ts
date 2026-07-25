@@ -11,6 +11,7 @@ import {
   SharedAssetApiError,
   approveAdminProjectMcpVersion,
   approveProjectMcpVersion,
+  changeProjectAssetStatus,
   configureAdminMcpCredentialGrants,
   createAdminCredential,
   createAdminProjectAsset,
@@ -18,6 +19,7 @@ import {
   createProjectAsset,
   createProjectAssetVersion,
   createProjectCredential,
+  deleteProjectSkill,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
   enableAdminProjectSystemBinding,
@@ -396,6 +398,98 @@ describe("shared asset api", () => {
     expect(mockedFetch).toHaveBeenCalledTimes(1);
   });
 
+  test("permanently deletes one project Skill package with its expected revision", async () => {
+    mockedFetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const signal = new AbortController().signal;
+    const input = { expected_asset_version: 7 };
+
+    await expect(
+      deleteProjectSkill(PROJECT_ID, asset.id, input, signal),
+    ).resolves.toBeUndefined();
+
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/skills/${asset.id}`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+        signal,
+      },
+    );
+    expect(() =>
+      changeProjectAssetStatus(
+        PROJECT_ID,
+        "skills",
+        asset.id,
+        "archive" as never,
+        input,
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        code: "ASSET_VALIDATION_FAILED",
+      }),
+    );
+    expect(mockedFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("activates and suspends a project Skill through explicit status actions", async () => {
+    mockedFetch
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          item: {
+            ...asset,
+            status: "active",
+            current_published_version_id: versionId,
+          },
+          request_id: "req-skill-activate",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          item: {
+            ...asset,
+            status: "suspended",
+            current_published_version_id: versionId,
+            version: 2,
+          },
+          request_id: "req-skill-suspend",
+        }),
+      );
+    const input = { expected_asset_version: 1 };
+
+    await changeProjectAssetStatus(
+      PROJECT_ID,
+      "skills",
+      asset.id,
+      "activate",
+      input,
+    );
+    await changeProjectAssetStatus(
+      PROJECT_ID,
+      "skills",
+      asset.id,
+      "suspend",
+      input,
+    );
+
+    expect(mockedFetch).toHaveBeenNthCalledWith(
+      1,
+      `/backend/api/projects/${PROJECT_ID}/skills/${asset.id}/activate`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    );
+    expect(mockedFetch).toHaveBeenNthCalledWith(
+      2,
+      `/backend/api/projects/${PROJECT_ID}/skills/${asset.id}/suspend`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    );
+  });
+
   test("uses canonical public errors and rejects unsafe responses", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(403, {
@@ -414,6 +508,21 @@ describe("shared asset api", () => {
       status: 403,
       code: "ASSET_FORBIDDEN",
       message: "Asset capability required",
+    });
+
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(429, {
+        detail: {
+          code: "asset_storage_quota_exceeded",
+          message: "private quota calculation must not escape",
+          request_id: "req-quota",
+        },
+      }),
+    );
+    await expect(listAdminAssets("skills")).rejects.toMatchObject({
+      status: 429,
+      code: "ASSET_STORAGE_QUOTA_EXCEEDED",
+      message: "Project Skill storage quota exceeded",
     });
 
     mockedFetch.mockResolvedValueOnce(

@@ -31,10 +31,12 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import type { Capability } from "@/core/projects/types";
 import {
   useApproveProjectMcpVersion,
   useChangeProjectAssetStatus,
+  useDeleteProjectSkill,
   useProjectAssets,
   useProjectAssetVersions,
   usePublishProjectAssetVersion,
@@ -46,12 +48,37 @@ import {
 } from "@/core/shared-assets";
 
 import { McpApprovalDialog } from "./mcp-approval-dialog";
-import { projectAssetLifecycleActions } from "./project-asset-view-model";
+import {
+  projectAssetDetailLifecycleActions,
+  projectAssetCanAuthor,
+  projectSkillStatusToggleState,
+  projectSkillCanDelete,
+} from "./project-asset-view-model";
+import { ProjectSkillDeleteDialog } from "./project-skill-delete-dialog";
 import { SystemBindingDialog } from "./system-binding-dialog";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
 type VersionStatus = ReturnType<typeof workflowStatus>;
+
+export type ProjectSkillDeleteSnapshot = Readonly<{
+  assetId: string;
+  skillName: string;
+  expectedAssetVersion: number;
+  startedAt: number;
+}>;
+
+export function createProjectSkillDeleteSnapshot(
+  item: Pick<ProjectAssetItem, "id" | "display_name" | "version">,
+  startedAt: number,
+): ProjectSkillDeleteSnapshot {
+  return Object.freeze({
+    assetId: item.id,
+    skillName: item.display_name,
+    expectedAssetVersion: item.version,
+    startedAt,
+  });
+}
 
 export type ProjectAssetVersionRenderContext = {
   accountId: string;
@@ -91,12 +118,93 @@ function workflowStatus(
     : version.status;
 }
 
+export function versionPublishDisabled(
+  actionPending: boolean,
+  versionDirty: boolean,
+  versionSelectionPending = false,
+): boolean {
+  return (
+    versionActionDisabled(actionPending, versionSelectionPending) ||
+    versionDirty
+  );
+}
+
+export function versionActionDisabled(
+  actionPending: boolean,
+  versionSelectionPending: boolean,
+): boolean {
+  return actionPending || versionSelectionPending;
+}
+
 function ErrorNotice({ error }: { error: unknown }) {
   if (!error) return null;
   return (
     <p role="alert" className="text-destructive text-sm">
       {adminAssetErrorMessage(error)}
     </p>
+  );
+}
+
+export function ProjectAssetDetailHeader({
+  kind,
+  item,
+  statusPending,
+  optimisticSkillStatus,
+  onToggleProjectSkillStatus,
+}: {
+  kind: MutableAssetKind;
+  item: ProjectAssetItem;
+  statusPending: boolean;
+  optimisticSkillStatus?: boolean;
+  onToggleProjectSkillStatus: (checked: boolean) => void;
+}) {
+  if (kind !== "skills") {
+    return (
+      <SheetHeader className="border-border/70 border-b px-6 py-5 pr-12 text-left">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={item.scope === "system" ? "secondary" : "default"}>
+            {item.scope === "system" ? "系统提供" : "项目自建"}
+          </Badge>
+          <AssetStatusBadge status={item.status} />
+        </div>
+        <SheetTitle className="mt-2 text-xl">{item.display_name}</SheetTitle>
+        <SheetDescription className="font-mono">{item.slug}</SheetDescription>
+      </SheetHeader>
+    );
+  }
+
+  const toggleState = projectSkillStatusToggleState(item);
+  const checked = optimisticSkillStatus ?? toggleState.checked;
+  const showToggle = item.scope === "project";
+  return (
+    <SheetHeader className="border-border/70 border-b px-6 py-5 pr-12 text-left">
+      <div className="flex min-w-0 items-start justify-between gap-4">
+        <SheetTitle className="min-w-0 truncate text-xl">
+          {item.display_name}
+        </SheetTitle>
+        {showToggle ? (
+          <div className="flex shrink-0 flex-col items-end gap-1.5">
+            <Switch
+              checked={checked}
+              disabled={toggleState.disabled || statusPending}
+              className="data-[state=checked]:bg-success focus-visible:ring-selection/30"
+              aria-busy={statusPending || undefined}
+              aria-label={`${checked ? "停用" : "启用"} ${item.display_name}`}
+              title={toggleState.disabledReason ?? undefined}
+              onCheckedChange={onToggleProjectSkillStatus}
+            />
+            {toggleState.disabledReason ? (
+              <span className="text-muted-foreground text-xs">
+                {toggleState.disabledReason}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      <SheetDescription className="sr-only">
+        Skill 详情与版本文件
+      </SheetDescription>
+    </SheetHeader>
   );
 }
 
@@ -107,8 +215,12 @@ export function ProjectAssetDetailSheet({
   kind,
   item,
   open,
+  requestedVersionId,
   onOpenChange,
   onCreateVersion,
+  onDeleted,
+  onVersionCreated,
+  onRequestedVersionHandled,
   renderVersion,
 }: {
   accountId: string;
@@ -117,8 +229,12 @@ export function ProjectAssetDetailSheet({
   kind: MutableAssetKind;
   item: ProjectAssetItem;
   open: boolean;
+  requestedVersionId: string | null;
   onOpenChange: (open: boolean) => void;
   onCreateVersion: (item: ProjectAssetItem) => void;
+  onDeleted: (assetId: string) => void;
+  onVersionCreated: (assetId: string, versionId: string) => void;
+  onRequestedVersionHandled: (assetId: string, versionId: string) => void;
   renderVersion: (
     version: AssetVersion,
     context: ProjectAssetVersionRenderContext,
@@ -129,13 +245,15 @@ export function ProjectAssetDetailSheet({
   const submit = useSubmitProjectMcpVersion(accountId, projectId);
   const approve = useApproveProjectMcpVersion(accountId, projectId);
   const changeStatus = useChangeProjectAssetStatus(accountId, projectId, kind);
+  const deleteSkill = useDeleteProjectSkill(accountId, projectId);
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const [bindingOpen, setBindingOpen] = useState(false);
   const [approvalVersion, setApprovalVersion] = useState<McpVersion | null>(
     null,
   );
   const [versionDirty, setVersionDirty] = useState(false);
-  const [pendingVersionId, setPendingVersionId] = useState<string | null>(null);
+  const [deleteSnapshot, setDeleteSnapshot] =
+    useState<ProjectSkillDeleteSnapshot | null>(null);
   const [discardAction, setDiscardAction] = useState<
     { type: "close" } | { type: "version"; versionId: string } | null
   >(null);
@@ -152,6 +270,14 @@ export function ProjectAssetDetailSheet({
 
   useEffect(() => {
     if (!open || versions.length === 0) return;
+    if (
+      requestedVersionId &&
+      versions.some((version) => version.id === requestedVersionId)
+    ) {
+      setSelectedVersionId(requestedVersionId);
+      onRequestedVersionHandled(item.id, requestedVersionId);
+      return;
+    }
     const preferred =
       versions.find(
         (version) => version.id === item.current_published_version_id,
@@ -161,7 +287,14 @@ export function ProjectAssetDetailSheet({
         ? current
         : (preferred?.id ?? ""),
     );
-  }, [item.current_published_version_id, item.id, open, versions]);
+  }, [
+    item.current_published_version_id,
+    item.id,
+    onRequestedVersionHandled,
+    open,
+    requestedVersionId,
+    versions,
+  ]);
 
   useEffect(() => {
     if (open) return;
@@ -169,21 +302,12 @@ export function ProjectAssetDetailSheet({
     setBindingOpen(false);
     setApprovalVersion(null);
     setVersionDirty(false);
-    setPendingVersionId(null);
+    setDeleteSnapshot(null);
     setDiscardAction(null);
   }, [open]);
 
-  useEffect(() => {
-    if (!pendingVersionId) return;
-    if (!versions.some((version) => version.id === pendingVersionId)) return;
-    setSelectedVersionId(pendingVersionId);
-    setPendingVersionId(null);
-  }, [pendingVersionId, versions]);
-
   const canAuthor =
-    item.scope === "project" &&
-    item.status === "active" &&
-    item.capabilities.includes("shared_assets.edit");
+    item.scope === "project" && projectAssetCanAuthor(item, kind);
   const canApprove =
     item.scope === "project" &&
     item.status === "active" &&
@@ -194,8 +318,9 @@ export function ProjectAssetDetailSheet({
     (item.status === "active" || Boolean(item.binding?.enabled));
   const lifecycleActions =
     item.scope === "project"
-      ? projectAssetLifecycleActions(item, projectCapabilities)
+      ? projectAssetDetailLifecycleActions(kind, item, projectCapabilities)
       : [];
+  const canDeleteSkill = projectSkillCanDelete(kind, item);
   const versionActions = useMemo(() => {
     if (
       item.scope !== "project" ||
@@ -225,17 +350,23 @@ export function ProjectAssetDetailSheet({
     publish.isPending ||
     submit.isPending ||
     approve.isPending ||
-    changeStatus.isPending;
+    changeStatus.isPending ||
+    deleteSkill.isPending;
+  const versionSelectionPending = requestedVersionId !== null;
   const actionError =
     publish.error ?? submit.error ?? approve.error ?? changeStatus.error;
+  const optimisticSkillStatus =
+    kind === "skills" && changeStatus.isPending
+      ? changeStatus.variables?.action === "activate"
+      : undefined;
 
-  const handleVersionCreated = useCallback(
+  const handleWorkbenchVersionCreated = useCallback(
     (versionId: string) => {
       setVersionDirty(false);
-      setPendingVersionId(versionId);
+      onVersionCreated(item.id, versionId);
       void history.refetch();
     },
-    [history],
+    [history, item.id, onVersionCreated],
   );
 
   function requestOpenChange(next: boolean) {
@@ -285,28 +416,47 @@ export function ProjectAssetDetailSheet({
     }
   }
 
+  async function confirmSkillDelete() {
+    const snapshot = deleteSnapshot;
+    if (!snapshot) return;
+    try {
+      await deleteSkill.mutateAsync({
+        assetId: snapshot.assetId,
+        input: {
+          expected_asset_version: snapshot.expectedAssetVersion,
+        },
+      });
+      setDeleteSnapshot(null);
+      onDeleted(snapshot.assetId);
+    } catch {
+      // The mutation exposes only its mapped public error inside the dialog.
+    }
+  }
+
+  function toggleProjectSkillStatus(checked: boolean) {
+    if (kind !== "skills") return;
+    const toggleState = projectSkillStatusToggleState(item);
+    if (toggleState.disabled || toggleState.checked === checked) return;
+    changeStatus.mutate({
+      assetId: item.id,
+      action: checked ? "activate" : "suspend",
+      input: { expected_asset_version: item.version },
+    });
+  }
+
   return (
     <>
       <Sheet open={open} onOpenChange={requestOpenChange}>
         <SheetContent
           className={`w-full gap-0 p-0 ${kind === "skills" ? "sm:max-w-[1080px]" : "sm:max-w-[640px]"}`}
         >
-          <SheetHeader className="border-border/70 border-b px-6 py-5 pr-12 text-left">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge
-                variant={item.scope === "system" ? "secondary" : "default"}
-              >
-                {item.scope === "system" ? "系统提供" : "项目自建"}
-              </Badge>
-              <AssetStatusBadge status={item.status} />
-            </div>
-            <SheetTitle className="mt-2 text-xl">
-              {item.display_name}
-            </SheetTitle>
-            <SheetDescription className="font-mono">
-              {item.slug}
-            </SheetDescription>
-          </SheetHeader>
+          <ProjectAssetDetailHeader
+            kind={kind}
+            item={item}
+            statusPending={changeStatus.isPending}
+            optimisticSkillStatus={optimisticSkillStatus}
+            onToggleProjectSkillStatus={toggleProjectSkillStatus}
+          />
 
           <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="space-y-6 px-6 py-5">
@@ -361,7 +511,18 @@ export function ProjectAssetDetailSheet({
                   </Button>
                 )}
                 {canAuthor && (
-                  <Button type="button" onClick={() => onCreateVersion(item)}>
+                  <Button
+                    type="button"
+                    disabled={versionDirty || versionSelectionPending}
+                    title={
+                      versionDirty
+                        ? "请先保存或放弃当前未保存修改"
+                        : versionSelectionPending
+                          ? "正在加载新版本，请稍候"
+                          : undefined
+                    }
+                    onClick={() => onCreateVersion(item)}
+                  >
                     {kind === "skills" ? "从空白创建" : "创建新版本"}
                   </Button>
                 )}
@@ -382,6 +543,21 @@ export function ProjectAssetDetailSheet({
                     {action === "archive" ? "归档" : "暂停"}
                   </Button>
                 ))}
+                {canDeleteSkill && (
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    disabled={actionPending}
+                    onClick={() => {
+                      deleteSkill.reset();
+                      setDeleteSnapshot(
+                        createProjectSkillDeleteSnapshot(item, Date.now()),
+                      );
+                    }}
+                  >
+                    删除 Skill
+                  </Button>
+                )}
               </div>
 
               <section className="space-y-3">
@@ -393,6 +569,7 @@ export function ProjectAssetDetailSheet({
                       <select
                         aria-label="查看版本"
                         value={selectedVersionId}
+                        disabled={versionSelectionPending}
                         onChange={(event) =>
                           requestVersionChange(event.target.value)
                         }
@@ -453,7 +630,18 @@ export function ProjectAssetDetailSheet({
                           <Button
                             type="button"
                             size="sm"
-                            disabled={actionPending}
+                            disabled={versionPublishDisabled(
+                              actionPending,
+                              versionDirty,
+                              versionSelectionPending,
+                            )}
+                            title={
+                              versionDirty
+                                ? "请先保存或放弃当前未保存修改"
+                                : versionSelectionPending
+                                  ? "正在加载新版本，请稍候"
+                                  : undefined
+                            }
                             onClick={() =>
                               publish.mutate({
                                 assetId: item.id,
@@ -471,7 +659,15 @@ export function ProjectAssetDetailSheet({
                             <Button
                               type="button"
                               size="sm"
-                              disabled={actionPending}
+                              disabled={versionActionDisabled(
+                                actionPending,
+                                versionSelectionPending,
+                              )}
+                              title={
+                                versionSelectionPending
+                                  ? "正在加载新版本，请稍候"
+                                  : undefined
+                              }
                               onClick={() =>
                                 submit.mutate({
                                   assetId: item.id,
@@ -491,7 +687,15 @@ export function ProjectAssetDetailSheet({
                             <Button
                               type="button"
                               size="sm"
-                              disabled={actionPending}
+                              disabled={versionActionDisabled(
+                                actionPending,
+                                versionSelectionPending,
+                              )}
+                              title={
+                                versionSelectionPending
+                                  ? "正在加载新版本，请稍候"
+                                  : undefined
+                              }
                               onClick={() =>
                                 setApprovalVersion(selectedVersion)
                               }
@@ -518,9 +722,9 @@ export function ProjectAssetDetailSheet({
                         accountId,
                         projectId,
                         item,
-                        canAuthor,
+                        canAuthor: canAuthor && !versionSelectionPending,
                         onDirtyChange: setVersionDirty,
-                        onVersionCreated: handleVersionCreated,
+                        onVersionCreated: handleWorkbenchVersionCreated,
                       })}
                     </div>
 
@@ -585,6 +789,24 @@ export function ProjectAssetDetailSheet({
         }}
         onApprove={approveVersion}
       />
+
+      {deleteSnapshot !== null && (
+        <ProjectSkillDeleteDialog
+          key={`${deleteSnapshot.assetId}:${deleteSnapshot.startedAt}`}
+          skillName={deleteSnapshot.skillName}
+          startedAt={deleteSnapshot.startedAt}
+          pending={deleteSkill.isPending}
+          errorMessage={
+            deleteSkill.error ? adminAssetErrorMessage(deleteSkill.error) : null
+          }
+          onOpenChange={(next) => {
+            if (next) return;
+            setDeleteSnapshot(null);
+            deleteSkill.reset();
+          }}
+          onConfirm={() => void confirmSkillDelete()}
+        />
+      )}
 
       <Dialog
         open={discardAction !== null}

@@ -21,6 +21,11 @@ from deerflow.persistence.private_work.model import (
     UserProjectMemoryRow,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.shared_assets import (
+    SkillRow,
+    SkillVersionFileRow,
+    SkillVersionRow,
+)
 from deerflow.persistence.user.model import UserRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -245,10 +250,20 @@ class RetentionPurgeRepository:
                 quota=quota,
                 request_id=candidate.request_id,
             )
+            await release_project_skill_storage_quota(
+                session,
+                project_id=candidate.project_id,
+                quota=quota,
+                request_id=candidate.request_id,
+            )
             await purge_private_scope(session, project_id=candidate.project_id, owner_user_id=None)
             await purge_project_shared_scope(
                 session,
                 project_id=candidate.project_id,
+            )
+            await quota.reconcile_project_storage(
+                session,
+                candidate.project_id,
             )
             return 1
         if candidate.resource_kind == "former_owner":
@@ -325,6 +340,50 @@ async def release_private_storage_quota(
             file_id=row.id,
             size=row.size,
             request_id=request_id,
+        )
+
+
+async def release_project_skill_storage_quota(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    quota: ProjectQuotaEnforcer,
+    request_id: str,
+) -> None:
+    """Release exact immutable Skill-version reservations before project purge."""
+
+    rows = (
+        await session.execute(
+            select(
+                SkillVersionFileRow.skill_version_id,
+                SkillVersionFileRow.size_bytes,
+            )
+            .select_from(SkillVersionFileRow)
+            .join(
+                SkillVersionRow,
+                SkillVersionRow.id == SkillVersionFileRow.skill_version_id,
+            )
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(
+                SkillRow.scope == "project",
+                SkillRow.project_id == project_id,
+            )
+            .order_by(
+                SkillVersionFileRow.skill_version_id,
+                SkillVersionFileRow.path,
+            )
+            .with_for_update(of=SkillVersionFileRow)
+        )
+    ).all()
+    version_sizes: dict[uuid.UUID, int] = {}
+    for row in rows:
+        version_sizes[row.skill_version_id] = version_sizes.get(row.skill_version_id, 0) + row.size_bytes
+    for version_id, size in version_sizes.items():
+        await quota.release_skill_version_if_reserved(
+            session,
+            project_id=project_id,
+            version_id=version_id,
+            size=size,
         )
 
 

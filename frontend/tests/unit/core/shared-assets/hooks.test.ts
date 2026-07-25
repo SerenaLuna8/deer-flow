@@ -4,10 +4,13 @@ import { resolve } from "node:path";
 import { beforeEach, describe, expect, test, rs } from "@rstest/core";
 import { useQueryClient } from "@tanstack/react-query";
 
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
   approveProjectMcpVersion,
   configureAdminMcpCredentialGrants,
+  changeProjectAssetStatus,
   createProjectAssetVersion,
+  deleteProjectSkill,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
   forkProjectSkillVersion,
@@ -27,7 +30,9 @@ import {
   useAdminProjectAssets,
   useApproveProjectMcpVersion,
   useConfigureAdminMcpCredentialGrants,
+  useChangeProjectAssetStatus,
   useCreateProjectAssetVersion,
+  useDeleteProjectSkill,
   useDisableProjectSystemBinding,
   useEnableProjectSystemBinding,
   useForkProjectSkillVersion,
@@ -47,12 +52,16 @@ rs.mock("@tanstack/react-query", () => ({
   useQuery: rs.fn((options) => options),
   useQueryClient: rs.fn(),
 }));
+rs.mock("@/core/private-work/provider", () => ({
+  usePrivateWorkAccess: rs.fn(),
+}));
 rs.mock("@/core/shared-assets/api", () => ({
   approveProjectMcpVersion: rs.fn(),
   configureAdminMcpCredentialGrants: rs.fn(),
   changeProjectAssetStatus: rs.fn(),
   createProjectAsset: rs.fn(),
   createProjectAssetVersion: rs.fn(),
+  deleteProjectSkill: rs.fn(),
   disableProjectSystemBinding: rs.fn(),
   enableProjectSystemBinding: rs.fn(),
   forkProjectSkillVersion: rs.fn(),
@@ -76,15 +85,26 @@ type QueryConfig = {
   queryFn: (context: { signal: AbortSignal }) => Promise<unknown>;
 };
 type MutationConfig = {
+  mutationKey: readonly unknown[];
   mutationFn: (input: never) => Promise<unknown>;
-  onSuccess: () => Promise<unknown>;
+  onSuccess: (data?: unknown, variables?: never) => Promise<unknown>;
 };
 
 const accountId = "account-1";
 const projectId = "33333333-3333-4333-8333-333333333333";
 const assetId = "11111111-1111-4111-8111-111111111111";
 const versionId = "22222222-2222-4222-8222-222222222222";
-const client = { invalidateQueries: rs.fn(() => Promise.resolve()) };
+const client = {
+  invalidateQueries: rs.fn(() => Promise.resolve()),
+  removeQueries: rs.fn(),
+  setQueryData: rs.fn(),
+};
+const mutationController = new AbortController();
+let scopeActive = true;
+const runAbortable = rs.fn(
+  (operation: (signal: AbortSignal) => Promise<unknown>) =>
+    operation(mutationController.signal),
+);
 
 function mutation(value: unknown): MutationConfig {
   return value as MutationConfig;
@@ -92,11 +112,19 @@ function mutation(value: unknown): MutationConfig {
 
 beforeEach(() => {
   rs.clearAllMocks();
+  scopeActive = true;
   rs.mocked(useQueryClient).mockReturnValue(client as never);
+  rs.mocked(usePrivateWorkAccess).mockReturnValue({
+    scope: { accountId, projectId },
+    runAbortable,
+    isActive: () => scopeActive,
+  } as never);
   for (const api of [
     approveProjectMcpVersion,
     configureAdminMcpCredentialGrants,
+    changeProjectAssetStatus,
     createProjectAssetVersion,
+    deleteProjectSkill,
     disableProjectSystemBinding,
     enableProjectSystemBinding,
     forkProjectSkillVersion,
@@ -198,6 +226,7 @@ describe("shared asset hooks", () => {
       assetId,
       versionId,
       input,
+      mutationController.signal,
     );
     expect(client.invalidateQueries).toHaveBeenCalledWith({
       queryKey: [
@@ -209,6 +238,124 @@ describe("shared asset hooks", () => {
         "skills",
       ],
     });
+  });
+
+  test("deletes a whole project Skill through the active scope and refreshes its catalog", async () => {
+    const remove = mutation(useDeleteProjectSkill(accountId, projectId));
+    const input = { expected_asset_version: 7 };
+
+    await remove.mutationFn({ assetId, input } as never);
+    await remove.onSuccess(undefined, { assetId, input } as never);
+
+    expect(deleteProjectSkill).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      input,
+      mutationController.signal,
+    );
+    expect(remove.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "skills",
+      "mutation",
+      "delete",
+    ]);
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "skills",
+      ],
+    });
+    expect(client.setQueryData).toHaveBeenCalledWith(
+      ["account", accountId, "shared-assets", "project", projectId, "skills"],
+      expect.any(Function),
+    );
+    const removeDeletedSkill = client.setQueryData.mock.calls.at(
+      -1,
+    )?.[1] as (current: {
+      system_items: Array<{ id: string }>;
+      project_items: Array<{ id: string }>;
+      request_id: string;
+    }) => {
+      system_items: Array<{ id: string }>;
+      project_items: Array<{ id: string }>;
+      request_id: string;
+    };
+    expect(
+      removeDeletedSkill({
+        system_items: [{ id: "system-skill" }],
+        project_items: [{ id: assetId }, { id: "other-skill" }],
+        request_id: "request-skills",
+      }),
+    ).toEqual({
+      system_items: [{ id: "system-skill" }],
+      project_items: [{ id: "other-skill" }],
+      request_id: "request-skills",
+    });
+    expect(client.removeQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "skills",
+        "asset",
+        assetId,
+        "versions",
+      ],
+    });
+  });
+
+  test("changes project Skill enablement through the active scope and refreshes the shared list", async () => {
+    const toggle = mutation(
+      useChangeProjectAssetStatus(accountId, projectId, "skills"),
+    );
+    const input = { expected_asset_version: 7 };
+
+    await toggle.mutationFn({
+      assetId,
+      action: "activate",
+      input,
+    } as never);
+    await toggle.onSuccess();
+
+    expect(changeProjectAssetStatus).toHaveBeenCalledWith(
+      projectId,
+      "skills",
+      assetId,
+      "activate",
+      input,
+      mutationController.signal,
+    );
+    expect(toggle.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "skills",
+      "mutation",
+      "change-status",
+    ]);
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "skills",
+      ],
+    });
+    expect(client.invalidateQueries).toHaveBeenCalledTimes(1);
   });
 
   test("loads the authenticated system catalog with an account-scoped key", async () => {
@@ -318,7 +465,19 @@ describe("shared asset hooks", () => {
       "agents",
       assetId,
       agentInput,
+      mutationController.signal,
     );
+    expect(projectVersion.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "agents",
+      "mutation",
+      "create-version",
+    ]);
+    expect(runAbortable).toHaveBeenCalled();
     expect(client.invalidateQueries).toHaveBeenCalledWith({
       queryKey: [
         "account",
@@ -332,6 +491,52 @@ describe("shared asset hooks", () => {
     expect(client.invalidateQueries).toHaveBeenCalledWith({
       queryKey: ["account", accountId, "projects"],
     });
+  });
+
+  test("drops a late project mutation success after its origin scope is inactive", async () => {
+    const agentInput = {
+      description: "Writer",
+      soul: "Be precise",
+      model_ref: "default",
+      tool_groups: [],
+      skill_version_ids: [],
+      mcp_version_ids: [],
+      expected_asset_version: 1,
+    };
+    rs.mocked(createProjectAssetVersion).mockImplementationOnce(async () => {
+      scopeActive = false;
+      return {} as never;
+    });
+    const projectVersion = mutation(
+      useCreateProjectAssetVersion(accountId, projectId, "agents"),
+    );
+
+    await expect(
+      projectVersion.mutationFn({
+        assetId,
+        input: agentInput,
+      } as never),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    await expect(projectVersion.onSuccess()).rejects.toMatchObject({
+      name: "AbortError",
+    });
+
+    expect(client.invalidateQueries).not.toHaveBeenCalled();
+
+    scopeActive = true;
+    const completedBeforeTransition = mutation(
+      useCreateProjectAssetVersion(accountId, projectId, "agents"),
+    );
+    await completedBeforeTransition.mutationFn({
+      assetId,
+      input: agentInput,
+    } as never);
+    scopeActive = false;
+
+    await expect(completedBeforeTransition.onSuccess()).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    expect(client.invalidateQueries).not.toHaveBeenCalled();
   });
 
   test("wires the dedicated packaged System MCP Credential grant hook", async () => {

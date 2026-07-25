@@ -5,14 +5,17 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
-from app.shared_assets.errors import AssetForbidden, AssetNotFound
+from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound
+from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
+    AgentVersionSkillRefRow,
     ProjectSystemSkillBindingRow,
     SkillRow,
     SkillVersionFileRow,
@@ -45,6 +48,12 @@ class SkillVersionMetadataRecord:
     asset: SkillRow
     version: SkillVersionRow
     files: tuple[SkillVersionFileMetadataRecord, ...]
+
+
+@dataclass(frozen=True)
+class SkillVersionStorageRecord:
+    version_id: uuid.UUID
+    size_bytes: int
 
 
 def _request_id(context: object) -> str:
@@ -138,6 +147,7 @@ class SkillRepository:
             project_id=context.project_id,
             slug=command.slug,
             display_name=command.display_name,
+            status="suspended",
             created_by_user_id=str(context.user_id),
         )
         self.session.add(row)
@@ -174,11 +184,127 @@ class SkillRepository:
             project_id=context.project_id,
             slug=command.slug,
             display_name=command.display_name,
+            status="suspended",
             created_by_user_id=str(context.user_id),
         )
         self.session.add(row)
         await self.session.flush()
         return row
+
+    async def plan_project_asset_deletion(
+        self,
+        context: ProjectContext,
+        asset: SkillRow,
+    ) -> tuple[SkillVersionStorageRecord, ...]:
+        """Lock a project Skill package and reject immutable external references."""
+
+        self._require_project_actor(context)
+        if asset.scope != "project" or asset.project_id != context.project_id:
+            raise AssetNotFound(context.request_id)
+        version_ids = tuple(
+            (await self.session.execute(select(SkillVersionRow.id).where(SkillVersionRow.skill_id == asset.id).order_by(SkillVersionRow.version_number, SkillVersionRow.id).with_for_update(of=SkillVersionRow))).scalars().all()
+        )
+        if not version_ids:
+            return ()
+        agent_reference_exists = await self.session.scalar(
+            select(
+                exists().where(
+                    AgentVersionSkillRefRow.skill_version_id.in_(version_ids),
+                )
+            )
+        )
+        run_reference_exists = await self.session.scalar(
+            select(
+                exists().where(
+                    RunAssetVersionRow.project_id == context.project_id,
+                    RunAssetVersionRow.asset_kind == "skill",
+                    RunAssetVersionRow.asset_scope == "project",
+                    RunAssetVersionRow.asset_id == asset.id,
+                    RunAssetVersionRow.version_id.in_(version_ids),
+                )
+            )
+        )
+        if agent_reference_exists or run_reference_exists:
+            raise AssetConflict(context.request_id)
+        size_rows = (
+            await self.session.execute(
+                select(
+                    SkillVersionFileRow.skill_version_id,
+                    func.coalesce(func.sum(SkillVersionFileRow.size_bytes), 0),
+                )
+                .where(SkillVersionFileRow.skill_version_id.in_(version_ids))
+                .group_by(SkillVersionFileRow.skill_version_id)
+            )
+        ).all()
+        sizes = {version_id: int(size_bytes) for version_id, size_bytes in size_rows}
+        return tuple(
+            SkillVersionStorageRecord(
+                version_id=version_id,
+                size_bytes=sizes.get(version_id, 0),
+            )
+            for version_id in version_ids
+        )
+
+    async def delete_project_asset(
+        self,
+        context: ProjectContext,
+        asset: SkillRow,
+        version_ids: Sequence[uuid.UUID],
+    ) -> None:
+        """Physically remove one already-locked project Skill package."""
+
+        self._require_project_actor(context)
+        selected_version_ids = tuple(version_ids)
+        if asset.scope != "project" or asset.project_id != context.project_id or len(set(selected_version_ids)) != len(selected_version_ids):
+            raise AssetNotFound(context.request_id)
+
+        # This transient state is never committed: it combines with the cleared
+        # pointer to authorize the published-child trigger added in revision 0002.
+        asset.current_published_version_id = None
+        asset.status = "archived"
+        await self.session.flush()
+        await self.session.scalar(
+            select(
+                func.set_config(
+                    "deerflow.skill_hard_delete_asset_id",
+                    str(asset.id),
+                    True,
+                )
+            )
+        )
+
+        if selected_version_ids:
+            await self.session.execute(
+                delete(SkillVersionFileRow).where(
+                    SkillVersionFileRow.skill_version_id.in_(
+                        selected_version_ids,
+                    )
+                )
+            )
+            child = aliased(SkillVersionRow)
+            remaining = set(selected_version_ids)
+            while remaining:
+                deleted_ids = set(
+                    (
+                        await self.session.execute(
+                            delete(SkillVersionRow)
+                            .where(
+                                SkillVersionRow.id.in_(remaining),
+                                SkillVersionRow.skill_id == asset.id,
+                                ~exists().where(child.supersedes_version_id == SkillVersionRow.id),
+                            )
+                            .returning(SkillVersionRow.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if not deleted_ids:
+                    raise AssetConflict(context.request_id)
+                remaining.difference_update(deleted_ids)
+
+        await self.session.delete(asset)
+        await self.session.flush()
 
     async def get_project_asset(
         self,
@@ -533,7 +659,7 @@ class SkillRepository:
                 SkillVersionRow.workflow_status == "published",
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
-                SkillRow.status != "suspended",
+                SkillRow.status == "active",
                 self._project_context_exists(context),
             )
             .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
@@ -556,7 +682,7 @@ class SkillRepository:
                     SkillVersionRow.workflow_status == "published",
                     SkillRow.scope == "system",
                     SkillRow.project_id.is_(None),
-                    SkillRow.status != "suspended",
+                    SkillRow.status == "active",
                     ProjectSystemSkillBindingRow.project_id == context.project_id,
                     ProjectSystemSkillBindingRow.enabled.is_(True),
                     self._project_context_exists(context),
@@ -589,7 +715,7 @@ class SkillRepository:
                 SkillVersionRow.workflow_status == "published",
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
-                SkillRow.status != "suspended",
+                SkillRow.status == "active",
             )
             .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
         )
@@ -614,7 +740,7 @@ class SkillRepository:
                 SkillVersionRow.workflow_status == "published",
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
-                SkillRow.status != "suspended",
+                SkillRow.status == "active",
             )
             .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
         )

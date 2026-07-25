@@ -3,8 +3,13 @@ import { describe, expect, test } from "@rstest/core";
 import type { SkillAssetVersion } from "@/components/projects/assets/skill-asset-detail";
 import {
   addSkillFile,
+  addSkillFolder,
+  buildSkillFileTree,
   deleteSkillFile,
+  defaultSkillFileFolder,
   editSkillFile,
+  joinSkillFilePath,
+  listSkillFolderPaths,
   listWorkingSkillFiles,
   markdownPreviewContent,
   renameSkillFile,
@@ -77,6 +82,54 @@ describe("Skill file workbench state", () => {
     ).toEqual(["SKILL.md", "references/start-here.md"]);
   });
 
+  test("turns rename A to B to A into a replace instead of conflicting create", () => {
+    let changes = renameSkillFile(
+      [],
+      files,
+      "scripts/run.py",
+      "scripts/renamed.py",
+      "print('run')\n",
+      "text/x-python",
+    );
+    changes = renameSkillFile(
+      changes,
+      files,
+      "scripts/renamed.py",
+      "scripts/run.py",
+      "print('run')\n",
+      "text/x-python",
+    );
+
+    expect(changes).toEqual([
+      {
+        op: "replace",
+        path: "scripts/run.py",
+        content: "print('run')\n",
+        media_type: "text/x-python",
+      },
+    ]);
+  });
+
+  test("turns delete then add at an original path into a replace", () => {
+    let changes = deleteSkillFile([], files, "scripts/run.py");
+    changes = addSkillFile(
+      changes,
+      files,
+      "scripts/run.py",
+      "print('replacement')\n",
+      "text/x-python",
+    );
+
+    expect(changes).toEqual([
+      {
+        op: "replace",
+        path: "scripts/run.py",
+        content: "print('replacement')\n",
+        media_type: "text/x-python",
+      },
+    ]);
+  });
+
   test("protects SKILL.md and rejects duplicate or unsafe paths", () => {
     expect(() => deleteSkillFile([], files, "SKILL.md")).toThrow();
     expect(() =>
@@ -93,6 +146,9 @@ describe("Skill file workbench state", () => {
       addSkillFile([], files, "scripts/run.py", "duplicate", "text/plain"),
     ).toThrow();
     expect(() =>
+      addSkillFile([], files, "scripts", "file-folder collision", "text/plain"),
+    ).toThrow();
+    expect(() =>
       addSkillFile([], files, "../escape.md", "bad", "text/plain"),
     ).toThrow();
   });
@@ -106,5 +162,81 @@ describe("Skill file workbench state", () => {
     );
     expect(markdownPreviewContent("# Plain Markdown")).toBe("# Plain Markdown");
     expect(source).toContain("name: paper-review");
+  });
+
+  test("builds a real nested tree and keeps explicitly-created empty folders", () => {
+    const working = listWorkingSkillFiles(files, []);
+    const folders = addSkillFolder(
+      ["references"],
+      working,
+      "references",
+      "examples",
+    );
+
+    expect(listSkillFolderPaths(working, folders)).toEqual([
+      "references",
+      "references/examples",
+      "scripts",
+    ]);
+    expect(buildSkillFileTree(working, folders)).toEqual([
+      {
+        kind: "file",
+        name: "SKILL.md",
+        path: "SKILL.md",
+        file: working[0],
+      },
+      {
+        kind: "folder",
+        name: "references",
+        path: "references",
+        children: [
+          {
+            kind: "folder",
+            name: "examples",
+            path: "references/examples",
+            children: [],
+          },
+        ],
+      },
+      {
+        kind: "folder",
+        name: "scripts",
+        path: "scripts",
+        children: [
+          {
+            kind: "file",
+            name: "run.py",
+            path: "scripts/run.py",
+            file: working[1],
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("defaults new files to a selected folder or the selected file parent", () => {
+    expect(defaultSkillFileFolder({ kind: "folder", path: "references" })).toBe(
+      "references",
+    );
+    expect(
+      defaultSkillFileFolder({
+        kind: "file",
+        path: "references/guide.md",
+      }),
+    ).toBe("references");
+    expect(defaultSkillFileFolder({ kind: "file", path: "SKILL.md" })).toBe("");
+    expect(defaultSkillFileFolder(null)).toBe("");
+  });
+
+  test("creates files from separate folder and filename inputs", () => {
+    expect(joinSkillFilePath("references", "guide.md")).toBe(
+      "references/guide.md",
+    );
+    expect(joinSkillFilePath("", "notes.md")).toBe("notes.md");
+    expect(() => joinSkillFilePath("references", "nested/guide.md")).toThrow();
+    expect(() =>
+      addSkillFolder(["references"], files, "", "references"),
+    ).toThrow();
+    expect(() => addSkillFolder([], files, "", "SKILL.md")).toThrow();
   });
 });

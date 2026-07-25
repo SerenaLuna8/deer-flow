@@ -55,6 +55,7 @@ class AuditAction(StrEnum):
     ASSET_UPDATED = "asset.updated"
     ASSET_PUBLISHED = "asset.published"
     ASSET_DEPRECATED = "asset.deprecated"
+    ASSET_DELETED = "asset.deleted"
     ASSET_BOUND = "asset.bound"
     ASSET_UNBOUND = "asset.unbound"
     ASSET_CREDENTIAL_CREATED = "asset.credential_created"
@@ -213,6 +214,7 @@ for _action in (
     AuditAction.ASSET_UPDATED,
     AuditAction.ASSET_PUBLISHED,
     AuditAction.ASSET_DEPRECATED,
+    AuditAction.ASSET_DELETED,
     AuditAction.ASSET_CREDENTIAL_CREATED,
     AuditAction.ASSET_CREDENTIAL_REPLACED,
     AuditAction.ASSET_CREDENTIAL_REVOKED,
@@ -721,6 +723,7 @@ for _action in (
     AuditAction.ASSET_UPDATED,
     AuditAction.ASSET_PUBLISHED,
     AuditAction.ASSET_DEPRECATED,
+    AuditAction.ASSET_DELETED,
     AuditAction.ASSET_BOUND,
     AuditAction.ASSET_UNBOUND,
     AuditAction.ASSET_CREDENTIAL_CREATED,

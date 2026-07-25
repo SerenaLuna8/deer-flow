@@ -18,8 +18,10 @@ from app.gateway.routers.project_assets import (
     MoveSystemBindingRequest,
     ProjectAssetItemResponse,
     ProjectCredentialItemResponse,
+    ProjectSkillItemResponse,
     ScopedAssetListResponse,
     ScopedCredentialListResponse,
+    ScopedSkillAssetListResponse,
     SystemBindingRequest,
     SystemMcpCredentialGrantRequest,
     _asset_item,
@@ -138,7 +140,7 @@ async def _list_override_assets(
     kind: AssetKind,
     service,
     binding_service,
-) -> ScopedAssetListResponse:
+) -> ScopedAssetListResponse | ScopedSkillAssetListResponse:
     try:
         project_views = await service.list_visible(actor)
         catalog_actor = SystemAssetReadContext(
@@ -152,8 +154,9 @@ async def _list_override_assets(
         if any(view.scope is not AssetScope.SYSTEM or view.project_id is not None for view in system_views):
             raise AssetValidationFailed(actor.request_id)
         by_asset_id = {binding.asset_id: binding for binding in bindings}
+        item_model = ProjectSkillItemResponse if kind is AssetKind.SKILL else ProjectAssetItemResponse
         system_items = [
-            ProjectAssetItemResponse(
+            item_model(
                 **vars(view),
                 capabilities=_override_asset_capabilities(view.scope, kind),
                 binding=(BindingItemResponse(**vars(by_asset_id[view.id])) if view.id in by_asset_id else None),
@@ -161,14 +164,15 @@ async def _list_override_assets(
             for view in system_views
         ]
         project_items = [
-            ProjectAssetItemResponse(
+            item_model(
                 **vars(view),
                 capabilities=_override_asset_capabilities(view.scope, kind),
                 binding=None,
             )
             for view in project_views
         ]
-        return ScopedAssetListResponse(
+        response_model = ScopedSkillAssetListResponse if kind is AssetKind.SKILL else ScopedAssetListResponse
+        return response_model(
             system_items=system_items,
             project_items=project_items,
             request_id=actor.request_id,
@@ -283,7 +287,7 @@ async def list_override_agents(
     return await _list_override_assets(actor, AssetKind.AGENT, service, binding_service)
 
 
-@admin_project_router.get("/skills", response_model=ScopedAssetListResponse)
+@admin_project_router.get("/skills", response_model=ScopedSkillAssetListResponse)
 async def list_override_skills(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_project_actor)],
     service: Annotated[SkillService, Depends(get_skill_service)],

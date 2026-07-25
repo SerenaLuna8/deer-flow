@@ -73,12 +73,15 @@ import {
 } from "./types";
 
 type MutableAssetListKind = Exclude<AssetListKind, "credentials">;
+export type ProjectAssetStatusAction<Kind extends MutableAssetListKind> =
+  Kind extends "skills" ? "activate" | "suspend" : "archive" | "suspend";
 
 const serverErrorCodeSchema = z.enum([
   "asset_not_found",
   "asset_forbidden",
   "asset_conflict",
   "asset_validation_failed",
+  "asset_storage_quota_exceeded",
   "asset_storage_unavailable",
 ]);
 
@@ -102,6 +105,10 @@ const SAFE_SERVER_ERRORS = {
     "ASSET_VALIDATION_FAILED",
     "Asset validation failed",
   ],
+  asset_storage_quota_exceeded: [
+    "ASSET_STORAGE_QUOTA_EXCEEDED",
+    "Project Skill storage quota exceeded",
+  ],
   asset_storage_unavailable: [
     "ASSET_STORAGE_UNAVAILABLE",
     "Asset storage unavailable",
@@ -113,6 +120,7 @@ export const SHARED_ASSET_ERROR_CODES = [
   "ASSET_FORBIDDEN",
   "ASSET_CONFLICT",
   "ASSET_VALIDATION_FAILED",
+  "ASSET_STORAGE_QUOTA_EXCEEDED",
   "ASSET_STORAGE_UNAVAILABLE",
   "AUTH_REQUIRED",
   "ASSET_NETWORK_ERROR",
@@ -531,14 +539,25 @@ async function changeAssetStatus(
   return parseResponse(response, assetMutationResponseSchema);
 }
 
-export function changeProjectAssetStatus(
+export function changeProjectAssetStatus<Kind extends MutableAssetListKind>(
   projectId: string,
-  kind: Exclude<AssetListKind, "credentials">,
+  kind: Kind,
   assetId: string,
-  action: "archive" | "suspend",
+  action: ProjectAssetStatusAction<Kind>,
   input: ExpectedAssetVersionInput,
   signal?: AbortSignal,
 ) {
+  const validAction =
+    kind === "skills"
+      ? action === "activate" || action === "suspend"
+      : action === "archive" || action === "suspend";
+  if (!validAction) {
+    throw new SharedAssetApiError(
+      422,
+      "ASSET_VALIDATION_FAILED",
+      "Asset validation failed",
+    );
+  }
   const id = parseInput(assetIdSchema, assetId);
   return changeAssetStatus(
     `${projectAssetUrl(projectId, kind)}/${id}/${action}`,
@@ -547,20 +566,53 @@ export function changeProjectAssetStatus(
   );
 }
 
-export function changeAdminProjectAssetStatus(
+export function changeAdminProjectAssetStatus<
+  Kind extends MutableAssetListKind,
+>(
   projectId: string,
-  kind: Exclude<AssetListKind, "credentials">,
+  kind: Kind,
   assetId: string,
-  action: "archive" | "suspend",
+  action: ProjectAssetStatusAction<Kind>,
   input: ExpectedAssetVersionInput,
   signal?: AbortSignal,
 ) {
+  const validAction =
+    kind === "skills"
+      ? action === "activate" || action === "suspend"
+      : action === "archive" || action === "suspend";
+  if (!validAction) {
+    throw new SharedAssetApiError(
+      422,
+      "ASSET_VALIDATION_FAILED",
+      "Asset validation failed",
+    );
+  }
   const id = parseInput(assetIdSchema, assetId);
   return changeAssetStatus(
     `${adminProjectAssetUrl(projectId, kind)}/${id}/${action}`,
     input,
     signal,
   );
+}
+
+export async function deleteProjectSkill(
+  projectId: string,
+  assetId: string,
+  input: ExpectedAssetVersionInput,
+  signal?: AbortSignal,
+): Promise<void> {
+  const id = parseInput(assetIdSchema, assetId);
+  const body = parseInput(expectedAssetVersionInputSchema, input);
+  const response = await request(
+    `${projectAssetUrl(projectId, "skills")}/${id}`,
+    {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  if (!response.ok) await throwResponseError(response);
 }
 
 export async function listProjectAssetVersions(

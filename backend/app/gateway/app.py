@@ -36,6 +36,7 @@ from app.gateway.routers import (
     project_usage,
     projects,
 )
+from app.gateway.skill_version_body_limit import SkillVersionRequestBodyLimitMiddleware
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from app.reliability.error_mapping import (
     ReliabilityHTTPException,
@@ -271,6 +272,10 @@ This gateway provides project-scoped runtime endpoints and administrative operat
         ReliabilityHTTPException,
         reliability_http_exception_handler,
     )
+
+    # Bound base64 Skill archives at the ASGI receive boundary so oversized
+    # JSON cannot be loaded into memory before Pydantic validation.
+    app.add_middleware(SkillVersionRequestBodyLimitMiddleware)
 
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
     app.add_middleware(AuthMiddleware)

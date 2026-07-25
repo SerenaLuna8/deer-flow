@@ -43,6 +43,12 @@ class AssetStorageUnavailable(SharedAssetError):
     public_message = "Asset storage unavailable"
 
 
+class AssetStorageQuotaExceeded(SharedAssetError):
+    code = "asset_storage_quota_exceeded"
+    status_code = 429
+    public_message = "Project Skill storage quota exceeded"
+
+
 class AssetResolutionUnavailable(SharedAssetError):
     code = "asset_resolution_unavailable"
     status_code = 503

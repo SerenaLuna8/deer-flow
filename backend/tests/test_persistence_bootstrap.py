@@ -9,9 +9,14 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from deerflow.persistence import bootstrap
-from deerflow.persistence.final_schema_contract import ALEMBIC_INDEXES, FINAL_APP_SEQUENCES
+from deerflow.persistence.final_schema_contract import (
+    ALEMBIC_INDEXES,
+    BASELINE_M7_CATALOG_SIGNATURE,
+    FINAL_APP_SEQUENCES,
+)
 
-CURRENT_REVISION = "0001_project_saas_baseline"
+BASELINE_REVISION = "0001_project_saas_baseline"
+CURRENT_REVISION = "0002_project_skill_hard_delete"
 
 
 def _exact_app_only_objects() -> frozenset[str]:
@@ -53,6 +58,27 @@ async def test_classify_database_accepts_exact_current_schema(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_classify_database_accepts_only_exact_baseline_as_upgradeable(
+    monkeypatch,
+) -> None:
+    connection = AsyncMock()
+    connection.scalar.return_value = BASELINE_REVISION
+    monkeypatch.setattr(
+        bootstrap,
+        "inventory_user_schema_objects",
+        AsyncMock(return_value=_exact_app_only_objects()),
+    )
+    read_signature = AsyncMock(return_value=BASELINE_M7_CATALOG_SIGNATURE)
+    monkeypatch.setattr(bootstrap, "read_m7_catalog_signature", read_signature)
+
+    assert await bootstrap.classify_database(connection) == "upgradeable"
+
+    read_signature.return_value = {}
+    with pytest.raises(bootstrap.M7RecreateRequired):
+        await bootstrap.classify_database(connection)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "objects,revision",
     [
@@ -82,12 +108,59 @@ async def test_classify_database_rejects_old_or_unknown_nonempty_schema_before_m
     assert captured.value.code == "M7_RECREATE_REQUIRED"
 
 
-def test_migration_graph_has_single_merged_0001_head() -> None:
+def test_migration_graph_has_single_forward_head() -> None:
     assert bootstrap._get_head_revision() == CURRENT_REVISION
 
 
 @pytest.mark.asyncio
-async def test_explicit_migrate_installs_empty_database_to_head(
+async def test_explicit_migrate_upgrades_exact_ancestor_to_head(
+    monkeypatch,
+) -> None:
+    connection = AsyncMock()
+    engine = _engine_with_connection(connection)
+    config = object()
+    classify = AsyncMock(side_effect=["upgradeable", "current"])
+    offload = AsyncMock()
+
+    @asynccontextmanager
+    async def lock(_engine):
+        yield
+
+    monkeypatch.setattr(bootstrap, "_postgres_lock", lock)
+    monkeypatch.setattr(bootstrap, "classify_database", classify)
+    monkeypatch.setattr(bootstrap, "_get_alembic_config", lambda _engine: config)
+    monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
+
+    await bootstrap.migrate_schema(engine)
+
+    offload.assert_awaited_once_with(bootstrap._upgrade, config, "head")
+    assert classify.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_explicit_migrate_rejects_empty_database(
+    monkeypatch,
+) -> None:
+    connection = AsyncMock()
+    engine = _engine_with_connection(connection)
+    classify = AsyncMock(return_value="empty")
+    offload = AsyncMock()
+
+    @asynccontextmanager
+    async def lock(_engine):
+        yield
+
+    monkeypatch.setattr(bootstrap, "_postgres_lock", lock)
+    monkeypatch.setattr(bootstrap, "classify_database", classify)
+    monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
+
+    with pytest.raises(bootstrap.SchemaSetupRequired):
+        await bootstrap.migrate_schema(engine)
+    offload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_setup_installs_empty_database_to_head(
     monkeypatch,
 ) -> None:
     connection = AsyncMock()
@@ -105,7 +178,7 @@ async def test_explicit_migrate_installs_empty_database_to_head(
     monkeypatch.setattr(bootstrap, "_get_alembic_config", lambda _engine: config)
     monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
 
-    await bootstrap.migrate_schema(engine)
+    await bootstrap.bootstrap_schema(engine)
 
     offload.assert_awaited_once_with(bootstrap._upgrade, config, "head")
     assert classify.await_count == 2
@@ -151,6 +224,24 @@ async def test_runtime_validation_rejects_empty_schema_without_running_alembic(
 
     assert captured.value.code == "DATABASE_SETUP_REQUIRED"
     offload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_runtime_validation_requires_explicit_ancestor_migration(
+    monkeypatch,
+) -> None:
+    connection = AsyncMock()
+    engine = _engine_with_connection(connection)
+    monkeypatch.setattr(
+        bootstrap,
+        "classify_database",
+        AsyncMock(return_value="upgradeable"),
+    )
+
+    with pytest.raises(bootstrap.SchemaMigrationRequired) as captured:
+        await bootstrap.validate_schema(engine)
+
+    assert captured.value.code == "DATABASE_MIGRATION_REQUIRED"
 
 
 @pytest.mark.asyncio

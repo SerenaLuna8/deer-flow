@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-import re
 import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -30,8 +29,7 @@ from app.shared_assets.catalog_state_repository import CatalogStateRepository
 from app.shared_assets.errors import AssetValidationFailed
 from app.shared_assets.models import AgentPayload, SkillArchiveFile
 from app.shared_assets.skill_service import (
-    _file_views,
-    _snapshot_checksum,
+    _analyze_skill_files,
     normalize_skill_files,
 )
 from deerflow.persistence.projects import ProjectMembershipRow
@@ -59,7 +57,6 @@ from deerflow.persistence.user import UserRow
 BUILTIN_ASSET_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000007")
 BUILTIN_ASSET_EMAIL = "builtin-assets@deerflow.invalid"
 _ID_NAMESPACE = uuid.UUID("6f6622dd-a1f5-5799-a2f7-d9f793ea8d2e")
-_FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
 
 
 class BootstrapConflict(RuntimeError):
@@ -142,36 +139,22 @@ def _agent_checksum(payload: AgentPayload) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _skill_metadata(
+def _validated_skill_preview(
     entry: BootstrapEntry,
-    content: bytes,
-) -> tuple[dict[str, object], str, str | None, list[object]]:
+    archive_files: tuple[SkillArchiveFile, ...],
+):
     try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        raise BootstrapCatalogError("bootstrap Skill must be UTF-8") from None
-    match = _FRONTMATTER.match(text)
-    if match is None:
-        raise BootstrapCatalogError("bootstrap Skill frontmatter is required")
-    try:
-        frontmatter = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as error:
-        raise BootstrapCatalogError("bootstrap Skill frontmatter is invalid") from error
-    if not isinstance(frontmatter, dict) or frontmatter.get("name") != entry.slug:
+        preview = _analyze_skill_files(
+            archive_files,
+            entry.source_key,
+        )
+    except AssetValidationFailed as error:
+        raise BootstrapCatalogError("bootstrap Skill archive is invalid") from error
+    if preview.frontmatter.get("name") != entry.slug:
         raise BootstrapCatalogError("bootstrap Skill name does not match manifest")
-    description = frontmatter.get("description", "")
-    if not isinstance(description, str):
+    if not preview.description.strip():
         raise BootstrapCatalogError("bootstrap Skill description is invalid")
-    compatibility = frontmatter.get("compatibility")
-    if compatibility is not None and (not isinstance(compatibility, str) or len(compatibility) > 255):
-        raise BootstrapCatalogError("bootstrap Skill compatibility is invalid")
-    compatibility = compatibility.strip() if isinstance(compatibility, str) else None
-    requirements = frontmatter.get("required-secrets", [])
-    if requirements is None:
-        requirements = []
-    if not isinstance(requirements, list):
-        raise BootstrapCatalogError("bootstrap Skill secret requirements are invalid")
-    return frontmatter, description, compatibility, requirements
+    return preview
 
 
 async def _ensure_builtin_principal(session: AsyncSession) -> None:
@@ -294,12 +277,22 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
         )
     except AssetValidationFailed as error:
         raise BootstrapCatalogError("bootstrap Skill archive is invalid") from error
-    skill_manifest = next(file.content for file in archive_files if file.path == "SKILL.md")
-    frontmatter, description, compatibility, requirements = _skill_metadata(
+    preview = await asyncio.to_thread(
+        _validated_skill_preview,
         entry,
-        skill_manifest,
+        archive_files,
     )
-    checksum = _snapshot_checksum(_file_views(archive_files))
+    frontmatter = dict(preview.frontmatter)
+    description = preview.description
+    compatibility = preview.compatibility
+    requirements = [
+        {
+            "name": requirement.name,
+            "optional": requirement.optional,
+        }
+        for requirement in preview.secret_requirements
+    ]
+    checksum = preview.checksum
     asset_id = _stable_id(entry.source_key)
     version_id = _version_id(entry)
     asset = await _existing_asset(session, entry)
@@ -315,8 +308,8 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
             frontmatter=frontmatter,
             compatibility=compatibility,
             secret_requirements=requirements,
-            scan_decision="allow",
-            scan_summary={"source": "builtin-bootstrap"},
+            scan_decision=preview.scan_decision,
+            scan_summary=dict(preview.scan_summary),
             supersedes_version_id=None,
             payload_checksum=checksum,
             submitted_at=None,
@@ -374,8 +367,8 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
         frontmatter=frontmatter,
         compatibility=compatibility,
         secret_requirements=requirements,
-        scan_decision="allow",
-        scan_summary={"source": "builtin-bootstrap"},
+        scan_decision=preview.scan_decision,
+        scan_summary=dict(preview.scan_summary),
         supersedes_version_id=None,
         payload_checksum=checksum,
         created_by_user_id=str(BUILTIN_ASSET_USER_ID),

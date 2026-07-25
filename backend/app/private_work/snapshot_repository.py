@@ -36,7 +36,6 @@ from deerflow.persistence.shared_assets.agent_model import (
     AgentVersionRow,
     AgentVersionSkillRefRow,
 )
-from deerflow.persistence.shared_assets.binding_model import AssetCatalogStateRow
 from deerflow.persistence.shared_assets.mcp_model import McpServerRow, McpServerVersionRow
 from deerflow.persistence.shared_assets.skill_model import SkillRow, SkillVersionRow
 
@@ -147,7 +146,20 @@ class RunSnapshotRepository:
     ) -> list[tuple[SkillRow, SkillVersionRow]]:
         rows: list[tuple[SkillRow, SkillVersionRow]] = []
         for version_id in version_ids:
-            row = (await session.execute(select(SkillRow, SkillVersionRow).join(SkillVersionRow, SkillVersionRow.skill_id == SkillRow.id).where(SkillVersionRow.id == version_id))).one_or_none()
+            row = (
+                await session.execute(
+                    select(SkillRow, SkillVersionRow)
+                    .join(
+                        SkillVersionRow,
+                        SkillVersionRow.skill_id == SkillRow.id,
+                    )
+                    .where(SkillVersionRow.id == version_id)
+                    .with_for_update(
+                        read=True,
+                        of=[SkillRow, SkillVersionRow],
+                    )
+                )
+            ).one_or_none()
             if row is None:
                 raise RunSnapshotAssetStale
             asset, version = row
@@ -413,9 +425,6 @@ class RunSnapshotRepository:
             project_id,
         )
         closures = await self._credential_closures(session, mcps)
-        generation = await session.scalar(select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1).with_for_update())
-        if generation != resolved_agent.catalog_generation:
-            raise RunSnapshotAssetStale
         return skills, mcps, closures
 
     async def list_assets(

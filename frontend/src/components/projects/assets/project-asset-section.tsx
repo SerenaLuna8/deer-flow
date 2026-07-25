@@ -4,17 +4,19 @@ import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import type { ProjectAssetList } from "@/core/shared-assets";
+import type { AssetListKind, ProjectAssetList } from "@/core/shared-assets";
 
 import { projectAssetCanAuthor } from "./project-asset-view-model";
 
 type ProjectAssetItem = ProjectAssetList["project_items"][number];
 
 export function ProjectAssetSection({
+  kind,
   items,
   onCreateVersion,
   renderDetails,
 }: {
+  kind: Exclude<AssetListKind, "credentials">;
   items: ProjectAssetItem[];
   onCreateVersion?: (item: ProjectAssetItem) => void;
   renderDetails?: (item: ProjectAssetItem) => React.ReactNode;
@@ -68,7 +70,7 @@ export function ProjectAssetSection({
                     </dd>
                   </div>
                 </dl>
-                {projectAssetCanAuthor(item) && (
+                {projectAssetCanAuthor(item, kind) && (
                   <Button
                     type="button"
                     size="sm"

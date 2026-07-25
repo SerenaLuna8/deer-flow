@@ -681,6 +681,17 @@ class AgentRepository:
         system_ids = (await self.session.execute(system_statement)).scalars().all()
         return tuple((*project_ids, *system_ids))
 
+    async def lock_skill_version_slugs(
+        self,
+        version_ids: Sequence[uuid.UUID],
+    ) -> tuple[str, ...]:
+        """Read slugs for dependency rows already scope-validated and locked."""
+
+        if not version_ids:
+            return ()
+        statement = select(SkillRow.slug).join(SkillVersionRow, SkillVersionRow.skill_id == SkillRow.id).where(SkillVersionRow.id.in_(version_ids)).with_for_update(read=True, of=[SkillRow, SkillVersionRow])
+        return tuple((await self.session.execute(statement)).scalars().all())
+
     async def resolve_project_mcp_versions(
         self,
         context: ProjectContext,

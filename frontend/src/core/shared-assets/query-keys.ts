@@ -22,6 +22,16 @@ export const sharedAssetKeys = {
     [...sharedAssetKeys.account(accountId), "project"] as const,
 };
 
+export function projectSharedAssetRoot(scope: {
+  accountId: string;
+  projectId: string;
+}) {
+  return [
+    ...sharedAssetKeys.projects(scope.accountId),
+    requireKeyPart(scope.projectId, "Project ID"),
+  ] as const;
+}
+
 export function adminAssetKey(accountId: string, kind: AssetListKind) {
   return [
     ...sharedAssetKeys.admin(accountId),
@@ -59,9 +69,21 @@ export function projectAssetKey(
   kind: AssetListKind,
 ) {
   return [
-    ...sharedAssetKeys.projects(accountId),
-    requireKeyPart(projectId, "Project ID"),
+    ...projectSharedAssetRoot({ accountId, projectId }),
     assetListKindSchema.parse(kind),
+  ] as const;
+}
+
+export function projectAssetMutationKey(
+  accountId: string,
+  projectId: string,
+  kind: AssetListKind,
+  action: string,
+) {
+  return [
+    ...projectAssetKey(accountId, projectId, kind),
+    "mutation",
+    requireKeyPart(action, "Mutation action"),
   ] as const;
 }
 

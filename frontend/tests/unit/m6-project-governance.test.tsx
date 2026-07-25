@@ -206,6 +206,30 @@ describe("M6 project governance", () => {
   test("accepts only strict public usage and audit response fields", () => {
     expect(usageResponseSchema.parse(usage)).toEqual(usage);
     expect(auditPageSchema.parse(auditPage)).toEqual(auditPage);
+    expect(
+      auditPageSchema.parse({
+        items: [
+          {
+            id: "44444444-4444-4444-8444-444444444444",
+            occurred_at: "2026-07-25T15:00:00Z",
+            actor: "user",
+            action: "asset.deleted",
+            target_kind: "asset",
+            outcome: "success",
+            public_error_code: null,
+            metadata: { asset_kind: "skill" },
+          },
+        ],
+        next_cursor: null,
+      }),
+    ).toMatchObject({
+      items: [
+        {
+          action: "asset.deleted",
+          metadata: { asset_kind: "skill" },
+        },
+      ],
+    });
     expect(() =>
       usageResponseSchema.parse({ ...usage, owner_user_id: ACCOUNT_A }),
     ).toThrow();

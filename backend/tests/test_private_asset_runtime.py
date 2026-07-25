@@ -37,8 +37,14 @@ async def _prepare_exact_dependencies(
     support_sha = hashlib.sha256(support_content).hexdigest()
     canonical = json.dumps(
         [
-            {"path": "SKILL.md", "sha256": file_sha, "size_bytes": len(content)},
             {
+                "media_type": "text/markdown",
+                "path": "SKILL.md",
+                "sha256": file_sha,
+                "size_bytes": len(content),
+            },
+            {
+                "media_type": "text/plain",
                 "path": "references/support.txt",
                 "sha256": support_sha,
                 "size_bytes": len(support_content),
@@ -350,7 +356,7 @@ async def test_exact_runtime_loads_persisted_agent_version_and_uses_run_temp(mig
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_materialize_fails_closed_on_generation_drift(migrated_postgres_database_url: str) -> None:
+async def test_materialize_ignores_unrelated_catalog_generation_drift(migrated_postgres_database_url: str) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     thread_id = f"runtime-stale-{uuid.uuid4()}"
     try:
@@ -364,9 +370,12 @@ async def test_materialize_fails_closed_on_generation_drift(migrated_postgres_da
         async with seed.factory() as session, session.begin():
             await session.execute(text("UPDATE asset_catalog_state SET generation=generation+1 WHERE id=1"))
 
-        with pytest.raises(PrivateWorkAssetStale) as captured:
-            await PrivateAssetRuntime(seed.factory).materialize(seed.owner_a, admitted)
-        assert captured.value.request_id == seed.owner_a.request_id
+        runtime = await PrivateAssetRuntime(seed.factory).materialize(
+            seed.owner_a,
+            admitted,
+        )
+        assert runtime.agent_version_id == admitted.snapshot.assets[0].version_id
+        await runtime.aclose()
     finally:
         await seed.engine.dispose()
 
@@ -383,6 +392,7 @@ async def test_materialize_uses_asset_before_generation_lock_order_without_deadl
     writer_committed = asyncio.Event()
     writer_task = None
     runtime_task = None
+    materialized_runtime = None
 
     class BarrierResolver(ProjectAssetResolver):
         async def resolve_project_asset_snapshot_in_session(
@@ -437,9 +447,9 @@ async def test_materialize_uses_asset_before_generation_lock_order_without_deadl
             ).materialize(seed.owner_a, admitted)
         )
 
-        with pytest.raises(PrivateWorkAssetStale):
-            await asyncio.wait_for(runtime_task, timeout=10)
+        materialized_runtime = await asyncio.wait_for(runtime_task, timeout=10)
         await asyncio.wait_for(writer_task, timeout=10)
+        assert materialized_runtime.agent_version_id == admitted.snapshot.assets[0].version_id
         async with seed.factory() as session:
             generation = await session.scalar(text("SELECT generation FROM asset_catalog_state WHERE id=1"))
         assert generation > admitted.snapshot.catalog_generation
@@ -451,6 +461,8 @@ async def test_materialize_uses_asset_before_generation_lock_order_without_deadl
                 asyncio.gather(*pending, return_exceptions=True),
                 timeout=10,
             )
+        if materialized_runtime is not None:
+            await materialized_runtime.aclose()
         await seed.engine.dispose()
 
 

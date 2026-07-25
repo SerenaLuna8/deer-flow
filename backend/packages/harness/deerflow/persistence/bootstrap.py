@@ -17,15 +17,17 @@ from sqlalchemy.pool import NullPool
 
 import deerflow.persistence.models  # noqa: F401 -- populate final metadata
 from deerflow.persistence.final_schema_contract import (
+    BASELINE_M7_CATALOG_SIGNATURE,
     FINAL_APP_TABLES,
     LANGGRAPH_TABLES,
     inventory_is_m7_allowed,
     inventory_user_schema_objects,
+    read_m7_catalog_signature,
     verify_m7_catalog,
 )
 
 BASELINE_SCHEMA_REVISION = "0001_project_saas_baseline"
-CURRENT_SCHEMA_REVISION = BASELINE_SCHEMA_REVISION
+CURRENT_SCHEMA_REVISION = "0002_project_skill_hard_delete"
 # Current-schema alias retained for the M7 readiness contract.
 M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 
@@ -109,7 +111,7 @@ async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
 
 async def classify_database(
     connection: AsyncConnection,
-) -> Literal["empty", "current"]:
+) -> Literal["empty", "upgradeable", "current"]:
     """Classify a database without mutation before any migration can run."""
 
     objects = await inventory_user_schema_objects(connection)
@@ -122,6 +124,10 @@ async def classify_database(
     if revision == CURRENT_SCHEMA_REVISION:
         if await verify_m7_catalog(connection):
             return "current"
+        raise M7RecreateRequired()
+    if revision == BASELINE_SCHEMA_REVISION:
+        if await read_m7_catalog_signature(connection) == BASELINE_M7_CATALOG_SIGNATURE:
+            return "upgradeable"
         raise M7RecreateRequired()
     raise M7RecreateRequired()
 
@@ -161,7 +167,7 @@ async def _postgres_lock(engine: AsyncEngine) -> AsyncIterator[None]:
 
 
 async def migrate_schema(engine: AsyncEngine) -> None:
-    """Explicitly migrate an empty or exact known ancestor database to head."""
+    """Explicitly migrate an exact known ancestor database to head."""
 
     if not isinstance(engine, AsyncEngine):
         raise TypeError("migrate_schema() requires an AsyncEngine")
@@ -169,7 +175,9 @@ async def migrate_schema(engine: AsyncEngine) -> None:
     async with _postgres_lock(engine):
         async with engine.connect() as connection:
             state = await classify_database(connection)
-        if state != "current":
+        if state == "empty":
+            raise SchemaSetupRequired()
+        if state == "upgradeable":
             await _run_alembic_offload(_upgrade, _get_alembic_config(engine), "head")
         async with engine.connect() as connection:
             if await classify_database(connection) != "current":
@@ -177,11 +185,25 @@ async def migrate_schema(engine: AsyncEngine) -> None:
 
 
 async def bootstrap_schema(engine: AsyncEngine) -> None:
-    """Install or verify the current schema through an explicit operator path."""
+    """Install an empty schema or verify an already-current schema."""
 
     if not isinstance(engine, AsyncEngine):
         raise TypeError("bootstrap_schema() requires an AsyncEngine")
-    await migrate_schema(engine)
+    _get_head_revision()
+    async with _postgres_lock(engine):
+        async with engine.connect() as connection:
+            state = await classify_database(connection)
+        if state == "upgradeable":
+            raise SchemaMigrationRequired()
+        if state == "empty":
+            await _run_alembic_offload(
+                _upgrade,
+                _get_alembic_config(engine),
+                "head",
+            )
+        async with engine.connect() as connection:
+            if await classify_database(connection) != "current":
+                raise M7RecreateRequired()
 
 
 async def validate_schema(engine: AsyncEngine) -> None:
@@ -194,6 +216,8 @@ async def validate_schema(engine: AsyncEngine) -> None:
         state = await classify_database(connection)
     if state == "current":
         return
+    if state == "upgradeable":
+        raise SchemaMigrationRequired()
     raise SchemaSetupRequired()
 
 

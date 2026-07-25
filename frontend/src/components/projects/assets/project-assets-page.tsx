@@ -40,6 +40,7 @@ import {
   type AssetVersion,
   type ProjectAssetList,
   type ProjectAssetItem,
+  type ProjectAssetStatusAction,
   type ProjectCredentialList,
   type ProjectCredentialItem,
   type CreateCredentialInput,
@@ -52,7 +53,7 @@ import { dependencyVersionOptions } from "./asset-dependency-options";
 import { ProjectAssetSection } from "./project-asset-section";
 import {
   projectAssetCanAuthor,
-  projectAssetLifecycleActions,
+  projectAssetDetailLifecycleActions,
 } from "./project-asset-view-model";
 import { SystemAssetSection } from "./system-asset-section";
 import { SystemBindingDialog } from "./system-binding-dialog";
@@ -108,7 +109,7 @@ export function credentialPayloadFieldsFromVersions(
 }
 
 export function ProjectAssetCatalogView({
-  kind: _kind,
+  kind,
   data,
   onManageBinding,
   onCreateVersion,
@@ -130,6 +131,7 @@ export function ProjectAssetCatalogView({
         renderDetails={renderSystemDetails}
       />
       <ProjectAssetSection
+        kind={kind}
         items={data.project_items}
         onCreateVersion={onCreateVersion}
         renderDetails={renderProjectDetails}
@@ -316,7 +318,7 @@ export function projectCredentialShowsHistory(
   return credential.scope === "project";
 }
 
-export { projectAssetCanAuthor, projectAssetLifecycleActions };
+export { projectAssetCanAuthor };
 
 export { dependencyVersionOptions } from "./asset-dependency-options";
 
@@ -331,7 +333,7 @@ function ErrorNotice({ error }: { error: unknown }) {
 
 type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
 
-export function ProjectAssetHistoryView({
+export function ProjectAssetHistoryView<Kind extends MutableKind>({
   kind,
   item,
   versions,
@@ -348,7 +350,7 @@ export function ProjectAssetHistoryView({
   onApprove,
   onRetryApprovalCredentials,
 }: {
-  kind: MutableKind;
+  kind: Kind;
   item: ProjectAssetItem;
   versions: AssetVersion[];
   approvalCredentials?: ProjectCredentialItem[];
@@ -358,7 +360,7 @@ export function ProjectAssetHistoryView({
   error?: unknown;
   actionError?: unknown;
   pending?: boolean;
-  onChangeStatus?: (action: "archive" | "suspend") => void;
+  onChangeStatus?: (action: ProjectAssetStatusAction<Kind>) => void;
   onPublish?: (version: AssetVersion) => void;
   onSubmit?: (version: McpVersion) => void;
   onApprove?: (
@@ -367,7 +369,7 @@ export function ProjectAssetHistoryView({
   ) => void;
   onRetryApprovalCredentials?: () => void;
 }) {
-  const canAuthor = projectAssetCanAuthor(item);
+  const canAuthor = projectAssetCanAuthor(item, kind);
   const canApprove = item.capabilities.includes("mcp.credentials.approve");
   const waiting = versions.some(
     (version) =>
@@ -380,7 +382,7 @@ export function ProjectAssetHistoryView({
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold">版本历史</h3>
         <div className="flex flex-wrap gap-2">
-          {projectAssetLifecycleActions(item).map((action) => (
+          {projectAssetDetailLifecycleActions(kind, item).map((action) => (
             <Button
               key={action}
               type="button"

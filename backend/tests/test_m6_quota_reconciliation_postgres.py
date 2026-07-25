@@ -22,6 +22,11 @@ from app.quotas.reconciliation import QuotaReconciler
 from app.quotas.service import QuotaService
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.private_work.model import PrivateFileRow
+from deerflow.persistence.shared_assets import (
+    SkillRow,
+    SkillVersionFileRow,
+    SkillVersionRow,
+)
 
 
 def _source_ref(payload: bytes) -> QuotaSourceRef:
@@ -45,6 +50,9 @@ def _authority(project_id: object) -> QuotaReconciliationAuthority:
 async def _seed_authoritative_usage(seed) -> tuple[str, tuple[str, str]]:
     thread_id = str(uuid.uuid4())
     run_ids = (str(uuid.uuid4()), str(uuid.uuid4()))
+    skill_id = uuid.uuid4()
+    skill_version_id = uuid.uuid4()
+    skill_content = b"s" * 37
     async with seed.factory() as session, session.begin():
         await PrivateThreadRepository(session).create(
             scope=seed.owner_a_scope,
@@ -69,6 +77,41 @@ async def _seed_authoritative_usage(seed) -> tuple[str, tuple[str, str]]:
                 size=100,
                 sha256="a" * 64,
                 status="ready",
+            )
+        )
+        session.add(
+            SkillRow(
+                id=skill_id,
+                scope="project",
+                project_id=seed.owner_a.project_id,
+                slug=f"quota-reconcile-{str(skill_id)[:8]}",
+                display_name="Quota reconciliation Skill",
+                created_by_user_id=str(seed.owner_a.user_id),
+            )
+        )
+        session.add(
+            SkillVersionRow(
+                id=skill_version_id,
+                skill_id=skill_id,
+                version_number=1,
+                workflow_status="draft",
+                description="Count every stored project Skill version",
+                frontmatter={},
+                secret_requirements=[],
+                scan_decision="allow",
+                scan_summary={},
+                payload_checksum="b" * 64,
+                created_by_user_id=str(seed.owner_a.user_id),
+            )
+        )
+        session.add(
+            SkillVersionFileRow(
+                skill_version_id=skill_version_id,
+                path="SKILL.md",
+                media_type="text/markdown",
+                size_bytes=len(skill_content),
+                sha256=hashlib.sha256(skill_content).hexdigest(),
+                content=skill_content,
             )
         )
     return thread_id, run_ids
@@ -97,7 +140,7 @@ async def test_reconciliation_dry_run_is_zero_write_and_execute_converges(
 
         assert {(item.dimension, item.current, item.expected) for item in preview.differences} >= {
             ("members", 0, 3),
-            ("storage_bytes", 0, 100),
+            ("storage_bytes", 0, 137),
             ("concurrent_runs", 0, 2),
         }
         async with seed.factory() as session:
@@ -152,7 +195,7 @@ async def test_reconciliation_dry_run_is_zero_write_and_execute_converges(
                 {"project_id": seed.owner_a.project_id},
             )
         assert counters["members"] == (0, 3)
-        assert counters["storage_bytes"] == (0, 100)
+        assert counters["storage_bytes"] == (0, 137)
         assert counters["concurrent_runs"] == (0, 2)
         assert adjustment_count == 3
     finally:
@@ -213,7 +256,7 @@ async def test_reconciliation_repairs_counter_drift_with_compensation_rows(
 
         preview = await reconciler.preview(authority, now=now)
         assert {(item.dimension, item.current, item.expected) for item in preview.differences} >= {
-            ("storage_bytes", 99, 100),
+            ("storage_bytes", 99, 137),
             ("mcp_calls_daily", 7, 2),
             ("members", 3, 3),
         }
@@ -247,10 +290,10 @@ async def test_reconciliation_repairs_counter_drift_with_compensation_rows(
         assert [(row.dimension, row.used, row.reserved) for row in repaired] == [
             ("mcp_calls_daily", 2, 0),
             ("members", 0, 3),
-            ("storage_bytes", 0, 100),
+            ("storage_bytes", 0, 137),
         ]
         assert ("mcp_calls_daily", -5) in adjustments
-        assert ("storage_bytes", 1) in adjustments
+        assert ("storage_bytes", 38) in adjustments
         async with seed.factory() as session:
             axis_adjustments = await session.scalar(
                 text(

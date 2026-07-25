@@ -24,7 +24,12 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
 )
 from app.shared_assets.keyring import CredentialKeyring
-from app.shared_assets.models import AssetKind, AssetSelection, ResolvedMcpSnapshot
+from app.shared_assets.models import (
+    AgentPayload,
+    AssetKind,
+    AssetSelection,
+    ResolvedMcpSnapshot,
+)
 
 
 async def _seed_project(
@@ -221,8 +226,10 @@ async def _seed_skill(
     scope: str,
     project_id: uuid.UUID | None,
     versions: int = 1,
+    slug: str | None = None,
 ) -> tuple[uuid.UUID, tuple[uuid.UUID, ...]]:
     asset_id = uuid.uuid4()
+    selected_slug = slug or f"skill-{str(asset_id)[:8]}"
     version_ids = tuple(uuid.uuid4() for _ in range(versions))
     async with engine.begin() as connection:
         await connection.execute(
@@ -235,15 +242,22 @@ async def _seed_skill(
                 "id": asset_id,
                 "scope": scope,
                 "project": project_id,
-                "slug": f"skill-{str(asset_id)[:8]}",
+                "slug": selected_slug,
                 "user": str(owner_id),
             },
         )
         for number, version_id in enumerate(version_ids, 1):
-            content = f"---\nname: demo-{number}\ndescription: demo\n---\nbody\n".encode()
+            content = f"---\nname: {selected_slug}\ndescription: demo\n---\nbody\n".encode()
             file_sha = hashlib.sha256(content).hexdigest()
             canonical = json.dumps(
-                [{"path": "SKILL.md", "sha256": file_sha, "size_bytes": len(content)}],
+                [
+                    {
+                        "media_type": "text/markdown",
+                        "path": "SKILL.md",
+                        "sha256": file_sha,
+                        "size_bytes": len(content),
+                    }
+                ],
                 separators=(",", ":"),
                 sort_keys=True,
             ).encode()
@@ -287,6 +301,82 @@ async def _seed_skill(
             {"version": version_ids[-1], "asset": asset_id},
         )
     return asset_id, version_ids
+
+
+@pytest.mark.asyncio
+async def test_project_agent_authoring_rejects_same_slug_system_and_project_skills(
+    migrated_postgres_database_url: str,
+) -> None:
+    from app.shared_assets.agent_service import AgentService, CreateAgent
+    from app.shared_assets.binding_service import BindingService
+
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin = await _seed_project(engine, factory, label="duplicate-skill-authoring")
+    system = await _seed_system_admin(engine)
+    duplicate_slug = "duplicate-authoring-skill"
+    system_skill_id, system_versions = await _seed_skill(
+        engine,
+        owner_id=system.user_id,
+        scope="system",
+        project_id=None,
+        slug=duplicate_slug,
+    )
+    _project_skill_id, project_versions = await _seed_skill(
+        engine,
+        owner_id=admin.user_id,
+        scope="project",
+        project_id=admin.project_id,
+        slug=duplicate_slug,
+    )
+    bindings = BindingService(factory)
+    agents = AgentService(factory)
+    try:
+        await bindings.enable(
+            admin,
+            AssetSelection(
+                AssetKind.SKILL,
+                system_skill_id,
+                system_versions[0],
+            ),
+        )
+        asset = await agents.create_asset(
+            admin,
+            CreateAgent("duplicate-skill-agent", "Duplicate Skill Agent"),
+        )
+
+        with pytest.raises(AssetValidationFailed) as exc_info:
+            await agents.create_version(
+                admin,
+                asset.id,
+                AgentPayload(
+                    description="Reject ambiguous Skill materialization.",
+                    soul="Use only unambiguous Skill names.",
+                    model_ref="default",
+                    tool_groups=(),
+                    skill_version_ids=(
+                        system_versions[0],
+                        project_versions[0],
+                    ),
+                    mcp_version_ids=(),
+                ),
+                expected_asset_version=1,
+            )
+
+        assert exc_info.value.request_id == admin.request_id
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    text(
+                        """SELECT count(*) FROM agent_versions
+                           WHERE agent_id=:asset_id"""
+                    ),
+                    {"asset_id": asset.id},
+                )
+                == 0
+            )
+    finally:
+        await engine.dispose()
 
 
 async def _generation(engine: AsyncEngine) -> int:

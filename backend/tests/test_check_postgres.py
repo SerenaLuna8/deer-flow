@@ -8,7 +8,7 @@ import pytest
 from deerflow.persistence.base import Base
 from scripts import check_postgres
 
-CURRENT_REVISION = "0001_project_saas_baseline"
+CURRENT_REVISION = "0002_project_skill_hard_delete"
 
 
 def test_required_tables_exactly_cover_final_application_and_langgraph_schema() -> None:

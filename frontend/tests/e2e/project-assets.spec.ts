@@ -30,6 +30,7 @@ const CREDENTIAL_VERSION_ID = "30000000-0000-4000-8000-000000000005";
 const SYSTEM_CREDENTIAL_VERSION_ID = "30000000-0000-4000-8000-000000000006";
 const SKILL_SOURCE_VERSION_ID = "30000000-0000-4000-8000-000000000021";
 const SKILL_FORK_VERSION_ID = "30000000-0000-4000-8000-000000000022";
+const SKILL_BLANK_VERSION_ID = "30000000-0000-4000-8000-000000000012";
 const SKILL_SOURCE_CHECKSUM = "a".repeat(64);
 const SKILL_SOURCE_FILE_CHECKSUM = "b".repeat(64);
 const SKILL_FORK_FILE_CHECKSUM = "c".repeat(64);
@@ -149,6 +150,7 @@ async function json(route: Route, body: unknown, status = 200) {
 }
 
 type AssetMock = {
+  skillDeleteExpectedVersions: () => number[];
   staleConflicts: () => number;
   validatedMutations: () => number;
   skillFileRequests: () => Array<{ path: string; versionId: string }>;
@@ -232,6 +234,8 @@ async function mockProjectAssets(
   let credentialVersions: CredentialVersion[] = [];
   let staleConflicts = 0;
   let validatedMutations = 0;
+  let projectSkillDeleted = false;
+  const skillDeleteExpectedVersions: number[] = [];
   const skillFileRequests: Array<{ path: string; versionId: string }> = [];
   const skillForkRequests: Array<{
     body: SkillFileForkInput;
@@ -260,6 +264,7 @@ async function mockProjectAssets(
         {
           detail: {
             code: "asset_conflict",
+            message: "Asset state conflict",
             request_id: "request-stale-version",
           },
         },
@@ -363,7 +368,7 @@ async function mockProjectAssets(
     ) {
       await json(route, {
         system_items: [{ ...systemSkill, binding: skillBinding }],
-        project_items: [projectSkill],
+        project_items: projectSkillDeleted ? [] : [projectSkill],
         request_id: "request-skills",
       });
       return;
@@ -387,6 +392,80 @@ async function mockProjectAssets(
         system_items: [systemCredential],
         project_items: credential ? [credential] : [],
         request_id: "request-credentials",
+      });
+      return;
+    }
+
+    if (
+      path.endsWith(`/api/projects/${PROJECT_ID}/skills/${PROJECT_SKILL_ID}`) &&
+      method === "DELETE"
+    ) {
+      const body = request.postDataJSON() as {
+        expected_asset_version: number;
+      };
+      skillDeleteExpectedVersions.push(body.expected_asset_version);
+      if (projectSkillDeleted) {
+        await json(
+          route,
+          {
+            detail: {
+              code: "asset_not_found",
+              request_id: "request-skill-deleted",
+            },
+          },
+          404,
+        );
+        return;
+      }
+      if (
+        !(await requireExpectedVersion(
+          route,
+          body.expected_asset_version,
+          projectSkill.version,
+        ))
+      ) {
+        return;
+      }
+      projectSkillDeleted = true;
+      skillVersions = [];
+      skillFileContents.clear();
+      await route.fulfill({ status: 204, body: "" });
+      return;
+    }
+
+    if (
+      path.endsWith(
+        `/api/projects/${PROJECT_ID}/skills/${PROJECT_SKILL_ID}/suspend`,
+      ) &&
+      method === "POST"
+    ) {
+      const body = request.postDataJSON() as {
+        expected_asset_version: number;
+      };
+      if (
+        !(await requireExpectedVersion(
+          route,
+          body.expected_asset_version,
+          projectSkill.version,
+        ))
+      ) {
+        return;
+      }
+      projectSkill = {
+        ...projectSkill,
+        status: "suspended",
+        version: projectSkill.version + 1,
+      };
+      const {
+        binding: _binding,
+        capabilities: _capabilities,
+        ...responseItem
+      } = projectSkill;
+      void _binding;
+      void _capabilities;
+      await json(route, {
+        item: responseItem,
+        request_id: "request-skill-suspended",
       });
       return;
     }
@@ -715,6 +794,11 @@ async function mockProjectAssets(
     }
     if (path.endsWith(`/${PROJECT_SKILL_ID}/versions`) && method === "POST") {
       const body = request.postDataJSON() as {
+        files: Array<{
+          path: string;
+          content_base64: string;
+          media_type: string;
+        }>;
         expected_asset_version: number;
       };
       if (
@@ -726,13 +810,44 @@ async function mockProjectAssets(
       ) {
         return;
       }
+      const file = body.files[0];
+      const content = file
+        ? Buffer.from(file.content_base64, "base64").toString("utf8")
+        : "";
+      const frontmatter =
+        /^---\nname: ([^\n]+)\ndescription: ([^\n]+)\n---(?:\n|$)/u.exec(
+          content,
+        );
+      if (
+        body.files.length !== 1 ||
+        file?.path !== "SKILL.md" ||
+        file.media_type !== "text/markdown" ||
+        frontmatter?.[1] !== projectSkill.slug ||
+        frontmatter[2]?.trim() === ""
+      ) {
+        await json(
+          route,
+          {
+            detail: {
+              code: "asset_validation_failed",
+              request_id: "request-skill-create-invalid",
+            },
+          },
+          422,
+        );
+        return;
+      }
       const version: SkillVersion = {
-        id: "30000000-0000-4000-8000-000000000012",
+        id: SKILL_BLANK_VERSION_ID,
         skill_id: PROJECT_SKILL_ID,
-        version_number: 1,
+        version_number:
+          Math.max(0, ...skillVersions.map((item) => item.version_number)) + 1,
         workflow_status: "draft",
-        description: "Review Skill",
-        frontmatter: {},
+        description: frontmatter[2]!,
+        frontmatter: {
+          name: frontmatter[1],
+          description: frontmatter[2]!,
+        },
         compatibility: null,
         secret_requirements: [],
         scan_decision: "allow",
@@ -742,16 +857,17 @@ async function mockProjectAssets(
           {
             path: "SKILL.md",
             media_type: "text/markdown",
-            size_bytes: 12,
+            size_bytes: Buffer.byteLength(content),
             sha256: "skill-file",
           },
         ],
-        supersedes_version_id: null,
+        supersedes_version_id: projectSkill.current_published_version_id,
         payload_checksum: "skill-checksum",
         created_by_user_id: "user-1",
         created_at: now,
       };
-      skillVersions = [version];
+      skillVersions = [version, ...skillVersions];
+      skillFileContents.set(version.id, content);
       projectSkill = { ...projectSkill, version: 2 };
       await json(route, { data: version, request_id: "skill-create" }, 201);
       return;
@@ -1116,6 +1232,7 @@ async function mockProjectAssets(
   });
 
   return {
+    skillDeleteExpectedVersions: () => [...skillDeleteExpectedVersions],
     staleConflicts: () => staleConflicts,
     validatedMutations: () => validatedMutations,
     skillFileRequests: () => [...skillFileRequests],
@@ -1197,6 +1314,97 @@ test("Skill list shows descriptions and keeps quick binding separate from detail
 
   expect(mock.validatedMutations()).toBe(2);
   expect(mock.staleConflicts()).toBe(0);
+});
+
+test("project Skill delete waits five seconds and removes the whole package", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const mock = await mockProjectAssets(page, { skillFileWorkflow: true });
+
+  await page.goto("/projects/research-lab/skills");
+  await page.getByRole("button", { name: "查看 Review Skill 详情" }).click();
+
+  const detail = page.getByRole("dialog", {
+    name: "Review Skill",
+    exact: true,
+  });
+  await expect(detail.getByRole("button", { name: "归档" })).toHaveCount(0);
+  await detail.getByRole("button", { name: "删除 Skill" }).click();
+
+  const confirmation = page.getByRole("dialog", {
+    name: "永久删除 Skill？",
+  });
+  await expect(confirmation).toContainText("永久删除整个 Skill 包");
+  await expect(confirmation).toContainText("所有版本");
+  await expect(confirmation).toContainText("不可恢复");
+  const confirm = confirmation.getByRole("button", {
+    name: /确认(?:永久)?删除/u,
+  });
+  await expect(confirm).toBeDisabled();
+  await expect(confirm).toBeEnabled({ timeout: 6_500 });
+  await confirm.click();
+
+  await expect(confirmation).toHaveCount(0);
+  await expect(detail).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "查看 Review Skill 详情" }),
+  ).toHaveCount(0);
+  expect(mock.validatedMutations()).toBe(1);
+  expect(mock.staleConflicts()).toBe(0);
+});
+
+test("project Skill delete keeps the opening revision when the catalog refreshes during confirmation", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const mock = await mockProjectAssets(page, { skillFileWorkflow: true });
+
+  await page.goto("/projects/research-lab/skills");
+  await page.getByRole("button", { name: "查看 Review Skill 详情" }).click();
+  const detail = page.getByRole("dialog", {
+    name: "Review Skill",
+    exact: true,
+  });
+  const concurrentSuspend = page
+    .locator("button")
+    .filter({ hasText: /^暂停$/u });
+  await expect(concurrentSuspend).toBeVisible();
+  await detail.getByRole("button", { name: "删除 Skill" }).click();
+
+  const confirmation = page.getByRole("dialog", {
+    name: "永久删除 Skill？",
+  });
+  const confirm = confirmation.getByRole("button", {
+    name: /确认(?:永久)?删除/u,
+  });
+  await expect(confirm).toBeDisabled();
+
+  const refreshedCatalog = page.waitForResponse((response) => {
+    const request = response.request();
+    return (
+      request.method() === "GET" &&
+      new URL(request.url()).pathname.endsWith(
+        `/api/projects/${PROJECT_ID}/skills`,
+      )
+    );
+  });
+  await concurrentSuspend.evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
+  await refreshedCatalog;
+
+  await expect(confirm).toBeEnabled({ timeout: 6_500 });
+  await confirm.click();
+
+  await expect(confirmation).toContainText("资产状态已变化，请刷新后重试。");
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "取消" }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect(detail).toBeVisible();
+  expect(mock.skillDeleteExpectedVersions()).toEqual([1]);
+  expect(mock.validatedMutations()).toBe(1);
+  expect(mock.staleConflicts()).toBe(1);
 });
 
 test("Skill file preview and fork preserve immutable source version", async ({
@@ -1282,6 +1490,49 @@ test("Skill file preview and fork preserve immutable source version", async ({
       { path: "SKILL.md", versionId: SKILL_FORK_VERSION_ID },
     ]),
   );
+  expect(mock.validatedMutations()).toBe(1);
+  expect(mock.staleConflicts()).toBe(0);
+});
+
+test("blank Skill creation uses the real contract, selects the new draft, and blocks dirty publish", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const mock = await mockProjectAssets(page, { skillFileWorkflow: true });
+
+  await page.goto("/projects/research-lab/skills");
+  await page.getByRole("button", { name: "查看 Review Skill 详情" }).click();
+  const detail = page.getByRole("dialog", {
+    name: "Review Skill",
+    exact: true,
+  });
+  await expect(detail.getByLabel("查看版本")).toHaveValue(
+    SKILL_SOURCE_VERSION_ID,
+  );
+
+  await detail.getByRole("button", { name: "从空白创建" }).click();
+  const create = page.getByRole("dialog", { name: "创建 Skill 版本" });
+  const content = create.getByLabel("文件内容");
+  await expect(content).toHaveValue(
+    /^---\nname: review-skill\ndescription: .+\n---\n/u,
+  );
+  await expect(create.getByText("SKILL.md", { exact: true })).toBeVisible();
+  await expect(
+    create.getByText("text/markdown", { exact: true }),
+  ).toBeVisible();
+  await expect(create.locator('input[name="path"]')).toHaveCount(0);
+  await expect(create.locator('input[name="media_type"]')).toHaveCount(0);
+  await create.getByRole("button", { name: "创建版本" }).click();
+  await expect(create).toHaveCount(0);
+
+  const selector = detail.getByLabel("查看版本");
+  await expect(selector).toHaveValue(SKILL_BLANK_VERSION_ID);
+  await expect(selector.locator("option:checked")).toHaveText("版本 2 · 草稿");
+
+  await detail.getByRole("button", { name: "编辑为新版本" }).click();
+  const editor = detail.getByLabel("编辑 SKILL.md");
+  await editor.fill(`${await editor.inputValue()}\n\nKeep this edit local.`);
+  await expect(detail.getByRole("button", { name: "发布版本" })).toBeDisabled();
   expect(mock.validatedMutations()).toBe(1);
   expect(mock.staleConflicts()).toBe(0);
 });
@@ -1389,7 +1640,10 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
   const skillVersionDialog = page.getByRole("dialog", {
     name: "创建 Skill 版本",
   });
-  await skillVersionDialog.getByLabel("文件内容").fill("# Review Skill");
+  const skillContent = skillVersionDialog.getByLabel("文件内容");
+  await expect(skillContent).toHaveValue(
+    /^---\nname: review-skill\ndescription: .+\n---\n/u,
+  );
   await skillVersionDialog.getByRole("button", { name: "创建版本" }).click();
   await expect(skillVersionDialog).toHaveCount(0);
   await skillSheet.getByRole("button", { name: "发布版本" }).click();

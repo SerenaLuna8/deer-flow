@@ -37,6 +37,8 @@ const ERROR_MESSAGES: Partial<Record<SharedAssetApiError["code"], string>> = {
   ASSET_FORBIDDEN: "当前账户没有执行此操作的权限。",
   ASSET_CONFLICT: "资产状态已变化，请刷新后重试。",
   ASSET_VALIDATION_FAILED: "提交内容不符合资产要求。",
+  ASSET_STORAGE_QUOTA_EXCEEDED:
+    "项目 Skill 存储配额已用尽，请清理不再需要的 Skill 后重试。",
   ASSET_STORAGE_UNAVAILABLE: "资产存储暂时不可用，请稍后重试。",
   AUTH_REQUIRED: "登录状态已失效，请重新登录。",
   ASSET_NETWORK_ERROR: "暂时无法连接资产服务，请稍后重试。",

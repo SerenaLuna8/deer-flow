@@ -130,6 +130,28 @@ Project asset pages group visible system and project Agent, Skill, MCP, and Cred
 Queries are keyed by account, project, and kind. UI actions use per-item capabilities and
 optimistic revisions; no role-based inference is allowed.
 
+Project Skill blank-version authoring starts from a backend-valid `SKILL.md` whose frontmatter
+name is the immutable asset slug. After creation, the detail sheet selects the returned version
+ID; unsaved file-workbench changes block publish, version switching, and competing version
+creation until the user saves or explicitly discards them. Slash suggestions exclude assets
+without a published version and honor the server-provided execute capability and system binding.
+Shared-asset mutations use the active project scope's abort controller and are removed with
+their project query/mutation roots during scope transition.
+
+New project Skills start disabled. Project-owned Skill rows and detail sheets expose the same
+enable/disable switch: enabling requires `shared_assets.manage_bindings` plus a published version,
+while a disabled Skill remains editable and publishable. The version workbench renders archive
+paths as an expandable folder tree and opens only the selected file. New-file creation requires a
+target folder and may create a nested folder inline; empty folders are local editor state because
+immutable Skill snapshots persist files rather than directory entries.
+
+Project Skill lifecycle has no archive or pause action. A project-owned Skill with
+`shared_assets.edit` exposes permanent package deletion from its detail sheet; the confirmation
+must state that every version and file will be removed, keep the destructive button disabled for
+five seconds, and close the detail plus remove list/version/file caches only after the scoped
+DELETE succeeds. System Skills never expose deletion. Agent and MCP archive behavior remains
+independent.
+
 Global `/admin/assets` Agent, Skill, and MCP pages render the packaged PostgreSQL catalog as
 read-only governance metadata. They must not expose definition create/edit, new-version,
 publish, approval, archive, or suspend controls or client mutations. A published packaged

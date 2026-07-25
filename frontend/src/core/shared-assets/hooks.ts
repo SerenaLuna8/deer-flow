@@ -5,6 +5,11 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import {
+  isPrivateWorkAccessActive,
+  runPrivateWorkAbortable,
+} from "@/core/private-work/types";
 import { projectKeys } from "@/core/projects/query-keys";
 
 import {
@@ -17,6 +22,7 @@ import {
   createAdminProjectAssetVersion,
   createProjectAsset,
   createProjectAssetVersion,
+  deleteProjectSkill,
   disableAdminProjectSystemBinding,
   disableProjectSystemBinding,
   enableAdminProjectSystemBinding,
@@ -41,6 +47,7 @@ import {
   submitProjectMcpVersion,
   upgradeAdminProjectSystemBinding,
   upgradeProjectSystemBinding,
+  type ProjectAssetStatusAction,
 } from "./api";
 import {
   adminAssetKey,
@@ -49,6 +56,7 @@ import {
   adminProjectAssetKey,
   adminProjectAssetVersionsKey,
   projectAssetKey,
+  projectAssetMutationKey,
   projectAssetVersionsKey,
   projectSkillVersionFileKey,
   systemCatalogKey,
@@ -144,6 +152,48 @@ function useProjectAssetListInvalidation(
   const queryClient = useQueryClient();
   return () =>
     invalidateProjectAssetQueries(queryClient, accountId, projectId, kind);
+}
+
+function useProjectMutationRunner(accountId: string, projectId: string) {
+  const access = usePrivateWorkAccess();
+  if (
+    access.scope.accountId !== accountId ||
+    access.scope.projectId !== projectId
+  ) {
+    throw new Error("Shared asset mutation scope does not match the project");
+  }
+
+  function inactiveScopeError() {
+    const error = new Error("Shared asset mutation scope is inactive");
+    error.name = "AbortError";
+    return error;
+  }
+
+  async function runMutation<T>(
+    operation: (signal?: AbortSignal) => Promise<T>,
+  ) {
+    try {
+      const result = await runPrivateWorkAbortable(access, operation);
+      if (!isPrivateWorkAccessActive(access)) throw inactiveScopeError();
+      return result;
+    } catch (error) {
+      if (!isPrivateWorkAccessActive(access)) throw inactiveScopeError();
+      throw error;
+    }
+  }
+
+  function whenActive<Arguments extends unknown[], T>(
+    operation: (...args: Arguments) => T | Promise<T>,
+  ) {
+    return async (...args: Arguments): Promise<T> => {
+      if (!isPrivateWorkAccessActive(access)) throw inactiveScopeError();
+      const result = await operation(...args);
+      if (!isPrivateWorkAccessActive(access)) throw inactiveScopeError();
+      return result;
+    };
+  }
+
+  return { runMutation, whenActive };
 }
 
 function useAdminInvalidation(accountId: string, kind: AssetListKind) {
@@ -292,10 +342,17 @@ export function useCreateProjectAsset(
   kind: MutableAssetKind,
 ) {
   const invalidate = useProjectInvalidation(accountId, projectId, kind);
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(accountId, projectId, kind, "create"),
     mutationFn: (input: CreateAssetInput) =>
-      createProjectAsset(projectId, kind, input),
-    onSuccess: invalidate,
+      runMutation((signal) =>
+        createProjectAsset(projectId, kind, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 
@@ -335,15 +392,16 @@ function createProjectVersionForKind(
   kind: MutableAssetKind,
   assetId: string,
   input: VersionAuthoringInput,
+  signal?: AbortSignal,
 ) {
   if (kind === "agents" && isAgentVersionInput(input)) {
-    return createProjectAssetVersion(projectId, kind, assetId, input);
+    return createProjectAssetVersion(projectId, kind, assetId, input, signal);
   }
   if (kind === "skills" && isSkillVersionInput(input)) {
-    return createProjectAssetVersion(projectId, kind, assetId, input);
+    return createProjectAssetVersion(projectId, kind, assetId, input, signal);
   }
   if (kind === "mcp-servers" && isMcpVersionInput(input)) {
-    return createProjectAssetVersion(projectId, kind, assetId, input);
+    return createProjectAssetVersion(projectId, kind, assetId, input, signal);
   }
   throw new TypeError(`Version input does not match ${kind}`);
 }
@@ -372,15 +430,28 @@ export function useCreateProjectAssetVersion(
   kind: MutableAssetKind,
 ) {
   const invalidate = useProjectInvalidation(accountId, projectId, kind);
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      kind,
+      "create-version",
+    ),
     mutationFn: ({
       assetId,
       input,
     }: {
       assetId: string;
       input: VersionAuthoringInput;
-    }) => createProjectVersionForKind(projectId, kind, assetId, input),
-    onSuccess: invalidate,
+    }) =>
+      runMutation((signal) =>
+        createProjectVersionForKind(projectId, kind, assetId, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 
@@ -407,7 +478,17 @@ export function useForkProjectSkillVersion(
   projectId: string,
 ) {
   const invalidate = useProjectInvalidation(accountId, projectId, "skills");
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "skills",
+      "fork-version",
+    ),
     mutationFn: ({
       assetId,
       sourceVersionId,
@@ -416,35 +497,126 @@ export function useForkProjectSkillVersion(
       assetId: string;
       sourceVersionId: string;
       input: SkillFileForkInput;
-    }) => forkProjectSkillVersion(projectId, assetId, sourceVersionId, input),
-    onSuccess: invalidate,
+    }) =>
+      runMutation((signal) =>
+        forkProjectSkillVersion(
+          projectId,
+          assetId,
+          sourceVersionId,
+          input,
+          signal,
+        ),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 
-export function useChangeProjectAssetStatus(
+export function useChangeProjectAssetStatus<Kind extends MutableAssetKind>(
   accountId: string,
   projectId: string,
-  kind: MutableAssetKind,
+  kind: Kind,
 ) {
-  const invalidate = useProjectInvalidation(accountId, projectId, kind);
+  const invalidate = useProjectAssetListInvalidation(
+    accountId,
+    projectId,
+    kind,
+  );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      kind,
+      "change-status",
+    ),
     mutationFn: ({
       assetId,
       action,
       input,
     }: {
       assetId: string;
-      action: "archive" | "suspend";
+      action: ProjectAssetStatusAction<Kind>;
       input: ExpectedAssetVersionInput;
-    }) => changeProjectAssetStatus(projectId, kind, assetId, action, input),
-    onSuccess: invalidate,
+    }) =>
+      runMutation((signal) =>
+        changeProjectAssetStatus(
+          projectId,
+          kind,
+          assetId,
+          action,
+          input,
+          signal,
+        ),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 
-export function useChangeAdminProjectAssetStatus(
+export function useDeleteProjectSkill(accountId: string, projectId: string) {
+  const queryClient = useQueryClient();
+  const invalidate = useProjectInvalidation(accountId, projectId, "skills");
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "skills",
+      "delete",
+    ),
+    mutationFn: ({
+      assetId,
+      input,
+    }: {
+      assetId: string;
+      input: ExpectedAssetVersionInput;
+    }) =>
+      runMutation((signal) =>
+        deleteProjectSkill(projectId, assetId, input, signal),
+      ),
+    onSuccess: whenActive(
+      (
+        _data: void,
+        variables: {
+          assetId: string;
+          input: ExpectedAssetVersionInput;
+        },
+      ) => {
+        queryClient.setQueryData<ProjectAssetList>(
+          projectAssetKey(accountId, projectId, "skills"),
+          (current) =>
+            current
+              ? {
+                  ...current,
+                  project_items: current.project_items.filter(
+                    (item) => item.id !== variables.assetId,
+                  ),
+                }
+              : current,
+        );
+        queryClient.removeQueries({
+          queryKey: projectAssetVersionsKey(
+            accountId,
+            projectId,
+            "skills",
+            variables.assetId,
+          ),
+        });
+        void invalidate();
+      },
+    ),
+  });
+}
+
+export function useChangeAdminProjectAssetStatus<Kind extends MutableAssetKind>(
   accountId: string,
   projectId: string,
-  kind: MutableAssetKind,
+  kind: Kind,
 ) {
   const invalidate = useAdminProjectInvalidation(accountId, projectId, kind);
   return useMutation({
@@ -454,7 +626,7 @@ export function useChangeAdminProjectAssetStatus(
       input,
     }: {
       assetId: string;
-      action: "archive" | "suspend";
+      action: ProjectAssetStatusAction<Kind>;
       input: ExpectedAssetVersionInput;
     }) =>
       changeAdminProjectAssetStatus(projectId, kind, assetId, action, input),
@@ -468,7 +640,17 @@ export function usePublishProjectAssetVersion(
   kind: MutableAssetKind,
 ) {
   const invalidate = useProjectInvalidation(accountId, projectId, kind);
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      kind,
+      "publish-version",
+    ),
     mutationFn: ({
       assetId,
       versionId,
@@ -478,8 +660,17 @@ export function usePublishProjectAssetVersion(
       versionId: string;
       input: ExpectedAssetVersionInput;
     }) =>
-      publishProjectAssetVersion(projectId, kind, assetId, versionId, input),
-    onSuccess: invalidate,
+      runMutation((signal) =>
+        publishProjectAssetVersion(
+          projectId,
+          kind,
+          assetId,
+          versionId,
+          input,
+          signal,
+        ),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 
@@ -519,15 +710,28 @@ export function useRevokeProjectCredential(
     projectId,
     "credentials",
   );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "credentials",
+      "revoke",
+    ),
     mutationFn: ({
       credentialId,
       input,
     }: {
       credentialId: string;
       input: RevokeCredentialInput;
-    }) => revokeProjectCredential(projectId, credentialId, input),
-    onSuccess: invalidate,
+    }) =>
+      runMutation((signal) =>
+        revokeProjectCredential(projectId, credentialId, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 
@@ -554,7 +758,17 @@ export function useSubmitProjectMcpVersion(
     projectId,
     "mcp-servers",
   );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "mcp-servers",
+      "submit-version",
+    ),
     mutationFn: ({
       assetId,
       versionId,
@@ -563,8 +777,11 @@ export function useSubmitProjectMcpVersion(
       assetId: string;
       versionId: string;
       input: ExpectedAssetVersionInput;
-    }) => submitProjectMcpVersion(projectId, assetId, versionId, input),
-    onSuccess: invalidate,
+    }) =>
+      runMutation((signal) =>
+        submitProjectMcpVersion(projectId, assetId, versionId, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 
@@ -600,7 +817,17 @@ export function useApproveProjectMcpVersion(
     projectId,
     "mcp-servers",
   );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "mcp-servers",
+      "approve-version",
+    ),
     mutationFn: ({
       assetId,
       versionId,
@@ -609,8 +836,11 @@ export function useApproveProjectMcpVersion(
       assetId: string;
       versionId: string;
       input: ApproveMcpInput;
-    }) => approveProjectMcpVersion(projectId, assetId, versionId, input),
-    onSuccess: invalidate,
+    }) =>
+      runMutation((signal) =>
+        approveProjectMcpVersion(projectId, assetId, versionId, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 
@@ -663,10 +893,22 @@ export function useEnableProjectSystemBinding(
     projectId,
     BINDING_LIST_KIND[kind],
   );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      BINDING_LIST_KIND[kind],
+      "enable-binding",
+    ),
     mutationFn: (input: EnableSystemBindingInput) =>
-      enableProjectSystemBinding(projectId, kind, input),
-    onSuccess: invalidate,
+      runMutation((signal) =>
+        enableProjectSystemBinding(projectId, kind, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 
@@ -681,7 +923,17 @@ function useMoveProjectSystemBinding(
     projectId,
     BINDING_LIST_KIND[kind],
   );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      BINDING_LIST_KIND[kind],
+      `${action}-binding`,
+    ),
     mutationFn: ({
       assetId,
       input,
@@ -689,10 +941,18 @@ function useMoveProjectSystemBinding(
       assetId: string;
       input: MoveSystemBindingInput;
     }) =>
-      action === "upgrade"
-        ? upgradeProjectSystemBinding(projectId, kind, assetId, input)
-        : rollbackProjectSystemBinding(projectId, kind, assetId, input),
-    onSuccess: invalidate,
+      runMutation((signal) =>
+        action === "upgrade"
+          ? upgradeProjectSystemBinding(projectId, kind, assetId, input, signal)
+          : rollbackProjectSystemBinding(
+              projectId,
+              kind,
+              assetId,
+              input,
+              signal,
+            ),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 
@@ -722,15 +982,28 @@ export function useDisableProjectSystemBinding(
     projectId,
     BINDING_LIST_KIND[kind],
   );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      BINDING_LIST_KIND[kind],
+      "disable-binding",
+    ),
     mutationFn: ({
       assetId,
       input,
     }: {
       assetId: string;
       input: DisableSystemBindingInput;
-    }) => disableProjectSystemBinding(projectId, kind, assetId, input),
-    onSuccess: invalidate,
+    }) =>
+      runMutation((signal) =>
+        disableProjectSystemBinding(projectId, kind, assetId, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
   });
 }
 

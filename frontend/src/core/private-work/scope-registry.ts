@@ -2,6 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 
 import { automationRoot } from "@/core/project-automations/query-keys";
 import { governanceRoot } from "@/core/project-governance/query-keys";
+import { projectSharedAssetRoot } from "@/core/shared-assets/query-keys";
 
 import {
   clearProjectReconnectStorage,
@@ -123,6 +124,7 @@ export async function transitionPrivateWorkScope(
     privateWorkRoot(previous),
     automationRoot(previous),
     governanceRoot(previous),
+    projectSharedAssetRoot(previous),
   ];
   const cancellations = roots.map((queryKey) =>
     queryClient.cancelQueries({ queryKey }),

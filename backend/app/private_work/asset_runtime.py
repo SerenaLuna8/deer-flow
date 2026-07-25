@@ -13,7 +13,6 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -42,13 +41,13 @@ from app.shared_assets.errors import (
 )
 from app.shared_assets.models import (
     AssetKind,
+    AssetScope,
     AssetSelection,
     ResolvedAgentSnapshot,
     ResolvedMcpSnapshot,
     ResolvedSkillSnapshot,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
-from deerflow.persistence.shared_assets.binding_model import AssetCatalogStateRow
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import Skill, SkillCategory
@@ -56,6 +55,7 @@ from deerflow.skills.types import Skill, SkillCategory
 logger = logging.getLogger(__name__)
 
 _PRIVATE_SKILL_CLEANUP_ATTEMPTS = 3
+_RUNTIME_SKILL_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
 
 class PrivateRuntimeCleanupError(RuntimeError):
@@ -149,23 +149,37 @@ def _write_skill_tree(
 ) -> tuple[tuple[PrivateSkillManifest, ...], tuple[Skill, ...]]:
     manifests: list[PrivateSkillManifest] = []
     skills: list[Skill] = []
+    runtime_names: set[str] = set()
+    staging_root = root / ".staging"
+    staging_root.mkdir(mode=0o700, parents=False, exist_ok=False)
     for snapshot in skill_snapshots:
-        relative_root = snapshot.asset_id.hex
-        skill_root = root / SkillCategory.CUSTOM.value / relative_root
-        skill_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+        staged_skill_root = staging_root / snapshot.asset_id.hex
+        staged_skill_root.mkdir(mode=0o700, parents=False, exist_ok=False)
         for archive_file in snapshot.files:
             relative = Path(archive_file.path)
             if relative.is_absolute() or ".." in relative.parts:
                 raise RunSnapshotAssetStale
-            destination = (skill_root / relative).resolve()
-            if skill_root.resolve() not in destination.parents:
+            destination = (staged_skill_root / relative).resolve()
+            if staged_skill_root.resolve() not in destination.parents:
                 raise RunSnapshotAssetStale
             destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             destination.write_bytes(archive_file.content)
             destination.chmod(0o600)
-        parsed = parse_skill_file(skill_root / "SKILL.md", SkillCategory.CUSTOM, Path(relative_root))
-        if parsed is None:
+        parsed = parse_skill_file(
+            staged_skill_root / "SKILL.md",
+            SkillCategory.CUSTOM,
+            Path(snapshot.asset_id.hex),
+        )
+        if parsed is None or _RUNTIME_SKILL_NAME.fullmatch(parsed.name) is None or parsed.name in runtime_names:
             raise RunSnapshotAssetStale
+        runtime_names.add(parsed.name)
+        category = SkillCategory.PUBLIC if snapshot.scope is AssetScope.SYSTEM else SkillCategory.CUSTOM
+        relative_root = parsed.name if category is SkillCategory.PUBLIC else snapshot.asset_id.hex
+        skill_root = root / category.value / relative_root
+        skill_root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if skill_root.exists():
+            raise RunSnapshotAssetStale
+        staged_skill_root.rename(skill_root)
         manifests.append(
             PrivateSkillManifest(
                 asset_id=snapshot.asset_id,
@@ -173,7 +187,18 @@ def _write_skill_tree(
                 relative_root=relative_root,
             )
         )
-        skills.append(replace(parsed, enabled=True, runtime_read_only=True))
+        skills.append(
+            replace(
+                parsed,
+                skill_dir=skill_root,
+                skill_file=skill_root / "SKILL.md",
+                relative_path=Path(relative_root),
+                category=category,
+                enabled=True,
+                runtime_read_only=True,
+            )
+        )
+    staging_root.rmdir()
     return tuple(manifests), tuple(skills)
 
 
@@ -605,7 +630,7 @@ class PrivateAgentRuntime:
                 if len(matching_assets) != 1:
                     raise RunSnapshotAssetStale
                 asset = matching_assets[0]
-                if asset.asset_id != snapshot.asset_id or asset.asset_scope != snapshot.scope.value or asset.payload_checksum != snapshot.checksum or asset.catalog_generation != snapshot.catalog_generation:
+                if asset.asset_id != snapshot.asset_id or asset.asset_scope != snapshot.scope.value or asset.payload_checksum != snapshot.checksum:
                     raise RunSnapshotAssetStale
                 persisted = tuple(
                     sorted(
@@ -640,9 +665,6 @@ class PrivateAgentRuntime:
                         for grant in persisted
                     ),
                 )
-                generation = await session.scalar(select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1).with_for_update())
-                if generation != snapshot.catalog_generation:
-                    raise RunSnapshotAssetStale
                 return materialized
         except (
             RunSnapshotAssetStale,
@@ -757,16 +779,14 @@ class PrivateAssetRuntime:
                         current,
                         AssetSelection(kind, asset.asset_id, asset.version_id),
                     )
-                    if (
-                        snapshot.kind is not kind
-                        or snapshot.scope.value != asset.asset_scope
-                        or snapshot.asset_id != asset.asset_id
-                        or snapshot.version_id != asset.version_id
-                        or snapshot.checksum != asset.payload_checksum
-                        or snapshot.catalog_generation != persisted_generation
-                    ):
+                    if snapshot.kind is not kind or snapshot.scope.value != asset.asset_scope or snapshot.asset_id != asset.asset_id or snapshot.version_id != asset.version_id or snapshot.checksum != asset.payload_checksum:
                         raise RunSnapshotAssetStale
-                    resolved.append(snapshot)
+                    resolved.append(
+                        replace(
+                            snapshot,
+                            catalog_generation=persisted_generation,
+                        )
+                    )
 
                 agent = resolved[0]
                 if type(agent) is not ResolvedAgentSnapshot:
@@ -795,9 +815,6 @@ class PrivateAssetRuntime:
                     )
                 )
                 if current_grants != persisted_grants:
-                    raise RunSnapshotAssetStale
-                generation = await session.scalar(select(AssetCatalogStateRow.generation).where(AssetCatalogStateRow.id == 1).with_for_update())
-                if generation != persisted_generation:
                     raise RunSnapshotAssetStale
         except (RunSnapshotAssetStale, AssetResolutionUnavailable, AssetValidationFailed, AssetForbidden):
             raise PrivateWorkAssetStale(context.request_id) from None

@@ -30,6 +30,7 @@ from app.shared_assets.mcp_service import (
     McpVersionView,
 )
 from app.shared_assets.models import AgentPayload, AssetKind, AssetScope, WorkflowStatus
+from app.shared_assets.skill_service import SkillAssetView, SkillService
 
 PROJECT_ID = uuid.uuid4()
 ADMIN_ID = uuid.uuid4()
@@ -66,6 +67,7 @@ def _client(
     binding_service=None,
     credential_service=None,
     mcp_service=None,
+    skill_service=None,
 ) -> TestClient:
     app = FastAPI()
     app.include_router(admin_assets.admin_router)
@@ -79,6 +81,8 @@ def _client(
         app.dependency_overrides[admin_assets.get_credential_service] = lambda: credential_service
     if mcp_service is not None:
         app.dependency_overrides[admin_assets.get_mcp_service] = lambda: mcp_service
+    if skill_service is not None:
+        app.dependency_overrides[admin_assets.get_skill_service] = lambda: skill_service
     return TestClient(app)
 
 
@@ -113,6 +117,15 @@ def test_system_asset_admin_routes_are_read_only_while_credentials_remain_mutabl
     assert "POST" in methods_by_path["/api/admin/assets/credentials"]
     assert "POST" in methods_by_path["/api/admin/assets/credentials/{credential_id}/replace"]
     assert "POST" in methods_by_path["/api/admin/assets/credentials/{credential_id}/revoke"]
+
+
+def test_admin_project_skill_routes_do_not_expose_delete_or_archive() -> None:
+    methods_by_path = {route.path: set(route.methods or ()) for route in admin_assets.admin_project_router.routes}
+    detail = "/api/admin/projects/{project_id}/assets/skills/{asset_id}"
+
+    assert methods_by_path[detail] == {"GET"}
+    assert f"{detail}/archive" not in methods_by_path
+    assert methods_by_path[f"{detail}/suspend"] == {"POST"}
 
 
 def test_system_mcp_grant_route_only_configures_published_packaged_version() -> None:
@@ -303,6 +316,74 @@ def test_system_admin_override_list_combines_catalog_project_assets_and_binding_
     assert override_actor.project_id == PROJECT_ID
     assert not hasattr(override_actor, "membership_id")
     binding_service.list_visible.assert_awaited_once_with(override_actor, AssetKind.AGENT)
+
+
+def test_system_admin_override_skill_list_uses_description_aware_strict_response() -> None:
+    system_asset = SkillAssetView(
+        id=uuid.uuid4(),
+        scope=AssetScope.SYSTEM,
+        project_id=None,
+        slug="system-skill",
+        display_name="System Skill",
+        status="active",
+        current_published_version_id=uuid.uuid4(),
+        version=1,
+        created_by_user_id=str(ADMIN_ID),
+        created_at=NOW,
+        updated_at=NOW,
+        description="Packaged system Skill.",
+    )
+    project_asset = SkillAssetView(
+        id=uuid.uuid4(),
+        scope=AssetScope.PROJECT,
+        project_id=PROJECT_ID,
+        slug="project-skill",
+        display_name="Project Skill",
+        status="active",
+        current_published_version_id=None,
+        version=2,
+        created_by_user_id=str(ADMIN_ID),
+        created_at=NOW,
+        updated_at=NOW,
+        description="Project-owned Skill.",
+    )
+    service = AsyncMock(spec=SkillService)
+
+    async def list_visible(actor):
+        if isinstance(actor, SystemAssetReadContext):
+            return (system_asset,)
+        return (project_asset,)
+
+    service.list_visible.side_effect = list_visible
+    binding_service = AsyncMock(spec=BindingService)
+    binding_service.list_visible.return_value = ()
+
+    response = _client(
+        "system_admin",
+        skill_service=service,
+        binding_service=binding_service,
+    ).get(f"/api/admin/projects/{PROJECT_ID}/assets/skills")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["system_items"][0]["description"] == system_asset.description
+    assert body["project_items"][0]["description"] == project_asset.description
+    assert set(body["system_items"][0]) == {
+        "id",
+        "scope",
+        "project_id",
+        "slug",
+        "display_name",
+        "status",
+        "current_published_version_id",
+        "version",
+        "created_by_user_id",
+        "created_at",
+        "updated_at",
+        "capabilities",
+        "binding",
+        "description",
+    }
 
 
 def test_successful_platform_override_emits_governance_event() -> None:

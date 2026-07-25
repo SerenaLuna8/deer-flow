@@ -28,6 +28,7 @@ from app.shared_assets import (
     AssetNotFound,
     AssetScope,
     AssetSelection,
+    AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
     AssetValidationFailed,
     BindingService,
@@ -46,6 +47,10 @@ from app.shared_assets import (
     WorkflowStatus,
 )
 from app.shared_assets.contexts import SystemAssetReadContext, resolve_asset_reader
+from app.shared_assets.skill_service import (
+    MAX_SKILL_ARCHIVE_BYTES,
+    MAX_SKILL_ARCHIVE_FILES,
+)
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
@@ -216,14 +221,21 @@ class AgentVersionRequest(_StrictModel):
     expected_asset_version: int = Field(ge=1)
 
 
+MAX_SKILL_BASE64_FILE_CHARS = 4 * ((MAX_SKILL_ARCHIVE_BYTES + 2) // 3)
+MAX_SKILL_ARCHIVE_BASE64_CHARS = MAX_SKILL_BASE64_FILE_CHARS + 4 * MAX_SKILL_ARCHIVE_FILES
+
+
 class SkillFileRequest(_StrictModel):
-    path: str
-    content_base64: str
-    media_type: str = "application/octet-stream"
+    path: str = Field(min_length=1, max_length=1024)
+    content_base64: str = Field(max_length=MAX_SKILL_BASE64_FILE_CHARS)
+    media_type: str = Field(default="application/octet-stream", min_length=1, max_length=255)
 
 
 class SkillVersionRequest(_StrictModel):
-    files: list[SkillFileRequest]
+    files: list[SkillFileRequest] = Field(
+        min_length=1,
+        max_length=MAX_SKILL_ARCHIVE_FILES,
+    )
     expected_asset_version: int = Field(ge=1)
 
 
@@ -499,6 +511,7 @@ ASSET_ERRORS = (
     AssetConflict,
     AssetValidationFailed,
     AssetStorageUnavailable,
+    AssetStorageQuotaExceeded,
 )
 
 
@@ -508,6 +521,7 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
         AssetForbidden: 403,
         AssetConflict: 409,
         AssetValidationFailed: 422,
+        AssetStorageQuotaExceeded: 429,
         AssetStorageUnavailable: 503,
     }
     status_code = known.get(type(exc))
@@ -520,6 +534,7 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
             "message": exc.public_message,
             "request_id": request_id or exc.request_id,
         },
+        headers={"Retry-After": "1"} if type(exc) is AssetStorageQuotaExceeded else None,
     ) from None
 
 
@@ -594,7 +609,12 @@ def get_agent_service(request: Request) -> AgentService:
 
 
 def get_skill_service(request: Request) -> SkillService:
-    return SkillService(_factory(), governance_sink=_governance_sink(request))
+    quota = getattr(request.app.state, "project_quota_enforcer", None)
+    return SkillService(
+        _factory(),
+        governance_sink=_governance_sink(request),
+        quota=quota,
+    )
 
 
 def get_mcp_service(request: Request) -> McpService:
@@ -765,14 +785,25 @@ def _response_data(value: object) -> object:
 
 def _decode_skill_files(body: SkillVersionRequest, request_id: str) -> tuple[SkillArchiveFile, ...]:
     try:
-        return tuple(
-            SkillArchiveFile(
-                path=item.path,
-                content=base64.b64decode(item.content_base64, validate=True),
-                media_type=item.media_type,
+        if sum(len(item.content_base64) for item in body.files) > MAX_SKILL_ARCHIVE_BASE64_CHARS:
+            raise AssetValidationFailed(request_id)
+        files: list[SkillArchiveFile] = []
+        total_decoded_bytes = 0
+        for item in body.files:
+            content = base64.b64decode(item.content_base64, validate=True)
+            total_decoded_bytes += len(content)
+            if total_decoded_bytes > MAX_SKILL_ARCHIVE_BYTES:
+                raise AssetValidationFailed(request_id)
+            files.append(
+                SkillArchiveFile(
+                    path=item.path,
+                    content=content,
+                    media_type=item.media_type,
+                )
             )
-            for item in body.files
-        )
+        return tuple(files)
+    except AssetValidationFailed as exc:
+        raise_asset_domain(exc)
     except (binascii.Error, ValueError):
         raise_asset_domain(AssetValidationFailed(request_id))
 
@@ -807,6 +838,7 @@ def register_asset_routes(
     actor_dependency,
     *,
     include_shared_asset_mutations: bool = True,
+    include_project_skill_delete: bool = False,
 ) -> None:
     async def create_agent(body: CreateAssetRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         return await _asset_call(actor, lambda: service.create_asset(actor, CreateAgent(body.slug, body.display_name)))
@@ -847,6 +879,17 @@ def register_asset_routes(
     async def publish_skill(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         return await _version_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), SkillVersionResponse)
 
+    async def delete_skill(asset_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
+        try:
+            await service.delete(
+                actor,
+                asset_id,
+                expected_asset_version=body.expected_asset_version,
+            )
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     async def create_mcp(body: CreateAssetRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _asset_call(actor, lambda: service.create_asset(actor, CreateMcpServer(body.slug, body.display_name)))
 
@@ -868,13 +911,21 @@ def register_asset_routes(
     async def approve_mcp(asset_id: uuid.UUID, version_id: uuid.UUID, body: McpApproveRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _version_call(actor, lambda: service.approve(actor, asset_id, version_id, body.credential_versions, expected_asset_version=body.expected_asset_version), McpVersionResponse)
 
-    def add_status_routes(segment: str, service_dependency):
-        async def change(asset_id: uuid.UUID, action: str, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(service_dependency)):
-            if action not in {"archive", "suspend"}:
-                raise_asset_domain(AssetNotFound(actor.request_id))
+    def add_status_route(
+        segment: str,
+        action: Literal["activate", "archive", "suspend"],
+        service_dependency,
+    ) -> None:
+        async def change(asset_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(service_dependency)):
             return await _asset_call(actor, lambda: getattr(service, action)(actor, asset_id, expected_asset_version=body.expected_asset_version))
 
-        router.add_api_route(f"/{segment}/{{asset_id}}/{{action}}", change, methods=["POST"], response_model=AssetMutationResponse, name=f"change_{segment}_status")
+        router.add_api_route(
+            f"/{segment}/{{asset_id}}/{action}",
+            change,
+            methods=["POST"],
+            response_model=AssetMutationResponse,
+            name=f"{action}_{segment}",
+        )
 
     async def create_credential(body: CredentialCreateRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
         try:
@@ -948,9 +999,24 @@ def register_asset_routes(
         routes = (*routes, *shared_asset_write_routes)
     for path, endpoint, methods, response_model, code in routes:
         router.add_api_route(path, endpoint, methods=methods, response_model=response_model, status_code=code)
+    if include_project_skill_delete:
+        router.add_api_route(
+            "/skills/{asset_id}",
+            delete_skill,
+            methods=["DELETE"],
+            response_model=None,
+            status_code=status.HTTP_204_NO_CONTENT,
+            name="delete_project_skill",
+        )
     if include_shared_asset_mutations:
-        for segment, dependency in (("agents", get_agent_service), ("skills", get_skill_service), ("mcp-servers", get_mcp_service)):
-            add_status_routes(segment, dependency)
+        for segment, dependency in (
+            ("agents", get_agent_service),
+            ("mcp-servers", get_mcp_service),
+        ):
+            add_status_route(segment, "archive", dependency)
+            add_status_route(segment, "suspend", dependency)
+        add_status_route("skills", "activate", get_skill_service)
+        add_status_route("skills", "suspend", get_skill_service)
 
 
 @project_router.get(
@@ -1155,4 +1221,8 @@ for _segment, _kind in _BINDING_KINDS.items():
     _register_binding_routes(_segment, _kind)
 
 
-register_asset_routes(project_router, project_asset_context)
+register_asset_routes(
+    project_router,
+    project_asset_context,
+    include_project_skill_delete=True,
+)

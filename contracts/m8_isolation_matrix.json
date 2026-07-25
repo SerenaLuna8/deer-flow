@@ -128,8 +128,8 @@
     ]
   },
   "surface_manifest": {
-    "count": 530,
-    "sha256": "379d59cd8b358a1b99e740a7f4519effffe5e4a99f62442b2f51563466c5ac7d"
+    "count": 533,
+    "sha256": "5d255c4138f274b52b8388017d570a45b4b51d965e34dd53ac7af17c2f0c2945"
   },
   "cases": [
     {
@@ -3376,6 +3376,32 @@
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
         "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
+      ]
+    },
+    {
+      "case_id": "surface.skill.delete",
+      "actor": "editor",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_editor",
+      "platform_role": "user",
+      "resource_family": "skill",
+      "scope": "project_shared",
+      "ownership": "not_applicable",
+      "operation": "delete",
+      "expected_status": 204,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
+        "frontend",
+        "api",
+        "service",
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_m3_skill_assets_postgres.py::test_project_skill_delete_removes_every_version_and_suspended_snapshot_fails_closed",
+        "playwright::tests/e2e/project-assets.spec.ts::project Skill delete waits five seconds and removes the whole package"
       ]
     },
     {

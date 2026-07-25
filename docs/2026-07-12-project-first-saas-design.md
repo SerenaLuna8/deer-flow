@@ -243,7 +243,7 @@ authenticated user
 仓库提供：
 
 - `make setup-db`：检查 PostgreSQL、创建空的 `deerflow` 目标库、安装当前 Alembic head、初始化基础数据；
-- `make migrate-db`：保留给未来新增 revision，对处于已知祖先 revision 的存量库只执行 pending Alembic migrations 到 head；
+- `make migrate-db`：对处于精确已知祖先 revision 的存量库只执行 pending Alembic migrations 到 head，不执行 catalog、LangGraph 或默认项目 bootstrap；
 - `make check-db`：只读检查连接、current/head revision、扩展、必需对象和 migration 状态。
 
 脚本必须幂等、脱敏错误，并且不提供删除数据库或清空数据功能。Gateway、Worker 和 Scheduler 启动不得执行 DDL、Alembic upgrade、stamp 或 schema repair。
@@ -310,7 +310,9 @@ authenticated user
 - Agent、Skill、MCP 同时支持 `system` 和 `project` scope；同名资产不覆盖，所有引用使用 UUID 和 scope。
 - 系统 Agent、Skill、MCP 由 packaged bootstrap catalog 管理，运行期只向 `system_admin` 提供 catalog 治理元数据；`skills/public/` 中的 21 个完整多文件 Skill 在开发期生成 digest 校验的 system Skill archives，并只在全新数据库 setup 时写入 catalog。项目绑定仍显式固定 system version，catalog 更新不自动升级既有绑定。项目 Agent 页面隐藏系统 Agent，新会话直接使用已绑定的系统 Main Agent。
 - 项目资产由当前项目 Admin、Editor 按 capability 创建和发布；使用 credential 的项目 MCP 必须由项目 Admin 审批。
+- 项目 Skill 的 manifest name 必须等于资产 slug；每个 archive 及一次批量导入合计最多 100 MiB、4096 个文件。Gateway 与统一 Nginx 入口仅对 archive 创建路由开放 160 MiB JSON/base64 wire body，并在 JSON 解析前拒绝越界请求。所有不可变项目 Skill 版本文件均计入项目 `storage_bytes`，Gateway 与显式导入 CLI 共用部署配额配置。项目 Skill 不提供归档；详情页经过二次确认和 5 秒等待后永久删除整个包及全部版本，并在同一事务释放逐版本配额。系统 Skill 或仍被 Agent/Run snapshot 引用的项目 Skill 拒绝删除。
 - Agent、Skill 和 MCP 每次执行记录准确版本 ID。
+- Run 只按准入 snapshot 中的精确资产版本、checksum、绑定和授权闭包重新校验；全局 catalog generation 只作诊断元数据，其他项目的资产写入不会使已准入 Run 失效。
 - 新项目不复制或自动启用系统资产；项目 Admin 通过显式绑定启用系统资产并固定具体 version。
 - MCP 凭据授权绑定到不可变 MCP 版本，而不是逻辑服务器 ID。
 - Editor 可以起草 MCP 变更；携带凭据的版本必须由 Admin 审批。
@@ -384,17 +386,18 @@ V1 初始默认值：
 
 ## 16. 向前迁移策略
 
-项目当前尚未上线，因此现有全部 schema（包括登录会话、系统通知和成员激活代次）统一合并到唯一的
-`0001_project_saas_baseline`。完成本次重新初始化后，这份合并基线即冻结；任何未来 schema 变化都必须
-从 `0002` 开始新增线性 Alembic revision，已经可能进入已发布数据库的 migration 不得修改、压缩或重新
-stamp。
+`0001_project_saas_baseline` 是冻结且不可改写的合并基线；
+`0002_project_skill_hard_delete` 是当前线性 head。后续 schema 变化继续新增线性 Alembic revision，
+已经可能进入数据库的 migration 不得修改、压缩或重新 stamp。
 
 新安装顺序是：创建空数据库 → `make setup-db` → `make check-db` → `make start`。Setup 从空库执行
-当前单一 `0001` head，然后初始化 packaged system asset catalog、LangGraph schema 和 default project。
+完整的 `0001 → 0002` chain，然后初始化 packaged system asset catalog、LangGraph schema 和 default
+project。
 
 存量库顺序是：停止应用进程 → `make migrate-db` → `make check-db` → `make start`。只有当前 revision
 是 migration graph 中已知的 head 祖先且其 catalog 满足对应 revision 合同时，`migrate-db` 才执行
-pending migrations。运行时启动和 `check-db` 始终只读：已知旧 revision 报告 migration required；
+pending migrations，且不执行 setup bootstrap side effects。运行时启动和 `check-db` 始终只读：
+已知旧 revision 报告 migration required；
 未知 revision、未纳管非空 schema 或 catalog drift 拒绝自动处理。系统不执行隐式 upgrade、manual
 stamp、自动 repair、清空、删除或 downgrade。
 
@@ -429,7 +432,7 @@ stamp、自动 repair、清空、删除或 downgrade。
 - SSE 断线或进程重启后的游标续传；
 - 凭据加密、轮换和脱敏；
 - 项目删除、撤销删除、成员退出、重新加入和数据清除；
-- 空库安装合并后的 `0001` head 幂等、未来已知旧 revision 升级后数据保留，以及未知结构 fail-before-DDL；
+- 空库安装完整 `0001 → 0002` chain 幂等、精确 `0001` 祖先升级后数据保留，以及未知结构 fail-before-DDL；
 - 前端账户、项目切换和退出登录后的缓存隔离。
 
 除非隔离、隐私、schema 初始化、凭据和项目生命周期测试全部通过，否则不得发布。

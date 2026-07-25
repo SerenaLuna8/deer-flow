@@ -8,13 +8,13 @@ import {
   McpApprovalForm,
   McpCredentialSelectors,
 } from "@/components/projects/assets/mcp-approval-dialog";
+import { projectAssetDetailLifecycleActions } from "@/components/projects/assets/project-asset-view-model";
 import {
   ProjectAssetCatalogView,
   ProjectAssetHistoryView,
   ProjectCredentialCatalogView,
   dependencyVersionOptions,
   projectAssetCanAuthor,
-  projectAssetLifecycleActions,
   projectCredentialShowsHistory,
 } from "@/components/projects/assets/project-assets-page";
 import { canManageSystemBinding } from "@/components/projects/assets/system-asset-section";
@@ -214,9 +214,11 @@ describe("project shared asset pages", () => {
     expect(html).not.toContain("创建新版本");
     expect(html).not.toContain("管理绑定");
     expect(projectAssetCanAuthor(suspendedProject)).toBe(false);
-    expect(projectAssetLifecycleActions(suspendedProject)).toEqual(["archive"]);
     expect(
-      projectAssetLifecycleActions({
+      projectAssetDetailLifecycleActions("agents", suspendedProject),
+    ).toEqual(["archive"]);
+    expect(
+      projectAssetDetailLifecycleActions("agents", {
         ...suspendedProject,
         capabilities: ["shared_assets.read"],
       }),
@@ -230,6 +232,18 @@ describe("project shared asset pages", () => {
     ).toBe(true);
     expect(canMoveSystemBinding(archivedSystem)).toBe(false);
     expect(canMoveSystemBinding(adminData.system_items[0]!)).toBe(true);
+  });
+
+  test("keeps a suspended project Skill editable without exposing pause lifecycle controls", () => {
+    const suspendedSkill = {
+      ...adminData.project_items[0]!,
+      status: "suspended" as const,
+    };
+
+    expect(projectAssetCanAuthor(suspendedSkill, "skills")).toBe(true);
+    expect(
+      projectAssetDetailLifecycleActions("skills", suspendedSkill),
+    ).toEqual([]);
   });
 
   test("labels binding versions for people without exposing internal UUIDs", () => {

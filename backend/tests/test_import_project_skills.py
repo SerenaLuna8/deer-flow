@@ -13,11 +13,15 @@ from app.audit.service import AuditService
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext, resolve_project_context
 from app.projects.models import ProjectRole
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.service import QuotaService
 from app.reliability.owner_refs import AuditHmacKeyring
 from app.shared_assets.audit import DurableSharedAssetGovernanceEventSink
 from app.shared_assets.bootstrap import bootstrap_system_assets
+from app.shared_assets.errors import AssetStorageQuotaExceeded
 from app.shared_assets.models import AssetScope
 from app.shared_assets.skill_service import ProjectSkillArchiveImport, SkillService
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.shared_assets import SkillRow
 from deerflow.persistence.user.model import UserRow
 from scripts.import_project_skills import (
@@ -103,6 +107,41 @@ def test_source_tree_rejects_symlinks(tmp_path: Path) -> None:
         load_project_skill_sources(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("limit_name", "limit_value"),
+    [
+        ("MAX_PROJECT_SKILL_BATCH_ITEMS", 1),
+        ("MAX_PROJECT_SKILL_BATCH_FILES", 2),
+        ("MAX_PROJECT_SKILL_BATCH_BYTES", "first-skill-bytes"),
+    ],
+)
+def test_source_loader_enforces_batch_bounds_before_reading_next_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit_name: str,
+    limit_value: int | str,
+) -> None:
+    _write_skill(tmp_path, "01-first", name="loader-first")
+    _write_skill(tmp_path, "02-second", name="loader-second")
+    first_skill_bytes = sum(path.stat().st_size for path in (tmp_path / "01-first").rglob("*") if path.is_file())
+    selected_limit = first_skill_bytes if limit_value == "first-skill-bytes" else limit_value
+    monkeypatch.setattr(importer, limit_name, selected_limit)
+    reads: list[Path] = []
+    original_read = importer._read_regular_file
+
+    def recording_read(path: Path, *, expected_size: int) -> bytes:
+        reads.append(path)
+        return original_read(path, expected_size=expected_size)
+
+    monkeypatch.setattr(importer, "_read_regular_file", recording_read)
+
+    with pytest.raises(ProjectSkillImportError, match="source tree is invalid"):
+        load_project_skill_sources(tmp_path)
+
+    assert reads
+    assert all("01-first" in path.parts for path in reads)
+
+
 def test_cli_success_output_is_summary_only(monkeypatch, capsys) -> None:
     email = "private-user@example.com"
     project_slug = "private-project"
@@ -139,6 +178,72 @@ def test_cli_success_output_is_summary_only(monkeypatch, capsys) -> None:
     assert captured.out == ('{"created_count":0,"discovered_count":2,"mode":"dry-run","planned_create_count":2,"planned_replace_count":0,"replaced_count":0,"unchanged_count":0}\n')
     assert email not in captured.out
     assert project_slug not in captured.out
+
+
+def test_cli_execute_uses_deployment_quota_config(monkeypatch, capsys) -> None:
+    configured_quota = QuotaConfig(default_storage_bytes_limit=1234)
+    observed: dict[str, object] = {}
+    monkeypatch.setenv("DATABASE_URL", "postgresql://private.invalid/private_database")
+    monkeypatch.setattr(importer, "_load_configured_quota", lambda: configured_quota)
+
+    async def fake_import_project_skills(
+        database_url: str,
+        **kwargs: object,
+    ) -> ProjectSkillImportSummary:
+        observed["database_url"] = database_url
+        observed.update(kwargs)
+        return ProjectSkillImportSummary(
+            mode="execute",
+            discovered_count=1,
+            planned_create_count=1,
+            planned_replace_count=0,
+            unchanged_count=0,
+            created_count=1,
+            replaced_count=0,
+        )
+
+    monkeypatch.setattr(importer, "import_project_skills", fake_import_project_skills)
+
+    assert (
+        importer.main(
+            [
+                "--email",
+                "operator@example.com",
+                "--project-slug",
+                "private-project",
+                "--execute",
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert observed["quota_config"] is configured_quota
+
+
+@pytest.mark.asyncio
+async def test_import_project_skills_maps_storage_quota_exceeded_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_import(*args: object, **kwargs: object) -> ProjectSkillImportSummary:
+        raise AssetStorageQuotaExceeded("private-request-id")
+
+    monkeypatch.setattr(importer, "_run_import", fail_import)
+
+    with pytest.raises(ProjectSkillImportError, match="project Skill storage quota exceeded") as exc_info:
+        await import_project_skills(
+            "postgresql://private.invalid/private_database",
+            source_root="/private/source",
+            user_email="private-user@example.com",
+            project_slug="private-project",
+            execute=True,
+            replace=False,
+            quota_config=QuotaConfig(default_storage_bytes_limit=1),
+        )
+
+    assert "private-request-id" not in str(exc_info.value)
+    assert "private-user@example.com" not in str(exc_info.value)
 
 
 async def _seed_project_actor(database_url: str, *, role: str) -> tuple[str, str, uuid.UUID]:
@@ -238,6 +343,19 @@ def _batch_sources(source_root: Path) -> tuple[ProjectSkillArchiveImport, ...]:
     return tuple(ProjectSkillArchiveImport(files=source.files) for source in load_project_skill_sources(source_root))
 
 
+def _quota(
+    factory,
+    keyring: AuditHmacKeyring,
+) -> ProjectQuotaEnforcer:
+    return ProjectQuotaEnforcer(
+        QuotaService(
+            factory,
+            QuotaConfig(),
+            source_ref_hasher=keyring,
+        )
+    )
+
+
 @pytest.mark.asyncio
 async def test_atomic_batch_rolls_back_first_skill_when_second_skill_fails(
     migrated_postgres_database_url: str,
@@ -256,7 +374,8 @@ async def test_atomic_batch_rolls_back_first_skill_when_second_skill_fails(
     )
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    durable = DurableSharedAssetGovernanceEventSink(AuditService(factory, AuditHmacKeyring.from_environment()))
+    keyring = AuditHmacKeyring.from_environment()
+    durable = DurableSharedAssetGovernanceEventSink(AuditService(factory, keyring))
     service = SkillService(
         factory,
         governance_sink=_InjectedGovernanceFailure(
@@ -264,6 +383,7 @@ async def test_atomic_batch_rolls_back_first_skill_when_second_skill_fails(
             action="skill.create",
             occurrence=2,
         ),
+        quota=_quota(factory, keyring),
     )
     try:
         with pytest.raises(RuntimeError, match="injected second project Skill failure"):
@@ -286,6 +406,29 @@ async def test_atomic_batch_rolls_back_first_skill_when_second_skill_fails(
             ) == 0
             assert await connection.scalar(text("SELECT count(*) FROM skill_versions")) == 0
             assert await connection.scalar(text("SELECT count(*) FROM audit_logs")) == 0
+            assert (
+                await connection.scalar(
+                    text(
+                        """SELECT count(*) FROM project_usage_ledger
+                           WHERE project_id=:project_id
+                             AND dimension='storage_bytes'"""
+                    ),
+                    {"project_id": project_id},
+                )
+                == 0
+            )
+            assert (
+                await connection.scalar(
+                    text(
+                        """SELECT coalesce(sum(reserved), 0)
+                           FROM project_usage_counters
+                           WHERE project_id=:project_id
+                             AND dimension='storage_bytes'"""
+                    ),
+                    {"project_id": project_id},
+                )
+                == 0
+            )
     finally:
         await engine.dispose()
 
@@ -308,11 +451,14 @@ async def test_atomic_batch_replace_rolls_back_and_preserves_unchanged_skill(
     )
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    durable = DurableSharedAssetGovernanceEventSink(AuditService(factory, AuditHmacKeyring.from_environment()))
+    keyring = AuditHmacKeyring.from_environment()
+    durable = DurableSharedAssetGovernanceEventSink(AuditService(factory, keyring))
+    quota = _quota(factory, keyring)
     try:
         created = await SkillService(
             factory,
             governance_sink=durable,
+            quota=quota,
         ).import_project_archives_atomic(
             actor,
             _batch_sources(tmp_path),
@@ -353,6 +499,7 @@ async def test_atomic_batch_replace_rolls_back_and_preserves_unchanged_skill(
                 action="skill.version.create",
                 occurrence=2,
             ),
+            quota=quota,
         )
         with pytest.raises(RuntimeError, match="injected second project Skill failure"):
             await failing_service.import_project_archives_atomic(
@@ -387,6 +534,7 @@ async def test_atomic_batch_replace_rolls_back_and_preserves_unchanged_skill(
         completed = await SkillService(
             factory,
             governance_sink=durable,
+            quota=quota,
         ).import_project_archives_atomic(
             actor,
             _batch_sources(tmp_path),
@@ -418,6 +566,7 @@ async def test_import_project_skills_dry_run_create_replace_and_audit(
         project_slug=project_slug,
         execute=False,
         replace=False,
+        quota_config=None,
     )
     assert dry_run.mode == "dry-run"
     assert dry_run.discovered_count == 1
@@ -437,6 +586,7 @@ async def test_import_project_skills_dry_run_create_replace_and_audit(
             project_slug=project_slug,
             execute=True,
             replace=False,
+            quota_config=QuotaConfig(),
         )
         assert created.mode == "execute"
         assert created.created_count == 1
@@ -446,7 +596,7 @@ async def test_import_project_skills_dry_run_create_replace_and_audit(
             row = (
                 await connection.execute(
                     text(
-                        """SELECT id,scope,project_id,current_published_version_id,version
+                        """SELECT id,scope,project_id,status,current_published_version_id,version
                         FROM skills WHERE slug='imported-skill'"""
                     )
                 )
@@ -454,6 +604,7 @@ async def test_import_project_skills_dry_run_create_replace_and_audit(
             first_version_id = row.current_published_version_id
             assert row.scope == AssetScope.PROJECT.value
             assert row.project_id == project_id
+            assert row.status == "suspended"
             assert row.version == 3
             assert await connection.scalar(text("SELECT count(*) FROM skill_versions")) == 1
             assert await connection.scalar(text("SELECT count(*) FROM audit_logs")) == 3
@@ -466,6 +617,7 @@ async def test_import_project_skills_dry_run_create_replace_and_audit(
                 project_slug=project_slug,
                 execute=True,
                 replace=False,
+                quota_config=QuotaConfig(),
             )
 
         (tmp_path / "directory-name-can-differ" / "SKILL.md").write_text(
@@ -479,6 +631,7 @@ async def test_import_project_skills_dry_run_create_replace_and_audit(
             project_slug=project_slug,
             execute=True,
             replace=True,
+            quota_config=QuotaConfig(),
         )
         assert replaced.created_count == 0
         assert replaced.replaced_count == 1
@@ -513,6 +666,7 @@ async def test_import_project_skills_dry_run_create_replace_and_audit(
             project_slug=project_slug,
             execute=True,
             replace=True,
+            quota_config=QuotaConfig(),
         )
         assert unchanged.unchanged_count == 1
         assert unchanged.replaced_count == 0
@@ -539,6 +693,7 @@ async def test_import_project_skills_requires_edit_capability(
             project_slug=project_slug,
             execute=False,
             replace=False,
+            quota_config=None,
         )
 
     engine = create_async_engine(migrated_postgres_database_url)
@@ -572,6 +727,7 @@ async def test_repository_public_skills_import_into_fresh_setup_project(
             project_slug=project_slug,
             execute=True,
             replace=False,
+            quota_config=QuotaConfig(),
         )
 
         assert summary.discovered_count == 21

@@ -255,6 +255,18 @@ function encodeBase64(value: string): string {
   return window.btoa(binary);
 }
 
+export function skillMarkdownTemplate(assetSlug: string): string {
+  return `---
+name: ${assetSlug}
+description: Describe when and how to use this skill.
+---
+
+# ${assetSlug}
+
+Add instructions for this skill here.
+`;
+}
+
 export function CreateAssetDialog({
   kind,
   scope = "system",
@@ -439,20 +451,27 @@ export function AgentVersionFields({
   );
 }
 
-export function SkillVersionFields() {
+export function SkillVersionFields({ assetSlug }: { assetSlug: string }) {
   return (
     <>
-      <label className="grid gap-2 text-sm">
-        文件路径
-        <Input name="path" required defaultValue="SKILL.md" />
-      </label>
-      <label className="grid gap-2 text-sm">
-        媒体类型
-        <Input name="media_type" required defaultValue="text/markdown" />
-      </label>
+      <dl className="bg-muted/35 grid gap-3 rounded-lg p-3 text-sm sm:grid-cols-2">
+        <div>
+          <dt className="text-muted-foreground text-xs">文件路径</dt>
+          <dd className="mt-1 font-mono">SKILL.md</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground text-xs">媒体类型</dt>
+          <dd className="mt-1 font-mono">text/markdown</dd>
+        </div>
+      </dl>
       <label className="grid gap-2 text-sm">
         文件内容
-        <Textarea name="content" required rows={12} />
+        <Textarea
+          name="content"
+          required
+          rows={12}
+          defaultValue={skillMarkdownTemplate(assetSlug)}
+        />
       </label>
     </>
   );
@@ -569,9 +588,9 @@ function versionInput(
     return {
       files: [
         {
-          path: field(form, "path").trim(),
+          path: "SKILL.md",
           content_base64: encodeBase64(field(form, "content")),
-          media_type: field(form, "media_type").trim(),
+          media_type: "text/markdown",
         },
       ],
       expected_asset_version: expectedAssetVersion,
@@ -666,7 +685,7 @@ export function CreateVersionDialog({
               modelsError={modelsError}
             />
           ) : kind === "skills" ? (
-            <SkillVersionFields />
+            <SkillVersionFields assetSlug={asset.slug} />
           ) : (
             <McpVersionFields />
           )}

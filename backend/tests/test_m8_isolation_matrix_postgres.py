@@ -65,6 +65,18 @@ def test_skill_file_preview_and_fork_keep_skill_authority() -> None:
         assert (surface.resource_family, surface.operation, surface.layer) == classification
 
 
+def test_project_skill_delete_surfaces_keep_skill_authority() -> None:
+    discovered = {surface.surface_id: surface for surface in discover_scoped_surface(_REPO_ROOT)}
+    expected = {
+        "frontend:frontend/src/core/shared-assets/api.ts:deleteProjectSkill": ("skill", "delete", "frontend"),
+        "repository:backend/app/shared_assets/skill_repository.py:SkillRepository.delete_project_asset": ("skill", "delete", "repository"),
+        "repository:backend/app/shared_assets/skill_repository.py:SkillRepository.plan_project_asset_deletion": ("skill", "get", "repository"),
+    }
+    for surface_id, classification in expected.items():
+        surface = discovered[surface_id]
+        assert (surface.resource_family, surface.operation, surface.layer) == classification
+
+
 def test_asset_names_do_not_turn_list_get_or_create_into_updates() -> None:
     discovered = {surface.surface_id: surface for surface in discover_scoped_surface(_REPO_ROOT)}
     expected = {

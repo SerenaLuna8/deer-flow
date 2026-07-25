@@ -9,6 +9,7 @@ import {
 } from "@/core/private-work/scope-registry";
 import { automationRoot } from "@/core/project-automations/query-keys";
 import { governanceRoot } from "@/core/project-governance/query-keys";
+import { projectSharedAssetRoot } from "@/core/shared-assets/query-keys";
 
 const A_P1 = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -146,13 +147,17 @@ describe("project private-work scope registry", () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData([...privateWorkRoot(A_P1), "threads"], "old");
     queryClient.setQueryData([...automationRoot(A_P1), "list", 50, 0], "old");
+    queryClient.setQueryData(
+      [...projectSharedAssetRoot(A_P1), "skills"],
+      "old",
+    );
     rs.spyOn(queryClient, "cancelQueries").mockImplementation(async () => {
       order.push("cancel");
     });
 
     await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
 
-    expect(order).toEqual(["cancel", "cancel", "cancel", "dispose"]);
+    expect(order).toEqual(["cancel", "cancel", "cancel", "cancel", "dispose"]);
     expect(dispose).toHaveBeenCalledWith(A_P1);
     expect(registry.has(A_P1)).toBe(false);
     expect(
@@ -161,6 +166,48 @@ describe("project private-work scope registry", () => {
     expect(
       queryClient.getQueryData([...automationRoot(A_P1), "list", 50, 0]),
     ).toBeUndefined();
+    expect(
+      queryClient.getQueryData([...projectSharedAssetRoot(A_P1), "skills"]),
+    ).toBeUndefined();
+  });
+
+  test("aborts and removes project shared-asset mutations on scope exit", async () => {
+    const registry = createPrivateWorkScopeRegistry();
+    const access = registry.acquire(A_P1);
+    const queryClient = new QueryClient();
+    const root = projectSharedAssetRoot(A_P1);
+    let mutationStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      mutationStarted = resolve;
+    });
+    let mutationAborted = false;
+    let resolveMutation!: (value: string) => void;
+    const deferred = new Promise<string>((resolve) => {
+      resolveMutation = resolve;
+    });
+    const mutation = queryClient.getMutationCache().build(queryClient, {
+      mutationKey: [...root, "skills", "mutation", "create-version"],
+      mutationFn: () =>
+        access.runAbortable!(async (signal) => {
+          signal.addEventListener("abort", () => {
+            mutationAborted = true;
+          });
+          mutationStarted();
+          return deferred;
+        }),
+    });
+    const pending = mutation.execute(undefined);
+    await started;
+
+    await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
+
+    expect(mutationAborted).toBe(true);
+    expect(
+      queryClient.getMutationCache().findAll({ mutationKey: root }),
+    ).toHaveLength(0);
+
+    resolveMutation("late-shared-asset");
+    await pending;
   });
 
   test("isolates reconnect metadata by account and project", () => {

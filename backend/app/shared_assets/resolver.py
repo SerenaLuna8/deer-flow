@@ -373,7 +373,8 @@ class ProjectAssetResolver:
 
     @staticmethod
     def _assert_asset_state(asset, version, request_id: str) -> None:
-        if asset.status == "suspended" or version.workflow_status != "published":
+        unavailable = asset.status != "active" if isinstance(asset, SkillRow) else asset.status == "suspended"
+        if unavailable or version.workflow_status != "published":
             raise AssetResolutionUnavailable(request_id)
 
     async def _snapshot(
@@ -595,13 +596,14 @@ class ProjectAssetResolver:
     ) -> _ResolvedRecord:
         asset_type, version_type, parent_column = _ASSET_TYPES[kind]
         parent_id = (await session.execute(select(getattr(version_type, parent_column)).where(version_type.id == version_id))).scalar_one_or_none()
+        status_predicate = asset_type.status == "active" if kind is AssetKind.SKILL else asset_type.status != "suspended"
         project_statement = (
             select(asset_type)
             .where(
                 asset_type.id == parent_id,
                 asset_type.scope == "project",
                 asset_type.project_id == context.project_id,
-                asset_type.status != "suspended",
+                status_predicate,
             )
             .with_for_update(read=True, of=asset_type)
         )
@@ -645,7 +647,7 @@ class ProjectAssetResolver:
                 asset_type.id == asset_id,
                 asset_type.scope == "system",
                 asset_type.project_id.is_(None),
-                asset_type.status != "suspended",
+                status_predicate,
             )
             .with_for_update(read=True, of=asset_type)
         )
@@ -773,7 +775,14 @@ class ProjectAssetResolver:
             .with_for_update(read=True, of=McpServerVersionRow)
         )
         version = (await session.execute(version_statement)).scalar_one_or_none()
-        if asset is None or version is None or asset.status == "suspended" or version.workflow_status != "published" or version.payload_checksum != resolved.checksum:
+        if (
+            asset is None
+            or version is None
+            or asset.status == "suspended"
+            or version.workflow_status != "published"
+            or version.payload_checksum != resolved.checksum
+            or (scope is AssetScope.PROJECT and asset.current_published_version_id != resolved.version_id)
+        ):
             raise AssetResolutionUnavailable(request_id)
 
         record = _ResolvedRecord(scope, asset, version)
@@ -818,10 +827,6 @@ class ProjectAssetResolver:
         )
         if locked_definition != resolved.definition or closure.grant_ids != resolved.credential_grant_ids:
             raise AssetResolutionUnavailable(request_id)
-        current_generation = await CatalogStateRepository(session).read_generation()
-        if current_generation != resolved.catalog_generation:
-            raise AssetResolutionUnavailable(request_id)
-
         try:
             keyring = self._keyring or CredentialKeyring.from_environment()
         except CredentialKeyringInvalid:

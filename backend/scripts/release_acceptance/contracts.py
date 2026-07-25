@@ -575,6 +575,11 @@ def _is_scoped_route(module_name: str, route_path: str) -> bool:
 
 def _resource_family(value: str) -> str:
     normalized = _normalized_identifier(value)
+    # Repository methods that plan or perform permanent Skill-package deletion
+    # still operate under Skill authority. The word "deletion" must not
+    # reclassify them as project-lifecycle surfaces.
+    if "skill_repository" in normalized:
+        return "skill"
     # A Skill version file is a project-shared immutable Skill resource, not
     # project-private user file storage. Keep the more specific authority when
     # both words appear in route/repository/frontend identifiers.
@@ -632,6 +637,8 @@ def _operation_for_name(name: str, *, method: str | None = None, route_path: str
         return "update"
     if normalized.startswith("current_published_descriptions"):
         return "list"
+    if normalized.startswith("plan_project_asset_deletion"):
+        return "get"
     # These semantic verbs must win before substring heuristics. In particular,
     # ``asset_id`` contains ``set_`` and would otherwise misclassify both routes
     # as updates. Forking creates a new immutable version; preview is read-only.

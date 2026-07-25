@@ -6,13 +6,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
-import yaml
-
 from app.shared_assets.bootstrap.skill_archive import dump_skill_archive
+from app.shared_assets.errors import AssetValidationFailed
+from app.shared_assets.skill_service import _analyze_skill_files
 from scripts.import_project_skills import load_project_skill_sources
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -21,27 +23,19 @@ _BOOTSTRAP_ROOT = _REPOSITORY_ROOT / "backend" / "app" / "shared_assets" / "boot
 _CATALOG_PATH = _BOOTSTRAP_ROOT / "catalog.json"
 _OUTPUT_ROOT = _BOOTSTRAP_ROOT / "content" / "public-skills"
 _PAYLOAD_PREFIX = "content/public-skills/"
-_FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
 _SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _EXPECTED_SKILL_COUNT = 21
 
 
 def _skill_name(files) -> str:
-    manifest = next(
-        (file.content for file in files if file.path == "SKILL.md"),
-        None,
-    )
-    if manifest is None:
-        raise ValueError("public Skill is missing SKILL.md")
     try:
-        text = manifest.decode("utf-8")
-        match = _FRONTMATTER.match(text)
-        if match is None:
-            raise ValueError
-        frontmatter = yaml.safe_load(match.group(1))
-    except (UnicodeError, yaml.YAMLError, ValueError):
+        preview = _analyze_skill_files(
+            tuple(files),
+            "public-system-skill-catalog",
+        )
+    except AssetValidationFailed:
         raise ValueError("public Skill frontmatter is invalid") from None
-    name = frontmatter.get("name") if isinstance(frontmatter, dict) else None
+    name = preview.frontmatter.get("name")
     if not isinstance(name, str) or _SLUG.fullmatch(name) is None:
         raise ValueError("public Skill name is invalid")
     return name
@@ -102,25 +96,52 @@ def _expected_outputs() -> tuple[bytes, dict[str, bytes]]:
 
 
 def _check(catalog_bytes: bytes, payloads: dict[str, bytes]) -> bool:
-    if _CATALOG_PATH.read_bytes() != catalog_bytes:
+    if _OUTPUT_ROOT.is_symlink() or _CATALOG_PATH.is_symlink() or _CATALOG_PATH.read_bytes() != catalog_bytes:
         return False
     expected_paths = {_BOOTSTRAP_ROOT / relative_path for relative_path in payloads}
     actual_paths = set(_OUTPUT_ROOT.glob("*.skill.json"))
     if actual_paths != expected_paths:
         return False
-    return all((_BOOTSTRAP_ROOT / relative_path).read_bytes() == content for relative_path, content in payloads.items())
+    return all(not (_BOOTSTRAP_ROOT / relative_path).is_symlink() and (_BOOTSTRAP_ROOT / relative_path).read_bytes() == content for relative_path, content in payloads.items())
+
+
+def _reject_symlink(path: Path) -> None:
+    if path.is_symlink():
+        raise ValueError(f"refusing symbolic link output: {path}")
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    _reject_symlink(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _write(catalog_bytes: bytes, payloads: dict[str, bytes]) -> None:
+    _reject_symlink(_OUTPUT_ROOT)
     _OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     expected_paths = {_BOOTSTRAP_ROOT / relative_path for relative_path in payloads}
-    for stale_path in _OUTPUT_ROOT.glob("*.skill.json"):
+    existing_paths = tuple(_OUTPUT_ROOT.glob("*.skill.json"))
+    for path in (*existing_paths, *expected_paths, _CATALOG_PATH):
+        _reject_symlink(path)
+    for stale_path in existing_paths:
         if stale_path not in expected_paths:
             stale_path.unlink()
     for relative_path, content in payloads.items():
         destination = _BOOTSTRAP_ROOT / relative_path
-        destination.write_bytes(content)
-    _CATALOG_PATH.write_bytes(catalog_bytes)
+        _atomic_write(destination, content)
+    _atomic_write(_CATALOG_PATH, catalog_bytes)
 
 
 def main() -> int:

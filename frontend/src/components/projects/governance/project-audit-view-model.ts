@@ -49,6 +49,10 @@ const ACTION_LABELS: Record<AuditAction, LocalizedLabel> = {
     "zh-CN": "已停用资产版本",
     "en-US": "Asset version deprecated",
   },
+  "asset.deleted": {
+    "zh-CN": "已删除资产",
+    "en-US": "Asset deleted",
+  },
   "asset.bound": { "zh-CN": "已绑定项目资产", "en-US": "Project asset bound" },
   "asset.unbound": {
     "zh-CN": "已解除资产绑定",

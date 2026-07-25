@@ -79,21 +79,22 @@ does not acquire the Scheduler ownership lock or start polling.
 
 ## Forward-only PostgreSQL migrations
 
-The project has not shipped yet, so all current schema requirements are consolidated in the
-single `0001_project_saas_baseline.py` revision. Treat this merged baseline as immutable from
-this point forward. Every future schema change starts at `0002` and adds a new linear Alembic
-revision; never edit, squash, or restamp a revision that may already exist in a released database.
+`0001_project_saas_baseline.py` is the immutable merged baseline.
+`0002_project_skill_hard_delete.py` is the current linear head and adds the controlled
+project-Skill package deletion boundary. Every later schema change adds another linear Alembic
+revision; never edit, squash, or restamp an existing revision.
 
 `make setup-db` requires an explicit administrator URL and application URL. It creates the
 named empty target if needed, applies the complete committed migration chain through head,
 seeds the packaged system asset catalog, initializes the LangGraph checkpointer/store schema,
 and bootstraps the default project. The application role must be an ordinary non-superuser.
 
-`make migrate-db` is retained for future revisions. It uses only `DATABASE_URL` and upgrades an
-existing database from a verified, known ancestor revision by applying its pending committed
-migrations through head. It never creates the database. Runtime startup only performs read-only
-validation: an ancestor revision reports migration required, while an unknown revision,
-unversioned nonempty schema, or catalog drift fails closed without DDL or repair.
+`make migrate-db` uses only `DATABASE_URL` and upgrades an existing database from a verified,
+known ancestor revision by applying its pending committed migrations through head. It never
+creates the database and never seeds the catalog, initializes LangGraph, or bootstraps a default
+project. Runtime startup only performs read-only validation: an ancestor revision reports
+migration required, while an unknown revision, unversioned nonempty schema, or catalog drift
+fails closed without DDL or repair.
 
 `make check-db` is also read-only. It reports current/head revision, required application and
 LangGraph relations, and whether setup, migration, or operator intervention is required without
@@ -178,8 +179,10 @@ The 21 directories under `../skills/public/` are maintained as complete multi-fi
 Skill archives, including `SKILL.md`, scripts, references, templates, and other regular
 files. Regenerate the checked-in archives and manifest entries from `backend/` with
 `PYTHONPATH=. uv run python scripts/generate_public_system_skill_catalog.py`; use `--check`
-to verify that they are current. Runtime processes never scan `skills/public/`, and setup
-does not create project bindings for these assets.
+to verify that they are current. Generation and bootstrap use the same bounded frontmatter,
+archive, and static-scan validation; generated destinations reject symlinks and are replaced
+atomically. Runtime processes never scan `skills/public/`, and setup does not create project
+bindings for these assets.
 
 The runtime system catalog is bootstrap-only. Global `/api/admin/assets` Agent, Skill, and
 MCP definition/version routes expose governance metadata with GET only; Gateway and domain
@@ -193,10 +196,19 @@ mutable.
 
 Runtime processes use PostgreSQL as the only catalog authority. Gateway admission persists
 the exact secret-free Agent/Skill/MCP and Credential-grant snapshot for a Run. Worker reloads
-that exact snapshot, materializes Skill bytes in a run-owned read-only tree, and materializes
-MCP secrets only after current capability, catalog generation, binding, slot, grant,
-Credential, and envelope closure are locked and revalidated. Secret material never enters an
-API response, cache, checkpoint, event, repr, log, or audit metadata.
+that exact snapshot and materializes system Skill bytes below `/mnt/skills/public/<name>` and
+project Skill bytes below `/mnt/skills/custom/<asset_uuid>` in a run-owned read-only tree.
+New project Skills are created in `suspended` state. Authors may create, fork, replace, and
+publish versions while suspended; activation is a separate capability-checked transition that
+requires a published version. Resolution and runtime materialization accept only active,
+published Skills.
+Agent version authoring rejects a dependency set containing duplicate Skill slugs across
+system and project scope before that layout can become ambiguous. Worker materializes MCP
+secrets only after current capability, exact selected version/checksum,
+binding, slot, grant, Credential, and envelope closure are locked and revalidated. Catalog
+generation is diagnostic snapshot metadata, not a global invalidation token: an unrelated
+project mutation must not stale an exact admitted Run. Secret material never enters an API
+response, cache, checkpoint, event, repr, log, or audit metadata.
 
 `RunAgentPrivateExecutor` is the only production adapter that calls `run_agent()`. The Worker
 holds the raw lease token only in memory; PostgreSQL stores its hash. Durable stream appends
@@ -231,6 +243,17 @@ Quota reservation/consume/release occurs in the authoritative business transacti
 defaults are 20 members, 5 GiB storage, 3 concurrent Runs, and 10,000 MCP calls per UTC day;
 project Admins may only tighten them. Hard-limit HTTP responses use stable 429 plus
 `Retry-After: 1`. Already admitted work is not interrupted by a later policy tightening.
+Every immutable project Skill version reserves the sum of all stored version-file bytes in
+`storage_bytes`; system Skill versions are excluded. The reservation rolls back with failed
+authoring, reconciliation sums ready private files plus every project `SkillVersionFileRow`,
+and either project-Skill package deletion or project retention releases each exact Skill-version
+reservation before physical deletion. Project Skill deletion is unavailable for system assets
+and fails closed while an immutable Agent dependency or admitted Run snapshot still references
+the package.
+Gateway authoring and the explicit project-Skill import CLI use the same `AppConfig.quotas`
+defaults. Archive-creation requests have a scoped 160 MiB JSON/base64 wire limit at both the
+ASGI receive boundary and each Nginx entry point, before JSON/Pydantic parsing; the decoded
+archive remains limited to 100 MiB and 4096 files.
 
 Audit uses closed action/actor/target/outcome contracts and action-specific strict metadata.
 Private target identifiers are domain-separated HMACs; raw project-owner resources, prompt,
